@@ -335,9 +335,10 @@ class AssertHandler(BaseHandler):
                 # stale first-iteration evidence forever.
                 artifact = latest_artifact(artifacts, step_id=step_id, name=artifact_name)
                 if artifact is not None:
-                    # Prefer content_text (actual output) over content_json
+                    # Prefer content_text (actual output) over content_json;
+                    # "" is valid empty output, so only None falls through.
                     content_text = artifact.get("content_text")
-                    if content_text:
+                    if content_text is not None:
                         return content_text
                     content_json = artifact.get("content_json")
                     if content_json is None:

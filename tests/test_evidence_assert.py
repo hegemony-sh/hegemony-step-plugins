@@ -224,9 +224,11 @@ class TestLatestArtifact:
         # incorrectly beat any '+' offset for the same instant).
         from hegemony_steps_evidence.artifacts import latest_artifact
 
+        # Lexical and chronological order disagree here: the lexically
+        # smaller "-01:00" timestamp is the newer instant (19:30Z > 19:01Z).
         artifacts = self._dup(
-            (_NEIGHBORS_ALL_FULL, "2026-07-27T19:01:30Z"),
-            ("% OSPF is not enabled in vrf default", "2026-07-27T19:00:00+00:00"),
+            (_NEIGHBORS_ALL_FULL, "2026-07-27T18:30:00-01:00"),
+            ("% OSPF is not enabled in vrf default", "2026-07-27T19:01:30Z"),
         )
         picked = latest_artifact(artifacts, step_id="collect_state")
         assert picked is not None
