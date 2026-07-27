@@ -154,3 +154,67 @@ class TestLineScope:
         passed, msg, _ = handler._assert_content(123, "Full", "contains", "lines", "", 1)
         assert passed is False
         assert "needs text content" in msg
+
+
+class TestLatestArtifact:
+    """Duplicate step_id+name artifacts (loop iterations) must resolve to the newest."""
+
+    def _dup(self, *contents_with_dates):
+        return [
+            {
+                "step_id": "collect_state",
+                "name": "dc1-core-01:show ip ospf neighbor",
+                "content_text": text,
+                **({"created_at": at} if at is not None else {}),
+            }
+            for text, at in contents_with_dates
+        ]
+
+    def test_picks_newest_by_created_at(self) -> None:
+        from hegemony_steps_evidence.artifacts import latest_artifact
+
+        artifacts = self._dup(
+            ("% OSPF is not enabled in vrf default", "2026-07-27T19:00:00+00:00"),
+            (_NEIGHBORS_ALL_FULL, "2026-07-27T19:01:30+00:00"),
+        )
+        picked = latest_artifact(
+            artifacts, step_id="collect_state", name="dc1-core-01:show ip ospf neighbor"
+        )
+        assert picked is not None
+        assert "Full/DR" in picked["content_text"]
+
+    def test_created_at_wins_over_list_order(self) -> None:
+        from hegemony_steps_evidence.artifacts import latest_artifact
+
+        artifacts = self._dup(
+            (_NEIGHBORS_ALL_FULL, "2026-07-27T19:01:30+00:00"),
+            ("% OSPF is not enabled in vrf default", "2026-07-27T19:00:00+00:00"),
+        )
+        picked = latest_artifact(artifacts, step_id="collect_state")
+        assert picked is not None
+        assert "Full/DR" in picked["content_text"]
+
+    def test_without_created_at_last_match_wins(self) -> None:
+        # Older APIs omit created_at; the API returns oldest first, so the
+        # last listed duplicate is the newest.
+        from hegemony_steps_evidence.artifacts import latest_artifact
+
+        artifacts = self._dup(
+            ("% OSPF is not enabled in vrf default", None),
+            (_NEIGHBORS_ALL_FULL, None),
+        )
+        picked = latest_artifact(artifacts, step_id="collect_state")
+        assert picked is not None
+        assert "Full/DR" in picked["content_text"]
+
+    def test_filters_apply(self) -> None:
+        from hegemony_steps_evidence.artifacts import latest_artifact
+
+        artifacts = [
+            {"step_id": "other", "name": "x", "created_at": "2026-07-27T20:00:00+00:00"},
+            {"step_id": "collect_state", "name": "x", "created_at": "2026-07-27T19:00:00+00:00"},
+        ]
+        picked = latest_artifact(artifacts, step_id="collect_state")
+        assert picked is not None and picked["step_id"] == "collect_state"
+        assert latest_artifact(artifacts, step_id="missing") is None
+        assert latest_artifact([], step_id="collect_state") is None

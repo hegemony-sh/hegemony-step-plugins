@@ -20,6 +20,8 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
+from .artifacts import latest_artifact
+
 logger = logging.getLogger(__name__)
 
 # Guardrails for user-supplied ``ignore_patterns``: a pathological regex run via
@@ -236,19 +238,22 @@ class CompareEvidenceHandler(BaseHandler):
                     summary="Missing postcheck artifact",
                 )
 
-            # Compare the specific artifact
+            # Compare the specific artifact — the NEWEST one on each side, in
+            # case the pre/post steps ran more than once (loops, retries) and
+            # left several artifacts under the same name.
+            precheck_latest = latest_artifact(precheck_filtered)
+            postcheck_latest = latest_artifact(postcheck_filtered)
+            assert precheck_latest is not None and postcheck_latest is not None
             # Prefer content_text for CLI output (actual command output) over content_json (metadata)
-            precheck_text = precheck_filtered[0].get("content_text")
+            precheck_text = precheck_latest.get("content_text")
             precheck_content = (
-                precheck_text
-                if precheck_text is not None
-                else precheck_filtered[0].get("content_json")
+                precheck_text if precheck_text is not None else precheck_latest.get("content_json")
             )
-            postcheck_text = postcheck_filtered[0].get("content_text")
+            postcheck_text = postcheck_latest.get("content_text")
             postcheck_content = (
                 postcheck_text
                 if postcheck_text is not None
-                else postcheck_filtered[0].get("content_json")
+                else postcheck_latest.get("content_json")
             )
 
             passed, diff_details = self._compare(
@@ -256,9 +261,18 @@ class CompareEvidenceHandler(BaseHandler):
             )
             artifacts_compared = [artifact_name]
         else:
-            # Compare all matching artifacts by name
-            precheck_by_name = {a["name"]: a for a in precheck_artifacts if a.get("name")}
-            postcheck_by_name = {a["name"]: a for a in postcheck_artifacts if a.get("name")}
+            # Compare all matching artifacts by name, keeping only the newest
+            # per name (steps that ran more than once leave older duplicates).
+            precheck_by_name = {
+                name: artifact
+                for name in {a["name"] for a in precheck_artifacts if a.get("name")}
+                if (artifact := latest_artifact(precheck_artifacts, name=name)) is not None
+            }
+            postcheck_by_name = {
+                name: artifact
+                for name in {a["name"] for a in postcheck_artifacts if a.get("name")}
+                if (artifact := latest_artifact(postcheck_artifacts, name=name)) is not None
+            }
 
             common_names = set(precheck_by_name.keys()) & set(postcheck_by_name.keys())
             if not common_names:

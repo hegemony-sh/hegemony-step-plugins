@@ -19,6 +19,8 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
+from .artifacts import latest_artifact
+
 logger = logging.getLogger(__name__)
 
 
@@ -311,17 +313,20 @@ class AssertHandler(BaseHandler):
                 run_data = response.json()
                 artifacts = run_data.get("artifacts", [])
 
-                # Find matching artifact
-                for artifact in artifacts:
-                    if artifact.get("step_id") == step_id and artifact.get("name") == artifact_name:
-                        # Prefer content_text (actual output) over content_json
-                        content_text = artifact.get("content_text")
-                        if content_text:
-                            return content_text
-                        content_json = artifact.get("content_json")
-                        if content_json is None:
-                            return None
-                        return json.dumps(content_json, ensure_ascii=False)
+                # Pick the NEWEST matching artifact — a collect step inside a
+                # loop (or retried) appends one per iteration under the same
+                # step_id + name, and asserting the first match would re-check
+                # stale first-iteration evidence forever.
+                artifact = latest_artifact(artifacts, step_id=step_id, name=artifact_name)
+                if artifact is not None:
+                    # Prefer content_text (actual output) over content_json
+                    content_text = artifact.get("content_text")
+                    if content_text:
+                        return content_text
+                    content_json = artifact.get("content_json")
+                    if content_json is None:
+                        return None
+                    return json.dumps(content_json, ensure_ascii=False)
 
                 logger.error(f"Artifact '{artifact_name}' not found in step '{step_id}'")
                 return None
