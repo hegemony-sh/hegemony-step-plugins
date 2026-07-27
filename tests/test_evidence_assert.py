@@ -218,3 +218,38 @@ class TestLatestArtifact:
         assert picked is not None and picked["step_id"] == "collect_state"
         assert latest_artifact(artifacts, step_id="missing") is None
         assert latest_artifact([], step_id="collect_state") is None
+
+    def test_mixed_iso_forms_compare_correctly(self) -> None:
+        # 'Z' vs '+00:00' must not be compared lexicographically ('Z' would
+        # incorrectly beat any '+' offset for the same instant).
+        from hegemony_steps_evidence.artifacts import latest_artifact
+
+        artifacts = self._dup(
+            (_NEIGHBORS_ALL_FULL, "2026-07-27T19:01:30Z"),
+            ("% OSPF is not enabled in vrf default", "2026-07-27T19:00:00+00:00"),
+        )
+        picked = latest_artifact(artifacts, step_id="collect_state")
+        assert picked is not None
+        assert "Full/DR" in picked["content_text"]
+
+    def test_unparsable_created_at_falls_back_to_list_order(self) -> None:
+        from hegemony_steps_evidence.artifacts import latest_artifact
+
+        artifacts = self._dup(
+            ("% OSPF is not enabled in vrf default", "not-a-date"),
+            (_NEIGHBORS_ALL_FULL, 12345),
+        )
+        picked = latest_artifact(artifacts, step_id="collect_state")
+        assert picked is not None
+        assert "Full/DR" in picked["content_text"]
+
+
+class TestScopeValidation:
+    def test_unknown_match_scope_fails_cleanly(self) -> None:
+        handler = _handler()
+        passed, msg, detail = handler._assert_content(
+            _NEIGHBORS_ALL_FULL, "Full", "contains", "every_line", "", 1
+        )
+        assert passed is False
+        assert "Unknown match_scope" in msg
+        assert detail["match_scope"] == "every_line"

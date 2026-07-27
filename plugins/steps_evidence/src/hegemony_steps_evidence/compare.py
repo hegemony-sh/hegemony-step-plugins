@@ -243,7 +243,14 @@ class CompareEvidenceHandler(BaseHandler):
             # left several artifacts under the same name.
             precheck_latest = latest_artifact(precheck_filtered)
             postcheck_latest = latest_artifact(postcheck_filtered)
-            assert precheck_latest is not None and postcheck_latest is not None
+            if precheck_latest is None or postcheck_latest is None:
+                # Unreachable with the non-empty lists checked above, but a
+                # clean failure beats a stripped assert under -O.
+                return HandlerResult(
+                    success=False,
+                    error="Failed to select artifacts for comparison",
+                    summary="Missing comparison artifacts",
+                )
             # Prefer content_text for CLI output (actual command output) over content_json (metadata)
             precheck_text = precheck_latest.get("content_text")
             precheck_content = (

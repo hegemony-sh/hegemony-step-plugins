@@ -161,6 +161,11 @@ class AssertHandler(BaseHandler):
             min_lines = int(ctx.config.get("min_lines", 1))
         except (TypeError, ValueError):
             min_lines = 1
+        if min_lines < 0:
+            # A negative value would let empty selections pass vacuously
+            # (len(selected) < min_lines is never true); treat it as the
+            # default. The API schema already rejects negatives (ge=0).
+            min_lines = 1
         message = ctx.config.get("message", "")
         artifact_step_id = ctx.config.get("artifact_step_id")
         log_extra = {
@@ -352,7 +357,9 @@ class AssertHandler(BaseHandler):
         against a vacuous pass on an empty selection. Returns
         ``(passed, failure message, detail dict for the evidence record)``.
         """
-        if match_scope != "lines":
+        if match_scope not in ("output", "lines"):
+            return False, f"Unknown match_scope: {match_scope}", {"match_scope": match_scope}
+        if match_scope == "output":
             passed, msg = self._compare_values(actual, expected, operator)
             return passed, msg, {"match_scope": "output"}
 
