@@ -40,17 +40,56 @@ class AssertConfig(BaseModel):
             "x_placeholder": "Select evidence step...",
         },
     )
-    operator: Literal["contains", "matches", "eq", "ne"] = Field(
+    operator: Literal["contains", "not_contains", "matches", "not_matches", "eq", "ne"] = Field(
         default="contains",
         title="Operator",
         json_schema_extra={
             "x_option_labels": {
                 "contains": "Contains",
+                "not_contains": "Does Not Contain",
                 "matches": "Matches (regex)",
+                "not_matches": "Does Not Match (regex)",
                 "eq": "Equals (==)",
                 "ne": "Not Equals (!=)",
             }
         },
+    )
+    match_scope: Literal["output", "lines"] = Field(
+        default="output",
+        title="Match Scope",
+        description=(
+            "'Whole output' asserts once against the entire artifact; "
+            "'Every line' asserts the operator against each selected line "
+            "(e.g. every OSPF neighbor row must contain 'Full')."
+        ),
+        json_schema_extra={
+            "x_option_labels": {
+                "output": "Whole output",
+                "lines": "Every line",
+            }
+        },
+    )
+    line_filter: str = Field(
+        default="",
+        title="Line Filter (regex)",
+        description=(
+            "With 'Every line' scope: only lines matching this regex are "
+            "asserted, so headers and blanks don't count. Empty selects every "
+            "non-empty line."
+        ),
+        json_schema_extra={
+            "x_placeholder": "Regex selecting the lines to assert",
+            "x_col_span": 2,
+        },
+    )
+    min_lines: int = Field(
+        default=1,
+        ge=0,
+        title="Minimum Lines",
+        description=(
+            "With 'Every line' scope: fail unless at least this many lines "
+            "were selected — an empty selection must not pass vacuously."
+        ),
     )
     target_role: str = Field(
         default="",
@@ -87,7 +126,14 @@ class AssertHandler(BaseHandler):
     Config:
         expression: str - JMESPath or simple field path to evaluate
         expected: Any - Expected value to compare against
-        operator: str - Comparison operator (eq, ne, gt, lt, ge, le, contains, matches)
+        operator: str - Comparison operator (eq, ne, gt, lt, ge, le, contains,
+            not_contains, matches, not_matches)
+        match_scope: str - "output" asserts once against the whole artifact;
+            "lines" asserts the operator against every selected line
+        line_filter: str - (match_scope="lines") regex selecting which lines
+            are asserted; empty selects every non-empty line
+        min_lines: int - (match_scope="lines") fail unless at least this many
+            lines were selected (guards against vacuous passes)
         source: str - Source of data: "params" | "evidence" | "device" | "artifact"
         artifact_step_id: str - (when source="artifact") Step ID to get artifact from
         artifact_name: str - (when source="artifact") Artifact name to check
@@ -107,6 +153,12 @@ class AssertHandler(BaseHandler):
         """Execute assertion check against artifact from a previous step."""
         expected = ctx.config.get("expected")
         operator = ctx.config.get("operator", "contains")
+        match_scope = ctx.config.get("match_scope", "output")
+        line_filter = ctx.config.get("line_filter", "")
+        try:
+            min_lines = int(ctx.config.get("min_lines", 1))
+        except (TypeError, ValueError):
+            min_lines = 1
         message = ctx.config.get("message", "")
         artifact_step_id = ctx.config.get("artifact_step_id")
         log_extra = {
@@ -192,7 +244,9 @@ class AssertHandler(BaseHandler):
 
             # The actual value is the artifact text content
             actual = artifact_content
-            passed, comparison_msg = self._compare_values(actual, expected, operator)
+            passed, comparison_msg, scope_detail = self._assert_content(
+                actual, expected, operator, match_scope, line_filter, min_lines
+            )
             if not passed:
                 failed_messages.append(f"{name}: {comparison_msg}")
 
@@ -206,6 +260,7 @@ class AssertHandler(BaseHandler):
                         "operator": operator,
                         "expected": expected,
                         "actual": actual if len(str(actual)) < 500 else f"{str(actual)[:500]}...",
+                        **scope_detail,
                         "passed": passed,
                     },
                 }
@@ -274,6 +329,75 @@ class AssertHandler(BaseHandler):
                 logger.error(f"Failed to fetch artifact: {e}")
                 return None
 
+    def _assert_content(
+        self,
+        actual: Any,
+        expected: Any,
+        operator: str,
+        match_scope: str,
+        line_filter: str,
+        min_lines: int,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """Assert against artifact content in the configured scope.
+
+        ``output`` scope compares once against the whole artifact (the
+        original behavior); ``lines`` scope selects lines (via the optional
+        ``line_filter`` regex, else every non-empty line) and requires EVERY
+        selected line to satisfy the operator, with ``min_lines`` guarding
+        against a vacuous pass on an empty selection. Returns
+        ``(passed, failure message, detail dict for the evidence record)``.
+        """
+        if match_scope != "lines":
+            passed, msg = self._compare_values(actual, expected, operator)
+            return passed, msg, {"match_scope": "output"}
+
+        detail: dict[str, Any] = {"match_scope": "lines", "line_filter": line_filter}
+        if not isinstance(actual, str):
+            return (
+                False,
+                f"Line-scope assertion needs text content, got {type(actual).__name__}",
+                detail,
+            )
+
+        try:
+            selector = re.compile(line_filter) if line_filter else None
+        except re.error as exc:
+            return False, f"Invalid line_filter regex: {exc}", detail
+
+        if selector is None:
+            selected = [line for line in actual.splitlines() if line.strip()]
+        else:
+            selected = [line for line in actual.splitlines() if selector.search(line)]
+        detail["lines_selected"] = len(selected)
+
+        if len(selected) < min_lines:
+            qualifier = f" by filter '{line_filter}'" if line_filter else ""
+            return (
+                False,
+                f"only {len(selected)} line(s) selected{qualifier}, expected at least {min_lines}",
+                detail,
+            )
+
+        lines_passed = 0
+        first_failed: str | None = None
+        for line in selected:
+            line_ok, _ = self._compare_values(line, expected, operator)
+            if line_ok:
+                lines_passed += 1
+            elif first_failed is None:
+                first_failed = line.strip()[:200]
+        detail["lines_passed"] = lines_passed
+
+        if first_failed is not None:
+            detail["first_failed_line"] = first_failed
+            return (
+                False,
+                f"{len(selected) - lines_passed}/{len(selected)} selected line(s) "
+                f"failed {operator} '{expected}'; first: '{first_failed}'",
+                detail,
+            )
+        return True, "", detail
+
     def _compare_values(self, actual: Any, expected: Any, operator: str) -> tuple[bool, str]:
         """Compare actual and expected values using operator."""
         try:
@@ -308,12 +432,21 @@ class AssertHandler(BaseHandler):
             elif operator == "contains":
                 passed = expected in actual if isinstance(actual, str | list | tuple) else False
                 msg = f"Expected '{actual}' to contain '{expected}'"
+            elif operator == "not_contains":
+                passed = expected not in actual if isinstance(actual, str | list | tuple) else False
+                msg = f"Expected '{actual}' to not contain '{expected}'"
             elif operator == "matches":
                 if isinstance(actual, str) and isinstance(expected, str):
                     passed = bool(re.search(expected, actual))
                 else:
                     passed = False
                 msg = f"Expected '{actual}' to match pattern '{expected}'"
+            elif operator == "not_matches":
+                if isinstance(actual, str) and isinstance(expected, str):
+                    passed = not re.search(expected, actual)
+                else:
+                    passed = False
+                msg = f"Expected '{actual}' to not match pattern '{expected}'"
             else:
                 passed = False
                 msg = f"Unknown operator: {operator}"
