@@ -23,6 +23,11 @@ from .artifacts import latest_artifact
 
 logger = logging.getLogger(__name__)
 
+# ReDoS guardrail (mirrors compare.py): workflow-controlled regexes
+# (line_filter, matches/not_matches patterns) never run against more than
+# this much text, so a catastrophic pattern cannot stall the worker.
+_MAX_REGEX_INPUT_CHARS = 1_000_000
+
 
 class AssertConfig(BaseModel):
     """Config for ``evidence.assert``.
@@ -42,7 +47,9 @@ class AssertConfig(BaseModel):
             "x_placeholder": "Select evidence step...",
         },
     )
-    operator: Literal["contains", "not_contains", "matches", "not_matches", "eq", "ne"] = Field(
+    operator: Literal[
+        "contains", "not_contains", "matches", "not_matches", "eq", "ne", "gt", "lt", "ge", "le"
+    ] = Field(
         default="contains",
         title="Operator",
         json_schema_extra={
@@ -53,6 +60,10 @@ class AssertConfig(BaseModel):
                 "not_matches": "Does Not Match (regex)",
                 "eq": "Equals (==)",
                 "ne": "Not Equals (!=)",
+                "gt": "Greater Than (>)",
+                "lt": "Less Than (<)",
+                "ge": "Greater or Equal (>=)",
+                "le": "Less or Equal (<=)",
             }
         },
     )
@@ -371,6 +382,10 @@ class AssertHandler(BaseHandler):
                 detail,
             )
 
+        if len(actual) > _MAX_REGEX_INPUT_CHARS:
+            actual = actual[:_MAX_REGEX_INPUT_CHARS]
+            detail["truncated"] = True
+
         try:
             selector = re.compile(line_filter) if line_filter else None
         except re.error as exc:
@@ -449,13 +464,13 @@ class AssertHandler(BaseHandler):
                 msg = f"Expected '{actual}' to not contain '{expected}'"
             elif operator == "matches":
                 if isinstance(actual, str) and isinstance(expected, str):
-                    passed = bool(re.search(expected, actual))
+                    passed = bool(re.search(expected, actual[:_MAX_REGEX_INPUT_CHARS]))
                 else:
                     passed = False
                 msg = f"Expected '{actual}' to match pattern '{expected}'"
             elif operator == "not_matches":
                 if isinstance(actual, str) and isinstance(expected, str):
-                    passed = not re.search(expected, actual)
+                    passed = not re.search(expected, actual[:_MAX_REGEX_INPUT_CHARS])
                 else:
                     passed = False
                 msg = f"Expected '{actual}' to not match pattern '{expected}'"

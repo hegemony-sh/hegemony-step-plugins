@@ -253,3 +253,26 @@ class TestScopeValidation:
         assert passed is False
         assert "Unknown match_scope" in msg
         assert detail["match_scope"] == "every_line"
+
+
+def test_numeric_operators_reachable_in_config_schema() -> None:
+    # gt/lt/ge/le are implemented in _compare_values and documented — the
+    # config schema must actually offer them.
+    from hegemony_steps_evidence.assert_check import AssertConfig
+
+    for op in ("gt", "lt", "ge", "le"):
+        assert AssertConfig(artifact_step_id="s", operator=op).operator == op
+
+
+def test_regex_paths_are_input_capped() -> None:
+    # Workflow-controlled regexes never run against more than the cap.
+    from hegemony_steps_evidence.assert_check import _MAX_REGEX_INPUT_CHARS
+
+    handler = _handler()
+    huge = "a" * (_MAX_REGEX_INPUT_CHARS + 100) + "NEEDLE"
+    # The needle sits beyond the cap, so the regex must not see it.
+    passed, _ = handler._compare_values(huge, "NEEDLE", "matches")
+    assert passed is False
+    # Line scope marks the truncation in the evidence detail.
+    passed, _, detail = handler._assert_content(huge, "a", "contains", "lines", "", 1)
+    assert detail.get("truncated") is True

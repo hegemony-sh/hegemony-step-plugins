@@ -184,15 +184,19 @@ class RunFlowHandler(BaseHandler):
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         errors: list[str] = []
-        flow_id = config.get("flow_id")
-        flow_name = config.get("flow_name")
-        has_id = isinstance(flow_id, str) and flow_id.strip()
-        has_name = isinstance(flow_name, str) and flow_name.strip()
-        if has_id and has_name:
+        raw_flow_id = config.get("flow_id")
+        raw_flow_name = config.get("flow_name")
+        if raw_flow_id is not None and not isinstance(raw_flow_id, str):
+            errors.append("flow_id must be a string")
+        if raw_flow_name is not None and not isinstance(raw_flow_name, str):
+            errors.append("flow_name must be a string")
+        flow_id = raw_flow_id.strip() if isinstance(raw_flow_id, str) else ""
+        flow_name = raw_flow_name.strip() if isinstance(raw_flow_name, str) else ""
+        if flow_id and flow_name:
             errors.append("provide either flow_id or flow_name, not both")
-        elif not has_id and not has_name:
+        elif not flow_id and not flow_name and not errors:
             errors.append("flow_id or flow_name is required")
-        elif has_id:
+        elif flow_id:
             try:
                 UUID(flow_id)
             except ValueError:
@@ -223,8 +227,10 @@ class RunFlowHandler(BaseHandler):
 
         services = ctx.require_services()
 
-        flow_id = str(ctx.config.get("flow_id") or "").strip()
-        flow_name = str(ctx.config.get("flow_name") or "").strip()
+        raw_flow_id = ctx.config.get("flow_id")
+        raw_flow_name = ctx.config.get("flow_name")
+        flow_id = raw_flow_id.strip() if isinstance(raw_flow_id, str) else ""
+        flow_name = raw_flow_name.strip() if isinstance(raw_flow_name, str) else ""
         raw_version = ctx.config.get("version")
         version = int(raw_version) if raw_version is not None else None
         wait_for_completion = bool(ctx.config.get("wait_for_completion", True))

@@ -38,3 +38,11 @@ def test_neither_reference_rejected() -> None:
 def test_flow_id_must_be_uuid_when_given() -> None:
     errors = _errors({"flow_id": "not-a-uuid"})
     assert any("must be a UUID" in e for e in errors)
+
+
+def test_non_string_selectors_rejected() -> None:
+    # flow_id=123 + flow_name="X" must not silently launch by str(123).
+    errors = _errors({"flow_id": 123, "flow_name": "X"})
+    assert any("flow_id must be a string" in e for e in errors)
+    errors = _errors({"flow_name": 123})
+    assert any("flow_name must be a string" in e for e in errors)
