@@ -4,7 +4,7 @@
 
 [project]
 name = "hegemony-steps-flow"
-version = "0.1.6"
+version = "0.1.7"
 description = "Flow orchestration step handlers for Hegemony"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }

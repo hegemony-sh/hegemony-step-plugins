@@ -153,6 +153,15 @@ class RunFlowConfig(BaseModel):
     model_config = ConfigDict(extra="allow", json_schema_extra={"x_widget": "run-flow"})
 
     flow_id: str = Field(default="", title="Flow")
+    flow_name: str = Field(
+        default="",
+        title="Flow name",
+        description=(
+            "Child flow name, resolved to the newest flow at launch time — the "
+            "portable alternative to flow_id for imported bundles. Provide "
+            "exactly one of flow_id / flow_name."
+        ),
+    )
     version: int | None = Field(default=None, ge=1, title="Version")
     wait_for_completion: bool = Field(default=True, title="Wait for completion")
     run_name: str | None = Field(default=None, title="Child run name")
@@ -176,9 +185,14 @@ class RunFlowHandler(BaseHandler):
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         errors: list[str] = []
         flow_id = config.get("flow_id")
-        if not isinstance(flow_id, str) or not flow_id.strip():
-            errors.append("flow_id is required")
-        else:
+        flow_name = config.get("flow_name")
+        has_id = isinstance(flow_id, str) and flow_id.strip()
+        has_name = isinstance(flow_name, str) and flow_name.strip()
+        if has_id and has_name:
+            errors.append("provide either flow_id or flow_name, not both")
+        elif not has_id and not has_name:
+            errors.append("flow_id or flow_name is required")
+        elif has_id:
             try:
                 UUID(flow_id)
             except ValueError:
@@ -209,7 +223,8 @@ class RunFlowHandler(BaseHandler):
 
         services = ctx.require_services()
 
-        flow_id = str(ctx.config["flow_id"]).strip()
+        flow_id = str(ctx.config.get("flow_id") or "").strip()
+        flow_name = str(ctx.config.get("flow_name") or "").strip()
         raw_version = ctx.config.get("version")
         version = int(raw_version) if raw_version is not None else None
         wait_for_completion = bool(ctx.config.get("wait_for_completion", True))
@@ -232,13 +247,16 @@ class RunFlowHandler(BaseHandler):
         )
 
         payload = {
-            "flow_id": flow_id,
             "name": run_name,
             "related_targets": related_targets,
             "params": params,
             "parent_run_id": ctx.run_id,
             "parent_step_run_id": ctx.step_run_id,
         }
+        if flow_id:
+            payload["flow_id"] = flow_id
+        else:
+            payload["flow_name"] = flow_name
         if version is not None:
             payload["version"] = version
 
@@ -270,7 +288,8 @@ class RunFlowHandler(BaseHandler):
             attrs={
                 "child_run_id": child_run_id,
                 "child_workflow_id": child_workflow_id,
-                "child_flow_id": flow_id,
+                "child_flow_id": flow_id or None,
+                "child_flow_name": flow_name or None,
                 "child_version": version if version is not None else "latest",
             },
         )
