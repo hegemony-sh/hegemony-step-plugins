@@ -4,7 +4,7 @@
 
 [project]
 name = "hegemony-steps-evidence"
-version = "0.1.6"
+version = "0.1.7"
 description = "Evidence assertion and comparison step handlers for Hegemony"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
