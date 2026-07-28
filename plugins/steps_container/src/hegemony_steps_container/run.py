@@ -30,6 +30,27 @@ from hegemony_step_sdk import (
 logger = logging.getLogger(__name__)
 
 
+def _docker_env(docker_host: str) -> dict[str, str] | None:
+    """Environment for a docker subprocess, optionally selecting the daemon.
+
+    When ``docker_host`` is set (the worker's ``container_docker_host`` setting,
+    surfaced as :attr:`ContainerRuntime.docker_host`), every docker invocation
+    the handler spawns gets ``DOCKER_HOST`` pointing at the sandbox daemon on top
+    of the inherited process environment. When empty, ``None`` is returned so the
+    subprocess inherits the plain environment unchanged — byte-for-byte today's
+    host-socket behavior. Daemon selection is environment, never argv, so the
+    ``docker create`` args are identical on either daemon.
+
+    The override is deliberately per invocation: exporting ``DOCKER_HOST``
+    process-wide would also redirect the worker's own daemon queries (e.g. the
+    worker-id derivation), which must keep targeting the daemon that runs the
+    worker container.
+    """
+    if not docker_host:
+        return None
+    return {**os.environ, "DOCKER_HOST": docker_host}
+
+
 class RunContainerConfig(BaseModel):
     """Config for ``container.run``.
 
@@ -938,6 +959,11 @@ class RunContainerHandler(BaseHandler):
         runtime = services.container_runtime()
 
         docker_bin = runtime.docker_bin
+        # Daemon selection for every docker call below. None (setting unset) means
+        # inherit the worker's environment / host socket; set means DOCKER_HOST is
+        # placed on each invocation (never process-wide — see _docker_env).
+        docker_host = runtime.docker_host
+        docker_env = _docker_env(docker_host)
         image = ctx.config.get("image", "")
         timeout = ctx.config.get("timeout_seconds", ctx.timeout_seconds)
         working_dir = ctx.config.get("working_dir", "/workspace")
@@ -985,7 +1011,7 @@ class RunContainerHandler(BaseHandler):
 
         try:
             # 1. Preflight cleanup
-            await self._preflight_cleanup(docker_bin, ctx)
+            await self._preflight_cleanup(docker_bin, ctx, docker_host)
 
             # 2. Create a temp staging directory for files to copy into container
             staging_dir = tempfile.mkdtemp(prefix="hegemony-container-")
@@ -1307,6 +1333,7 @@ class RunContainerHandler(BaseHandler):
                 capture_output=True,
                 text=True,
                 timeout=remaining,
+                env=docker_env,
             )
             pull_duration = time.monotonic() - pull_start
             if pull_proc.returncode != 0:
@@ -1354,6 +1381,7 @@ class RunContainerHandler(BaseHandler):
                 capture_output=True,
                 text=True,
                 timeout=max(deadline - time.monotonic(), 1),
+                env=docker_env,
             )
             if create_proc.returncode != 0:
                 return HandlerResult(
@@ -1384,6 +1412,7 @@ class RunContainerHandler(BaseHandler):
                     capture_output=True,
                     text=True,
                     timeout=max(deadline - time.monotonic(), 1),
+                    env=docker_env,
                 )
                 if cp_proc.returncode != 0:
                     return HandlerResult(
@@ -1406,6 +1435,7 @@ class RunContainerHandler(BaseHandler):
                     capture_output=True,
                     text=True,
                     timeout=max(deadline - time.monotonic(), 1),
+                    env=docker_env,
                 )
                 if cp_proc.returncode != 0:
                     return HandlerResult(
@@ -1426,6 +1456,7 @@ class RunContainerHandler(BaseHandler):
                     capture_output=True,
                     text=True,
                     timeout=max(deadline - time.monotonic(), 1),
+                    env=docker_env,
                 )
                 if cp_proc.returncode != 0:
                     logger.warning(
@@ -1455,6 +1486,7 @@ class RunContainerHandler(BaseHandler):
                     capture_output=True,
                     text=True,
                     timeout=max(deadline - time.monotonic(), 1),
+                    env=docker_env,
                 )
                 if cp_proc.returncode != 0:
                     return HandlerResult(
@@ -1477,6 +1509,7 @@ class RunContainerHandler(BaseHandler):
                 container_name,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=docker_env,
             )
             if proc.stdout is None or proc.stderr is None:
                 raise RuntimeError("subprocess pipes not available")
@@ -1709,6 +1742,7 @@ class RunContainerHandler(BaseHandler):
                     capture_output=True,
                     text=True,
                     timeout=max(deadline - time.monotonic(), 1),
+                    env=docker_env,
                 )
                 if generated_artifacts_cp.returncode != 0:
                     logger.warning(
@@ -1800,7 +1834,7 @@ class RunContainerHandler(BaseHandler):
         except subprocess.TimeoutExpired:
             duration = time.monotonic() - start_time
             # Kill the container on timeout
-            await self._force_remove_container(docker_bin, container_name)
+            await self._force_remove_container(docker_bin, container_name, docker_host)
             return HandlerResult(
                 success=False,
                 error=f"Container timed out after {timeout}s (image: {image})",
@@ -1823,7 +1857,7 @@ class RunContainerHandler(BaseHandler):
         finally:
             # Best-effort cleanup
             try:
-                await self._force_remove_container(docker_bin, container_name)
+                await self._force_remove_container(docker_bin, container_name, docker_host)
             except Exception as e:
                 logger.warning(f"Cleanup: container removal failed: {e}")
 
@@ -1864,8 +1898,16 @@ class RunContainerHandler(BaseHandler):
                 attrs={"milestone": "cleanup_complete"},
             )
 
-    async def _preflight_cleanup(self, docker_bin: str, ctx: HandlerContext) -> None:
-        """Remove pre-existing containers with matching labels before new attempt."""
+    async def _preflight_cleanup(
+        self, docker_bin: str, ctx: HandlerContext, docker_host: str = ""
+    ) -> None:
+        """Remove pre-existing containers with matching labels before new attempt.
+
+        Sweeps the same daemon the run targets (``docker_host`` selects it, empty
+        = host socket), so a retry cleans up the previous attempt's container on
+        the daemon it was actually created on.
+        """
+        docker_env = _docker_env(docker_host)
         try:
             result = await asyncio.to_thread(
                 subprocess.run,
@@ -1883,17 +1925,25 @@ class RunContainerHandler(BaseHandler):
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=docker_env,
             )
             stdout = str(result.stdout or "")
             for name in stdout.strip().splitlines():
                 if name:
-                    await self._force_remove_container(docker_bin, name.strip())
+                    await self._force_remove_container(docker_bin, name.strip(), docker_host)
         except Exception as e:
             logger.warning(f"Preflight cleanup failed: {e}")
 
     @staticmethod
-    async def _force_remove_container(docker_bin: str, container_name: str) -> None:
-        """Force remove a container, ignoring errors if already gone."""
+    async def _force_remove_container(
+        docker_bin: str, container_name: str, docker_host: str = ""
+    ) -> None:
+        """Force remove a container, ignoring errors if already gone.
+
+        ``docker_host`` (empty = host socket) selects the daemon so removal hits
+        the same daemon that created the container.
+        """
+        docker_env = _docker_env(docker_host)
         with contextlib.suppress(Exception):
             await asyncio.to_thread(
                 subprocess.run,
@@ -1901,4 +1951,5 @@ class RunContainerHandler(BaseHandler):
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=docker_env,
             )
