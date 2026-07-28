@@ -113,6 +113,13 @@ class ContainerRuntime:
     shared_workspaces_enabled: bool
     shared_workspace_root: str
     shared_workspace_volume: str
+    # Daemon selection for flow-container work. Empty means inherit the worker's
+    # environment (the host Docker socket) — today's behavior and the rollback
+    # story. When set (e.g. ``tcp://dind:2375``), the handler points ``DOCKER_HOST``
+    # at that daemon on every docker invocation it spawns — per invocation, never
+    # process-wide, and never in the ``docker create`` argv (selection is
+    # environment, not arguments).
+    docker_host: str = ""
     # Files larger than this are skipped when harvesting generated artifacts.
     artifact_max_file_size_bytes: int = 52_428_800
 
