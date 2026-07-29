@@ -462,7 +462,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-evidence"
-version = "0.1.6"
+version = "0.1.7"
 source = { editable = "plugins/steps_evidence" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -477,7 +477,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-flow"
-version = "0.1.6"
+version = "0.1.7"
 source = { editable = "plugins/steps_flow" }
 dependencies = [
     { name = "hegemony-step-sdk" },

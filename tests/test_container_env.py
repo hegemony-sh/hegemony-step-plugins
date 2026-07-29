@@ -105,6 +105,24 @@ def test_docker_env_helper_overlays_docker_host() -> None:
     assert os.environ.get("PATH") == env.get("PATH")
 
 
+def test_docker_env_helper_drops_inherited_docker_context(monkeypatch) -> None:
+    """A worker-level DOCKER_CONTEXT must not ride along with a forced DOCKER_HOST.
+
+    Daemon selection needs exactly one source of truth: the CLI resolves
+    DOCKER_HOST first, but an inherited context name next to a forced host is
+    ambiguous for other docker-compatible tooling.
+    """
+    monkeypatch.setenv("DOCKER_CONTEXT", "some-context")
+
+    env = _docker_env("tcp://dind:2375")
+    assert env is not None
+    assert env["DOCKER_HOST"] == "tcp://dind:2375"
+    assert "DOCKER_CONTEXT" not in env
+
+    # Unset docker_host keeps the plain environment (no override dict at all).
+    assert _docker_env("") is None
+
+
 async def test_docker_host_set_applies_to_every_docker_call(monkeypatch) -> None:
     captured = _install_docker_mocks(monkeypatch)
 

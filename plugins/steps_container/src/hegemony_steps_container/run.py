@@ -45,10 +45,18 @@ def _docker_env(docker_host: str) -> dict[str, str] | None:
     process-wide would also redirect the worker's own daemon queries (e.g. the
     worker-id derivation), which must keep targeting the daemon that runs the
     worker container.
+
+    Any inherited ``DOCKER_CONTEXT`` is dropped alongside the override: the
+    docker CLI resolves ``DOCKER_HOST`` ahead of ``DOCKER_CONTEXT``, but
+    carrying a context name next to a forced host is ambiguous at best (and
+    other docker-compatible tooling may resolve them differently) — daemon
+    selection here must have exactly one source of truth.
     """
     if not docker_host:
         return None
-    return {**os.environ, "DOCKER_HOST": docker_host}
+    env = {key: value for key, value in os.environ.items() if key != "DOCKER_CONTEXT"}
+    env["DOCKER_HOST"] = docker_host
+    return env
 
 
 class RunContainerConfig(BaseModel):
