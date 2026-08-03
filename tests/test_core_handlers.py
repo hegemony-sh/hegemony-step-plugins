@@ -155,6 +155,41 @@ async def test_connectivity_probe_runs_through_services_run_probe():
     assert calls == [("tcp_connect", "192.0.2.1", {"timeout_ms": 3000, "port": 443})]
 
 
+async def test_connectivity_probe_forwards_socks_proxy():
+    """The socks_proxy option rides the existing config path into run_probe."""
+    from hegemony_step_sdk import ProbeResult
+    from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
+
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    class _Services:
+        async def run_probe(self, check_type, address, options):
+            calls.append((check_type, address, options))
+            return ProbeResult(ok=True, metrics={"connect_ms": 1.2})
+
+    handler = ConnectivityCheckHandler()
+    ctx = HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        phase="VERIFY",
+        kind="CHECK",
+        config={
+            "check_type": "tcp_connect",
+            "port": 22,
+            "timeout_sec": 3,
+            "socks_proxy": "socks5://jump:pw@dind:1080",
+        },
+        target_roles=["primary"],
+        target_devices_by_role={"primary": [{"id": "d1", "name": "r1", "mgmt_host": "192.0.2.1"}]},
+        services=cast(HandlerServices, _Services()),
+    )
+    result = await handler.execute(ctx)
+    assert result.success is True
+    assert calls[0][2]["socks_proxy"] == "socks5://jump:pw@dind:1080"
+
+
 async def test_connectivity_probe_reports_unsupported_check_type():
     """A known-but-unregistered check type surfaces as a clean failure, not a crash."""
     from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
