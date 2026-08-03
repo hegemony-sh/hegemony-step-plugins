@@ -233,8 +233,9 @@ async def test_jump_host_tunnels_the_device_session():
     assert bastion_call.kwargs["port"] == 2222
     assert bastion_call.kwargs["username"] == "jump"
     assert bastion_call.kwargs["password"] == "bastion-pw"
-    # Credential isolation: the bastion never sees device credentials.
-    assert "device-pw" not in bastion_call.kwargs.values()
+    # Credential isolation: the bastion never sees device credentials —
+    # checked on the serialized kwargs so nested containers are covered.
+    assert "device-pw" not in repr(bastion_call.kwargs)
 
     device_call = connect.await_args_list[1]
     assert device_call.args == ("172.20.30.11",)
@@ -242,7 +243,7 @@ async def test_jump_host_tunnels_the_device_session():
     assert device_call.kwargs["password"] == "device-pw"
     assert device_call.kwargs["tunnel"] is bastion
     # ...and the device never sees bastion credentials.
-    assert "bastion-pw" not in device_call.kwargs.values()
+    assert "bastion-pw" not in repr(device_call.kwargs)
 
     # Both sessions are torn down with the device connection.
     device.close.assert_called_once()
@@ -273,3 +274,30 @@ async def test_device_connect_failure_closes_the_bastion_session():
 
     assert all("SSH connection failed" in (r.error or "") for r in results)
     bastion.close.assert_called_once()
+
+
+async def test_jump_host_private_key_is_used_for_the_bastion():
+    spec = DeviceConnectionSpec(
+        host="172.20.30.11",
+        username="admin",
+        password="device-pw",
+        platform="linux",
+        jump_host=JumpHostSpec(host="dind", username="jump", private_key="PEM"),
+    )
+    transport = AsyncSSHTransport(spec)
+    bastion = _connection()
+    device = _connection()
+    device.run.return_value = _completed(stdout="ok\n")
+    connect = AsyncMock(side_effect=[bastion, device])
+    imported = object()
+
+    with (
+        patch.object(asyncssh, "connect", connect),
+        patch.object(asyncssh, "import_private_key", MagicMock(return_value=imported)) as imp,
+    ):
+        await transport.execute_commands(["uname -a"])
+
+    imp.assert_called_once_with("PEM")
+    assert connect.await_args_list[0].kwargs["client_keys"] == [imported]
+    # The key stays on the bastion hop; the device hop authenticates on its own.
+    assert "client_keys" not in connect.await_args_list[1].kwargs

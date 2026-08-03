@@ -79,16 +79,24 @@ _QUIET_READS_DONE = 3
 _JUMP_TUNNEL_ATTR = "_hegemony_jump_tunnel"
 
 
-def _close_connection(connection) -> None:
-    """Close an asyncssh connection (and its jump tunnel), suppressing errors."""
+async def _close_connection(connection) -> None:
+    """Close an asyncssh connection (and its jump tunnel), suppressing errors.
+
+    ``close()`` only starts the shutdown; awaiting ``wait_closed()`` lets both
+    sessions finish tearing down instead of racing the event loop's end.
+    """
     if not connection:
         return
     with contextlib.suppress(Exception):
         connection.close()
+    with contextlib.suppress(Exception):
+        await connection.wait_closed()
     tunnel = getattr(connection, _JUMP_TUNNEL_ATTR, None)
     if tunnel is not None:
         with contextlib.suppress(Exception):
             tunnel.close()
+        with contextlib.suppress(Exception):
+            await tunnel.wait_closed()
 
 
 class AsyncSSHTransport:
@@ -158,6 +166,11 @@ class AsyncSSHTransport:
             username=jump.username or None,
             password=jump.password or None,
             client_keys=client_keys,
+            # Deliberately unpinned, matching the device hop below: the
+            # platform's trust model is that device inventory (which supplies
+            # the bastion endpoint and credentials) is the source of truth.
+            # Host-key pinning would land on both hops together via a
+            # host_key_policy field once the ssh section grows one.
             known_hosts=None,
             connect_timeout=self.connect_timeout,
         )
@@ -169,6 +182,11 @@ class AsyncSSHTransport:
         tunnel = None
         if self.jump_host is not None:
             tunnel = await self._connect_jump()
+        # One connect budget across both hops: the device hop gets whatever
+        # the bastion hop left of connect_timeout (floored so a slow bastion
+        # still surfaces as a device-connect timeout, not a zero timeout).
+        remaining = self.connect_timeout - (time.perf_counter() - connect_start)
+        device_timeout = max(remaining, 1.0) if tunnel is not None else self.connect_timeout
         try:
             connection = await asyncssh.connect(
                 self.host,
@@ -177,7 +195,7 @@ class AsyncSSHTransport:
                 # Empty password falls back to key/agent auth.
                 password=self.password or None,
                 known_hosts=None,
-                connect_timeout=self.connect_timeout,
+                connect_timeout=device_timeout,
                 # SSH session #2 runs inside a direct-tcpip channel of session
                 # #1: end-to-end encrypted, the bastion never sees credentials
                 # or content. () = asyncssh's "no tunnel" sentinel.
@@ -322,7 +340,7 @@ class AsyncSSHTransport:
         finally:
             if self.step_run_id and connection:
                 self._cancellation_registry.unregister(self.step_run_id, connection)
-            _close_connection(connection)
+            await _close_connection(connection)
 
         return results
 
@@ -505,7 +523,7 @@ class AsyncSSHTransport:
                     process.terminate()
             if self.step_run_id and connection:
                 self._cancellation_registry.unregister(self.step_run_id, connection)
-            _close_connection(connection)
+            await _close_connection(connection)
 
     @staticmethod
     def _dest_path(dest_fs: str, dest_filename: str) -> str:
@@ -572,7 +590,7 @@ class AsyncSSHTransport:
         finally:
             if self.step_run_id and connection:
                 self._cancellation_registry.unregister(self.step_run_id, connection)
-            _close_connection(connection)
+            await _close_connection(connection)
 
     async def http_transfer(
         self,
@@ -633,4 +651,4 @@ class AsyncSSHTransport:
         finally:
             if self.step_run_id and connection:
                 self._cancellation_registry.unregister(self.step_run_id, connection)
-            _close_connection(connection)
+            await _close_connection(connection)

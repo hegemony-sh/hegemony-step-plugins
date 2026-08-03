@@ -73,6 +73,7 @@ def _make_transport() -> SSHTransport:
     t.connect_timeout = 10.0
     t.command_timeout = 30.0
     t.step_run_id = None
+    t.jump_host = None
     t._cancellation_registry = _NullCancellationRegistry()
     return t
 
@@ -167,3 +168,91 @@ def test_config_set_exception_skips_post_commands():
     assert all(r.command != "write memory" for r in results)
     assert any(r.command == "hostname branch-router" and r.exit_code == -1 for r in results)
     assert any((r.error or "") == "config exploded" for r in results)
+
+
+# ── Jump host (bastion) hop ──────────────────────────────────────────────────
+
+
+def _jump_transport() -> SSHTransport:
+    from hegemony_step_sdk import JumpHostSpec
+
+    spec = DeviceConnectionSpec(
+        host="172.20.30.11",
+        username="admin",
+        password="device-pw",
+        platform="ios-xe",
+        jump_host=JumpHostSpec(host="dind", port=2222, username="jump", password="bastion-pw"),
+    )
+    with patch.object(hegemony_transport_netmiko.transport, "ConnectHandler", MagicMock()):
+        return SSHTransport(spec)
+
+
+def test_connect_device_tunnels_through_the_bastion_channel():
+    """ProxyJump parity: paramiko session #1, device session on its channel."""
+    transport = _jump_transport()
+
+    channel = MagicMock(name="direct-tcpip-channel")
+    bastion_client = MagicMock()
+    bastion_client.get_transport.return_value.open_channel.return_value = channel
+    paramiko_mock = MagicMock()
+    paramiko_mock.SSHClient.return_value = bastion_client
+    connect_handler = MagicMock()
+
+    with (
+        patch.object(hegemony_transport_netmiko.transport, "paramiko", paramiko_mock),
+        patch.object(hegemony_transport_netmiko.transport, "ConnectHandler", connect_handler),
+    ):
+        connection = transport._connect_device()
+
+    # Session #1: bastion endpoint with bastion credentials only.
+    bastion_kwargs = bastion_client.connect.call_args.kwargs
+    assert bastion_client.connect.call_args.args == ("dind",)
+    assert bastion_kwargs["port"] == 2222
+    assert bastion_kwargs["username"] == "jump"
+    assert bastion_kwargs["password"] == "bastion-pw"
+    assert "device-pw" not in repr(bastion_kwargs)
+
+    # The direct-tcpip channel targets the device and feeds netmiko's sock=.
+    open_channel = bastion_client.get_transport.return_value.open_channel
+    assert open_channel.call_args.args[0] == "direct-tcpip"
+    assert open_channel.call_args.args[1] == ("172.20.30.11", 22)
+    device_kwargs = connect_handler.call_args.kwargs
+    assert device_kwargs["sock"] is channel
+    assert device_kwargs["password"] == "device-pw"
+    assert "bastion-pw" not in repr(device_kwargs)
+
+    # The bastion client rides the connection for _safe_disconnect teardown.
+    from hegemony_transport_netmiko.transport import _JUMP_CLIENT_ATTR, _safe_disconnect
+
+    assert getattr(connection, _JUMP_CLIENT_ATTR) is bastion_client
+    _safe_disconnect(connection)
+    bastion_client.close.assert_called()
+
+
+def test_connect_device_without_jump_passes_no_sock():
+    transport = _make_transport()
+    connect_handler = MagicMock()
+    with patch.object(hegemony_transport_netmiko.transport, "ConnectHandler", connect_handler):
+        transport._connect_device()
+    assert "sock" not in connect_handler.call_args.kwargs
+
+
+def test_connect_device_closes_bastion_when_device_connect_fails():
+    transport = _jump_transport()
+
+    bastion_client = MagicMock()
+    bastion_client.get_transport.return_value.open_channel.return_value = MagicMock()
+    paramiko_mock = MagicMock()
+    paramiko_mock.SSHClient.return_value = bastion_client
+    connect_handler = MagicMock(side_effect=OSError("connection refused"))
+
+    import pytest
+
+    with (
+        patch.object(hegemony_transport_netmiko.transport, "paramiko", paramiko_mock),
+        patch.object(hegemony_transport_netmiko.transport, "ConnectHandler", connect_handler),
+        pytest.raises(OSError, match="connection refused"),
+    ):
+        transport._connect_device()
+
+    bastion_client.close.assert_called()

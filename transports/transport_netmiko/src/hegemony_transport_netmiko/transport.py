@@ -34,6 +34,12 @@ except ImportError:
     NetmikoAuthenticationException: type[Exception] = Exception
     NetmikoTimeoutException: type[Exception] = Exception
 
+try:
+    # Netmiko's own SSH library; used only for the optional jump-host hop.
+    import paramiko
+except ImportError:
+    paramiko: Any = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,15 +97,26 @@ def _detect_cli_error(output: str) -> str | None:
     return None
 
 
+#: Attribute under which the bastion client rides its device connection, so
+#: every existing disconnect path tears the hop down with the session.
+_JUMP_CLIENT_ATTR = "_hegemony_jump_client"
+
+
 def _safe_disconnect(connection) -> None:
     """Safely disconnect a Netmiko connection, suppressing all errors.
 
     Netmiko's disconnect() and Paramiko's close() can raise decode errors
     when reading from a closed connection. We use socket-level shutdown
-    to forcefully close without triggering any reads.
+    to forcefully close without triggering any reads. A jump-host client
+    riding the connection is closed with it.
     """
     if not connection:
         return
+
+    bastion = getattr(connection, _JUMP_CLIENT_ATTR, None)
+    if bastion is not None:
+        with contextlib.suppress(Exception):
+            bastion.close()
 
     try:
         # Get the underlying socket and shut it down forcefully
@@ -197,6 +214,86 @@ class SSHTransport:
         self.device_type = PLATFORM_TO_NETMIKO.get(spec.platform, "cisco_ios")
         self.connect_timeout = spec.connect_timeout
         self.command_timeout = spec.command_timeout
+        self.jump_host = spec.jump_host
+
+    @staticmethod
+    def _load_jump_private_key(pem: str):
+        """Parse a PEM private key for the bastion login (any paramiko type)."""
+        import io
+
+        for key_cls in (
+            paramiko.Ed25519Key,
+            paramiko.ECDSAKey,
+            paramiko.RSAKey,
+        ):
+            with contextlib.suppress(Exception):
+                return key_cls.from_private_key(io.StringIO(pem))
+        raise ValueError("unsupported jump-host private key format")
+
+    def _open_jump_channel(self):
+        """SSH session #1 to the bastion plus a direct-tcpip channel to the device.
+
+        Only bastion credentials are presented here (design-dind-sandbox.md
+        §11.1); the device session runs inside the returned channel with device
+        credentials only. Host keys are not pinned — same trust model as the
+        device hop (inventory is the source of truth).
+        """
+        jump = self.jump_host
+        assert jump is not None
+        if paramiko is None:  # pragma: no cover - netmiko always brings paramiko
+            raise ImportError("paramiko is required for jump-host support")
+        logger.info(f"Connecting to jump host {jump.host}:{jump.port} as {jump.username}")
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                jump.host,
+                port=jump.port,
+                username=jump.username or None,
+                password=jump.password or None,
+                pkey=self._load_jump_private_key(jump.private_key) if jump.private_key else None,
+                allow_agent=False,
+                look_for_keys=False,
+                timeout=self.connect_timeout,
+            )
+            transport = client.get_transport()
+            if transport is None:
+                raise OSError("bastion SSH transport unavailable")
+            channel = transport.open_channel(
+                "direct-tcpip",
+                (self.host, self.port),
+                ("127.0.0.1", 0),
+                timeout=self.connect_timeout,
+            )
+        except BaseException:
+            with contextlib.suppress(Exception):
+                client.close()
+            raise
+        return client, channel
+
+    def _connect_device(self):
+        """Open the netmiko connection, via the bastion channel when one is set.
+
+        The bastion client rides the returned connection under
+        ``_JUMP_CLIENT_ATTR`` so ``_safe_disconnect`` tears the hop down with
+        the session — call sites stay hop-agnostic.
+        """
+        assert ConnectHandler is not None  # Validated in __init__
+        params = self._get_connection_params()
+        bastion = None
+        if self.jump_host is not None:
+            bastion, channel = self._open_jump_channel()
+            params["sock"] = channel
+        try:
+            connection = ConnectHandler(**params)
+        except BaseException:
+            if bastion is not None:
+                with contextlib.suppress(Exception):
+                    bastion.close()
+            raise
+        if bastion is not None:
+            setattr(connection, _JUMP_CLIENT_ATTR, bastion)
+        return connection
 
     def _get_connection_params(self) -> dict[str, Any]:
         """Get Netmiko connection parameters."""
@@ -240,8 +337,7 @@ class SSHTransport:
             # Connect to device
             logger.info(f"Connecting to {self.host}:{self.port} as {self.username}")
             connect_start = time.perf_counter()
-            assert ConnectHandler is not None  # Validated in __init__
-            connection = ConnectHandler(**self._get_connection_params())
+            connection = self._connect_device()
             connect_time = (time.perf_counter() - connect_start) * 1000
             logger.info(f"Connected to {self.host} in {connect_time:.0f}ms")
 
@@ -532,8 +628,7 @@ class SSHTransport:
 
         try:
             logger.info(f"SCP upload to {self.host}: {local_path} -> {dest_fs}{dest_filename}")
-            assert ConnectHandler is not None  # Validated in __init__
-            connection = ConnectHandler(**self._get_connection_params())
+            connection = self._connect_device()
 
             # Register connection for cancellation support
             if self.step_run_id:
@@ -634,8 +729,7 @@ class SSHTransport:
 
         try:
             logger.info(f"HTTP transfer to {self.host}: {dest_fs}{dest_filename}")
-            assert ConnectHandler is not None  # Validated in __init__
-            connection = ConnectHandler(**self._get_connection_params())
+            connection = self._connect_device()
 
             # Register connection for cancellation support
             if self.step_run_id:
@@ -845,8 +939,7 @@ class SSHTransport:
 
         try:
             logger.info(f"Executing timing command on {self.host}: {command[:50]}...")
-            assert ConnectHandler is not None  # Validated in __init__
-            connection = ConnectHandler(**self._get_connection_params())
+            connection = self._connect_device()
 
             # Register connection for cancellation support
             if self.step_run_id:
