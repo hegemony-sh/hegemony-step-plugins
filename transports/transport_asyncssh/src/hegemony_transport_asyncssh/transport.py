@@ -74,12 +74,21 @@ _TIMING_POLL_SECONDS = 2.0
 _QUIET_READS_DONE = 3
 
 
+#: Attribute under which the bastion connection rides its device connection,
+#: so every existing close path tears the tunnel down with the session.
+_JUMP_TUNNEL_ATTR = "_hegemony_jump_tunnel"
+
+
 def _close_connection(connection) -> None:
-    """Close an asyncssh connection, suppressing all errors."""
+    """Close an asyncssh connection (and its jump tunnel), suppressing errors."""
     if not connection:
         return
     with contextlib.suppress(Exception):
         connection.close()
+    tunnel = getattr(connection, _JUMP_TUNNEL_ATTR, None)
+    if tunnel is not None:
+        with contextlib.suppress(Exception):
+            tunnel.close()
 
 
 class AsyncSSHTransport:
@@ -129,20 +138,60 @@ class AsyncSSHTransport:
         self.platform = spec.platform
         self.connect_timeout = spec.connect_timeout
         self.command_timeout = spec.command_timeout
+        self.jump_host = spec.jump_host
 
-    async def _connect(self):
-        """Open an asyncssh connection from the spec."""
-        logger.info(f"Connecting to {self.host}:{self.port} as {self.username}")
-        connect_start = time.perf_counter()
-        connection = await asyncssh.connect(
-            self.host,
-            port=self.port,
-            username=self.username,
-            # Empty password falls back to key/agent auth.
-            password=self.password or None,
+    async def _connect_jump(self):
+        """Open SSH session #1 to the bastion (design-dind-sandbox.md §11.1).
+
+        Only bastion credentials are presented here — device credentials stay
+        confined to the tunneled device session, and vice versa.
+        """
+        jump = self.jump_host
+        assert jump is not None
+        logger.info(f"Connecting to jump host {jump.host}:{jump.port} as {jump.username}")
+        client_keys = None
+        if jump.private_key:
+            client_keys = [asyncssh.import_private_key(jump.private_key)]
+        return await asyncssh.connect(
+            jump.host,
+            port=jump.port,
+            username=jump.username or None,
+            password=jump.password or None,
+            client_keys=client_keys,
             known_hosts=None,
             connect_timeout=self.connect_timeout,
         )
+
+    async def _connect(self):
+        """Open an asyncssh connection from the spec (via the bastion when set)."""
+        logger.info(f"Connecting to {self.host}:{self.port} as {self.username}")
+        connect_start = time.perf_counter()
+        tunnel = None
+        if self.jump_host is not None:
+            tunnel = await self._connect_jump()
+        try:
+            connection = await asyncssh.connect(
+                self.host,
+                port=self.port,
+                username=self.username,
+                # Empty password falls back to key/agent auth.
+                password=self.password or None,
+                known_hosts=None,
+                connect_timeout=self.connect_timeout,
+                # SSH session #2 runs inside a direct-tcpip channel of session
+                # #1: end-to-end encrypted, the bastion never sees credentials
+                # or content. () = asyncssh's "no tunnel" sentinel.
+                tunnel=tunnel if tunnel is not None else (),
+            )
+        except BaseException:
+            if tunnel is not None:
+                with contextlib.suppress(Exception):
+                    tunnel.close()
+            raise
+        if tunnel is not None:
+            # Ride the tunnel on the connection so every close path (finally
+            # blocks, cancellation registry force-close) tears both down.
+            setattr(connection, _JUMP_TUNNEL_ATTR, tunnel)
         connect_time = (time.perf_counter() - connect_start) * 1000
         logger.info(f"Connected to {self.host} in {connect_time:.0f}ms")
         return connection

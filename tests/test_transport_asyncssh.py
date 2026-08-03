@@ -19,7 +19,7 @@ import asyncssh
 import pytest
 
 import hegemony_transport_asyncssh
-from hegemony_step_sdk import DeviceConnectionSpec
+from hegemony_step_sdk import DeviceConnectionSpec, JumpHostSpec
 from hegemony_transport_asyncssh.transport import (
     AsyncSSHTransport,
     _NullCancellationRegistry,
@@ -202,3 +202,74 @@ async def test_http_transfer_runs_curl_remotely():
     assert "-o /var/tmp/fw.bin" in command
     # The URL carries shell metacharacters, so shlex.quote must wrap it
     assert "'https://example.test/fw.bin?sig=abc'" in command
+
+
+def _jump_spec() -> DeviceConnectionSpec:
+    return DeviceConnectionSpec(
+        host="172.20.30.11",
+        username="admin",
+        password="device-pw",
+        platform="linux",
+        jump_host=JumpHostSpec(host="dind", port=2222, username="jump", password="bastion-pw"),
+    )
+
+
+async def test_jump_host_tunnels_the_device_session():
+    """ProxyJump: session #1 to the bastion, session #2 tunneled through it."""
+    transport = AsyncSSHTransport(_jump_spec())
+    bastion = _connection()
+    device = _connection()
+    device.run.return_value = _completed(stdout="ok\n")
+    connect = AsyncMock(side_effect=[bastion, device])
+
+    with patch.object(asyncssh, "connect", connect):
+        results = await transport.execute_commands(["uname -a"])
+
+    assert results[0].exit_code == 0
+    assert connect.await_count == 2
+
+    bastion_call = connect.await_args_list[0]
+    assert bastion_call.args == ("dind",)
+    assert bastion_call.kwargs["port"] == 2222
+    assert bastion_call.kwargs["username"] == "jump"
+    assert bastion_call.kwargs["password"] == "bastion-pw"
+    # Credential isolation: the bastion never sees device credentials.
+    assert "device-pw" not in bastion_call.kwargs.values()
+
+    device_call = connect.await_args_list[1]
+    assert device_call.args == ("172.20.30.11",)
+    assert device_call.kwargs["username"] == "admin"
+    assert device_call.kwargs["password"] == "device-pw"
+    assert device_call.kwargs["tunnel"] is bastion
+    # ...and the device never sees bastion credentials.
+    assert "bastion-pw" not in device_call.kwargs.values()
+
+    # Both sessions are torn down with the device connection.
+    device.close.assert_called_once()
+    bastion.close.assert_called_once()
+
+
+async def test_no_jump_host_passes_the_no_tunnel_sentinel():
+    transport = _make_transport()
+    connection = _connection()
+    connection.run.return_value = _completed(stdout="ok\n")
+    connect = AsyncMock(return_value=connection)
+
+    with patch.object(asyncssh, "connect", connect):
+        await transport.execute_commands(["uptime"])
+
+    assert connect.await_count == 1
+    assert connect.await_args is not None
+    assert connect.await_args.kwargs["tunnel"] == ()
+
+
+async def test_device_connect_failure_closes_the_bastion_session():
+    transport = AsyncSSHTransport(_jump_spec())
+    bastion = _connection()
+    connect = AsyncMock(side_effect=[bastion, OSError("connection refused")])
+
+    with patch.object(asyncssh, "connect", connect):
+        results = await transport.execute_commands(["uptime"])
+
+    assert all("SSH connection failed" in (r.error or "") for r in results)
+    bastion.close.assert_called_once()

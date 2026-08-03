@@ -34,6 +34,25 @@ DEFAULT_DEVICE_MGMT_PORT = 22
 
 
 @dataclass(frozen=True, slots=True)
+class JumpHostSpec:
+    """Resolved bastion (ProxyJump) hop a transport must tunnel through.
+
+    Built by the host from ``device.access_config.jump_host`` with secret
+    references already resolved. The transport opens its first SSH session to
+    this endpoint with these credentials, then runs the device session inside
+    a forwarded channel — the bastion never sees device credentials.
+    """
+
+    host: str
+    port: int = DEFAULT_DEVICE_MGMT_PORT
+    username: str = ""
+    # Secrets are kept out of repr so a logged/traceback'd spec never leaks them.
+    password: str = field(default="", repr=False)
+    # Optional PEM private key for the bastion login (empty = password/agent).
+    private_key: str = field(default="", repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class DeviceConnectionSpec:
     """Fully-resolved parameters the host hands a transport at construction.
 
@@ -50,6 +69,8 @@ class DeviceConnectionSpec:
     platform: str = DEFAULT_DEVICE_PLATFORM
     connect_timeout: float = 10.0
     command_timeout: float = 30.0
+    # Optional bastion hop (design-dind-sandbox.md §11): None = direct.
+    jump_host: JumpHostSpec | None = None
 
 
 class ConnectionCancellationRegistry(Protocol):
