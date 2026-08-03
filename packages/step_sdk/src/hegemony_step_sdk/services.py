@@ -122,6 +122,12 @@ class ContainerRuntime:
     docker_host: str = ""
     # Files larger than this are skipped when harvesting generated artifacts.
     artifact_max_file_size_bytes: int = 52_428_800
+    # Docker network to attach the step container to (``--network``), used by
+    # the platform's egress-policy enforcement: the worker provisions a
+    # policy-scoped network on the sandbox daemon and names it here (``none``
+    # for deny-all). Empty means no policy network — default networking.
+    # An explicit config-level ``network_mode`` (admin host access) wins.
+    docker_network: str = ""
 
 
 @runtime_checkable
