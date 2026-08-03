@@ -201,6 +201,53 @@ class RunContainerConfig(BaseModel):
             "x_col_span": 2,
         },
     )
+    egress_mode: str = Field(
+        default="",
+        title="Egress policy mode",
+        description=(
+            "Outbound firewall for this step's container, enforced on the sandbox "
+            "daemon: 'open' allows everything except Deny rules, 'allow-listed' "
+            "allows only Allow rules (minus Deny), 'deny-all' blocks all network "
+            "access. Leave empty to inherit the flow's network policy. Cannot be "
+            "combined with host-access options or 'Disable network access'."
+        ),
+        json_schema_extra={
+            "x_placeholder": "open | allow-listed | deny-all",
+            "x_advanced": True,
+            "x_col_span": 2,
+        },
+    )
+    egress_allow: list[str] = Field(
+        default_factory=list,
+        title="Egress allow rules",
+        description=(
+            "One rule per line, used with allow-listed mode: "
+            "CIDR[:port[-port]][/tcp|udp] or service:port "
+            "(e.g. 172.20.30.0/24, 0.0.0.0/0:443/tcp, dind:3000)."
+        ),
+        json_schema_extra={
+            "x_widget": "commands",
+            "x_placeholder": "172.20.30.0/24\n0.0.0.0/0:443/tcp\ndind:3000",
+            "x_rows": 3,
+            "x_advanced": True,
+            "x_col_span": 2,
+        },
+    )
+    egress_deny: list[str] = Field(
+        default_factory=list,
+        title="Egress deny rules",
+        description=(
+            "One rule per line, same format as Allow rules. Deny always wins "
+            "over Allow and is unioned with the flow policy's Deny rules."
+        ),
+        json_schema_extra={
+            "x_widget": "commands",
+            "x_placeholder": "169.254.169.254/32",
+            "x_rows": 3,
+            "x_advanced": True,
+            "x_col_span": 2,
+        },
+    )
     env: dict[str, str] = Field(
         default_factory=dict,
         title="Environment Variables",
@@ -292,6 +339,63 @@ class RunContainerConfig(BaseModel):
 
 
 _SET_E_RE = re.compile(r"^\s*set\s+-[^\n;]*e")
+
+# Egress policy vocabulary shared with the platform's flow-level
+# network_policy block. Rules are CIDR[:port[-port]][/tcp|udp] or a
+# compose-service shorthand name:port resolved at enforcement time.
+EGRESS_MODES = ("open", "allow-listed", "deny-all")
+_EGRESS_SERVICE_RULE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9._-]{0,253}:\d{1,5}$")
+_EGRESS_CIDR_RULE_RE = re.compile(
+    r"^(?P<addr>\d{1,3}(?:\.\d{1,3}){3})(?:/(?P<prefix>\d{1,2}))?"
+    r"(?::(?P<port>\d{1,5})(?:-(?P<port_end>\d{1,5}))?)?"
+    r"(?:/(?P<proto>tcp|udp))?$"
+)
+
+
+def egress_rule_error(rule: str) -> str | None:
+    """Validate one egress rule string; return an error message or None.
+
+    Accepted forms: ``CIDR[:port[-port]][/tcp|udp]`` (IPv4) or the
+    compose-service shorthand ``name:port`` (resolved against the stack's
+    DNS at enforcement time). Kept in the wheel so the handler's config
+    validation and the platform's flow-level policy validation agree on one
+    vocabulary.
+    """
+    if not isinstance(rule, str) or not rule.strip():
+        return "egress rule must be a non-empty string"
+    rule = rule.strip()
+    match = _EGRESS_CIDR_RULE_RE.match(rule)
+    if match:
+        import ipaddress
+
+        prefix = match.group("prefix")
+        try:
+            ipaddress.ip_network(
+                f"{match.group('addr')}/{prefix if prefix is not None else 32}",
+                strict=False,
+            )
+        except ValueError as exc:
+            return f"invalid CIDR in egress rule {rule!r}: {exc}"
+        port = match.group("port")
+        port_end = match.group("port_end")
+        if port is not None:
+            start = int(port)
+            end = int(port_end) if port_end is not None else start
+            if not (1 <= start <= 65535 and 1 <= end <= 65535):
+                return f"egress rule {rule!r} port out of range (1-65535)"
+            if end < start:
+                return f"egress rule {rule!r} has an inverted port range"
+        elif port_end is not None:  # pragma: no cover - regex prevents this
+            return f"egress rule {rule!r} has a port range without a start"
+        return None
+    if _EGRESS_SERVICE_RULE_RE.match(rule):
+        port = int(rule.rsplit(":", 1)[1])
+        if not 1 <= port <= 65535:
+            return f"egress rule {rule!r} port out of range (1-65535)"
+        return None
+    return (
+        f"invalid egress rule {rule!r} (expected 'CIDR[:port[-port]][/tcp|udp]' or 'service:port')"
+    )
 
 
 def _with_fail_fast_shell(command: str) -> str | None:
@@ -748,6 +852,80 @@ class RunContainerHandler(BaseHandler):
                             f"Invalid 'extra_mounts[{i}]' entry: {m!r} "
                             "(expected '<abs-src>:<abs-dst>' or '<abs-src>:<abs-dst>:<opts>')"
                         )
+
+        # Egress policy fields. Enforced on the sandbox daemon (E2); admission
+        # here keeps declarations coherent and refuses combinations that could
+        # never be enforced.
+        egress_mode = config.get("egress_mode")
+        egress_allow = config.get("egress_allow")
+        egress_deny = config.get("egress_deny")
+        if egress_mode is not None and not isinstance(egress_mode, str):
+            errors.append("'egress_mode' must be a string")
+            egress_mode = None
+        mode = (egress_mode or "").strip()
+        if mode and mode not in EGRESS_MODES:
+            errors.append(
+                f"Invalid 'egress_mode' value: {mode!r} (allowed: {', '.join(EGRESS_MODES)})"
+            )
+        rule_lists: dict[str, list[str]] = {}
+        for field_name, value in (("egress_allow", egress_allow), ("egress_deny", egress_deny)):
+            if value is None:
+                rule_lists[field_name] = []
+                continue
+            if not isinstance(value, list):
+                errors.append(f"'{field_name}' must be a list of rule strings")
+                rule_lists[field_name] = []
+                continue
+            cleaned: list[str] = []
+            for i, rule in enumerate(value):
+                rule_error = egress_rule_error(rule) if isinstance(rule, str) else None
+                if not isinstance(rule, str):
+                    errors.append(f"'{field_name}[{i}]' must be a string")
+                elif rule_error:
+                    errors.append(f"'{field_name}[{i}]': {rule_error}")
+                else:
+                    cleaned.append(rule.strip())
+            rule_lists[field_name] = cleaned
+
+        egress_declared = (
+            bool(mode) or bool(rule_lists["egress_allow"]) or bool(rule_lists["egress_deny"])
+        )
+        if egress_declared:
+            if not mode:
+                errors.append("'egress_allow'/'egress_deny' require an explicit 'egress_mode'")
+            elif mode == "deny-all" and (rule_lists["egress_allow"] or rule_lists["egress_deny"]):
+                errors.append("'egress_mode: deny-all' does not take allow/deny rules")
+            elif mode == "allow-listed" and not rule_lists["egress_allow"]:
+                errors.append(
+                    "'egress_mode: allow-listed' requires at least one 'egress_allow' rule "
+                    "(use 'deny-all' to block everything)"
+                )
+            elif mode == "open" and rule_lists["egress_allow"]:
+                errors.append(
+                    "'egress_mode: open' does not take 'egress_allow' rules "
+                    "(everything not denied is already allowed)"
+                )
+            # Host-access options make the step sandbox-admin (or hand it
+            # firewall-bypass capability), so an egress policy on the same step
+            # could never be enforced honestly.
+            host_access_enabled = {
+                "network_mode": isinstance(network_mode, str) and bool(network_mode.strip()),
+                "attach_docker_socket": attach_socket is True,
+                "privileged": privileged is True,
+                "pid_mode": isinstance(pid_mode, str) and bool(pid_mode.strip()),
+                "extra_mounts": isinstance(extra_mounts, list) and bool(extra_mounts),
+            }
+            blocked_by = [name for name, enabled in host_access_enabled.items() if enabled]
+            if blocked_by:
+                errors.append(
+                    "egress policy cannot be combined with host-access options: "
+                    + ", ".join(sorted(blocked_by))
+                )
+            if config.get("network_disabled") is True:
+                errors.append(
+                    "egress policy cannot be combined with 'network_disabled: true' "
+                    "(use 'egress_mode: deny-all' instead)"
+                )
 
         mount_step_artifacts = config.get("mount_step_artifacts")
         if mount_step_artifacts is not None:
