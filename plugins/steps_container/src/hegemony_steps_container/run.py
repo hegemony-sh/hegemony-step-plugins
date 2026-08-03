@@ -967,6 +967,7 @@ class RunContainerHandler(BaseHandler):
         step_run_id: str,
         shared_workspace_path: str | None = None,
         shared_workspace_volume: str | None = None,
+        docker_network: str = "",
     ) -> list[str]:
         """Build the docker create command args from config.
 
@@ -1004,11 +1005,15 @@ class RunContainerHandler(BaseHandler):
             container_name,
         ]
 
-        # `network_mode` takes precedence over `network_disabled`. When neither
-        # is set, preserve legacy Docker networking behavior; network isolation
-        # requires explicit `network_disabled: true`.
+        # `network_mode` (admin host access) takes precedence, then the
+        # platform's policy network (``docker_network``, provisioned by egress
+        # enforcement — ``none`` for deny-all), then `network_disabled`. When
+        # none are set, preserve legacy Docker networking behavior; network
+        # isolation requires explicit `network_disabled: true`.
         if network_mode:
             args.append(f"--network={network_mode}")
+        elif docker_network:
+            args.append(f"--network={docker_network}")
         elif network_disabled:
             args.append("--network=none")
 
@@ -1513,13 +1518,8 @@ class RunContainerHandler(BaseHandler):
             )
             pull_start = time.monotonic()
             remaining = max(deadline - pull_start, 1)
-            pull_proc = await asyncio.to_thread(
-                subprocess.run,
-                [docker_bin, "pull", image],
-                capture_output=True,
-                text=True,
-                timeout=remaining,
-                env=docker_env,
+            pull_proc = await self._run_docker(
+                docker_bin, ["pull", image], env=docker_env, timeout=remaining
             )
             pull_duration = time.monotonic() - pull_start
             if pull_proc.returncode != 0:
@@ -1557,17 +1557,14 @@ class RunContainerHandler(BaseHandler):
                 step_run_id=ctx.step_run_id,
                 shared_workspace_path=shared_workspace_path,
                 shared_workspace_volume=shared_workspace_volume,
+                docker_network=runtime.docker_network,
             )
-            docker_cmd = [docker_bin] + docker_args
-
             # 8. Create the container
-            create_proc = await asyncio.to_thread(
-                subprocess.run,
-                docker_cmd,
-                capture_output=True,
-                text=True,
-                timeout=max(deadline - time.monotonic(), 1),
+            create_proc = await self._run_docker(
+                docker_bin,
+                docker_args,
                 env=docker_env,
+                timeout=max(deadline - time.monotonic(), 1),
             )
             if create_proc.returncode != 0:
                 return HandlerResult(
@@ -1592,13 +1589,11 @@ class RunContainerHandler(BaseHandler):
                 _stage_container_root_dir(root_dirs_staging_dir, container_root)
 
             if any(os.scandir(root_dirs_staging_dir)):
-                cp_proc = await asyncio.to_thread(
-                    subprocess.run,
-                    [docker_bin, "cp", f"{root_dirs_staging_dir}/.", f"{container_name}:/"],
-                    capture_output=True,
-                    text=True,
-                    timeout=max(deadline - time.monotonic(), 1),
+                cp_proc = await self._run_docker(
+                    docker_bin,
+                    ["cp", f"{root_dirs_staging_dir}/.", f"{container_name}:/"],
                     env=docker_env,
+                    timeout=max(deadline - time.monotonic(), 1),
                 )
                 if cp_proc.returncode != 0:
                     return HandlerResult(
@@ -1615,13 +1610,11 @@ class RunContainerHandler(BaseHandler):
             # artifacts_path root (default /artifacts), with legacy flows still
             # using their saved custom paths under the working directory.
             if staging_dir and any(os.scandir(staging_dir)):
-                cp_proc = await asyncio.to_thread(
-                    subprocess.run,
-                    [docker_bin, "cp", f"{staging_dir}/.", f"{container_name}:{attachments_path}/"],
-                    capture_output=True,
-                    text=True,
-                    timeout=max(deadline - time.monotonic(), 1),
+                cp_proc = await self._run_docker(
+                    docker_bin,
+                    ["cp", f"{staging_dir}/.", f"{container_name}:{attachments_path}/"],
                     env=docker_env,
+                    timeout=max(deadline - time.monotonic(), 1),
                 )
                 if cp_proc.returncode != 0:
                     return HandlerResult(
@@ -1631,18 +1624,15 @@ class RunContainerHandler(BaseHandler):
                     )
 
             if step_outputs_staging_dir and any(os.scandir(step_outputs_staging_dir)):
-                cp_proc = await asyncio.to_thread(
-                    subprocess.run,
+                cp_proc = await self._run_docker(
+                    docker_bin,
                     [
-                        docker_bin,
                         "cp",
                         f"{step_outputs_staging_dir}/.",
                         f"{container_name}:{step_outputs_path}/",
                     ],
-                    capture_output=True,
-                    text=True,
-                    timeout=max(deadline - time.monotonic(), 1),
                     env=docker_env,
+                    timeout=max(deadline - time.monotonic(), 1),
                 )
                 if cp_proc.returncode != 0:
                     logger.warning(
@@ -1657,10 +1647,9 @@ class RunContainerHandler(BaseHandler):
                     )
 
             if artifact_staging_dir and any(os.scandir(artifact_staging_dir)):
-                cp_proc = await asyncio.to_thread(
-                    subprocess.run,
+                cp_proc = await self._run_docker(
+                    docker_bin,
                     [
-                        docker_bin,
                         "cp",
                         f"{artifact_staging_dir}/.",
                         (
@@ -1669,10 +1658,8 @@ class RunContainerHandler(BaseHandler):
                             else f"{container_name}:{artifacts_path}/"
                         ),
                     ],
-                    capture_output=True,
-                    text=True,
-                    timeout=max(deadline - time.monotonic(), 1),
                     env=docker_env,
+                    timeout=max(deadline - time.monotonic(), 1),
                 )
                 if cp_proc.returncode != 0:
                     return HandlerResult(
@@ -1917,18 +1904,15 @@ class RunContainerHandler(BaseHandler):
                 generated_artifacts_staging_dir = tempfile.mkdtemp(
                     prefix="hegemony-generated-artifacts-"
                 )
-                generated_artifacts_cp = await asyncio.to_thread(
-                    subprocess.run,
+                generated_artifacts_cp = await self._run_docker(
+                    docker_bin,
                     [
-                        docker_bin,
                         "cp",
                         f"{container_name}:{new_artifacts_path}/.",
                         generated_artifacts_staging_dir,
                     ],
-                    capture_output=True,
-                    text=True,
-                    timeout=max(deadline - time.monotonic(), 1),
                     env=docker_env,
+                    timeout=max(deadline - time.monotonic(), 1),
                 )
                 if generated_artifacts_cp.returncode != 0:
                     logger.warning(
@@ -2084,6 +2068,34 @@ class RunContainerHandler(BaseHandler):
                 attrs={"milestone": "cleanup_complete"},
             )
 
+    @staticmethod
+    async def _run_docker(
+        docker_bin: str,
+        args: list[str],
+        *,
+        env: dict[str, str] | None,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run one docker CLI call with captured text output.
+
+        The single choke point for daemon selection: every docker invocation
+        receives its environment (and thus ``DOCKER_HOST``) here, so a future
+        call site cannot forget ``env`` and silently target the wrong daemon.
+        The attached ``docker start -a`` stream is the one deliberate
+        exception (``asyncio.create_subprocess_exec`` for live pipes).
+        """
+
+        def _invoke() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [docker_bin, *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+
+        return await asyncio.to_thread(_invoke)
+
     async def _preflight_cleanup(
         self, docker_bin: str, ctx: HandlerContext, docker_host: str = ""
     ) -> None:
@@ -2095,10 +2107,9 @@ class RunContainerHandler(BaseHandler):
         """
         docker_env = _docker_env(docker_host)
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
+            result = await self._run_docker(
+                docker_bin,
                 [
-                    docker_bin,
                     "ps",
                     "-a",
                     "--filter",
@@ -2108,10 +2119,8 @@ class RunContainerHandler(BaseHandler):
                     "--format",
                     "{{.Names}}",
                 ],
-                capture_output=True,
-                text=True,
-                timeout=10,
                 env=docker_env,
+                timeout=10,
             )
             stdout = str(result.stdout or "")
             for name in stdout.strip().splitlines():
@@ -2120,9 +2129,9 @@ class RunContainerHandler(BaseHandler):
         except Exception as e:
             logger.warning(f"Preflight cleanup failed: {e}")
 
-    @staticmethod
+    @classmethod
     async def _force_remove_container(
-        docker_bin: str, container_name: str, docker_host: str = ""
+        cls, docker_bin: str, container_name: str, docker_host: str = ""
     ) -> None:
         """Force remove a container, ignoring errors if already gone.
 
@@ -2131,11 +2140,6 @@ class RunContainerHandler(BaseHandler):
         """
         docker_env = _docker_env(docker_host)
         with contextlib.suppress(Exception):
-            await asyncio.to_thread(
-                subprocess.run,
-                [docker_bin, "rm", "-f", container_name],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=docker_env,
+            await cls._run_docker(
+                docker_bin, ["rm", "-f", container_name], env=docker_env, timeout=10
             )
