@@ -19,6 +19,8 @@ the platform's template pipeline before the probe sees them.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import socket
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
@@ -70,9 +72,12 @@ _SOCKS_REPLY_ERRORS = {
 async def _negotiate_auth(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter, proxy: SocksProxy
 ) -> None:
-    methods = b"\x00"  # no-auth
-    if proxy.username is not None:
-        methods = b"\x00\x02"  # no-auth or username/password
+    # When credentials are configured, offer ONLY username/password (0x02) —
+    # never no-auth alongside it. Otherwise a misconfigured or open proxy that
+    # selects no-auth (0x00) would let us connect unauthenticated, silently
+    # defeating the design's guarantee that both endpoints authenticate
+    # (design-dind-sandbox.md §11.4).
+    methods = b"\x02" if proxy.username is not None else b"\x00"
     writer.write(bytes([0x05, len(methods)]) + methods)
     await writer.drain()
     version, method = await reader.readexactly(2)
@@ -80,9 +85,14 @@ async def _negotiate_auth(
         raise SocksError("proxy is not a SOCKS5 server")
     if method == 0xFF:
         raise SocksError("proxy rejected all offered authentication methods")
-    if method == 0x02:
-        if proxy.username is None:
-            raise SocksError("proxy requires username/password but none was configured")
+    if proxy.username is not None:
+        # We offered only 0x02; anything else (including an unsolicited 0x00)
+        # is a protocol violation we must not accept unauthenticated.
+        if method != 0x02:
+            raise SocksError(
+                f"proxy did not select username/password auth (returned {method:#x}); "
+                "refusing to connect unauthenticated"
+            )
         user = proxy.username.encode()
         password = (proxy.password or "").encode()
         writer.write(bytes([0x01, len(user)]) + user + bytes([len(password)]) + password)
@@ -94,6 +104,41 @@ async def _negotiate_auth(
         raise SocksError(f"proxy selected an unsupported auth method {method:#x}")
 
 
+async def _dest_address(proxy: SocksProxy, dest_host: str) -> bytes:
+    """Encode the CONNECT destination as ``ATYP + address`` bytes.
+
+    An IP literal is always sent in its native form (IPv4=0x01, IPv6=0x04) —
+    there is nothing to resolve. A hostname is sent as a DOMAINNAME (0x03) so
+    the *proxy* resolves it when the scheme is ``socks5h``; under plain
+    ``socks5`` the name is resolved *locally* first (the documented
+    local-vs-proxy split), which surfaces a clear error if a lab-only name
+    does not resolve on the probe host.
+    """
+    try:
+        ip = ipaddress.ip_address(dest_host)
+    except ValueError:
+        ip = None
+    if ip is None and proxy.remote_dns:
+        host_bytes = dest_host.encode("idna")
+        if len(host_bytes) > 255:
+            raise SocksError("destination host name too long for SOCKS5")
+        return b"\x03" + bytes([len(host_bytes)]) + host_bytes
+    if ip is None:
+        try:
+            infos = await asyncio.get_running_loop().getaddrinfo(
+                dest_host, None, type=socket.SOCK_STREAM
+            )
+        except OSError as exc:
+            raise SocksError(
+                f"cannot resolve {dest_host!r} locally (use socks5h:// to resolve "
+                f"at the proxy): {exc}"
+            ) from exc
+        if not infos:
+            raise SocksError(f"cannot resolve {dest_host!r} locally")
+        ip = ipaddress.ip_address(infos[0][4][0])
+    return (b"\x01" if ip.version == 4 else b"\x04") + ip.packed
+
+
 async def _send_connect(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -101,14 +146,7 @@ async def _send_connect(
     dest_host: str,
     dest_port: int,
 ) -> None:
-    # Always send the destination as a DOMAINNAME; the proxy resolves it
-    # (socks5h) or we could resolve locally, but DOMAINNAME keeps one path.
-    host_bytes = dest_host.encode("idna") if _looks_like_hostname(dest_host) else dest_host.encode()
-    if len(host_bytes) > 255:
-        raise SocksError("destination host name too long for SOCKS5")
-    request = (
-        b"\x05\x01\x00\x03" + bytes([len(host_bytes)]) + host_bytes + dest_port.to_bytes(2, "big")
-    )
+    request = b"\x05\x01\x00" + await _dest_address(proxy, dest_host) + dest_port.to_bytes(2, "big")
     writer.write(request)
     await writer.drain()
 
@@ -130,10 +168,6 @@ async def _send_connect(
     else:
         raise SocksError(f"SOCKS5 CONNECT reply has unknown address type {atyp:#x}")
     await reader.readexactly(2)  # bound port
-
-
-def _looks_like_hostname(value: str) -> bool:
-    return any(ch.isalpha() for ch in value)
 
 
 async def open_socks_connection(

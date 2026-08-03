@@ -11,6 +11,7 @@ lives in the ``probe.http`` step handler.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -50,7 +51,8 @@ class _SocksAsyncTransport(httpx.AsyncBaseTransport):
             "Accept: */*\r\n"
             "Connection: close\r\n\r\n"
         )
-        try:
+
+        async def _exchange() -> int:
             writer.write(head.encode())
             await writer.drain()
             status_line = await reader.readline()
@@ -63,6 +65,16 @@ class _SocksAsyncTransport(httpx.AsyncBaseTransport):
                 line = await reader.readline()
                 if line in (b"\r\n", b"\n", b""):
                     break
+            return status_code
+
+        try:
+            # httpx's client timeout does NOT apply to a custom transport, so
+            # bound the post-CONNECT exchange ourselves — otherwise a target
+            # that accepts the tunnel then withholds its response would hang
+            # the probe (and its bastion connection) indefinitely.
+            status_code = await asyncio.wait_for(_exchange(), timeout=self._timeout)
+        except TimeoutError as exc:
+            raise httpx.ReadTimeout("tunneled HTTP exchange timed out", request=request) from exc
         finally:
             writer.close()
         return httpx.Response(status_code=status_code, request=request)
@@ -125,6 +137,18 @@ class HttpHealthProbe(BaseProbe):
                 ok=False,
                 metrics={"connect_ms": round(elapsed, 3)},
                 error_kind="http_error",
+                error_detail=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception as exc:  # noqa: BLE001 - a probe must fail one target, never the batch
+            # The custom SOCKS transport can surface raw OSError/ValueError
+            # (peer reset mid-read, oversized header line) that httpx does not
+            # wrap; record this target as failed instead of aborting the whole
+            # multi-device check, matching the tcp_connect contract.
+            elapsed = (time.perf_counter() - start) * 1000
+            return ProbeResult(
+                ok=False,
+                metrics={"connect_ms": round(elapsed, 3)},
+                error_kind="error",
                 error_detail=f"{type(exc).__name__}: {exc}",
             )
 

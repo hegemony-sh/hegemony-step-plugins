@@ -12,6 +12,7 @@ the URL grammar and the icmp_ping rejection contract.
 from __future__ import annotations
 
 import asyncio
+import socket
 
 import pytest
 
@@ -28,11 +29,27 @@ class _FakeSocks5Server:
     proxies bytes both ways so a real HTTP exchange can flow over the tunnel.
     """
 
-    def __init__(self, *, require_auth: bool = False, upstream_response: bytes | None = None):
+    def __init__(
+        self,
+        *,
+        require_auth: bool = False,
+        upstream_response: bytes | None = None,
+        force_no_auth: bool = False,
+        hang_after_connect: bool = False,
+    ):
         self.require_auth = require_auth
+        # Accept the CONNECT then withhold any response (and never close),
+        # modelling a slow/withholding target so the probe's own timeout is
+        # exercised rather than an EOF.
+        self.hang_after_connect = hang_after_connect
+        # Always answer the method-selection with no-auth (0x00), even if the
+        # client offered only username/password — models an open/misconfigured
+        # proxy so the client's refuse-to-connect-unauthenticated path is testable.
+        self.force_no_auth = force_no_auth
         self.upstream_response = upstream_response
         self.authed = False
         self.requested: tuple[str, int] | None = None
+        self.requested_atyp: int | None = None
         self._server: asyncio.AbstractServer | None = None
 
     @property
@@ -54,7 +71,11 @@ class _FakeSocks5Server:
             version, nmethods = await reader.readexactly(2)
             methods = await reader.readexactly(nmethods)
             assert version == 0x05
-            if self.require_auth:
+            if self.force_no_auth:
+                writer.write(b"\x05\x00")
+                await writer.drain()
+                # A well-behaved client that offered only 0x02 hangs up here.
+            elif self.require_auth:
                 if 0x02 not in methods:
                     writer.write(b"\x05\xff")
                     await writer.drain()
@@ -75,9 +96,17 @@ class _FakeSocks5Server:
                 await writer.drain()
 
             ver, cmd, _rsv, atyp = await reader.readexactly(4)
-            assert ver == 0x05 and cmd == 0x01 and atyp == 0x03
-            hlen = (await reader.readexactly(1))[0]
-            host = (await reader.readexactly(hlen)).decode()
+            assert ver == 0x05 and cmd == 0x01
+            self.requested_atyp = atyp
+            if atyp == 0x01:
+                host = socket.inet_ntoa(await reader.readexactly(4))
+            elif atyp == 0x04:
+                host = socket.inet_ntop(socket.AF_INET6, await reader.readexactly(16))
+            elif atyp == 0x03:
+                hlen = (await reader.readexactly(1))[0]
+                host = (await reader.readexactly(hlen)).decode()
+            else:
+                raise AssertionError(f"unexpected ATYP {atyp:#x}")
             port = int.from_bytes(await reader.readexactly(2), "big")
             self.requested = (host, port)
 
@@ -85,7 +114,9 @@ class _FakeSocks5Server:
             writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
             await writer.drain()
 
-            if self.upstream_response is not None:
+            if self.hang_after_connect:
+                await asyncio.sleep(30)
+            elif self.upstream_response is not None:
                 # Read the tunneled request (until blank line) then reply.
                 while True:
                     line = await reader.readline()
@@ -140,8 +171,72 @@ async def test_tcp_connect_dials_through_authenticated_proxy():
 
     assert result.ok is True
     assert server.authed is True
-    # The destination reaches the proxy as a name+port, not the local socket.
+    # An IP-literal destination is sent in its native ATYP (IPv4), not wrapped
+    # as a DOMAINNAME, and reaches the proxy — not the local socket.
     assert server.requested == ("10.9.9.9", 22)
+    assert server.requested_atyp == 0x01
+
+
+async def test_socks5h_sends_hostname_for_proxy_resolution():
+    server = _FakeSocks5Server()
+    await server.start()
+    try:
+        result = await TcpConnectProbe().execute(
+            "router.lab.internal",
+            {"port": 22, "timeout_ms": 3000, "socks_proxy": f"socks5h://127.0.0.1:{server.port}"},
+        )
+    finally:
+        await server.stop()
+
+    assert result.ok is True
+    # socks5h → the proxy resolves the name, so it travels as a DOMAINNAME.
+    assert server.requested == ("router.lab.internal", 22)
+    assert server.requested_atyp == 0x03
+
+
+async def test_socks5_resolves_locally_and_reports_failure_clearly():
+    # Plain socks5 (no 'h') resolves on the probe host; a name that does not
+    # resolve locally must surface a clear error rather than silently asking
+    # the proxy to resolve it. The proxy is reachable so we reach the CONNECT
+    # (resolution) stage rather than failing on the proxy connection.
+    server = _FakeSocks5Server()
+    await server.start()
+    try:
+        result = await TcpConnectProbe().execute(
+            "does-not-exist.invalid",
+            {"port": 22, "timeout_ms": 2000, "socks_proxy": f"socks5://127.0.0.1:{server.port}"},
+        )
+    finally:
+        await server.stop()
+
+    assert result.ok is False
+    assert result.error_kind == "socks_error"
+    assert "locally" in (result.error_detail or "")
+    # The proxy never received a CONNECT — resolution failed on the probe host.
+    assert server.requested is None
+
+
+async def test_client_refuses_unauthenticated_proxy_when_credentials_configured():
+    # An open/misconfigured proxy answers no-auth even though the client, having
+    # credentials, offered only username/password. The client must refuse rather
+    # than connect unauthenticated.
+    server = _FakeSocks5Server(force_no_auth=True)
+    await server.start()
+    try:
+        result = await TcpConnectProbe().execute(
+            "10.9.9.9",
+            {
+                "port": 22,
+                "timeout_ms": 3000,
+                "socks_proxy": f"socks5://u:p@127.0.0.1:{server.port}",
+            },
+        )
+    finally:
+        await server.stop()
+
+    assert result.ok is False
+    assert result.error_kind == "socks_error"
+    assert "unauthenticated" in (result.error_detail or "")
 
 
 async def test_tcp_connect_reports_socks_error_for_unreachable_proxy():
@@ -185,6 +280,26 @@ async def test_http_health_tunnels_the_request():
     assert result.ok is True
     assert result.metrics["http_status"] == 204
     assert server.requested == ("10.9.9.9", 8080)
+
+
+async def test_http_health_times_out_when_target_withholds_response():
+    # The tunnel opens (CONNECT succeeds) but the target never answers; the
+    # probe must bound the exchange itself and return a timeout, not hang.
+    server = _FakeSocks5Server(hang_after_connect=True)
+    await server.start()
+    try:
+        result = await asyncio.wait_for(
+            HttpHealthProbe().execute(
+                "10.9.9.9",
+                {"port": 80, "timeout_ms": 400, "socks_proxy": f"socks5://127.0.0.1:{server.port}"},
+            ),
+            timeout=10,
+        )
+    finally:
+        await server.stop()
+
+    assert result.ok is False
+    assert result.error_kind == "timeout"
 
 
 async def test_http_health_surfaces_bad_status_over_tunnel():
