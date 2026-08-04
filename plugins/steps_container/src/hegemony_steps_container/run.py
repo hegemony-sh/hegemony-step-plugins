@@ -1028,9 +1028,13 @@ class RunContainerHandler(BaseHandler):
         command = config.get("command", [])
         entrypoint = config.get("entrypoint")
         env_vars = config.get("env", {})
-        memory = config.get("memory", "512m")
-        cpus = config.get("cpus", "1.0")
-        working_dir = config.get("working_dir", "/workspace")
+        # These fields default to "" in the schema and resolve to the documented
+        # default at run time, so an empty/whitespace value means "use the
+        # default" — `.get(key, default)` would return "" (present but empty)
+        # and pass e.g. `--memory ""`, which docker rejects.
+        memory = (config.get("memory") or "").strip() or "512m"
+        cpus = (config.get("cpus") or "").strip() or "1.0"
+        working_dir = (config.get("working_dir") or "").strip() or "/workspace"
         network_disabled = config.get("network_disabled") is True
         network_mode = config.get("network_mode")
         attach_docker_socket = bool(config.get("attach_docker_socket", False))

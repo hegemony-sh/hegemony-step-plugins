@@ -48,6 +48,20 @@ def test_no_docker_network_leaves_argv_unchanged() -> None:
     assert _network_tokens(_args(_BASE_CONFIG)) == []
 
 
+def test_empty_memory_cpus_workdir_resolve_to_defaults() -> None:
+    # A bare step's editor sends these at their empty defaults; they must
+    # resolve to the documented defaults, never reach docker as e.g.
+    # `--memory ""` (which docker create rejects).
+    args = _args(
+        {**_BASE_CONFIG, "memory": "", "cpus": "  ", "working_dir": ""}
+    )
+    assert args[args.index("--memory") + 1] == "512m"
+    assert args[args.index("--cpus") + 1] == "1.0"
+    assert args[args.index("-w") + 1] == "/workspace"
+    # No flag is ever followed by an empty value.
+    assert "" not in args
+
+
 def test_docker_network_attaches_policy_network() -> None:
     args = _args(_BASE_CONFIG, docker_network="hegemony-egress-0123456789abcdef")
     assert _network_tokens(args) == ["--network=hegemony-egress-0123456789abcdef"]
