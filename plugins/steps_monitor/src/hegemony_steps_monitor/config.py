@@ -82,6 +82,21 @@ class ConnectivityMonitorConfig(BaseModel):
             "x_col_span": 2,
         },
     )
+    socks_proxy: str = Field(
+        default="",
+        title="SOCKS Proxy",
+        description=(
+            "Optional authenticated SOCKS5 proxy for the TCP-based checks, so a "
+            "monitor can reach targets only accessible through a bastion (e.g. a "
+            "lab management subnet behind dind:1080). "
+            "socks5[h]://[user:pass@]host:port; ignored by icmp_ping."
+        ),
+        json_schema_extra={
+            "x_placeholder": "socks5://user:pass@dind:1080",
+            "x_advanced": True,
+            "x_col_span": 2,
+        },
+    )
 
 
 class MonitorLifecycleConfig(BaseModel):
