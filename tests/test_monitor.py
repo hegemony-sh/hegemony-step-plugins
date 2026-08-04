@@ -110,6 +110,20 @@ async def test_connectivity_starts_monitor_via_services():
     config, resolved = services.start_calls[0]
     assert config["check_id"] == "tcp_connect"
     assert resolved[0]["address"] == "10.0.0.9"
+    # No socks_proxy configured → the option is absent.
+    assert "socks_proxy" not in config["options"]
+
+
+async def test_connectivity_forwards_socks_proxy_option():
+    services = _FakeServices()
+    proxy = "socks5://u:p@dind:1080"
+    result = await ConnectivityMonitorHandler().execute(
+        _ctx({"check_type": "tcp_connect", "port": 22, "socks_proxy": proxy}, services)
+    )
+    assert result.success is True
+    config, _ = services.start_calls[0]
+    # A monitor can watch targets reachable only through a bastion.
+    assert config["options"]["socks_proxy"] == proxy
 
 
 async def test_connectivity_rejects_unregistered_check():

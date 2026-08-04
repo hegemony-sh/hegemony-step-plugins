@@ -350,51 +350,75 @@ _EGRESS_CIDR_RULE_RE = re.compile(
     r"(?::(?P<port>\d{1,5})(?:-(?P<port_end>\d{1,5}))?)?"
     r"(?:/(?P<proto>tcp|udp))?$"
 )
+# IPv6 rules bracket the address so the port colon is unambiguous; ipaddress
+# does the real validation of the loosely-matched address body.
+_EGRESS_CIDR6_RULE_RE = re.compile(
+    r"^\[(?P<addr>[0-9A-Fa-f:]+)(?:/(?P<prefix>\d{1,3}))?\]"
+    r"(?::(?P<port>\d{1,5})(?:-(?P<port_end>\d{1,5}))?)?"
+    r"(?:/(?P<proto>tcp|udp))?$"
+)
+
+
+def _egress_port_error(rule: str, match: "re.Match[str]") -> str | None:
+    """Validate the shared ``port``/``port_end`` groups; error string or None."""
+    port = match.group("port")
+    port_end = match.group("port_end")
+    if port is not None:
+        start = int(port)
+        end = int(port_end) if port_end is not None else start
+        if not (1 <= start <= 65535 and 1 <= end <= 65535):
+            return f"egress rule {rule!r} port out of range (1-65535)"
+        if end < start:
+            return f"egress rule {rule!r} has an inverted port range"
+    elif port_end is not None:  # pragma: no cover - regex prevents this
+        return f"egress rule {rule!r} has a port range without a start"
+    return None
 
 
 def egress_rule_error(rule: str) -> str | None:
     """Validate one egress rule string; return an error message or None.
 
-    Accepted forms: ``CIDR[:port[-port]][/tcp|udp]`` (IPv4) or the
-    compose-service shorthand ``name:port`` (resolved against the stack's
-    DNS at enforcement time). Kept in the wheel so the handler's config
-    validation and the platform's flow-level policy validation agree on one
-    vocabulary.
+    Accepted forms: IPv4 ``CIDR[:port[-port]][/tcp|udp]``, IPv6
+    ``[CIDR][:port[-port]][/tcp|udp]`` (bracketed), or the compose-service
+    shorthand ``name:port`` (resolved against the stack's DNS at enforcement
+    time). Kept in the wheel so the handler's config validation and the
+    platform's flow-level policy validation agree on one vocabulary.
     """
     if not isinstance(rule, str) or not rule.strip():
         return "egress rule must be a non-empty string"
     rule = rule.strip()
+    import ipaddress
+
     match = _EGRESS_CIDR_RULE_RE.match(rule)
     if match:
-        import ipaddress
-
         prefix = match.group("prefix")
         try:
-            ipaddress.ip_network(
+            ipaddress.IPv4Network(
                 f"{match.group('addr')}/{prefix if prefix is not None else 32}",
                 strict=False,
             )
         except ValueError as exc:
             return f"invalid CIDR in egress rule {rule!r}: {exc}"
-        port = match.group("port")
-        port_end = match.group("port_end")
-        if port is not None:
-            start = int(port)
-            end = int(port_end) if port_end is not None else start
-            if not (1 <= start <= 65535 and 1 <= end <= 65535):
-                return f"egress rule {rule!r} port out of range (1-65535)"
-            if end < start:
-                return f"egress rule {rule!r} has an inverted port range"
-        elif port_end is not None:  # pragma: no cover - regex prevents this
-            return f"egress rule {rule!r} has a port range without a start"
-        return None
+        return _egress_port_error(rule, match)
+    match6 = _EGRESS_CIDR6_RULE_RE.match(rule)
+    if match6:
+        prefix6 = match6.group("prefix")
+        try:
+            ipaddress.IPv6Network(
+                f"{match6.group('addr')}/{prefix6 if prefix6 is not None else 128}",
+                strict=False,
+            )
+        except ValueError as exc:
+            return f"invalid IPv6 CIDR in egress rule {rule!r}: {exc}"
+        return _egress_port_error(rule, match6)
     if _EGRESS_SERVICE_RULE_RE.match(rule):
         port = int(rule.rsplit(":", 1)[1])
         if not 1 <= port <= 65535:
             return f"egress rule {rule!r} port out of range (1-65535)"
         return None
     return (
-        f"invalid egress rule {rule!r} (expected 'CIDR[:port[-port]][/tcp|udp]' or 'service:port')"
+        f"invalid egress rule {rule!r} (expected 'CIDR[:port[-port]][/tcp|udp]', "
+        "'[IPv6CIDR][:port[-port]][/tcp|udp]', or 'service:port')"
     )
 
 

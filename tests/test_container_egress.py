@@ -31,6 +31,11 @@ class TestEgressRuleGrammar:
             "10.1.2.3:22",
             "dind:3000",
             "some-service.internal:8443",
+            # IPv6 (bracketed).
+            "[2001:db8::/32]",
+            "[::/0]:443/tcp",
+            "[fd00::/8]:53/udp",
+            "[2001:db8::1]",
         ):
             assert egress_rule_error(rule) is None, rule
 
@@ -46,6 +51,12 @@ class TestEgressRuleGrammar:
             "dind",
             "dind:0",
             "-bad:80",
+            # IPv6 must be bracketed and well-formed.
+            "::1",
+            "[2001:db8::/129]",
+            "[2001:db8:::1]",
+            "[gggg::]",
+            "[2001:db8::]:70000",
         ):
             assert egress_rule_error(rule) is not None, rule
 
