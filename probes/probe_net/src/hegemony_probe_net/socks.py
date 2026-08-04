@@ -22,7 +22,7 @@ import asyncio
 import ipaddress
 import socket
 from dataclasses import dataclass
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote
 
 
 class SocksError(Exception):
@@ -42,18 +42,39 @@ class SocksProxy:
 
 
 def parse_socks_proxy(value: str) -> SocksProxy:
-    """Parse a ``socks5[h]://[user:pass@]host:port`` URL; raise on anything else."""
-    parts = urlsplit(value.strip())
-    if parts.scheme not in ("socks5", "socks5h"):
-        raise SocksError(f"unsupported socks_proxy scheme {parts.scheme!r} (use socks5 or socks5h)")
-    if not parts.hostname or not parts.port:
+    """Parse a ``socks5[h]://[user:pass@]host:port`` URL; raise on anything else.
+
+    The userinfo is split off at the *last* ``@`` rather than handed to
+    ``urlsplit``, because a password may legally contain ``@``, ``/``, ``?``
+    or ``#`` and those make ``urlsplit`` mis-locate the authority. It then
+    raises ``ValueError`` from ``.port`` — an exception type this module does
+    not own, carrying a message ("Port could not be cast to integer value as
+    'a'") that embeds the leading fragment of the password. Since these
+    values arrive already resolved from a secret, a parse detail is a
+    credential detail: every error raised here names only the shape expected,
+    never the input.
+    """
+    text = value.strip()
+    scheme, separator, authority = text.partition("://")
+    if not separator or scheme not in ("socks5", "socks5h"):
+        raise SocksError(f"unsupported socks_proxy scheme {scheme!r} (use socks5:// or socks5h://)")
+    userinfo, _, hostport = authority.rpartition("@")
+    host, _, port_text = hostport.rpartition(":")
+    try:
+        port = int(port_text)
+    except ValueError:
+        raise SocksError(
+            "socks_proxy requires host and port (e.g. socks5://user:pass@dind:1080)"
+        ) from None
+    if not host or not 1 <= port <= 65535:
         raise SocksError("socks_proxy requires host and port (e.g. socks5://user:pass@dind:1080)")
+    username, _, password = userinfo.partition(":")
     return SocksProxy(
-        host=parts.hostname,
-        port=parts.port,
-        username=unquote(parts.username) if parts.username else None,
-        password=unquote(parts.password) if parts.password else None,
-        remote_dns=parts.scheme == "socks5h",
+        host=host,
+        port=port,
+        username=unquote(username) if username else None,
+        password=unquote(password) if password else None,
+        remote_dns=scheme == "socks5h",
     )
 
 

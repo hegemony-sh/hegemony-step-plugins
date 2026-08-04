@@ -329,3 +329,43 @@ async def test_icmp_ping_rejects_socks_proxy():
     assert result.ok is False
     assert result.error_kind == "config_error"
     assert "tcp_connect" in (result.error_detail or "")
+
+
+class TestSocksProxyParsing:
+    """The value is a resolved secret, so parsing must neither mis-locate the
+    host nor let a credential fragment escape into an error message."""
+
+    def test_passwords_with_url_metacharacters_parse_correctly(self) -> None:
+        # urlsplit().port raises ValueError on these — a password may legally
+        # contain any of them, and mis-locating the authority would send the
+        # bastion credentials to the wrong host.
+        for password in ("a/b", "p@ss", "p?x", "p#x", "a/b?c#d@e"):
+            proxy = parse_socks_proxy(f"socks5://user:{password}@dind:1080")
+            assert (proxy.host, proxy.port) == ("dind", 1080), password
+            assert proxy.username == "user"
+            assert proxy.password == password
+
+    def test_errors_never_echo_the_input(self) -> None:
+        # A parse detail is a credential detail: the message names the shape
+        # expected, never what was supplied.
+        for value in ("socks5://user:s3cr3t@dind", "socks5://user:s3cr3t@dind:notaport"):
+            with pytest.raises(SocksError) as exc_info:
+                parse_socks_proxy(value)
+            assert "s3cr3t" not in str(exc_info.value)
+            assert "requires host and port" in str(exc_info.value)
+
+    def test_rejects_a_non_socks_scheme_without_echoing_credentials(self) -> None:
+        with pytest.raises(SocksError) as exc_info:
+            parse_socks_proxy("http://user:s3cr3t@dind:1080")
+        assert "s3cr3t" not in str(exc_info.value)
+        assert "socks5" in str(exc_info.value)
+
+    def test_out_of_range_port_is_rejected(self) -> None:
+        with pytest.raises(SocksError):
+            parse_socks_proxy("socks5://dind:99999")
+
+    def test_credential_less_and_socks5h_forms(self) -> None:
+        plain = parse_socks_proxy("socks5://dind:1080")
+        assert (plain.username, plain.password, plain.remote_dns) == (None, None, False)
+        remote = parse_socks_proxy("socks5h://dind:1080")
+        assert remote.remote_dns is True
