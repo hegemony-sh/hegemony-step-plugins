@@ -229,6 +229,97 @@ def test_connect_device_tunnels_through_the_bastion_channel():
     bastion_client.close.assert_called()
 
 
+def test_bastion_is_closed_after_the_device_session_it_carries():
+    # The device socket is a direct-tcpip channel of the bastion transport.
+    # Closing the bastion first pulls that channel away before the device
+    # shutdown below runs, leaving the device session for the peer to time out
+    # instead of closing it cleanly.
+    from hegemony_transport_netmiko.transport import _JUMP_CLIENT_ATTR, _safe_disconnect
+
+    order: list[str] = []
+    bastion_client = MagicMock()
+    bastion_client.close.side_effect = lambda: order.append("bastion")
+
+    connection = MagicMock()
+    connection.remote_conn_pre.sock.shutdown.side_effect = lambda *_: order.append("device-sock")
+    connection.remote_conn_pre.close.side_effect = lambda: order.append("device-transport")
+    connection.remote_conn.close.side_effect = lambda: order.append("device-channel")
+    setattr(connection, _JUMP_CLIENT_ATTR, bastion_client)
+
+    _safe_disconnect(connection)
+
+    assert order[-1] == "bastion", order
+    assert "device-sock" in order and "device-channel" in order
+
+
+def test_bastion_is_still_closed_when_the_device_teardown_explodes():
+    from hegemony_transport_netmiko.transport import _JUMP_CLIENT_ATTR, _safe_disconnect
+
+    bastion_client = MagicMock()
+    connection = MagicMock()
+    connection.remote_conn_pre.sock.shutdown.side_effect = RuntimeError("already dead")
+    setattr(connection, _JUMP_CLIENT_ATTR, bastion_client)
+
+    _safe_disconnect(connection)
+
+    bastion_client.close.assert_called_once()
+
+
+def test_connect_timeout_is_one_budget_across_both_hops():
+    # connect_timeout is the budget for reaching the device, not a per-hop
+    # allowance: charging it separately to the bastion login, the direct-tcpip
+    # channel and the device login turns a 30 s setting into 90 s of waiting.
+    transport = _jump_transport()
+    transport.connect_timeout = 30.0
+
+    channel = MagicMock(name="direct-tcpip-channel")
+    bastion_client = MagicMock()
+    bastion_client.get_transport.return_value.open_channel.return_value = channel
+    # The bastion login eats 20 of the 30 seconds.
+    clock = iter([100.0, 120.0, 120.0])
+    paramiko_mock = MagicMock()
+    paramiko_mock.SSHClient.return_value = bastion_client
+    connect_handler = MagicMock()
+
+    with (
+        patch.object(hegemony_transport_netmiko.transport, "paramiko", paramiko_mock),
+        patch.object(hegemony_transport_netmiko.transport, "ConnectHandler", connect_handler),
+        patch.object(
+            hegemony_transport_netmiko.transport.time, "perf_counter", lambda: next(clock)
+        ),
+    ):
+        transport._connect_device()
+
+    open_channel = bastion_client.get_transport.return_value.open_channel
+    assert open_channel.call_args.kwargs["timeout"] == 10.0
+    assert connect_handler.call_args.kwargs["timeout"] == 10.0
+
+
+def test_connect_budget_floors_rather_than_going_to_zero():
+    # A bastion that ate the whole budget must still surface as a *device*
+    # connect timeout, not an instant zero-timeout failure that hides the hop.
+    transport = _jump_transport()
+    transport.connect_timeout = 5.0
+
+    bastion_client = MagicMock()
+    bastion_client.get_transport.return_value.open_channel.return_value = MagicMock()
+    clock = iter([100.0, 400.0, 400.0])
+    paramiko_mock = MagicMock()
+    paramiko_mock.SSHClient.return_value = bastion_client
+    connect_handler = MagicMock()
+
+    with (
+        patch.object(hegemony_transport_netmiko.transport, "paramiko", paramiko_mock),
+        patch.object(hegemony_transport_netmiko.transport, "ConnectHandler", connect_handler),
+        patch.object(
+            hegemony_transport_netmiko.transport.time, "perf_counter", lambda: next(clock)
+        ),
+    ):
+        transport._connect_device()
+
+    assert connect_handler.call_args.kwargs["timeout"] == 1.0
+
+
 def test_connect_device_without_jump_passes_no_sock():
     transport = _make_transport()
     connect_handler = MagicMock()

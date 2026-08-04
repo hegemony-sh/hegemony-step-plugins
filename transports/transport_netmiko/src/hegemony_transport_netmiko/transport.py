@@ -108,15 +108,16 @@ def _safe_disconnect(connection) -> None:
     Netmiko's disconnect() and Paramiko's close() can raise decode errors
     when reading from a closed connection. We use socket-level shutdown
     to forcefully close without triggering any reads. A jump-host client
-    riding the connection is closed with it.
+    riding the connection is closed with it — but only *after* the device
+    session it carries. The device socket is a direct-tcpip channel of the
+    bastion transport, so closing the bastion first pulls that channel out
+    from under the shutdown below and leaves the device session to be reaped
+    by the peer's timeout rather than closed cleanly.
     """
     if not connection:
         return
 
     bastion = getattr(connection, _JUMP_CLIENT_ATTR, None)
-    if bastion is not None:
-        with contextlib.suppress(Exception):
-            bastion.close()
 
     try:
         # Get the underlying socket and shut it down forcefully
@@ -125,11 +126,9 @@ def _safe_disconnect(connection) -> None:
         if transport is not None:
             sock = getattr(transport, "sock", None)
             if sock is not None:
-                try:
+                # Ignore shutdown errors - socket may already be closed or in error state
+                with contextlib.suppress(Exception):
                     sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    # Ignore shutdown errors - socket may already be closed or in error state
-                    pass
                 with contextlib.suppress(Exception):
                     sock.close()
 
@@ -146,6 +145,11 @@ def _safe_disconnect(connection) -> None:
     except Exception:
         # Final catch-all
         pass
+    finally:
+        # Last: the hop the device session rode on.
+        if bastion is not None:
+            with contextlib.suppress(Exception):
+                bastion.close()
 
 
 @dataclass
@@ -245,6 +249,7 @@ class SSHTransport:
         logger.info(f"Connecting to jump host {jump.host}:{jump.port} as {jump.username}")
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        started = time.perf_counter()
         try:
             client.connect(
                 jump.host,
@@ -263,13 +268,25 @@ class SSHTransport:
                 "direct-tcpip",
                 (self.host, self.port),
                 ("127.0.0.1", 0),
-                timeout=self.connect_timeout,
+                timeout=self._remaining_connect_budget(started),
             )
         except BaseException:
             with contextlib.suppress(Exception):
                 client.close()
             raise
-        return client, channel
+        return client, channel, self._remaining_connect_budget(started)
+
+    def _remaining_connect_budget(self, started: float) -> float:
+        """What is left of ``connect_timeout`` since ``started``, floored.
+
+        ``connect_timeout`` is one budget for reaching the device, not a
+        per-hop allowance: charging it separately to the bastion login, the
+        direct-tcpip channel and the device login lets a slow bastion stretch
+        a 30 s setting into 90 s of real waiting. The floor keeps a bastion
+        that ate the whole budget surfacing as a device-connect timeout rather
+        than an immediate zero-timeout failure that hides which hop was slow.
+        """
+        return max(self.connect_timeout - (time.perf_counter() - started), 1.0)
 
     def _connect_device(self):
         """Open the netmiko connection, via the bastion channel when one is set.
@@ -279,10 +296,12 @@ class SSHTransport:
         the session — call sites stay hop-agnostic.
         """
         assert ConnectHandler is not None  # Validated in __init__
-        params = self._get_connection_params()
         bastion = None
+        device_timeout = None
         if self.jump_host is not None:
-            bastion, channel = self._open_jump_channel()
+            bastion, channel, device_timeout = self._open_jump_channel()
+        params = self._get_connection_params(connect_timeout=device_timeout)
+        if bastion is not None:
             params["sock"] = channel
         try:
             connection = ConnectHandler(**params)
@@ -295,7 +314,7 @@ class SSHTransport:
             setattr(connection, _JUMP_CLIENT_ATTR, bastion)
         return connection
 
-    def _get_connection_params(self) -> dict[str, Any]:
+    def _get_connection_params(self, *, connect_timeout: float | None = None) -> dict[str, Any]:
         """Get Netmiko connection parameters."""
         params = {
             "device_type": self.device_type,
@@ -303,7 +322,7 @@ class SSHTransport:
             "port": self.port,
             "username": self.username,
             "password": self.password,
-            "timeout": self.connect_timeout,
+            "timeout": self.connect_timeout if connect_timeout is None else connect_timeout,
             "global_delay_factor": 1,
             "fast_cli": True,
         }

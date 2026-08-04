@@ -293,6 +293,10 @@ async def test_open_connection_rides_the_bastion_tunnel():
     assert bastion_kwargs["username"] == "jump"
     assert bastion_kwargs["password"] == "bastion-pw"
     assert "device-pw" not in repr(bastion_kwargs)
+    # asyncssh reads an explicit client_keys=None as "no public-key auth" and
+    # clears agent_path with it, so a password-only bastion must omit the
+    # argument rather than pin it to None (parity with the asyncssh transport).
+    assert "client_keys" not in bastion_kwargs
 
     scrapli_kwargs = scrapli_cls.call_args.kwargs
     assert scrapli_kwargs["transport_options"] == {"asyncssh": {"tunnel": bastion}}

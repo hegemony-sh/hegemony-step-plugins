@@ -301,3 +301,21 @@ async def test_jump_host_private_key_is_used_for_the_bastion():
     assert connect.await_args_list[0].kwargs["client_keys"] == [imported]
     # The key stays on the bastion hop; the device hop authenticates on its own.
     assert "client_keys" not in connect.await_args_list[1].kwargs
+
+
+async def test_password_only_bastion_does_not_pin_client_keys_to_none():
+    # asyncssh reads an explicit client_keys=None as "no public-key auth" and
+    # clears agent_path along with it. Passing None whenever the inventory
+    # carries no private_key would therefore strip agent and default-key auth
+    # from the bastion hop while the device hop below keeps both — so the
+    # argument must be *absent*, not None.
+    transport = AsyncSSHTransport(_jump_spec())
+    bastion = _connection()
+    device = _connection()
+    device.run.return_value = _completed(stdout="ok\n")
+    connect = AsyncMock(side_effect=[bastion, device])
+
+    with patch.object(asyncssh, "connect", connect):
+        await transport.execute_commands(["uname -a"])
+
+    assert "client_keys" not in connect.await_args_list[0].kwargs

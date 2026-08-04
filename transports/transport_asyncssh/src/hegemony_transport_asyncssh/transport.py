@@ -157,15 +157,21 @@ class AsyncSSHTransport:
         jump = self.jump_host
         assert jump is not None
         logger.info(f"Connecting to jump host {jump.host}:{jump.port} as {jump.username}")
-        client_keys = None
-        if jump.private_key:
-            client_keys = [asyncssh.import_private_key(jump.private_key)]
+        # Only pass client_keys when the inventory actually supplied one.
+        # asyncssh reads an explicit None as "do not attempt public-key auth"
+        # and clears agent_path with it, so passing None would silently strip
+        # the agent and default-key auth the device hop below still gets.
+        key_options = (
+            {"client_keys": [asyncssh.import_private_key(jump.private_key)]}
+            if jump.private_key
+            else {}
+        )
         return await asyncssh.connect(
             jump.host,
             port=jump.port,
             username=jump.username or None,
             password=jump.password or None,
-            client_keys=client_keys,
+            **key_options,
             # Deliberately unpinned, matching the device hop below: the
             # platform's trust model is that device inventory (which supplies
             # the bastion endpoint and credentials) is the source of truth.
