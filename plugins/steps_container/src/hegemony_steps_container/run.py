@@ -469,11 +469,27 @@ def _normalize_container_root(value: Any, default: str) -> str:
     return normalized or "/"
 
 
+def _is_unset(value: Any) -> bool:
+    """True for an absent or empty/whitespace-only optional field.
+
+    These optional fields default to "" and the handler resolves that to the
+    documented default at run time, so validation must treat "" the same as
+    absent — otherwise a step that just fills in image + command (leaving the
+    optional paths/modes at their empty defaults) fails against its own
+    defaults.
+    """
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
 def _validate_absolute_container_path(field_name: str, value: Any, errors: list[str]) -> None:
-    """Validate an absolute container path setting like /attachments or /artifacts."""
-    if not isinstance(value, str) or not value.strip():
-        errors.append(f"'{field_name}' must be a non-empty absolute path")
-    elif not value.startswith("/"):
+    """Validate an absolute container path setting like /attachments or /artifacts.
+
+    An empty/whitespace value means "unset — use the documented default"; only a
+    provided value is checked for absoluteness.
+    """
+    if _is_unset(value):
+        return
+    if not isinstance(value, str) or not value.startswith("/"):
         errors.append(f"'{field_name}' must be an absolute path (start with '/')")
     elif "\0" in value:
         errors.append(f"'{field_name}' must not contain NUL bytes")
@@ -830,9 +846,9 @@ class RunContainerHandler(BaseHandler):
             errors.append("'network_disabled' must be a boolean")
 
         network_mode = config.get("network_mode")
-        if network_mode is not None:
-            if not isinstance(network_mode, str) or not network_mode:
-                errors.append("'network_mode' must be a non-empty string")
+        if not _is_unset(network_mode):
+            if not isinstance(network_mode, str):
+                errors.append("'network_mode' must be a string")
             elif network_mode == "none":
                 errors.append(
                     "'network_mode' may not be 'none'; use 'network_disabled: true' instead"
@@ -851,9 +867,9 @@ class RunContainerHandler(BaseHandler):
             errors.append("'privileged' must be a boolean")
 
         pid_mode = config.get("pid_mode")
-        if pid_mode is not None:
-            if not isinstance(pid_mode, str) or not pid_mode:
-                errors.append("'pid_mode' must be a non-empty string")
+        if not _is_unset(pid_mode):
+            if not isinstance(pid_mode, str):
+                errors.append("'pid_mode' must be a string")
             elif not self._PID_MODE_PATTERN.match(pid_mode):
                 errors.append(
                     f"Invalid 'pid_mode' value: {pid_mode!r} (allowed: 'host', 'container:<name>')"
