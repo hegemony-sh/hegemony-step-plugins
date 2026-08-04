@@ -60,6 +60,26 @@ def test_empty_memory_cpus_workdir_resolve_to_defaults() -> None:
     assert "" not in args
 
 
+def test_blank_network_and_pid_mode_are_unset_not_literal() -> None:
+    # Validation treats a whitespace-only optional field as absent, so a config
+    # carrying one *passes* — the emitter must agree, or the step dies on an
+    # opaque `--network=   ` / `--pid=   ` that docker create rejects. Blank
+    # network_mode must also yield the policy network rather than shadowing it.
+    handler = RunContainerHandler()
+    for blank in ("", "   ", "\t\n"):
+        config = {**_BASE_CONFIG, "network_mode": blank, "pid_mode": blank}
+        assert handler.validate_config(config) == []
+        args = _args(config, docker_network="hegemony-egress-0123456789abcdef")
+        assert _network_tokens(args) == ["--network=hegemony-egress-0123456789abcdef"]
+        assert not [tok for tok in args if tok.startswith("--pid")]
+        assert not any(tok != tok.strip() for tok in args)
+
+
+def test_pid_mode_is_passed_through_when_set() -> None:
+    args = _args({**_BASE_CONFIG, "pid_mode": "host"})
+    assert "--pid=host" in args
+
+
 def test_docker_network_attaches_policy_network() -> None:
     args = _args(_BASE_CONFIG, docker_network="hegemony-egress-0123456789abcdef")
     assert _network_tokens(args) == ["--network=hegemony-egress-0123456789abcdef"]

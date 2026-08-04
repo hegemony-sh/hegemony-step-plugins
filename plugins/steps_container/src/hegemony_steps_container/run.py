@@ -481,6 +481,19 @@ def _is_unset(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _optional_str(value: Any, default: str = "") -> str:
+    """The effective value of an optional string field.
+
+    The inverse of :func:`_is_unset` on the emitting side: whitespace-only is
+    "unset — use the default", never a literal to hand to docker. Without this
+    a config that *passed* validation (which treats "   " as absent) would
+    still emit ``--network=   `` and fail the create with an opaque docker
+    error. Non-strings resolve to the default too; validation rejects them, so
+    reaching here at all means the caller skipped it.
+    """
+    return value.strip() if isinstance(value, str) and value.strip() else default
+
+
 def _validate_absolute_container_path(field_name: str, value: Any, errors: list[str]) -> None:
     """Validate an absolute container path setting like /attachments or /artifacts.
 
@@ -1031,15 +1044,17 @@ class RunContainerHandler(BaseHandler):
         # These fields default to "" in the schema and resolve to the documented
         # default at run time, so an empty/whitespace value means "use the
         # default" — `.get(key, default)` would return "" (present but empty)
-        # and pass e.g. `--memory ""`, which docker rejects.
-        memory = (config.get("memory") or "").strip() or "512m"
-        cpus = (config.get("cpus") or "").strip() or "1.0"
-        working_dir = (config.get("working_dir") or "").strip() or "/workspace"
+        # and pass e.g. `--memory ""`, which docker rejects. Read every one of
+        # them through _optional_str so the emitted argv agrees with what
+        # validation accepted (_is_unset treats whitespace-only as absent).
+        memory = _optional_str(config.get("memory"), "512m")
+        cpus = _optional_str(config.get("cpus"), "1.0")
+        working_dir = _optional_str(config.get("working_dir"), "/workspace")
         network_disabled = config.get("network_disabled") is True
-        network_mode = config.get("network_mode")
+        network_mode = _optional_str(config.get("network_mode"))
         attach_docker_socket = bool(config.get("attach_docker_socket", False))
         privileged = bool(config.get("privileged", False))
-        pid_mode = config.get("pid_mode")
+        pid_mode = _optional_str(config.get("pid_mode"))
         extra_mounts = config.get("extra_mounts") or []
         shared_mount_path = _normalize_container_root(config.get("shared_path"), "/shared")
 
@@ -1112,7 +1127,7 @@ class RunContainerHandler(BaseHandler):
         # Advanced: share the host PID namespace so the container can resolve
         # sibling container PIDs (clab-in-Docker needs this to inspect netns
         # paths of containers it creates via the host Docker socket).
-        if isinstance(pid_mode, str) and pid_mode:
+        if pid_mode:
             args.append(f"--pid={pid_mode}")
 
         # Advanced: arbitrary bind mounts (validated above). Used to share
