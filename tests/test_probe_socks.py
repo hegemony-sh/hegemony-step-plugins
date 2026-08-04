@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from hegemony_probe_net.http_health import HttpHealthProbe
 from hegemony_probe_net.icmp_ping import IcmpPingProbe
-from hegemony_probe_net.socks import SocksError, parse_socks_proxy
+from hegemony_probe_net.socks import SocksError, SocksProxy, parse_socks_proxy
 from hegemony_probe_net.tcp_connect import TcpConnectProbe
 
 
@@ -369,3 +370,60 @@ class TestSocksProxyParsing:
         assert (plain.username, plain.password, plain.remote_dns) == (None, None, False)
         remote = parse_socks_proxy("socks5h://dind:1080")
         assert remote.remote_dns is True
+
+
+class TestSocksWireLimits:
+    """Everything this module raises must be a SocksError. Both wire fields
+    below are length-prefixed with a single byte, and packing an over-long one
+    would raise from bytes()/the idna codec instead — exception types the
+    caller does not catch, carrying messages this module never vetted."""
+
+    async def test_oversized_credentials_raise_socks_error(self) -> None:
+        from hegemony_probe_net.socks import _negotiate_auth
+
+        writer = MagicMock()
+        writer.drain = AsyncMock()
+        reader = AsyncMock()
+        reader.readexactly = AsyncMock(return_value=bytes([0x05, 0x02]))
+        proxy = SocksProxy(
+            host="dind", port=1080, username="u" * 256, password="p", remote_dns=False
+        )
+        with pytest.raises(SocksError) as exc_info:
+            await _negotiate_auth(reader, writer, proxy)
+        assert "RFC 1929" in str(exc_info.value)
+        # Still a credential: the limit is named, the value is not.
+        assert "uuu" not in str(exc_info.value)
+
+    async def test_undersized_username_raises_socks_error(self) -> None:
+        from hegemony_probe_net.socks import _negotiate_auth
+
+        writer = MagicMock()
+        writer.drain = AsyncMock()
+        reader = AsyncMock()
+        reader.readexactly = AsyncMock(return_value=bytes([0x05, 0x02]))
+        proxy = SocksProxy(host="dind", port=1080, username="", password="p", remote_dns=False)
+        with pytest.raises(SocksError):
+            await _negotiate_auth(reader, writer, proxy)
+
+    async def test_undialable_destination_names_raise_socks_error(self) -> None:
+        from hegemony_probe_net.socks import _dest_address
+
+        proxy = SocksProxy(host="dind", port=1080, username=None, password=None, remote_dns=True)
+        # An over-long label: the idna codec raises UnicodeError, not SocksError.
+        with pytest.raises(SocksError):
+            await _dest_address(proxy, "a" * 64 + ".example")
+        # 255 is the DOMAINNAME ceiling; an empty name has nothing to dial.
+        with pytest.raises(SocksError):
+            await _dest_address(proxy, ".".join(["abc"] * 70))
+        with pytest.raises(SocksError):
+            await _dest_address(proxy, "")
+
+    async def test_lab_hostnames_still_encode_verbatim(self) -> None:
+        from hegemony_probe_net.socks import _dest_address
+
+        proxy = SocksProxy(host="dind", port=1080, username=None, password=None, remote_dns=True)
+        # Underscores and mixed case are common in lab DNS and must survive.
+        encoded = await _dest_address(proxy, "Router_1.lab.internal")
+        assert encoded == b"\x03" + bytes([21]) + b"Router_1.lab.internal"
+        # Non-ASCII is punycoded, not rejected.
+        assert await _dest_address(proxy, "münchen.de") == b"\x03\x11xn--mnchen-3ya.de"

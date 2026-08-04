@@ -116,6 +116,16 @@ async def _negotiate_auth(
             )
         user = proxy.username.encode()
         password = (proxy.password or "").encode()
+        # RFC 1929 length-prefixes each field with a single byte, so anything
+        # past 255 cannot be represented. Check before packing: bytes([256])
+        # raises ValueError, an exception this module does not own and whose
+        # message would escape the "never echo the input" rule the parser
+        # above follows. UNAME must also be non-empty.
+        if not 1 <= len(user) <= 255 or len(password) > 255:
+            raise SocksError(
+                "socks_proxy credentials do not fit SOCKS5 username/password auth "
+                "(RFC 1929: username 1-255 bytes, password up to 255)"
+            )
         writer.write(bytes([0x01, len(user)]) + user + bytes([len(password)]) + password)
         await writer.drain()
         _auth_ver, status = await reader.readexactly(2)
@@ -140,9 +150,19 @@ async def _dest_address(proxy: SocksProxy, dest_host: str) -> bytes:
     except ValueError:
         ip = None
     if ip is None and proxy.remote_dns:
-        host_bytes = dest_host.encode("idna")
-        if len(host_bytes) > 255:
-            raise SocksError("destination host name too long for SOCKS5")
+        if not dest_host:
+            raise SocksError("destination host is empty")
+        try:
+            # Pure-ASCII names (including the underscores and mixed case lab
+            # hostnames use) pass through unchanged; only non-ASCII is
+            # punycoded. The codec is strict, though — an over-long label
+            # raises UnicodeError, which is not a SocksError and so would
+            # escape this module's documented contract.
+            host_bytes = dest_host.encode("idna")
+        except UnicodeError as exc:
+            raise SocksError(f"destination host {dest_host!r} is not a valid DNS name") from exc
+        if not 1 <= len(host_bytes) <= 255:
+            raise SocksError(f"destination host {dest_host!r} does not fit a SOCKS5 DOMAINNAME")
         return b"\x03" + bytes([len(host_bytes)]) + host_bytes
     if ip is None:
         try:
