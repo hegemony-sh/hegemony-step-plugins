@@ -52,9 +52,7 @@ def test_empty_memory_cpus_workdir_resolve_to_defaults() -> None:
     # A bare step's editor sends these at their empty defaults; they must
     # resolve to the documented defaults, never reach docker as e.g.
     # `--memory ""` (which docker create rejects).
-    args = _args(
-        {**_BASE_CONFIG, "memory": "", "cpus": "  ", "working_dir": ""}
-    )
+    args = _args({**_BASE_CONFIG, "memory": "", "cpus": "  ", "working_dir": ""})
     assert args[args.index("--memory") + 1] == "512m"
     assert args[args.index("--cpus") + 1] == "1.0"
     assert args[args.index("-w") + 1] == "/workspace"
