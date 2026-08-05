@@ -83,6 +83,24 @@ class WaitReachableHandler(BaseHandler):
                     summary=f"Device '{device_name}' missing mgmt_host — cannot check reachability",
                 )
 
+        # This handler opens its own socket rather than going through
+        # services.run_probe, which is where the host applies the flow egress
+        # gate — so without this the policy would never see these targets and
+        # the step would happily poll a host the flow is forbidden to reach.
+        # Checked once up front rather than per poll: a denial is a
+        # configuration fact, not a transient condition, so it should fail the
+        # step immediately with the policy's reason instead of after
+        # max_wait_seconds of pointless waiting.
+        enforce = getattr(ctx.require_services(), "enforce_egress", None)
+        if enforce is not None:
+            for device in target_devices:
+                await enforce(
+                    device["mgmt_host"],
+                    device.get("mgmt_port", 22),
+                    proto="tcp",
+                    kind="reachability check",
+                )
+
         start_time = datetime.now(UTC)
         # Track stability per device (all devices validated to have mgmt_host above)
         device_stable_start: dict[str, datetime | None] = {

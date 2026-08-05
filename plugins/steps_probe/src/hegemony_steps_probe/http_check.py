@@ -155,6 +155,16 @@ class HttpProbeHandler(BaseHandler):
                 netloc = host if default_port else f"{host}:{effective_port}"
                 url = f"{scheme}://{netloc}{path}"
 
+                # This handler drives its own httpx client rather than going
+                # through services.run_probe, which is where the host applies
+                # the flow egress gate — so without this call a restricted
+                # policy would never see these targets. Ask before dialling;
+                # a denial propagates rather than being recorded as a failed
+                # check, so the step reports the policy's reason.
+                enforce = getattr(ctx.require_services(), "enforce_egress", None)
+                if enforce is not None:
+                    await enforce(host, effective_port, proto="tcp", kind="http check")
+
                 outcome: dict[str, Any] = {}
                 for attempt in range(attempts):
                     outcome = await self._request(client, method, url, status_ranges, body_contains)

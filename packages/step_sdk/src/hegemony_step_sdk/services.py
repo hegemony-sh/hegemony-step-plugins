@@ -259,6 +259,27 @@ class HandlerServices(Protocol):
         """
         ...
 
+    async def enforce_egress(
+        self,
+        host: str,
+        port: int | None = None,
+        *,
+        proto: str | None = None,
+        kind: str = "connection",
+    ) -> None:
+        """Refuse ``host``[:``port``] if the flow's egress policy forbids it.
+
+        ``run_probe`` and ``open_shell`` already gate what they dial. A handler
+        that opens its own socket — an httpx client, a raw connection — is
+        outside that seam, so the policy would not see its target at all. Call
+        this immediately before dialling.
+
+        Raises the host's egress-denial error when the policy forbids the
+        target; returns None when the policy permits it or none is in force.
+        Hosts that implement no policy make this a no-op.
+        """
+        ...
+
     def is_check_registered(self, check_id: str) -> bool:
         """Whether ``check_id`` is a known, registered probe/check type.
 
