@@ -202,6 +202,12 @@ class UpgradeInstallHandler(BaseHandler):
                     commit=commit,
                 )
 
+                if result.cli_output:
+                    # Live view: surface the install session transcript in the
+                    # Logs tab once the (long) timing command returns. True
+                    # mid-command streaming needs transport-level support.
+                    await ctx.emit_output(result.cli_output, device=device, command="install")
+
                 if result.success:
                     success_count += 1
 

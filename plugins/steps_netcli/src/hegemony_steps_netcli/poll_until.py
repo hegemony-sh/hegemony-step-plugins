@@ -141,6 +141,9 @@ class PollUntilHandler(BaseHandler):
                     output = result.output
                     last_output = output
                     all_outputs.append({"attempt": attempt, "output_preview": output[:500]})
+                    if output:
+                        # Live view: each poll attempt's output into the Logs tab
+                        await ctx.emit_output(output, device=device, command=command)
 
                     # Check match condition
                     matched = False

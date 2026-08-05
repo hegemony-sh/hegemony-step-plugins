@@ -106,6 +106,9 @@ class CollectEvidenceHandler(BaseHandler):
                 # Execute all commands together for efficiency
                 results = await ssh.execute_commands(commands)
                 for result in results:
+                    if result.output:
+                        # Live view: per-command output into the Logs tab
+                        await ctx.emit_output(result.output, device=device, command=result.command)
                     all_evidence.append(
                         {
                             "kind": "cli_output",

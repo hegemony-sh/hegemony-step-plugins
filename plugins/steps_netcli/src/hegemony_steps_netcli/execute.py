@@ -133,6 +133,8 @@ class ExecuteCLIActionHandler(BaseHandler):
 
                     if full_output:
                         combined_output_parts.append(full_output)
+                        # Live view: the consolidated config-session transcript
+                        await ctx.emit_output(full_output, device=device)
 
                     if has_error:
                         all_success = False
@@ -174,6 +176,10 @@ class ExecuteCLIActionHandler(BaseHandler):
                         )
                         if result.output:
                             combined_output_parts.append(result.output)
+                            # Live view: per-command output into the Logs tab
+                            await ctx.emit_output(
+                                result.output, device=device, command=result.command
+                            )
                         all_evidence.append(
                             {
                                 "kind": "cli_output",
