@@ -17,6 +17,8 @@ from typing import Any
 
 from hegemony_step_sdk import BaseProbe, ProbeResult
 
+from .socks import SocksError, open_socks_connection, parse_socks_proxy
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,6 +28,9 @@ class TcpConnectProbe(BaseProbe):
     Options:
         port: TCP port to connect to (required)
         timeout_ms: Connection timeout in milliseconds (default: 5000)
+        socks_proxy: Optional ``socks5[h]://[user:pass@]host:port`` to dial
+            through (design-dind-sandbox.md §11.4); the connect then measures
+            the tunneled reach, not the local one.
 
     Metrics produced:
         connect_ms: Time to establish the TCP connection
@@ -44,18 +49,34 @@ class TcpConnectProbe(BaseProbe):
 
         timeout_ms = options.get("timeout_ms", 5000)
         timeout_sec = timeout_ms / 1000.0
+        socks_proxy = (options.get("socks_proxy") or "").strip()
         start_time = time.perf_counter()
 
         try:
-            _reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(address, port),
-                timeout=timeout_sec,
-            )
+            if socks_proxy:
+                proxy = parse_socks_proxy(socks_proxy)
+                _reader, writer = await open_socks_connection(
+                    proxy, address, port, timeout=timeout_sec
+                )
+            else:
+                _reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(address, port),
+                    timeout=timeout_sec,
+                )
             connect_time = (time.perf_counter() - start_time) * 1000
             writer.close()
             await writer.wait_closed()
             return ProbeResult(
                 ok=True, metrics={"connect_ms": round(connect_time, 3), "port": port}
+            )
+
+        except SocksError as e:
+            elapsed = (time.perf_counter() - start_time) * 1000
+            return ProbeResult(
+                ok=False,
+                metrics={"connect_ms": round(elapsed, 3), "port": port},
+                error_kind="socks_error",
+                error_detail=str(e),
             )
 
         except TimeoutError:

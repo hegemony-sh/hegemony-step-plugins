@@ -30,6 +30,35 @@ from hegemony_step_sdk import (
 logger = logging.getLogger(__name__)
 
 
+def _docker_env(docker_host: str) -> dict[str, str] | None:
+    """Environment for a docker subprocess, optionally selecting the daemon.
+
+    When ``docker_host`` is set (the worker's ``container_docker_host`` setting,
+    surfaced as :attr:`ContainerRuntime.docker_host`), every docker invocation
+    the handler spawns gets ``DOCKER_HOST`` pointing at the sandbox daemon on top
+    of the inherited process environment. When empty, ``None`` is returned so the
+    subprocess inherits the plain environment unchanged — byte-for-byte today's
+    host-socket behavior. Daemon selection is environment, never argv, so the
+    ``docker create`` args are identical on either daemon.
+
+    The override is deliberately per invocation: exporting ``DOCKER_HOST``
+    process-wide would also redirect the worker's own daemon queries (e.g. the
+    worker-id derivation), which must keep targeting the daemon that runs the
+    worker container.
+
+    Any inherited ``DOCKER_CONTEXT`` is dropped alongside the override: the
+    docker CLI resolves ``DOCKER_HOST`` ahead of ``DOCKER_CONTEXT``, but
+    carrying a context name next to a forced host is ambiguous at best (and
+    other docker-compatible tooling may resolve them differently) — daemon
+    selection here must have exactly one source of truth.
+    """
+    if not docker_host:
+        return None
+    env = {key: value for key, value in os.environ.items() if key != "DOCKER_CONTEXT"}
+    env["DOCKER_HOST"] = docker_host
+    return env
+
+
 class RunContainerConfig(BaseModel):
     """Config for ``container.run``.
 
@@ -172,6 +201,53 @@ class RunContainerConfig(BaseModel):
             "x_col_span": 2,
         },
     )
+    egress_mode: str = Field(
+        default="",
+        title="Egress policy mode",
+        description=(
+            "Outbound firewall for this step's container, enforced on the sandbox "
+            "daemon: 'open' allows everything except Deny rules, 'allow-listed' "
+            "allows only Allow rules (minus Deny), 'deny-all' blocks all network "
+            "access. Leave empty to inherit the flow's network policy. Cannot be "
+            "combined with host-access options or 'Disable network access'."
+        ),
+        json_schema_extra={
+            "x_placeholder": "open | allow-listed | deny-all",
+            "x_advanced": True,
+            "x_col_span": 2,
+        },
+    )
+    egress_allow: list[str] = Field(
+        default_factory=list,
+        title="Egress allow rules",
+        description=(
+            "One rule per line, used with allow-listed mode: "
+            "CIDR[:port[-port]][/tcp|udp] or service:port "
+            "(e.g. 172.20.30.0/24, 0.0.0.0/0:443/tcp, dind:3000)."
+        ),
+        json_schema_extra={
+            "x_widget": "commands",
+            "x_placeholder": "172.20.30.0/24\n0.0.0.0/0:443/tcp\ndind:3000",
+            "x_rows": 3,
+            "x_advanced": True,
+            "x_col_span": 2,
+        },
+    )
+    egress_deny: list[str] = Field(
+        default_factory=list,
+        title="Egress deny rules",
+        description=(
+            "One rule per line, same format as Allow rules. Deny always wins "
+            "over Allow and is unioned with the flow policy's Deny rules."
+        ),
+        json_schema_extra={
+            "x_widget": "commands",
+            "x_placeholder": "169.254.169.254/32",
+            "x_rows": 3,
+            "x_advanced": True,
+            "x_col_span": 2,
+        },
+    )
     env: dict[str, str] = Field(
         default_factory=dict,
         title="Environment Variables",
@@ -264,6 +340,87 @@ class RunContainerConfig(BaseModel):
 
 _SET_E_RE = re.compile(r"^\s*set\s+-[^\n;]*e")
 
+# Egress policy vocabulary shared with the platform's flow-level
+# network_policy block. Rules are CIDR[:port[-port]][/tcp|udp] or a
+# compose-service shorthand name:port resolved at enforcement time.
+EGRESS_MODES = ("open", "allow-listed", "deny-all")
+_EGRESS_SERVICE_RULE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9._-]{0,253}:\d{1,5}$")
+_EGRESS_CIDR_RULE_RE = re.compile(
+    r"^(?P<addr>\d{1,3}(?:\.\d{1,3}){3})(?:/(?P<prefix>\d{1,2}))?"
+    r"(?::(?P<port>\d{1,5})(?:-(?P<port_end>\d{1,5}))?)?"
+    r"(?:/(?P<proto>tcp|udp))?$"
+)
+# IPv6 rules bracket the address so the port colon is unambiguous; ipaddress
+# does the real validation of the loosely-matched address body.
+_EGRESS_CIDR6_RULE_RE = re.compile(
+    r"^\[(?P<addr>[0-9A-Fa-f:]+)(?:/(?P<prefix>\d{1,3}))?\]"
+    r"(?::(?P<port>\d{1,5})(?:-(?P<port_end>\d{1,5}))?)?"
+    r"(?:/(?P<proto>tcp|udp))?$"
+)
+
+
+def _egress_port_error(rule: str, match: "re.Match[str]") -> str | None:
+    """Validate the shared ``port``/``port_end`` groups; error string or None."""
+    port = match.group("port")
+    port_end = match.group("port_end")
+    if port is not None:
+        start = int(port)
+        end = int(port_end) if port_end is not None else start
+        if not (1 <= start <= 65535 and 1 <= end <= 65535):
+            return f"egress rule {rule!r} port out of range (1-65535)"
+        if end < start:
+            return f"egress rule {rule!r} has an inverted port range"
+    elif port_end is not None:  # pragma: no cover - regex prevents this
+        return f"egress rule {rule!r} has a port range without a start"
+    return None
+
+
+def egress_rule_error(rule: str) -> str | None:
+    """Validate one egress rule string; return an error message or None.
+
+    Accepted forms: IPv4 ``CIDR[:port[-port]][/tcp|udp]``, IPv6
+    ``[CIDR][:port[-port]][/tcp|udp]`` (bracketed), or the compose-service
+    shorthand ``name:port`` (resolved against the stack's DNS at enforcement
+    time). Kept in the wheel so the handler's config validation and the
+    platform's flow-level policy validation agree on one vocabulary.
+    """
+    if not isinstance(rule, str) or not rule.strip():
+        return "egress rule must be a non-empty string"
+    rule = rule.strip()
+    import ipaddress
+
+    match = _EGRESS_CIDR_RULE_RE.match(rule)
+    if match:
+        prefix = match.group("prefix")
+        try:
+            ipaddress.IPv4Network(
+                f"{match.group('addr')}/{prefix if prefix is not None else 32}",
+                strict=False,
+            )
+        except ValueError as exc:
+            return f"invalid CIDR in egress rule {rule!r}: {exc}"
+        return _egress_port_error(rule, match)
+    match6 = _EGRESS_CIDR6_RULE_RE.match(rule)
+    if match6:
+        prefix6 = match6.group("prefix")
+        try:
+            ipaddress.IPv6Network(
+                f"{match6.group('addr')}/{prefix6 if prefix6 is not None else 128}",
+                strict=False,
+            )
+        except ValueError as exc:
+            return f"invalid IPv6 CIDR in egress rule {rule!r}: {exc}"
+        return _egress_port_error(rule, match6)
+    if _EGRESS_SERVICE_RULE_RE.match(rule):
+        port = int(rule.rsplit(":", 1)[1])
+        if not 1 <= port <= 65535:
+            return f"egress rule {rule!r} port out of range (1-65535)"
+        return None
+    return (
+        f"invalid egress rule {rule!r} (expected 'CIDR[:port[-port]][/tcp|udp]', "
+        "'[IPv6CIDR][:port[-port]][/tcp|udp]', or 'service:port')"
+    )
+
 
 def _with_fail_fast_shell(command: str) -> str | None:
     """Return a stripped shell command that fails fast on intermediate errors."""
@@ -312,11 +469,40 @@ def _normalize_container_root(value: Any, default: str) -> str:
     return normalized or "/"
 
 
+def _is_unset(value: Any) -> bool:
+    """True for an absent or empty/whitespace-only optional field.
+
+    These optional fields default to "" and the handler resolves that to the
+    documented default at run time, so validation must treat "" the same as
+    absent — otherwise a step that just fills in image + command (leaving the
+    optional paths/modes at their empty defaults) fails against its own
+    defaults.
+    """
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _optional_str(value: Any, default: str = "") -> str:
+    """The effective value of an optional string field.
+
+    The inverse of :func:`_is_unset` on the emitting side: whitespace-only is
+    "unset — use the default", never a literal to hand to docker. Without this
+    a config that *passed* validation (which treats "   " as absent) would
+    still emit ``--network=   `` and fail the create with an opaque docker
+    error. Non-strings resolve to the default too; validation rejects them, so
+    reaching here at all means the caller skipped it.
+    """
+    return value.strip() if isinstance(value, str) and value.strip() else default
+
+
 def _validate_absolute_container_path(field_name: str, value: Any, errors: list[str]) -> None:
-    """Validate an absolute container path setting like /attachments or /artifacts."""
-    if not isinstance(value, str) or not value.strip():
-        errors.append(f"'{field_name}' must be a non-empty absolute path")
-    elif not value.startswith("/"):
+    """Validate an absolute container path setting like /attachments or /artifacts.
+
+    An empty/whitespace value means "unset — use the documented default"; only a
+    provided value is checked for absoluteness.
+    """
+    if _is_unset(value):
+        return
+    if not isinstance(value, str) or not value.startswith("/"):
         errors.append(f"'{field_name}' must be an absolute path (start with '/')")
     elif "\0" in value:
         errors.append(f"'{field_name}' must not contain NUL bytes")
@@ -673,9 +859,9 @@ class RunContainerHandler(BaseHandler):
             errors.append("'network_disabled' must be a boolean")
 
         network_mode = config.get("network_mode")
-        if network_mode is not None:
-            if not isinstance(network_mode, str) or not network_mode:
-                errors.append("'network_mode' must be a non-empty string")
+        if not _is_unset(network_mode):
+            if not isinstance(network_mode, str):
+                errors.append("'network_mode' must be a string")
             elif network_mode == "none":
                 errors.append(
                     "'network_mode' may not be 'none'; use 'network_disabled: true' instead"
@@ -694,9 +880,9 @@ class RunContainerHandler(BaseHandler):
             errors.append("'privileged' must be a boolean")
 
         pid_mode = config.get("pid_mode")
-        if pid_mode is not None:
-            if not isinstance(pid_mode, str) or not pid_mode:
-                errors.append("'pid_mode' must be a non-empty string")
+        if not _is_unset(pid_mode):
+            if not isinstance(pid_mode, str):
+                errors.append("'pid_mode' must be a string")
             elif not self._PID_MODE_PATTERN.match(pid_mode):
                 errors.append(
                     f"Invalid 'pid_mode' value: {pid_mode!r} (allowed: 'host', 'container:<name>')"
@@ -719,6 +905,80 @@ class RunContainerHandler(BaseHandler):
                             f"Invalid 'extra_mounts[{i}]' entry: {m!r} "
                             "(expected '<abs-src>:<abs-dst>' or '<abs-src>:<abs-dst>:<opts>')"
                         )
+
+        # Egress policy fields. Enforced on the sandbox daemon (E2); admission
+        # here keeps declarations coherent and refuses combinations that could
+        # never be enforced.
+        egress_mode = config.get("egress_mode")
+        egress_allow = config.get("egress_allow")
+        egress_deny = config.get("egress_deny")
+        if egress_mode is not None and not isinstance(egress_mode, str):
+            errors.append("'egress_mode' must be a string")
+            egress_mode = None
+        mode = (egress_mode or "").strip()
+        if mode and mode not in EGRESS_MODES:
+            errors.append(
+                f"Invalid 'egress_mode' value: {mode!r} (allowed: {', '.join(EGRESS_MODES)})"
+            )
+        rule_lists: dict[str, list[str]] = {}
+        for field_name, value in (("egress_allow", egress_allow), ("egress_deny", egress_deny)):
+            if value is None:
+                rule_lists[field_name] = []
+                continue
+            if not isinstance(value, list):
+                errors.append(f"'{field_name}' must be a list of rule strings")
+                rule_lists[field_name] = []
+                continue
+            cleaned: list[str] = []
+            for i, rule in enumerate(value):
+                rule_error = egress_rule_error(rule) if isinstance(rule, str) else None
+                if not isinstance(rule, str):
+                    errors.append(f"'{field_name}[{i}]' must be a string")
+                elif rule_error:
+                    errors.append(f"'{field_name}[{i}]': {rule_error}")
+                else:
+                    cleaned.append(rule.strip())
+            rule_lists[field_name] = cleaned
+
+        egress_declared = (
+            bool(mode) or bool(rule_lists["egress_allow"]) or bool(rule_lists["egress_deny"])
+        )
+        if egress_declared:
+            if not mode:
+                errors.append("'egress_allow'/'egress_deny' require an explicit 'egress_mode'")
+            elif mode == "deny-all" and (rule_lists["egress_allow"] or rule_lists["egress_deny"]):
+                errors.append("'egress_mode: deny-all' does not take allow/deny rules")
+            elif mode == "allow-listed" and not rule_lists["egress_allow"]:
+                errors.append(
+                    "'egress_mode: allow-listed' requires at least one 'egress_allow' rule "
+                    "(use 'deny-all' to block everything)"
+                )
+            elif mode == "open" and rule_lists["egress_allow"]:
+                errors.append(
+                    "'egress_mode: open' does not take 'egress_allow' rules "
+                    "(everything not denied is already allowed)"
+                )
+            # Host-access options make the step sandbox-admin (or hand it
+            # firewall-bypass capability), so an egress policy on the same step
+            # could never be enforced honestly.
+            host_access_enabled = {
+                "network_mode": isinstance(network_mode, str) and bool(network_mode.strip()),
+                "attach_docker_socket": attach_socket is True,
+                "privileged": privileged is True,
+                "pid_mode": isinstance(pid_mode, str) and bool(pid_mode.strip()),
+                "extra_mounts": isinstance(extra_mounts, list) and bool(extra_mounts),
+            }
+            blocked_by = [name for name, enabled in host_access_enabled.items() if enabled]
+            if blocked_by:
+                errors.append(
+                    "egress policy cannot be combined with host-access options: "
+                    + ", ".join(sorted(blocked_by))
+                )
+            if config.get("network_disabled") is True:
+                errors.append(
+                    "egress policy cannot be combined with 'network_disabled: true' "
+                    "(use 'egress_mode: deny-all' instead)"
+                )
 
         mount_step_artifacts = config.get("mount_step_artifacts")
         if mount_step_artifacts is not None:
@@ -760,6 +1020,7 @@ class RunContainerHandler(BaseHandler):
         step_run_id: str,
         shared_workspace_path: str | None = None,
         shared_workspace_volume: str | None = None,
+        docker_network: str = "",
     ) -> list[str]:
         """Build the docker create command args from config.
 
@@ -780,14 +1041,20 @@ class RunContainerHandler(BaseHandler):
         command = config.get("command", [])
         entrypoint = config.get("entrypoint")
         env_vars = config.get("env", {})
-        memory = config.get("memory", "512m")
-        cpus = config.get("cpus", "1.0")
-        working_dir = config.get("working_dir", "/workspace")
+        # These fields default to "" in the schema and resolve to the documented
+        # default at run time, so an empty/whitespace value means "use the
+        # default" — `.get(key, default)` would return "" (present but empty)
+        # and pass e.g. `--memory ""`, which docker rejects. Read every one of
+        # them through _optional_str so the emitted argv agrees with what
+        # validation accepted (_is_unset treats whitespace-only as absent).
+        memory = _optional_str(config.get("memory"), "512m")
+        cpus = _optional_str(config.get("cpus"), "1.0")
+        working_dir = _optional_str(config.get("working_dir"), "/workspace")
         network_disabled = config.get("network_disabled") is True
-        network_mode = config.get("network_mode")
+        network_mode = _optional_str(config.get("network_mode"))
         attach_docker_socket = bool(config.get("attach_docker_socket", False))
         privileged = bool(config.get("privileged", False))
-        pid_mode = config.get("pid_mode")
+        pid_mode = _optional_str(config.get("pid_mode"))
         extra_mounts = config.get("extra_mounts") or []
         shared_mount_path = _normalize_container_root(config.get("shared_path"), "/shared")
 
@@ -797,11 +1064,15 @@ class RunContainerHandler(BaseHandler):
             container_name,
         ]
 
-        # `network_mode` takes precedence over `network_disabled`. When neither
-        # is set, preserve legacy Docker networking behavior; network isolation
-        # requires explicit `network_disabled: true`.
+        # `network_mode` (admin host access) takes precedence, then the
+        # platform's policy network (``docker_network``, provisioned by egress
+        # enforcement — ``none`` for deny-all), then `network_disabled`. When
+        # none are set, preserve legacy Docker networking behavior; network
+        # isolation requires explicit `network_disabled: true`.
         if network_mode:
             args.append(f"--network={network_mode}")
+        elif docker_network:
+            args.append(f"--network={docker_network}")
         elif network_disabled:
             args.append("--network=none")
 
@@ -856,7 +1127,7 @@ class RunContainerHandler(BaseHandler):
         # Advanced: share the host PID namespace so the container can resolve
         # sibling container PIDs (clab-in-Docker needs this to inspect netns
         # paths of containers it creates via the host Docker socket).
-        if isinstance(pid_mode, str) and pid_mode:
+        if pid_mode:
             args.append(f"--pid={pid_mode}")
 
         # Advanced: arbitrary bind mounts (validated above). Used to share
@@ -938,6 +1209,11 @@ class RunContainerHandler(BaseHandler):
         runtime = services.container_runtime()
 
         docker_bin = runtime.docker_bin
+        # Daemon selection for every docker call below. None (setting unset) means
+        # inherit the worker's environment / host socket; set means DOCKER_HOST is
+        # placed on each invocation (never process-wide — see _docker_env).
+        docker_host = runtime.docker_host
+        docker_env = _docker_env(docker_host)
         image = ctx.config.get("image", "")
         timeout = ctx.config.get("timeout_seconds", ctx.timeout_seconds)
         working_dir = ctx.config.get("working_dir", "/workspace")
@@ -985,7 +1261,7 @@ class RunContainerHandler(BaseHandler):
 
         try:
             # 1. Preflight cleanup
-            await self._preflight_cleanup(docker_bin, ctx)
+            await self._preflight_cleanup(docker_bin, ctx, docker_host)
 
             # 2. Create a temp staging directory for files to copy into container
             staging_dir = tempfile.mkdtemp(prefix="hegemony-container-")
@@ -1301,12 +1577,8 @@ class RunContainerHandler(BaseHandler):
             )
             pull_start = time.monotonic()
             remaining = max(deadline - pull_start, 1)
-            pull_proc = await asyncio.to_thread(
-                subprocess.run,
-                [docker_bin, "pull", image],
-                capture_output=True,
-                text=True,
-                timeout=remaining,
+            pull_proc = await self._run_docker(
+                docker_bin, ["pull", image], env=docker_env, timeout=remaining
             )
             pull_duration = time.monotonic() - pull_start
             if pull_proc.returncode != 0:
@@ -1344,15 +1616,13 @@ class RunContainerHandler(BaseHandler):
                 step_run_id=ctx.step_run_id,
                 shared_workspace_path=shared_workspace_path,
                 shared_workspace_volume=shared_workspace_volume,
+                docker_network=runtime.docker_network,
             )
-            docker_cmd = [docker_bin] + docker_args
-
             # 8. Create the container
-            create_proc = await asyncio.to_thread(
-                subprocess.run,
-                docker_cmd,
-                capture_output=True,
-                text=True,
+            create_proc = await self._run_docker(
+                docker_bin,
+                docker_args,
+                env=docker_env,
                 timeout=max(deadline - time.monotonic(), 1),
             )
             if create_proc.returncode != 0:
@@ -1378,11 +1648,10 @@ class RunContainerHandler(BaseHandler):
                 _stage_container_root_dir(root_dirs_staging_dir, container_root)
 
             if any(os.scandir(root_dirs_staging_dir)):
-                cp_proc = await asyncio.to_thread(
-                    subprocess.run,
-                    [docker_bin, "cp", f"{root_dirs_staging_dir}/.", f"{container_name}:/"],
-                    capture_output=True,
-                    text=True,
+                cp_proc = await self._run_docker(
+                    docker_bin,
+                    ["cp", f"{root_dirs_staging_dir}/.", f"{container_name}:/"],
+                    env=docker_env,
                     timeout=max(deadline - time.monotonic(), 1),
                 )
                 if cp_proc.returncode != 0:
@@ -1400,11 +1669,10 @@ class RunContainerHandler(BaseHandler):
             # artifacts_path root (default /artifacts), with legacy flows still
             # using their saved custom paths under the working directory.
             if staging_dir and any(os.scandir(staging_dir)):
-                cp_proc = await asyncio.to_thread(
-                    subprocess.run,
-                    [docker_bin, "cp", f"{staging_dir}/.", f"{container_name}:{attachments_path}/"],
-                    capture_output=True,
-                    text=True,
+                cp_proc = await self._run_docker(
+                    docker_bin,
+                    ["cp", f"{staging_dir}/.", f"{container_name}:{attachments_path}/"],
+                    env=docker_env,
                     timeout=max(deadline - time.monotonic(), 1),
                 )
                 if cp_proc.returncode != 0:
@@ -1415,16 +1683,14 @@ class RunContainerHandler(BaseHandler):
                     )
 
             if step_outputs_staging_dir and any(os.scandir(step_outputs_staging_dir)):
-                cp_proc = await asyncio.to_thread(
-                    subprocess.run,
+                cp_proc = await self._run_docker(
+                    docker_bin,
                     [
-                        docker_bin,
                         "cp",
                         f"{step_outputs_staging_dir}/.",
                         f"{container_name}:{step_outputs_path}/",
                     ],
-                    capture_output=True,
-                    text=True,
+                    env=docker_env,
                     timeout=max(deadline - time.monotonic(), 1),
                 )
                 if cp_proc.returncode != 0:
@@ -1440,10 +1706,9 @@ class RunContainerHandler(BaseHandler):
                     )
 
             if artifact_staging_dir and any(os.scandir(artifact_staging_dir)):
-                cp_proc = await asyncio.to_thread(
-                    subprocess.run,
+                cp_proc = await self._run_docker(
+                    docker_bin,
                     [
-                        docker_bin,
                         "cp",
                         f"{artifact_staging_dir}/.",
                         (
@@ -1452,8 +1717,7 @@ class RunContainerHandler(BaseHandler):
                             else f"{container_name}:{artifacts_path}/"
                         ),
                     ],
-                    capture_output=True,
-                    text=True,
+                    env=docker_env,
                     timeout=max(deadline - time.monotonic(), 1),
                 )
                 if cp_proc.returncode != 0:
@@ -1477,6 +1741,7 @@ class RunContainerHandler(BaseHandler):
                 container_name,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=docker_env,
             )
             if proc.stdout is None or proc.stderr is None:
                 raise RuntimeError("subprocess pipes not available")
@@ -1698,16 +1963,14 @@ class RunContainerHandler(BaseHandler):
                 generated_artifacts_staging_dir = tempfile.mkdtemp(
                     prefix="hegemony-generated-artifacts-"
                 )
-                generated_artifacts_cp = await asyncio.to_thread(
-                    subprocess.run,
+                generated_artifacts_cp = await self._run_docker(
+                    docker_bin,
                     [
-                        docker_bin,
                         "cp",
                         f"{container_name}:{new_artifacts_path}/.",
                         generated_artifacts_staging_dir,
                     ],
-                    capture_output=True,
-                    text=True,
+                    env=docker_env,
                     timeout=max(deadline - time.monotonic(), 1),
                 )
                 if generated_artifacts_cp.returncode != 0:
@@ -1800,7 +2063,7 @@ class RunContainerHandler(BaseHandler):
         except subprocess.TimeoutExpired:
             duration = time.monotonic() - start_time
             # Kill the container on timeout
-            await self._force_remove_container(docker_bin, container_name)
+            await self._force_remove_container(docker_bin, container_name, docker_host)
             return HandlerResult(
                 success=False,
                 error=f"Container timed out after {timeout}s (image: {image})",
@@ -1823,7 +2086,7 @@ class RunContainerHandler(BaseHandler):
         finally:
             # Best-effort cleanup
             try:
-                await self._force_remove_container(docker_bin, container_name)
+                await self._force_remove_container(docker_bin, container_name, docker_host)
             except Exception as e:
                 logger.warning(f"Cleanup: container removal failed: {e}")
 
@@ -1864,13 +2127,48 @@ class RunContainerHandler(BaseHandler):
                 attrs={"milestone": "cleanup_complete"},
             )
 
-    async def _preflight_cleanup(self, docker_bin: str, ctx: HandlerContext) -> None:
-        """Remove pre-existing containers with matching labels before new attempt."""
+    @staticmethod
+    async def _run_docker(
+        docker_bin: str,
+        args: list[str],
+        *,
+        env: dict[str, str] | None,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run one docker CLI call with captured text output.
+
+        The single choke point for daemon selection: every docker invocation
+        receives its environment (and thus ``DOCKER_HOST``) here, so a future
+        call site cannot forget ``env`` and silently target the wrong daemon.
+        The attached ``docker start -a`` stream is the one deliberate
+        exception (``asyncio.create_subprocess_exec`` for live pipes).
+        """
+
+        def _invoke() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [docker_bin, *args],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+
+        return await asyncio.to_thread(_invoke)
+
+    async def _preflight_cleanup(
+        self, docker_bin: str, ctx: HandlerContext, docker_host: str = ""
+    ) -> None:
+        """Remove pre-existing containers with matching labels before new attempt.
+
+        Sweeps the same daemon the run targets (``docker_host`` selects it, empty
+        = host socket), so a retry cleans up the previous attempt's container on
+        the daemon it was actually created on.
+        """
+        docker_env = _docker_env(docker_host)
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
+            result = await self._run_docker(
+                docker_bin,
                 [
-                    docker_bin,
                     "ps",
                     "-a",
                     "--filter",
@@ -1880,25 +2178,27 @@ class RunContainerHandler(BaseHandler):
                     "--format",
                     "{{.Names}}",
                 ],
-                capture_output=True,
-                text=True,
+                env=docker_env,
                 timeout=10,
             )
             stdout = str(result.stdout or "")
             for name in stdout.strip().splitlines():
                 if name:
-                    await self._force_remove_container(docker_bin, name.strip())
+                    await self._force_remove_container(docker_bin, name.strip(), docker_host)
         except Exception as e:
             logger.warning(f"Preflight cleanup failed: {e}")
 
-    @staticmethod
-    async def _force_remove_container(docker_bin: str, container_name: str) -> None:
-        """Force remove a container, ignoring errors if already gone."""
+    @classmethod
+    async def _force_remove_container(
+        cls, docker_bin: str, container_name: str, docker_host: str = ""
+    ) -> None:
+        """Force remove a container, ignoring errors if already gone.
+
+        ``docker_host`` (empty = host socket) selects the daemon so removal hits
+        the same daemon that created the container.
+        """
+        docker_env = _docker_env(docker_host)
         with contextlib.suppress(Exception):
-            await asyncio.to_thread(
-                subprocess.run,
-                [docker_bin, "rm", "-f", container_name],
-                capture_output=True,
-                text=True,
-                timeout=10,
+            await cls._run_docker(
+                docker_bin, ["rm", "-f", container_name], env=docker_env, timeout=10
             )

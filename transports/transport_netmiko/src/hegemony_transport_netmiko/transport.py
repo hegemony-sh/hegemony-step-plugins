@@ -34,6 +34,12 @@ except ImportError:
     NetmikoAuthenticationException: type[Exception] = Exception
     NetmikoTimeoutException: type[Exception] = Exception
 
+try:
+    # Netmiko's own SSH library; used only for the optional jump-host hop.
+    import paramiko
+except ImportError:
+    paramiko: Any = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,15 +97,27 @@ def _detect_cli_error(output: str) -> str | None:
     return None
 
 
+#: Attribute under which the bastion client rides its device connection, so
+#: every existing disconnect path tears the hop down with the session.
+_JUMP_CLIENT_ATTR = "_hegemony_jump_client"
+
+
 def _safe_disconnect(connection) -> None:
     """Safely disconnect a Netmiko connection, suppressing all errors.
 
     Netmiko's disconnect() and Paramiko's close() can raise decode errors
     when reading from a closed connection. We use socket-level shutdown
-    to forcefully close without triggering any reads.
+    to forcefully close without triggering any reads. A jump-host client
+    riding the connection is closed with it — but only *after* the device
+    session it carries. The device socket is a direct-tcpip channel of the
+    bastion transport, so closing the bastion first pulls that channel out
+    from under the shutdown below and leaves the device session to be reaped
+    by the peer's timeout rather than closed cleanly.
     """
     if not connection:
         return
+
+    bastion = getattr(connection, _JUMP_CLIENT_ATTR, None)
 
     try:
         # Get the underlying socket and shut it down forcefully
@@ -108,11 +126,9 @@ def _safe_disconnect(connection) -> None:
         if transport is not None:
             sock = getattr(transport, "sock", None)
             if sock is not None:
-                try:
+                # Ignore shutdown errors - socket may already be closed or in error state
+                with contextlib.suppress(Exception):
                     sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    # Ignore shutdown errors - socket may already be closed or in error state
-                    pass
                 with contextlib.suppress(Exception):
                     sock.close()
 
@@ -129,6 +145,11 @@ def _safe_disconnect(connection) -> None:
     except Exception:
         # Final catch-all
         pass
+    finally:
+        # Last: the hop the device session rode on.
+        if bastion is not None:
+            with contextlib.suppress(Exception):
+                bastion.close()
 
 
 @dataclass
@@ -197,8 +218,111 @@ class SSHTransport:
         self.device_type = PLATFORM_TO_NETMIKO.get(spec.platform, "cisco_ios")
         self.connect_timeout = spec.connect_timeout
         self.command_timeout = spec.command_timeout
+        self.jump_host = spec.jump_host
 
-    def _get_connection_params(self) -> dict[str, Any]:
+    @staticmethod
+    def _load_jump_private_key(pem: str):
+        """Parse a PEM private key for the bastion login (any paramiko type)."""
+        import io
+
+        for key_cls in (
+            paramiko.Ed25519Key,
+            paramiko.ECDSAKey,
+            paramiko.RSAKey,
+        ):
+            with contextlib.suppress(Exception):
+                return key_cls.from_private_key(io.StringIO(pem))
+        raise ValueError("unsupported jump-host private key format")
+
+    def _open_jump_channel(self):
+        """SSH session #1 to the bastion plus a direct-tcpip channel to the device.
+
+        Only bastion credentials are presented here (design-dind-sandbox.md
+        §11.1); the device session runs inside the returned channel with device
+        credentials only. Host keys are not pinned — same trust model as the
+        device hop (inventory is the source of truth).
+        """
+        jump = self.jump_host
+        assert jump is not None
+        if paramiko is None:  # pragma: no cover - netmiko always brings paramiko
+            raise ImportError("paramiko is required for jump-host support")
+        logger.info(f"Connecting to jump host {jump.host}:{jump.port} as {jump.username}")
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        started = time.perf_counter()
+        # When the inventory supplies a key, present exactly that one and
+        # nothing else — an agent or an on-disk key silently substituting for
+        # the configured credential is the opposite of what was asked for.
+        # With no key configured, fall back to the agent and the default
+        # identities, matching what the asyncssh transport does by omitting
+        # client_keys: otherwise a bastion reachable only by agent key cannot
+        # be reached at all from this transport.
+        explicit_key = self._load_jump_private_key(jump.private_key) if jump.private_key else None
+        try:
+            client.connect(
+                jump.host,
+                port=jump.port,
+                username=jump.username or None,
+                password=jump.password or None,
+                pkey=explicit_key,
+                allow_agent=explicit_key is None,
+                look_for_keys=explicit_key is None,
+                timeout=self.connect_timeout,
+            )
+            transport = client.get_transport()
+            if transport is None:
+                raise OSError("bastion SSH transport unavailable")
+            channel = transport.open_channel(
+                "direct-tcpip",
+                (self.host, self.port),
+                ("127.0.0.1", 0),
+                timeout=self._remaining_connect_budget(started),
+            )
+        except BaseException:
+            with contextlib.suppress(Exception):
+                client.close()
+            raise
+        return client, channel, self._remaining_connect_budget(started)
+
+    def _remaining_connect_budget(self, started: float) -> float:
+        """What is left of ``connect_timeout`` since ``started``, floored.
+
+        ``connect_timeout`` is one budget for reaching the device, not a
+        per-hop allowance: charging it separately to the bastion login, the
+        direct-tcpip channel and the device login lets a slow bastion stretch
+        a 30 s setting into 90 s of real waiting. The floor keeps a bastion
+        that ate the whole budget surfacing as a device-connect timeout rather
+        than an immediate zero-timeout failure that hides which hop was slow.
+        """
+        return max(self.connect_timeout - (time.perf_counter() - started), 1.0)
+
+    def _connect_device(self):
+        """Open the netmiko connection, via the bastion channel when one is set.
+
+        The bastion client rides the returned connection under
+        ``_JUMP_CLIENT_ATTR`` so ``_safe_disconnect`` tears the hop down with
+        the session — call sites stay hop-agnostic.
+        """
+        assert ConnectHandler is not None  # Validated in __init__
+        bastion = None
+        device_timeout = None
+        if self.jump_host is not None:
+            bastion, channel, device_timeout = self._open_jump_channel()
+        params = self._get_connection_params(connect_timeout=device_timeout)
+        if bastion is not None:
+            params["sock"] = channel
+        try:
+            connection = ConnectHandler(**params)
+        except BaseException:
+            if bastion is not None:
+                with contextlib.suppress(Exception):
+                    bastion.close()
+            raise
+        if bastion is not None:
+            setattr(connection, _JUMP_CLIENT_ATTR, bastion)
+        return connection
+
+    def _get_connection_params(self, *, connect_timeout: float | None = None) -> dict[str, Any]:
         """Get Netmiko connection parameters."""
         params = {
             "device_type": self.device_type,
@@ -206,7 +330,7 @@ class SSHTransport:
             "port": self.port,
             "username": self.username,
             "password": self.password,
-            "timeout": self.connect_timeout,
+            "timeout": self.connect_timeout if connect_timeout is None else connect_timeout,
             "global_delay_factor": 1,
             "fast_cli": True,
         }
@@ -240,8 +364,7 @@ class SSHTransport:
             # Connect to device
             logger.info(f"Connecting to {self.host}:{self.port} as {self.username}")
             connect_start = time.perf_counter()
-            assert ConnectHandler is not None  # Validated in __init__
-            connection = ConnectHandler(**self._get_connection_params())
+            connection = self._connect_device()
             connect_time = (time.perf_counter() - connect_start) * 1000
             logger.info(f"Connected to {self.host} in {connect_time:.0f}ms")
 
@@ -532,8 +655,7 @@ class SSHTransport:
 
         try:
             logger.info(f"SCP upload to {self.host}: {local_path} -> {dest_fs}{dest_filename}")
-            assert ConnectHandler is not None  # Validated in __init__
-            connection = ConnectHandler(**self._get_connection_params())
+            connection = self._connect_device()
 
             # Register connection for cancellation support
             if self.step_run_id:
@@ -634,8 +756,7 @@ class SSHTransport:
 
         try:
             logger.info(f"HTTP transfer to {self.host}: {dest_fs}{dest_filename}")
-            assert ConnectHandler is not None  # Validated in __init__
-            connection = ConnectHandler(**self._get_connection_params())
+            connection = self._connect_device()
 
             # Register connection for cancellation support
             if self.step_run_id:
@@ -845,8 +966,7 @@ class SSHTransport:
 
         try:
             logger.info(f"Executing timing command on {self.host}: {command[:50]}...")
-            assert ConnectHandler is not None  # Validated in __init__
-            connection = ConnectHandler(**self._get_connection_params())
+            connection = self._connect_device()
 
             # Register connection for cancellation support
             if self.step_run_id:

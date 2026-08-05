@@ -54,6 +54,20 @@ class IcmpPingProbe(BaseProbe):
     probe_id = "icmp_ping"
 
     async def execute(self, address: str, options: dict[str, Any]) -> ProbeResult:
+        # ICMP cannot traverse an SSH tunnel / SOCKS proxy (design §11.4):
+        # reject the option explicitly rather than silently ignoring it and
+        # reporting misleading local reachability. tcp_connect:22 is the
+        # recommended liveness substitute for tunneled targets.
+        if (options.get("socks_proxy") or "").strip():
+            return ProbeResult(
+                ok=False,
+                error_kind="config_error",
+                error_detail=(
+                    "icmp_ping cannot use socks_proxy (ICMP does not traverse a "
+                    "SOCKS/SSH tunnel); use tcp_connect for tunneled targets"
+                ),
+            )
+
         count = options.get("count", 1)
         timeout_ms = options.get("timeout_ms", 1000)
         timeout_sec = timeout_ms / 1000.0

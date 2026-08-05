@@ -250,3 +250,169 @@ async def test_staging_methods_are_an_explicit_seam():
         await transport.scp_put(local_path="/tmp/x", dest_fs="flash:", dest_filename="x")
     with pytest.raises(NotImplementedError, match="netmiko"):
         await transport.http_transfer(url="https://x", dest_fs="flash:", dest_filename="x")
+
+
+# ── Jump host (bastion) hop ──────────────────────────────────────────────────
+
+
+def _jump_transport() -> ScrapliTransport:
+    from hegemony_step_sdk import JumpHostSpec
+
+    spec = DeviceConnectionSpec(
+        host="172.20.30.11",
+        username="admin",
+        password="device-pw",
+        platform="ios-xe",
+        jump_host=JumpHostSpec(host="dind", port=2222, username="jump", password="bastion-pw"),
+    )
+    return ScrapliTransport(spec)
+
+
+async def test_open_connection_rides_the_bastion_tunnel():
+    """The bastion session reaches scrapli's asyncssh transport as tunnel=."""
+    import hegemony_transport_scrapli.transport as transport_module
+
+    transport = _jump_transport()
+    bastion = MagicMock()
+    # Awaitable: _safe_close awaits wait_closed() under suppress(Exception), so
+    # a plain MagicMock would make the await raise and vanish, leaving the
+    # awaited teardown untested.
+    bastion.wait_closed = AsyncMock()
+    connection = _connection()
+    scrapli_cls = MagicMock(return_value=connection)
+    asyncssh_mock = MagicMock()
+    asyncssh_mock.connect = AsyncMock(return_value=bastion)
+
+    with (
+        patch.object(transport_module, "AsyncScrapli", scrapli_cls),
+        patch.object(transport_module, "asyncssh", asyncssh_mock),
+    ):
+        opened = await transport._open_connection()
+
+    bastion_call = asyncssh_mock.connect.await_args
+    assert bastion_call is not None
+    bastion_kwargs = bastion_call.kwargs
+    assert bastion_call.args == ("dind",)
+    assert bastion_kwargs["port"] == 2222
+    assert bastion_kwargs["username"] == "jump"
+    assert bastion_kwargs["password"] == "bastion-pw"
+    assert "device-pw" not in repr(bastion_kwargs)
+    # asyncssh reads an explicit client_keys=None as "no public-key auth" and
+    # clears agent_path with it, so a password-only bastion must omit the
+    # argument rather than pin it to None (parity with the asyncssh transport).
+    assert "client_keys" not in bastion_kwargs
+
+    scrapli_kwargs = scrapli_cls.call_args.kwargs
+    assert scrapli_kwargs["transport_options"] == {"asyncssh": {"tunnel": bastion}}
+    assert scrapli_kwargs["auth_password"] == "device-pw"
+    assert "bastion-pw" not in repr(scrapli_kwargs)
+
+    # The tunnel rides the connection; _safe_close tears both down.
+    from hegemony_transport_scrapli.transport import _JUMP_TUNNEL_ATTR, _safe_close
+
+    assert getattr(opened, _JUMP_TUNNEL_ATTR) is bastion
+    await _safe_close(opened)
+    bastion.close.assert_called()
+    bastion.wait_closed.assert_awaited()
+
+
+async def test_open_connection_without_jump_sets_no_transport_options():
+    import hegemony_transport_scrapli.transport as transport_module
+
+    transport = _make_transport()
+    connection = _connection()
+    scrapli_cls = MagicMock(return_value=connection)
+
+    with patch.object(transport_module, "AsyncScrapli", scrapli_cls):
+        await transport._open_connection()
+
+    assert "transport_options" not in scrapli_cls.call_args.kwargs
+
+
+async def test_open_connection_closes_bastion_when_device_open_fails():
+    import hegemony_transport_scrapli.transport as transport_module
+
+    transport = _jump_transport()
+    bastion = MagicMock()
+    # Awaitable: _safe_close awaits wait_closed() under suppress(Exception), so
+    # a plain MagicMock would make the await raise and vanish, leaving the
+    # awaited teardown untested.
+    bastion.wait_closed = AsyncMock()
+    connection = _connection()
+    connection.open = AsyncMock(side_effect=OSError("connection refused"))
+    scrapli_cls = MagicMock(return_value=connection)
+    asyncssh_mock = MagicMock()
+    asyncssh_mock.connect = AsyncMock(return_value=bastion)
+
+    import pytest
+
+    with (
+        patch.object(transport_module, "AsyncScrapli", scrapli_cls),
+        patch.object(transport_module, "asyncssh", asyncssh_mock),
+        pytest.raises(OSError, match="connection refused"),
+    ):
+        await transport._open_connection()
+
+    bastion.close.assert_called()
+
+
+async def test_connect_budget_is_shared_across_both_hops():
+    # connect_timeout is the budget for reaching the device. Charging it to the
+    # bastion login and again to timeout_socket lets a slow bastion double the
+    # caller's deadline — the same defect fixed in the netmiko and asyncssh
+    # transports.
+    import hegemony_transport_scrapli.transport as transport_module
+
+    transport = _jump_transport()
+    transport.connect_timeout = 30.0
+    bastion = MagicMock()
+    bastion.wait_closed = AsyncMock()
+    connection = _connection()
+    scrapli_cls = MagicMock(return_value=connection)
+    asyncssh_mock = MagicMock()
+    asyncssh_mock.connect = AsyncMock(return_value=bastion)
+    clock = iter([100.0, 120.0, 120.0, 120.0])  # the bastion login eats 20 s
+
+    with (
+        patch.object(transport_module, "AsyncScrapli", scrapli_cls),
+        patch.object(transport_module, "asyncssh", asyncssh_mock),
+        patch.object(transport_module.time, "perf_counter", lambda: next(clock)),
+    ):
+        await transport._open_connection()
+
+    assert scrapli_cls.call_args.kwargs["timeout_socket"] == 10.0
+
+
+async def test_connect_budget_floors_rather_than_going_to_zero():
+    import hegemony_transport_scrapli.transport as transport_module
+
+    transport = _jump_transport()
+    transport.connect_timeout = 5.0
+    bastion = MagicMock()
+    bastion.wait_closed = AsyncMock()
+    connection = _connection()
+    scrapli_cls = MagicMock(return_value=connection)
+    asyncssh_mock = MagicMock()
+    asyncssh_mock.connect = AsyncMock(return_value=bastion)
+    clock = iter([100.0, 400.0, 400.0, 400.0])
+
+    with (
+        patch.object(transport_module, "AsyncScrapli", scrapli_cls),
+        patch.object(transport_module, "asyncssh", asyncssh_mock),
+        patch.object(transport_module.time, "perf_counter", lambda: next(clock)),
+    ):
+        await transport._open_connection()
+
+    assert scrapli_cls.call_args.kwargs["timeout_socket"] == 1.0
+
+
+async def test_without_a_jump_host_the_full_budget_applies():
+    import hegemony_transport_scrapli.transport as transport_module
+
+    transport = _make_transport()
+    transport.connect_timeout = 30.0
+    connection = _connection()
+    scrapli_cls = MagicMock(return_value=connection)
+    with patch.object(transport_module, "AsyncScrapli", scrapli_cls):
+        await transport._open_connection()
+    assert scrapli_cls.call_args.kwargs["timeout_socket"] == 30.0

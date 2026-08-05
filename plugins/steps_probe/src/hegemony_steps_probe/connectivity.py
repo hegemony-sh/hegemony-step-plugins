@@ -84,6 +84,19 @@ class ConnectivityCheckConfig(BaseModel):
             "x_col_span": 2,
         },
     )
+    socks_proxy: str = Field(
+        default="",
+        title="SOCKS5 Proxy",
+        description=(
+            "Route TCP-based checks through an authenticated SOCKS5 proxy "
+            "(socks5[h]://user:pass@host:port), e.g. the lab bastion. "
+            "icmp_ping rejects it — use tcp_connect for tunneled targets."
+        ),
+        json_schema_extra={
+            "x_placeholder": "socks5://user:{{ secret('vault://lab/bastion/password') }}@dind:1080",
+            "x_col_span": 2,
+        },
+    )
 
 
 class ConnectivityCheckHandler(BaseHandler):
@@ -139,6 +152,14 @@ class ConnectivityCheckHandler(BaseHandler):
             options["count"] = 1
         elif check_type == "dns_resolve":
             options["hostname"] = ctx.config.get("hostname", "")
+
+        # Bastion routing (design-dind-sandbox.md §11.4): forwarded for every
+        # check type — the probes that cannot carry it (icmp_ping, dns_resolve)
+        # reject it with a clear config_error instead of silently probing the
+        # wrong path.
+        socks_proxy = (ctx.config.get("socks_proxy") or "").strip()
+        if socks_proxy:
+            options["socks_proxy"] = socks_proxy
 
         services = ctx.require_services()
         all_evidence = []

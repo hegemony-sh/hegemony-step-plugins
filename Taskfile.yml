@@ -24,22 +24,22 @@ tasks:
   fmt:
     desc: Format Python sources
     cmds:
-      - uv run ruff format packages plugins tests scripts
+      - uv run ruff format packages plugins probes transports tests scripts
 
   fmt:check:
     desc: Check Python formatting
     cmds:
-      - uv run ruff format --check packages plugins tests scripts
+      - uv run ruff format --check packages plugins probes transports tests scripts
 
   ruff:
     desc: Lint Python sources
     cmds:
-      - uv run ruff check packages plugins tests scripts
+      - uv run ruff check packages plugins probes transports tests scripts
 
   ruff:fix:
     desc: Lint Python sources and apply safe fixes
     cmds:
-      - uv run ruff check --fix packages plugins tests scripts
+      - uv run ruff check --fix packages plugins probes transports tests scripts
 
   ty:
     desc: Type check Python sources

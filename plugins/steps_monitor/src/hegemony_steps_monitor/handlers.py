@@ -267,6 +267,13 @@ class ConnectivityMonitorHandler(BaseHandler):
             options["url_path"] = ctx.config.get("url_path", "/health")
         if check_type == "icmp_ping":
             options["count"] = ctx.config.get("ping_count", 3)
+        # Forward the authenticated SOCKS proxy so a monitor can watch targets
+        # only reachable through a bastion (e.g. a lab management subnet behind
+        # dind:1080). The TCP-based checks tunnel through it; the probe layer
+        # rejects it for icmp_ping. Form: socks5[h]://[user:pass@]host:port
+        socks_proxy = ctx.config.get("socks_proxy")
+        if isinstance(socks_proxy, str) and socks_proxy.strip():
+            options["socks_proxy"] = socks_proxy.strip()
 
         schedule: dict[str, Any] = {"schedule_mode": schedule_mode, "interval_ms": interval_ms}
         if schedule_mode == "count":

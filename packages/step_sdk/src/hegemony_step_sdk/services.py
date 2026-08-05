@@ -113,8 +113,21 @@ class ContainerRuntime:
     shared_workspaces_enabled: bool
     shared_workspace_root: str
     shared_workspace_volume: str
+    # Daemon selection for flow-container work. Empty means inherit the worker's
+    # environment (the host Docker socket) — today's behavior and the rollback
+    # story. When set (e.g. ``tcp://dind:2375``), the handler points ``DOCKER_HOST``
+    # at that daemon on every docker invocation it spawns — per invocation, never
+    # process-wide, and never in the ``docker create`` argv (selection is
+    # environment, not arguments).
+    docker_host: str = ""
     # Files larger than this are skipped when harvesting generated artifacts.
     artifact_max_file_size_bytes: int = 52_428_800
+    # Docker network to attach the step container to (``--network``), used by
+    # the platform's egress-policy enforcement: the worker provisions a
+    # policy-scoped network on the sandbox daemon and names it here (``none``
+    # for deny-all). Empty means no policy network — default networking.
+    # An explicit config-level ``network_mode`` (admin host access) wins.
+    docker_network: str = ""
 
 
 @runtime_checkable
@@ -243,6 +256,27 @@ class HandlerServices(Protocol):
         registry — the same probes the background monitor uses — so one-shot
         ``probe.*`` handlers share a single implementation with monitors.
         Raises ``KeyError`` if ``check_type`` is not registered.
+        """
+        ...
+
+    async def enforce_egress(
+        self,
+        host: str,
+        port: int | None = None,
+        *,
+        proto: str | None = None,
+        kind: str = "connection",
+    ) -> None:
+        """Refuse ``host``[:``port``] if the flow's egress policy forbids it.
+
+        ``run_probe`` and ``open_shell`` already gate what they dial. A handler
+        that opens its own socket — an httpx client, a raw connection — is
+        outside that seam, so the policy would not see its target at all. Call
+        this immediately before dialling.
+
+        Raises the host's egress-denial error when the policy forbids the
+        target; returns None when the policy permits it or none is in force.
+        Hosts that implement no policy make this a no-op.
         """
         ...
 

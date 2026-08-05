@@ -59,10 +59,10 @@ jobs:
         run: uv sync --frozen --all-packages
 
       - name: Run linter
-        run: uv run ruff check packages plugins tests scripts
+        run: uv run ruff check packages plugins probes transports tests scripts
 
       - name: Check formatting
-        run: uv run ruff format --check packages plugins tests scripts
+        run: uv run ruff format --check packages plugins probes transports tests scripts
 
       - name: REUSE compliance
         run: uv run reuse lint

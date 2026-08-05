@@ -45,6 +45,7 @@ from .transports import (
     TRANSPORT_ENTRY_POINT_GROUP,
     ConnectionCancellationRegistry,
     DeviceConnectionSpec,
+    JumpHostSpec,
     TransportRegistry,
 )
 
@@ -70,6 +71,7 @@ __all__ = [
     "HandlerResult",
     "HandlerServices",
     "HandlerTargeting",
+    "JumpHostSpec",
     "ProbeRegistry",
     "ProbeResult",
     "ShellResult",

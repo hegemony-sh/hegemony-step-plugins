@@ -82,6 +82,29 @@ class ConnectivityMonitorConfig(BaseModel):
             "x_col_span": 2,
         },
     )
+    socks_proxy: str = Field(
+        default="",
+        title="SOCKS Proxy",
+        description=(
+            "Optional authenticated SOCKS5 proxy for the TCP-based checks "
+            "(tcp_connect, http_health), so a monitor can reach targets only "
+            "accessible through a bastion (e.g. a lab management subnet behind "
+            "dind:1080). socks5[h]://[user:pass@]host:port. Not usable by "
+            "icmp_ping or dns_resolve — neither ICMP nor DNS traverses a SOCKS5 "
+            "CONNECT tunnel, so those checks reject a configured proxy rather "
+            "than probe the wrong path."
+        ),
+        json_schema_extra={
+            "x_placeholder": "socks5://user:pass@dind:1080",
+            "x_advanced": True,
+            "x_col_span": 2,
+            # Hide it where it cannot work. The editor's condition is a single
+            # equality test, so only one check_type can be named here;
+            # dns_resolve is covered by the description and the probe's own
+            # config_error.
+            "x_hide_when": {"field": "check_type", "value": "icmp_ping"},
+        },
+    )
 
 
 class MonitorLifecycleConfig(BaseModel):

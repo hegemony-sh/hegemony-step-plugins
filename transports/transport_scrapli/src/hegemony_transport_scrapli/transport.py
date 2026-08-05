@@ -41,7 +41,18 @@ except ImportError:
     ScrapliAuthenticationFailed: type[Exception] = Exception
     ScrapliTimeout: type[Exception] = Exception
 
+try:
+    # Already a dependency via scrapli's asyncssh transport plugin; imported
+    # directly only for the optional jump-host hop.
+    import asyncssh
+except ImportError:
+    asyncssh: Any = None
+
 logger = logging.getLogger(__name__)
+
+#: Attribute under which the bastion connection rides its scrapli connection,
+#: so every existing close path tears the tunnel down with the session.
+_JUMP_TUNNEL_ATTR = "_hegemony_jump_tunnel"
 
 
 class _NullCancellationRegistry:
@@ -100,11 +111,17 @@ def _detect_cli_error(output: str) -> str | None:
 
 
 async def _safe_close(connection) -> None:
-    """Close a scrapli connection, suppressing all errors."""
+    """Close a scrapli connection (and its jump tunnel), suppressing errors."""
     if not connection:
         return
     with contextlib.suppress(Exception):
         await connection.close()
+    tunnel = getattr(connection, _JUMP_TUNNEL_ATTR, None)
+    if tunnel is not None:
+        with contextlib.suppress(Exception):
+            tunnel.close()
+        with contextlib.suppress(Exception):
+            await tunnel.wait_closed()
 
 
 @dataclass
@@ -185,13 +202,18 @@ class ScrapliTransport:
         self.scrapli_platform = PLATFORM_TO_SCRAPLI.get(spec.platform, "cisco_iosxe")
         self.connect_timeout = spec.connect_timeout
         self.command_timeout = spec.command_timeout
+        self.jump_host = spec.jump_host
 
-    def _get_connection_params(self, *, timeout_transport: float | None = None) -> dict[str, Any]:
+    def _get_connection_params(
+        self, *, timeout_transport: float | None = None, connect_timeout: float | None = None
+    ) -> dict[str, Any]:
         """Get scrapli connection parameters.
 
         Args:
             timeout_transport: Per-read transport timeout override; timing mode
                 uses a short value so channel polls return promptly.
+            connect_timeout: Socket timeout for the device hop. Defaults to the
+                full budget; the bastion path passes what its own hop left.
         """
         params: dict[str, Any] = {
             "platform": self.scrapli_platform,
@@ -203,7 +225,9 @@ class ScrapliTransport:
             # asyncssh: already the platform's SSH library, and scrapli's
             # paramiko extra would cap paramiko <4 for the whole install.
             "transport": "asyncssh",
-            "timeout_socket": self.connect_timeout,
+            "timeout_socket": (
+                self.connect_timeout if connect_timeout is None else connect_timeout
+            ),
             "timeout_ops": self.command_timeout,
         }
         if self.secret:
@@ -213,15 +237,71 @@ class ScrapliTransport:
             params["timeout_transport"] = timeout_transport
         return params
 
-    async def _open_connection(self, *, timeout_transport: float | None = None):
-        """Construct and open a scrapli connection."""
-        assert AsyncScrapli is not None  # Validated in __init__
-        connection = AsyncScrapli(
-            **self._get_connection_params(timeout_transport=timeout_transport)
+    async def _connect_jump(self):
+        """SSH session #1 to the bastion (design-dind-sandbox.md §11.1).
+
+        Only bastion credentials are presented here; the device session runs
+        tunneled with device credentials only. Host keys are not pinned —
+        same trust model as the device hop (inventory is the source of truth).
+        """
+        jump = self.jump_host
+        assert jump is not None
+        if asyncssh is None:  # pragma: no cover - scrapli[asyncssh] brings it
+            raise ImportError("asyncssh is required for jump-host support")
+        logger.info(f"Connecting to jump host {jump.host}:{jump.port} as {jump.username}")
+        # Only pass client_keys when the inventory actually supplied one.
+        # asyncssh reads an explicit None as "do not attempt public-key auth"
+        # and clears agent_path with it, so passing None would silently strip
+        # the agent and default-key auth the device hop still gets.
+        key_options = (
+            {"client_keys": [asyncssh.import_private_key(jump.private_key)]}
+            if jump.private_key
+            else {}
         )
+        return await asyncssh.connect(
+            jump.host,
+            port=jump.port,
+            username=jump.username or None,
+            password=jump.password or None,
+            **key_options,
+            known_hosts=None,
+            connect_timeout=self.connect_timeout,
+        )
+
+    async def _open_connection(self, *, timeout_transport: float | None = None):
+        """Construct and open a scrapli connection (via the bastion when set)."""
+        assert AsyncScrapli is not None  # Validated in __init__
+        tunnel = None
+        device_timeout = None
+        if self.jump_host is not None:
+            started = time.perf_counter()
+            tunnel = await self._connect_jump()
+            # One budget across both hops, as the asyncssh transport does.
+            # Charging connect_timeout to the bastion login and again to
+            # timeout_socket lets a slow bastion double the caller's deadline.
+            device_timeout = max(self.connect_timeout - (time.perf_counter() - started), 1.0)
+        params = self._get_connection_params(
+            timeout_transport=timeout_transport, connect_timeout=device_timeout
+        )
+        if tunnel is not None:
+            # scrapli's asyncssh transport merges transport_options["asyncssh"]
+            # straight into asyncssh.connect(), so the bastion session rides
+            # the device connection as its tunnel.
+            params["transport_options"] = {"asyncssh": {"tunnel": tunnel}}
+        connection = AsyncScrapli(**params)
         logger.info(f"Connecting to {self.host}:{self.port} as {self.username}")
         connect_start = time.perf_counter()
-        await connection.open()
+        try:
+            await connection.open()
+        except BaseException:
+            if tunnel is not None:
+                with contextlib.suppress(Exception):
+                    tunnel.close()
+            raise
+        if tunnel is not None:
+            # Ride the tunnel on the connection so every close path tears
+            # both down.
+            setattr(connection, _JUMP_TUNNEL_ATTR, tunnel)
         connect_time = (time.perf_counter() - connect_start) * 1000
         logger.info(f"Connected to {self.host} in {connect_time:.0f}ms")
         return connection
@@ -316,9 +396,7 @@ class ScrapliTransport:
 
                 config_failed = False
                 if config_commands:
-                    responses = await connection.send_configs(
-                        config_commands, stop_on_failed=True
-                    )
+                    responses = await connection.send_configs(config_commands, stop_on_failed=True)
                     # MultiResponse is list-like: one Response per attempted
                     # config command; with stop_on_failed a failure truncates it.
                     for cmd, response in zip(config_commands, responses, strict=False):
