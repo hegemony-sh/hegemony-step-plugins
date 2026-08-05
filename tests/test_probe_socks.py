@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -52,6 +52,7 @@ class _FakeSocks5Server:
         self.requested: tuple[str, int] | None = None
         self.requested_atyp: int | None = None
         self._server: asyncio.AbstractServer | None = None
+        self._handlers: set[asyncio.Task] = set()
 
     @property
     def port(self) -> int:
@@ -66,8 +67,22 @@ class _FakeSocks5Server:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
+        # asyncio.start_server runs each connection in its own task, and
+        # closing the listener does not touch them. The withholding-target test
+        # leaves a handler parked in asyncio.sleep(30), so without this the
+        # loop closes with a pending task and emits "Task was destroyed but it
+        # is pending" — which fails any run configured to error on warnings,
+        # for a reason unrelated to what is being tested.
+        for task in list(self._handlers):
+            task.cancel()
+        if self._handlers:
+            await asyncio.gather(*self._handlers, return_exceptions=True)
+        self._handlers.clear()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._handlers.add(task)
         try:
             version, nmethods = await reader.readexactly(2)
             methods = await reader.readexactly(nmethods)
@@ -125,9 +140,11 @@ class _FakeSocks5Server:
                         break
                 writer.write(self.upstream_response)
                 await writer.drain()
-        except (asyncio.IncompleteReadError, ConnectionError):
+        except (asyncio.IncompleteReadError, ConnectionError, asyncio.CancelledError):
             pass
         finally:
+            if task is not None:
+                self._handlers.discard(task)
             writer.close()
 
 
@@ -427,3 +444,78 @@ class TestSocksWireLimits:
         assert encoded == b"\x03" + bytes([21]) + b"Router_1.lab.internal"
         # Non-ASCII is punycoded, not rejected.
         assert await _dest_address(proxy, "münchen.de") == b"\x03\x11xn--mnchen-3ya.de"
+
+
+# ── Probes that cannot carry the tunnel reject it ────────────────────────────
+
+
+async def test_dns_resolve_rejects_a_socks_proxy():
+    # DNS is UDP and this client implements CONNECT only, so the option cannot
+    # be honored. Accepting it would resolve on the *worker* and report a
+    # success describing a network path the caller never asked for — the same
+    # misleading result icmp_ping refuses.
+    from hegemony_probe_net.dns_resolve import DnsResolveProbe
+
+    result = await DnsResolveProbe().execute(
+        "example.test", {"socks_proxy": "socks5://user:pw@dind:1080", "timeout_ms": 1000}
+    )
+    assert result.ok is False
+    assert result.error_kind == "config_error"
+    assert "dns_resolve cannot use socks_proxy" in (result.error_detail or "")
+    # And it never echoes the credential it was handed.
+    assert "pw@" not in (result.error_detail or "")
+
+
+async def test_dns_resolve_still_works_without_a_proxy():
+    from hegemony_probe_net.dns_resolve import DnsResolveProbe
+
+    result = await DnsResolveProbe().execute("localhost", {"timeout_ms": 3000})
+    assert result.ok is True
+
+
+async def test_tunneled_http_rejects_https_instead_of_sending_cleartext():
+    # The transport writes a plaintext HTTP/1.1 request on the tunneled stream.
+    # Selecting port 443 for an https:// URL and proceeding would put the
+    # request line and Host header in the clear on a TLS port.
+    import httpx
+
+    from hegemony_probe_net.http_health import _SocksAsyncTransport
+
+    transport = _SocksAsyncTransport("socks5://dind:1080", 5.0)
+    request = httpx.Request("GET", "https://example.test/health")
+    with pytest.raises(SocksError, match="http:// only"):
+        await transport.handle_async_request(request)
+
+
+async def test_tunneled_http_shares_one_timeout_budget():
+    # The handshake and the exchange must share timeout_ms; charging the full
+    # budget to each lets a proxied probe run for twice as long as the direct
+    # path, overlapping the ticks of a short-interval monitor.
+    import httpx
+
+    from hegemony_probe_net import http_health
+
+    seen: dict[str, float] = {}
+
+    async def _fake_open(proxy, host, port, *, timeout):
+        seen["handshake"] = timeout
+        reader, writer = MagicMock(), MagicMock()
+        writer.drain = AsyncMock()
+        reader.readline = AsyncMock(side_effect=[b"HTTP/1.1 200 OK\r\n", b"\r\n"])
+        return reader, writer
+
+    async def _fake_wait_for(coro, timeout):
+        seen["exchange"] = timeout
+        return await coro
+
+    clock = iter([100.0, 103.0])  # the handshake eats 3 of the 5 seconds
+    with (
+        patch.object(http_health, "open_socks_connection", _fake_open),
+        patch.object(http_health.asyncio, "wait_for", _fake_wait_for),
+        patch.object(http_health.time, "perf_counter", lambda: next(clock)),
+    ):
+        transport = http_health._SocksAsyncTransport("socks5://dind:1080", 5.0)
+        await transport.handle_async_request(httpx.Request("GET", "http://example.test/health"))
+
+    assert seen["handshake"] == 5.0
+    assert seen["exchange"] == 2.0

@@ -154,8 +154,9 @@ class ConnectivityCheckHandler(BaseHandler):
             options["hostname"] = ctx.config.get("hostname", "")
 
         # Bastion routing (design-dind-sandbox.md §11.4): forwarded for every
-        # check type — probes that cannot use it (icmp_ping) reject it with a
-        # clear config_error instead of silently probing the wrong path.
+        # check type — the probes that cannot carry it (icmp_ping, dns_resolve)
+        # reject it with a clear config_error instead of silently probing the
+        # wrong path.
         socks_proxy = (ctx.config.get("socks_proxy") or "").strip()
         if socks_proxy:
             options["socks_proxy"] = socks_proxy

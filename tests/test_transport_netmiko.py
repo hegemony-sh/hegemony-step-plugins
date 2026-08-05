@@ -173,7 +173,7 @@ def test_config_set_exception_skips_post_commands():
 # ── Jump host (bastion) hop ──────────────────────────────────────────────────
 
 
-def _jump_transport() -> SSHTransport:
+def _jump_transport(*, private_key: str = "") -> SSHTransport:
     from hegemony_step_sdk import JumpHostSpec
 
     spec = DeviceConnectionSpec(
@@ -181,7 +181,13 @@ def _jump_transport() -> SSHTransport:
         username="admin",
         password="device-pw",
         platform="ios-xe",
-        jump_host=JumpHostSpec(host="dind", port=2222, username="jump", password="bastion-pw"),
+        jump_host=JumpHostSpec(
+            host="dind",
+            port=2222,
+            username="jump",
+            password="bastion-pw",
+            private_key=private_key,
+        ),
     )
     with patch.object(hegemony_transport_netmiko.transport, "ConnectHandler", MagicMock()):
         return SSHTransport(spec)
@@ -347,3 +353,72 @@ def test_connect_device_closes_bastion_when_device_connect_fails():
         transport._connect_device()
 
     bastion_client.close.assert_called()
+
+
+# ── Bastion private-key loading ──────────────────────────────────────────────
+
+
+def test_jump_private_key_is_parsed_and_presented_to_the_bastion():
+    # _load_jump_private_key tries Ed25519/ECDSA/RSA with every failure
+    # suppressed, so a silent regression there degrades to password-only auth
+    # without any test noticing. Assert the parsed key reaches client.connect.
+    transport = _jump_transport(private_key="-----BEGIN OPENSSH PRIVATE KEY-----\nx\n")
+
+    bastion_client = MagicMock()
+    bastion_client.get_transport.return_value.open_channel.return_value = MagicMock()
+    paramiko_mock = MagicMock()
+    paramiko_mock.SSHClient.return_value = bastion_client
+    parsed = object()
+    paramiko_mock.Ed25519Key.from_private_key.return_value = parsed
+
+    with (
+        patch.object(hegemony_transport_netmiko.transport, "paramiko", paramiko_mock),
+        patch.object(hegemony_transport_netmiko.transport, "ConnectHandler", MagicMock()),
+    ):
+        transport._connect_device()
+
+    kwargs = bastion_client.connect.call_args.kwargs
+    assert kwargs["pkey"] is parsed
+    # An explicit key means exactly that key — an agent or an on-disk identity
+    # silently standing in for the configured credential is not acceptable.
+    assert kwargs["allow_agent"] is False
+    assert kwargs["look_for_keys"] is False
+
+
+def test_unparsable_jump_private_key_raises_a_clear_error():
+    transport = _jump_transport(private_key="not a key")
+
+    paramiko_mock = MagicMock()
+    for name in ("Ed25519Key", "ECDSAKey", "RSAKey"):
+        getattr(paramiko_mock, name).from_private_key.side_effect = ValueError("nope")
+
+    import pytest
+
+    with (
+        patch.object(hegemony_transport_netmiko.transport, "paramiko", paramiko_mock),
+        pytest.raises(ValueError, match="unsupported jump-host private key format"),
+    ):
+        transport._load_jump_private_key("not a key")
+
+
+def test_agent_and_default_keys_are_used_when_no_key_is_configured():
+    # Parity with the asyncssh transport, which now omits client_keys so the
+    # agent and default identities still apply. Pinning allow_agent=False here
+    # unconditionally made a bastion reachable only by agent key unreachable.
+    transport = _jump_transport()
+
+    bastion_client = MagicMock()
+    bastion_client.get_transport.return_value.open_channel.return_value = MagicMock()
+    paramiko_mock = MagicMock()
+    paramiko_mock.SSHClient.return_value = bastion_client
+
+    with (
+        patch.object(hegemony_transport_netmiko.transport, "paramiko", paramiko_mock),
+        patch.object(hegemony_transport_netmiko.transport, "ConnectHandler", MagicMock()),
+    ):
+        transport._connect_device()
+
+    kwargs = bastion_client.connect.call_args.kwargs
+    assert kwargs["pkey"] is None
+    assert kwargs["allow_agent"] is True
+    assert kwargs["look_for_keys"] is True

@@ -204,12 +204,16 @@ class ScrapliTransport:
         self.command_timeout = spec.command_timeout
         self.jump_host = spec.jump_host
 
-    def _get_connection_params(self, *, timeout_transport: float | None = None) -> dict[str, Any]:
+    def _get_connection_params(
+        self, *, timeout_transport: float | None = None, connect_timeout: float | None = None
+    ) -> dict[str, Any]:
         """Get scrapli connection parameters.
 
         Args:
             timeout_transport: Per-read transport timeout override; timing mode
                 uses a short value so channel polls return promptly.
+            connect_timeout: Socket timeout for the device hop. Defaults to the
+                full budget; the bastion path passes what its own hop left.
         """
         params: dict[str, Any] = {
             "platform": self.scrapli_platform,
@@ -221,7 +225,9 @@ class ScrapliTransport:
             # asyncssh: already the platform's SSH library, and scrapli's
             # paramiko extra would cap paramiko <4 for the whole install.
             "transport": "asyncssh",
-            "timeout_socket": self.connect_timeout,
+            "timeout_socket": (
+                self.connect_timeout if connect_timeout is None else connect_timeout
+            ),
             "timeout_ops": self.command_timeout,
         }
         if self.secret:
@@ -265,10 +271,19 @@ class ScrapliTransport:
     async def _open_connection(self, *, timeout_transport: float | None = None):
         """Construct and open a scrapli connection (via the bastion when set)."""
         assert AsyncScrapli is not None  # Validated in __init__
-        params = self._get_connection_params(timeout_transport=timeout_transport)
         tunnel = None
+        device_timeout = None
         if self.jump_host is not None:
+            started = time.perf_counter()
             tunnel = await self._connect_jump()
+            # One budget across both hops, as the asyncssh transport does.
+            # Charging connect_timeout to the bastion login and again to
+            # timeout_socket lets a slow bastion double the caller's deadline.
+            device_timeout = max(self.connect_timeout - (time.perf_counter() - started), 1.0)
+        params = self._get_connection_params(
+            timeout_transport=timeout_transport, connect_timeout=device_timeout
+        )
+        if tunnel is not None:
             # scrapli's asyncssh transport merges transport_options["asyncssh"]
             # straight into asyncssh.connect(), so the bastion session rides
             # the device connection as its tunnel.

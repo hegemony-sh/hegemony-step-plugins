@@ -37,6 +37,23 @@ class DnsResolveProbe(BaseProbe):
     probe_id = "dns_resolve"
 
     async def execute(self, address: str, options: dict[str, Any]) -> ProbeResult:
+        # This probe uses the host resolver, which no SOCKS5 CONNECT tunnel
+        # can carry (DNS is UDP, and RFC 1928 UDP ASSOCIATE is not
+        # implemented). Accepting the option would resolve on the *worker* and
+        # report a success describing a network path the caller never asked
+        # for — the same misleading result icmp_ping refuses. Fail closed
+        # instead; socks5h:// on a TCP-based check resolves at the bastion.
+        if (options.get("socks_proxy") or "").strip():
+            return ProbeResult(
+                ok=False,
+                error_kind="config_error",
+                error_detail=(
+                    "dns_resolve cannot use socks_proxy (DNS does not traverse a "
+                    "SOCKS5 CONNECT tunnel); use socks5h:// on tcp_connect or "
+                    "http_health to resolve at the bastion"
+                ),
+            )
+
         hostname = (options.get("hostname") or "").strip() or address
         timeout_sec = options.get("timeout_ms", 5000) / 1000.0
 

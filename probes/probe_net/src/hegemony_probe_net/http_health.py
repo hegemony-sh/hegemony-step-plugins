@@ -24,6 +24,11 @@ from .socks import SocksError, open_socks_connection, parse_socks_proxy
 
 logger = logging.getLogger(__name__)
 
+#: Floor on the exchange's share of the request budget. A handshake that ate
+#: the whole timeout must still surface as a *read* timeout against the target
+#: rather than an instant zero-timeout failure that hides which leg was slow.
+_MIN_EXCHANGE_TIMEOUT_SEC = 0.5
+
 
 class _SocksAsyncTransport(httpx.AsyncBaseTransport):
     """httpx transport that dials every request through a SOCKS5 proxy.
@@ -39,8 +44,25 @@ class _SocksAsyncTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         host = request.url.host
-        port = request.url.port or (443 if request.url.scheme == "https" else 80)
+        # This transport speaks cleartext HTTP/1.1 on the tunneled stream (see
+        # _exchange below) — it does no TLS handshake. `execute` only ever
+        # builds http:// URLs today, so this cannot currently be reached, but
+        # if a scheme option is added later, silently picking 443 would send
+        # the request line and Host header in the clear to a TLS port. Refuse
+        # rather than leave that waiting to happen.
+        if request.url.scheme != "http":
+            raise SocksError(
+                f"tunneled http_health supports http:// only (got {request.url.scheme}://); "
+                "the SOCKS transport does not perform a TLS handshake"
+            )
+        port = request.url.port or 80
+        # One budget for the whole request, matching the direct path. Charging
+        # self._timeout to the handshake and again to the exchange lets a
+        # proxied probe run for twice timeout_ms, which overlaps the ticks of a
+        # short-interval monitor.
+        started = time.perf_counter()
         reader, writer = await open_socks_connection(self._proxy, host, port, timeout=self._timeout)
+        remaining = max(self._timeout - (time.perf_counter() - started), _MIN_EXCHANGE_TIMEOUT_SEC)
         # Speak HTTP/1.1 over the tunneled stream ourselves: only the status
         # line matters for a health check, so read headers and stop.
         path = request.url.raw_path.decode()
@@ -72,7 +94,7 @@ class _SocksAsyncTransport(httpx.AsyncBaseTransport):
             # bound the post-CONNECT exchange ourselves — otherwise a target
             # that accepts the tunnel then withholds its response would hang
             # the probe (and its bastion connection) indefinitely.
-            status_code = await asyncio.wait_for(_exchange(), timeout=self._timeout)
+            status_code = await asyncio.wait_for(_exchange(), timeout=remaining)
         except TimeoutError as exc:
             raise httpx.ReadTimeout("tunneled HTTP exchange timed out", request=request) from exc
         finally:

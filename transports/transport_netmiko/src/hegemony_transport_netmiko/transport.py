@@ -250,15 +250,23 @@ class SSHTransport:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         started = time.perf_counter()
+        # When the inventory supplies a key, present exactly that one and
+        # nothing else — an agent or an on-disk key silently substituting for
+        # the configured credential is the opposite of what was asked for.
+        # With no key configured, fall back to the agent and the default
+        # identities, matching what the asyncssh transport does by omitting
+        # client_keys: otherwise a bastion reachable only by agent key cannot
+        # be reached at all from this transport.
+        explicit_key = self._load_jump_private_key(jump.private_key) if jump.private_key else None
         try:
             client.connect(
                 jump.host,
                 port=jump.port,
                 username=jump.username or None,
                 password=jump.password or None,
-                pkey=self._load_jump_private_key(jump.private_key) if jump.private_key else None,
-                allow_agent=False,
-                look_for_keys=False,
+                pkey=explicit_key,
+                allow_agent=explicit_key is None,
+                look_for_keys=explicit_key is None,
                 timeout=self.connect_timeout,
             )
             transport = client.get_transport()

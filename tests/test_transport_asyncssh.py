@@ -72,6 +72,11 @@ def _connection() -> MagicMock:
     connection = MagicMock()
     connection.run = AsyncMock()
     connection.close = MagicMock()
+    # Awaitable on purpose: the close helpers `await wait_closed()` inside a
+    # contextlib.suppress(Exception). A plain MagicMock returns a non-awaitable,
+    # so every await would raise TypeError and be swallowed — the awaited
+    # teardown would have no coverage at all while the test still passed.
+    connection.wait_closed = AsyncMock()
     return connection
 
 
@@ -245,9 +250,12 @@ async def test_jump_host_tunnels_the_device_session():
     # ...and the device never sees bastion credentials.
     assert "bastion-pw" not in repr(device_call.kwargs)
 
-    # Both sessions are torn down with the device connection.
+    # Both sessions are torn down with the device connection, and the close
+    # is actually awaited to completion rather than merely requested.
     device.close.assert_called_once()
     bastion.close.assert_called_once()
+    device.wait_closed.assert_awaited()
+    bastion.wait_closed.assert_awaited()
 
 
 async def test_no_jump_host_passes_the_no_tunnel_sentinel():
