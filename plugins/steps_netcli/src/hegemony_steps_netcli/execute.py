@@ -133,8 +133,11 @@ class ExecuteCLIActionHandler(BaseHandler):
 
                     if full_output:
                         combined_output_parts.append(full_output)
-                        # Live view: the consolidated config-session transcript
-                        await ctx.emit_output(full_output, device=device)
+                        # Deliberately NOT streamed to the Logs tab: config-mode
+                        # sessions echo credential lines (username/password,
+                        # RADIUS keys, …). The transcript stays artifact-only;
+                        # see docs/development/ssh-output-streaming.md (host
+                        # repo) — "Secrets in output".
 
                     if has_error:
                         all_success = False

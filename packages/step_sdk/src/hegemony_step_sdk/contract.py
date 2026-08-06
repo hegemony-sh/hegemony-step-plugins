@@ -272,10 +272,12 @@ class HandlerContext:
         if command:
             attrs["command"] = command_label(command)
 
+        # Chunks are forwarded verbatim (no synthetic newlines) so the live
+        # log stays a faithful view of the underlying output, matching
+        # container.run's raw pass-through. The UI renders an event's final
+        # unterminated fragment as its own line either way.
         ok = True
         for chunk in _chunk_on_line_boundaries(text, OUTPUT_EVENT_CHUNK_CHARS):
-            if not chunk.endswith("\n"):
-                chunk += "\n"
             try:
                 sent = await self.emit_progress(chunk, device_id, dict(attrs))
             except Exception:  # noqa: BLE001 - output streaming must never fail the step

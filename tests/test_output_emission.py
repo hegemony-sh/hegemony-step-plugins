@@ -75,7 +75,7 @@ class TestEmitOutput:
         assert ok is True
         assert len(events) == 1
         message, device_id, attrs = events[0]
-        assert message == "hello\nworld\n"
+        assert message == "hello\nworld"
         assert device_id == device_uuid
         assert attrs == {
             "milestone": "output",
@@ -115,7 +115,7 @@ class TestEmitOutput:
         text = "\n".join("y" * 80 for _ in range(200))  # ~16 KB
         await ctx.emit_output(text)
         assert len(events) > 1
-        assert all(len(m) <= OUTPUT_EVENT_CHUNK_CHARS + 1 for m, _, _ in events)
+        assert all(len(m) <= OUTPUT_EVENT_CHUNK_CHARS for m, _, _ in events)
         assert all(a["milestone"] == "output" for _, _, a in events)
 
     @pytest.mark.asyncio
@@ -125,10 +125,8 @@ class TestEmitOutput:
         await ctx.emit_output("z" * (OUTPUT_EVENT_MAX_CHARS + 10_000))
         emitted = "".join(m for m, _, _ in events)
         assert OUTPUT_TRUNCATION_NOTICE in emitted
-        # Bounded: the cap plus the notice plus one newline per emitted chunk
-        assert (
-            len(emitted) <= OUTPUT_EVENT_MAX_CHARS + len(OUTPUT_TRUNCATION_NOTICE) + len(events) + 1
-        )
+        # Chunks are verbatim: exactly the capped text plus the notice line
+        assert len(emitted) <= OUTPUT_EVENT_MAX_CHARS + len(OUTPUT_TRUNCATION_NOTICE) + 1
 
     @pytest.mark.asyncio
     async def test_empty_text_is_a_noop(self):
@@ -195,7 +193,48 @@ class TestHandlerWiring:
         assert [e[2]["command"] for e in out] == ["show version", "show inventory"]
         assert all(e[1] == DEVICE_UUID for e in out)
         assert all(e[2]["stream"] == "stdout" for e in out)
-        assert out[0][0] == "output of show version\n"
+        assert out[0][0] == "output of show version"
+
+    @pytest.mark.asyncio
+    async def test_netcli_execute_config_mode_streams_nothing(self):
+        """Config-mode transcripts may echo credentials — artifact-only."""
+        from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+        class _Result:
+            def __init__(self, command):
+                self.command = command
+                self.output = f"echo of {command}"
+                self.exit_code = 0
+                self.error = None
+                self.latency_ms = 1.0
+
+        class _Transport:
+            async def execute_commands(self, commands):
+                return [_Result(c) for c in commands]
+
+        class _Services:
+            def connect(self, device, *, platform=None, **kwargs):
+                return _Transport()
+
+        events = []
+        ctx = _ctx(
+            events,
+            config={
+                "commands": [
+                    "configure terminal",
+                    "username admin password hunter2",
+                    "end",
+                ]
+            },
+            target_roles=["primary"],
+            target_devices_by_role={"primary": [DEVICE]},
+            services=cast(HandlerServices, _Services()),
+        )
+        result = await ExecuteCLIActionHandler().execute(ctx)
+        assert result.success is True
+        assert _output_events(events) == []
+        # The transcript still lands in evidence artifacts
+        assert any(e.get("kind") == "cli_output" for e in result.evidence)
 
     @pytest.mark.asyncio
     async def test_netcli_collect_evidence_emits_per_command(self):
@@ -227,7 +266,7 @@ class TestHandlerWiring:
         )
         result = await CollectEvidenceHandler().execute(ctx)
         assert result.success is True
-        assert [e[0] for e in _output_events(events)] == ["Cisco IOS XE\n"]
+        assert [e[0] for e in _output_events(events)] == ["Cisco IOS XE"]
 
     @pytest.mark.asyncio
     async def test_poll_until_emits_each_attempt(self):
@@ -267,11 +306,7 @@ class TestHandlerWiring:
         )
         result = await PollUntilHandler().execute(ctx)
         assert result.success is True
-        assert [e[0] for e in _output_events(events)] == [
-            "not yet\n",
-            "not yet\n",
-            "READY\n",
-        ]
+        assert [e[0] for e in _output_events(events)] == ["not yet", "not yet", "READY"]
 
     @pytest.mark.asyncio
     async def test_shell_execute_emits_stdout_and_stderr(self):
@@ -308,7 +343,7 @@ class TestHandlerWiring:
 
         out = _output_events(events)
         assert [(e[0], e[2]["stream"]) for e in out] == [
-            ("file listing\n", "stdout"),
-            ("a warning\n", "stderr"),
+            ("file listing", "stdout"),
+            ("a warning", "stderr"),
         ]
         assert all(e[2]["command"] == "ls /var" for e in out)
