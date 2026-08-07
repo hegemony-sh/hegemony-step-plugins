@@ -50,6 +50,7 @@ from .transports import (
     ConnectionCancellationRegistry,
     DeviceConnectionSpec,
     JumpHostSpec,
+    TransportOutputSink,
     TransportRegistry,
 )
 
@@ -87,6 +88,7 @@ __all__ = [
     "StepHandlerRegistry",
     "StepKind",
     "Transport",
+    "TransportOutputSink",
     "TransportRegistry",
     "__version__",
     "resolve_target_devices_for_roles",

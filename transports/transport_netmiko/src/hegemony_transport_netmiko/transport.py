@@ -20,7 +20,11 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
-from hegemony_step_sdk import ConnectionCancellationRegistry, DeviceConnectionSpec
+from hegemony_step_sdk import (
+    ConnectionCancellationRegistry,
+    DeviceConnectionSpec,
+    TransportOutputSink,
+)
 
 try:
     from netmiko import ConnectHandler
@@ -178,12 +182,18 @@ class SSHTransport:
     #: check_type-style id claimed under the hegemony.device_transports group.
     transport_id = "netmiko"
 
+    #: Feature flag the host checks before passing ``output_sink`` (Phase B
+    #: live streaming): hosts that predate sinks never pass the kwarg, and
+    #: hosts that support them skip wheels without this attribute.
+    supports_output_sink = True
+
     def __init__(
         self,
         spec: DeviceConnectionSpec,
         *,
         cancellation_registry: ConnectionCancellationRegistry | None = None,
         step_run_id: str | None = None,
+        output_sink: TransportOutputSink | None = None,
     ):
         """Initialize the netmiko transport from a resolved connection spec.
 
@@ -193,6 +203,11 @@ class SSHTransport:
             cancellation_registry: Host registry used to force-close live
                 connections on cancellation; a no-op registry is used when None.
             step_run_id: Key under which connections register for cancellation.
+            output_sink: Optional host-built sink for live output streaming.
+                Netmiko runs in an executor thread, so chunks are pushed via
+                the sink's thread-safe entry point. Only timing-mode commands
+                stream (``send_command`` is prompt-based and yields no partial
+                output).
         """
         if ConnectHandler is None:
             raise ImportError(
@@ -205,6 +220,10 @@ class SSHTransport:
         self._cancellation_registry: ConnectionCancellationRegistry = (
             cancellation_registry if cancellation_registry is not None else _NULL_CANCELLATION
         )
+        self._output_sink = output_sink
+        #: Duck-typed flag handlers read to skip duplicate completed-output
+        #: emissions for paths this transport streams live.
+        self.streams_timing_output = output_sink is not None
 
         self.username = spec.username or None
         self.password = spec.password
@@ -219,6 +238,24 @@ class SSHTransport:
         self.connect_timeout = spec.connect_timeout
         self.command_timeout = spec.command_timeout
         self.jump_host = spec.jump_host
+
+    def _stream_from_thread(self, text: Any) -> None:
+        """Push a session chunk to the live-output sink (executor thread)."""
+        if self._output_sink is None or not text:
+            return
+        try:
+            self._output_sink.push_from_thread(str(text))
+        except Exception:  # noqa: BLE001 - streaming must never fail the command
+            logger.debug("output sink push failed", exc_info=True)
+
+    def _stream_flush_from_thread(self) -> None:
+        """Drain any buffered live output at the end of a streamed command."""
+        if self._output_sink is None:
+            return
+        try:
+            self._output_sink.flush_from_thread()
+        except Exception:  # noqa: BLE001 - best-effort tail flush
+            logger.debug("output sink flush failed", exc_info=True)
 
     @staticmethod
     def _load_jump_private_key(pem: str):
@@ -976,6 +1013,10 @@ class SSHTransport:
             if self.secret:
                 connection.enable()
 
+            # Command boundary marker for the live view (same exposure as the
+            # Phase A events' attrs.command labelling).
+            self._stream_from_thread(f"$ {command}\n")
+
             # Initial command send using timing mode
             # delay_factor controls how long to wait between read attempts - higher values
             # wait longer before deciding the command is done (critical for install commands)
@@ -989,6 +1030,7 @@ class SSHTransport:
                 logger.warning(f"Command '{command}' returned None output (connection issue?)")
             else:
                 combined_output += str(raw_output)
+                self._stream_from_thread(raw_output)
 
             # Handle prompts if answers provided (case-insensitive matching)
             # Track which prompts have been answered to avoid repeating
@@ -1025,6 +1067,7 @@ class SSHTransport:
                             combined_output += (
                                 str(raw_answer_output) if raw_answer_output is not None else ""
                             )
+                            self._stream_from_thread(raw_answer_output)
                             prompt_matched = True
                             break
 
@@ -1090,6 +1133,7 @@ class SSHTransport:
                         if more_output:
                             logger.debug(f"Read additional output: {len(more_output)} chars")
                             combined_output += more_output
+                            self._stream_from_thread(more_output)
 
                             # Handle prompts that appear during long-running commands
                             # This is critical for IOS-XE install which prompts mid-execution
@@ -1166,6 +1210,7 @@ class SSHTransport:
                 latency_ms=elapsed_ms,
             )
         finally:
+            self._stream_flush_from_thread()
             # Unregister from cancellation registry before disconnect
             if self.step_run_id and connection:
                 self._cancellation_registry.unregister(self.step_run_id, connection)

@@ -206,15 +206,19 @@ class ShellExecuteHandler(BaseHandler):
                     if result.stdout:
                         combined_output_parts.append(result.stdout)
 
-                    # Live view: stream each command's output into the Logs tab
-                    if result.stdout:
-                        await ctx.emit_output(
-                            result.stdout, stream="stdout", device=device, command=original
-                        )
-                    if result.stderr:
-                        await ctx.emit_output(
-                            result.stderr, stream="stderr", device=device, command=original
-                        )
+                    # Live view: surface each command's output in the Logs tab —
+                    # unless the transport already streamed it live (Phase B
+                    # sinks set streams_exec_output; emitting again would
+                    # duplicate every command's output).
+                    if not getattr(transport, "streams_exec_output", False):
+                        if result.stdout:
+                            await ctx.emit_output(
+                                result.stdout, stream="stdout", device=device, command=original
+                            )
+                        if result.stderr:
+                            await ctx.emit_output(
+                                result.stderr, stream="stderr", device=device, command=original
+                            )
 
                     command_display = command_label(original)
                     display_name_suffix = (

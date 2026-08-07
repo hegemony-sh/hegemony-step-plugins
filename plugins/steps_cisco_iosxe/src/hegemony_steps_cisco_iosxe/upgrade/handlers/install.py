@@ -202,10 +202,12 @@ class UpgradeInstallHandler(BaseHandler):
                     commit=commit,
                 )
 
-                if result.cli_output:
+                if result.cli_output and not getattr(ssh, "streams_timing_output", False):
                     # Live view: surface the install session transcript in the
-                    # Logs tab once the (long) timing command returns. True
-                    # mid-command streaming needs transport-level support.
+                    # Logs tab once the (long) timing command returns — but only
+                    # when the transport didn't already stream it live (Phase B
+                    # sinks set streams_timing_output; emitting again would
+                    # duplicate the whole transcript).
                     await ctx.emit_output(result.cli_output, device=device, command="install")
 
                 if result.success:
