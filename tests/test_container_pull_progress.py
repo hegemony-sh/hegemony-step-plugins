@@ -39,6 +39,22 @@ from hegemony_steps_container.run import RunContainerHandler
 _DIGEST = f"sha256:{'0' * 64}"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_docker_config(tmp_path_factory, monkeypatch) -> None:
+    """Keep the host's own registry credentials out of these tests.
+
+    ``build_registry_auth_header`` falls back to ``~/.docker/config.json``
+    when the caller's env carries no ``DOCKER_CONFIG`` — that fallback is the
+    point (it is how the handler matches what ``docker pull`` would send), but
+    it makes any test that passes ``env={}`` depend on whether the machine
+    happens to be logged into a registry. A CI runner that is logged into
+    Docker Hub would otherwise turn the anonymous-pull assertions red.
+    Tests that exercise credentials pass an explicit ``DOCKER_CONFIG``, which
+    still wins over this isolation.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("docker-home")))
+
+
 # --- parse_image_reference -------------------------------------------------
 
 
