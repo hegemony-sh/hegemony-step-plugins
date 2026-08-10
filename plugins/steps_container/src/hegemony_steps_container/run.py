@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,6 +27,8 @@ from hegemony_step_sdk import (
     HandlerTargeting,
     StepKind,
 )
+
+from .pull_progress import EnginePullError, stream_pull
 
 logger = logging.getLogger(__name__)
 
@@ -1570,30 +1573,17 @@ class RunContainerHandler(BaseHandler):
                         summary="Step artifact provisioning failed",
                     )
 
-            # 6. Pull image
-            await _safe_emit_progress(
-                f"Pulling image {image}...",
-                attrs={"milestone": "pull_start", "image": image},
+            # 6. Pull image (Engine-API streaming progress, CLI fallback)
+            pull_failure = await self._pull_image(
+                docker_bin=docker_bin,
+                image=image,
+                docker_env=docker_env,
+                docker_host=docker_host,
+                deadline=deadline,
+                emit=_safe_emit_progress,
             )
-            pull_start = time.monotonic()
-            remaining = max(deadline - pull_start, 1)
-            pull_proc = await self._run_docker(
-                docker_bin, ["pull", image], env=docker_env, timeout=remaining
-            )
-            pull_duration = time.monotonic() - pull_start
-            if pull_proc.returncode != 0:
-                return HandlerResult(
-                    success=False,
-                    error=f"Docker pull failed: {pull_proc.stderr[:500]}",
-                    summary=f"Failed to pull image {image}",
-                )
-            await _safe_emit_progress(
-                f"Image pulled in {pull_duration:.1f}s",
-                attrs={
-                    "milestone": "pull_complete",
-                    "image_pull_duration_seconds": round(pull_duration, 1),
-                },
-            )
+            if pull_failure is not None:
+                return pull_failure
 
             # 7. Build docker create command (container is created but not started)
             shared_workspace_path: str | None = None
@@ -2126,6 +2116,82 @@ class RunContainerHandler(BaseHandler):
                 "Cleanup complete",
                 attrs={"milestone": "cleanup_complete"},
             )
+
+    async def _pull_image(
+        self,
+        *,
+        docker_bin: str,
+        image: str,
+        docker_env: dict[str, str] | None,
+        docker_host: str,
+        deadline: float,
+        emit: Callable[..., Awaitable[None]],
+    ) -> HandlerResult | None:
+        """Pull ``image``, streaming byte progress; returns a failure result or None.
+
+        The Engine API path (:func:`stream_pull`) provides throttled
+        ``pull_progress`` events; any :class:`EnginePullError` falls back to
+        the plain ``docker pull`` CLI — the authoritative pull mechanism —
+        after announcing the downgrade with a single ``pull_fallback`` event.
+        Daemon selection matches the CLI calls byte-for-byte: the API path
+        derives its endpoint from the same ``docker_host`` value that
+        ``_docker_env`` would place as ``DOCKER_HOST``.
+
+        Deadline exhaustion mid-pull raises ``subprocess.TimeoutExpired`` so
+        the existing timeout handling in ``execute`` produces the identical
+        "Container timed out" result — there is no time left for a CLI retry.
+        """
+        await emit(
+            f"Pulling image {image}...",
+            attrs={"milestone": "pull_start", "image": image},
+        )
+        pull_start = time.monotonic()
+        pull_method = "api"
+        remaining = max(deadline - pull_start, 1)
+        try:
+            await asyncio.wait_for(
+                stream_pull(
+                    image=image,
+                    docker_host=docker_host,
+                    env=docker_env if docker_env is not None else os.environ,
+                    emit=emit,
+                ),
+                timeout=remaining,
+            )
+        except TimeoutError:
+            raise subprocess.TimeoutExpired([docker_bin, "pull", image], remaining) from None
+        except EnginePullError as e:
+            reason = str(e)[:200] or type(e).__name__
+            logger.info(
+                "Engine-API pull unavailable, falling back to docker pull",
+                extra={"image": image, "reason": reason},
+            )
+            await emit(
+                f"Streaming pull unavailable ({reason}); falling back to docker pull",
+                attrs={"milestone": "pull_fallback", "image": image, "reason": reason},
+            )
+            pull_method = "cli"
+            remaining = max(deadline - time.monotonic(), 1)
+            pull_proc = await self._run_docker(
+                docker_bin, ["pull", image], env=docker_env, timeout=remaining
+            )
+            if pull_proc.returncode != 0:
+                return HandlerResult(
+                    success=False,
+                    error=f"Docker pull failed: {pull_proc.stderr[:500]}",
+                    summary=f"Failed to pull image {image}",
+                )
+        pull_duration = time.monotonic() - pull_start
+        await emit(
+            f"Image pulled in {pull_duration:.1f}s",
+            attrs={
+                "milestone": "pull_complete",
+                "image_pull_duration_seconds": round(pull_duration, 1),
+                "image": image,
+                "pull_method": pull_method,
+            },
+        )
+        return None
 
     @staticmethod
     async def _run_docker(
