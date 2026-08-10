@@ -5,15 +5,19 @@
 """CollectEvidenceHandler: collect CLI command outputs as evidence."""
 
 import logging
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     StepKind,
     command_label,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +38,27 @@ class CollectEvidenceConfig(BaseModel):
             "x_col_span": 2,
         },
     )
+    max_parallel_devices: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Devices processed concurrently (1 = sequential)",
+    )
+
+
+@dataclass
+class _DeviceOutcome:
+    """One device's results, merged in device order after the fan-out.
+
+    Workers collect into these locals instead of shared lists so aggregation
+    stays deterministic when devices run in parallel.
+    """
+
+    evidence: list[dict] = field(default_factory=list)
+    succeeded: int = 0
+    failed: int = 0
+    failed_label: str | None = None
 
 
 class CollectEvidenceHandler(BaseHandler):
@@ -78,20 +103,17 @@ class CollectEvidenceHandler(BaseHandler):
                 evidence=[],
             )
 
-        all_evidence = []
-        total_success = 0
-        total_failure = 0
-        failed_devices = []
-
         services = ctx.require_services()
-        for device in target_devices:
+
+        async def _process_device(device: dict) -> _DeviceOutcome:
+            outcome = _DeviceOutcome()
             device_id = device.get("id", "unknown")
             device_name = device.get("name", device_id)
             host = device.get("mgmt_host")
             if not host:
-                total_failure += 1
-                failed_devices.append(device_name)
-                all_evidence.append(
+                outcome.failed += 1
+                outcome.failed_label = device_name
+                outcome.evidence.append(
                     {
                         "kind": "error",
                         "name": f"error_{device_name}",
@@ -99,14 +121,17 @@ class CollectEvidenceHandler(BaseHandler):
                         "content_text": f"Device {device_name} has no mgmt_host configured",
                     }
                 )
-                continue
+                return outcome
 
             try:
                 ssh = services.connect(device, platform=device.get("platform"))
                 # Execute all commands together for efficiency
                 results = await ssh.execute_commands(commands)
                 for result in results:
-                    all_evidence.append(
+                    if result.output:
+                        # Live view: per-command output into the Logs tab
+                        await ctx.emit_output(result.output, device=device, command=result.command)
+                    outcome.evidence.append(
                         {
                             "kind": "cli_output",
                             "name": f"{device_name}:{command_label(result.command)}",
@@ -123,20 +148,17 @@ class CollectEvidenceHandler(BaseHandler):
                         }
                     )
                     if result.exit_code == 0:
-                        total_success += 1
+                        outcome.succeeded += 1
                     else:
-                        total_failure += 1
-                        if device_name not in failed_devices:
-                            failed_devices.append(device_name)
+                        outcome.failed += 1
+                        if outcome.failed_label is None:
+                            outcome.failed_label = device_name
 
             except Exception as e:
-                if not any(
-                    entry == device_name or entry.startswith(f"{device_name} (")
-                    for entry in failed_devices
-                ):
-                    failed_devices.append(f"{device_name} ({e})")
+                if outcome.failed_label is None:
+                    outcome.failed_label = f"{device_name} ({e})"
                 # Add error evidence for this device
-                all_evidence.append(
+                outcome.evidence.append(
                     {
                         "kind": "error",
                         "name": f"{device_name}:connection_error",
@@ -148,6 +170,21 @@ class CollectEvidenceHandler(BaseHandler):
                         },
                     }
                 )
+
+            return outcome
+
+        outcomes = await for_each_target_device(
+            target_devices,
+            _process_device,
+            max_parallel=max_parallel_from_config(ctx.config),
+        )
+
+        all_evidence = [item for outcome in outcomes for item in outcome.evidence]
+        total_success = sum(outcome.succeeded for outcome in outcomes)
+        total_failure = sum(outcome.failed for outcome in outcomes)
+        failed_devices = [
+            outcome.failed_label for outcome in outcomes if outcome.failed_label is not None
+        ]
 
         metrics = {
             "device_count": len(target_devices),

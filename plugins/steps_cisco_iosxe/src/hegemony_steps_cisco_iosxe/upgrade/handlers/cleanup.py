@@ -10,17 +10,21 @@ This handler should run in CLEANUP phase after verification.
 """
 
 import logging
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     DEFAULT_DEVICE_PLATFORM,
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
     StepKind,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 from ..driver import UpgradeMode, get_driver
@@ -56,6 +60,29 @@ class UpgradeCleanupConfig(BaseModel):
         description="Number of old versions to keep (for bundle mode)",
         json_schema_extra={"x_show_when": {"field": "upgrade_mode", "value": "bundle"}},
     )
+    max_parallel_devices: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Devices cleaned concurrently (1 = sequential)",
+    )
+
+
+@dataclass
+class _DeviceOutcome:
+    """One device's results, merged in device order after the fan-out.
+
+    Workers collect into these locals instead of shared collections so
+    aggregation stays deterministic when devices run in parallel.
+    """
+
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    ok: bool = False
+    failed_device: str | None = None
+    device_id: Any = None
+    context: dict[str, Any] | None = None
+    removed: list[str] = field(default_factory=list)
 
 
 class UpgradeCleanupHandler(BaseHandler):
@@ -124,23 +151,18 @@ class UpgradeCleanupHandler(BaseHandler):
                 summary=f"Unsupported platform: {platform}",
             )
 
-        all_evidence = []
-        success_count = 0
-        failure_count = 0
-        failed_devices = []
-        total_removed = []
-        output_context = {}
-
         services = ctx.require_services()
-        for device in target_devices:
+
+        async def _process_device(device: dict[str, Any]) -> _DeviceOutcome:
+            outcome = _DeviceOutcome()
             device_id = device.get("id", "unknown")
             device_name = device.get("name", device_id)
+            outcome.device_id = device_id
             host = device.get("mgmt_host")
             if not host:
                 logger.error(f"Cleanup skipped for {device_name}: missing mgmt_host")
-                failure_count += 1
-                failed_devices.append(device_name)
-                all_evidence.append(
+                outcome.failed_device = device_name
+                outcome.evidence.append(
                     {
                         "kind": "cli_output",
                         "name": f"Cleanup Error: {device_name}",
@@ -154,7 +176,7 @@ class UpgradeCleanupHandler(BaseHandler):
                         },
                     }
                 )
-                continue
+                return outcome
 
             await ctx.emit_progress(
                 f"Running cleanup on {device_name}",
@@ -171,12 +193,12 @@ class UpgradeCleanupHandler(BaseHandler):
                 )
 
                 if result.success:
-                    success_count += 1
+                    outcome.ok = True
 
                     removed = result.removed_packages or []
                     if removed:
                         summary = f"Removed {len(removed)} package(s)/file(s)"
-                        total_removed.extend(removed)
+                        outcome.removed = list(removed)
                     else:
                         summary = "No inactive packages to remove"
 
@@ -186,8 +208,7 @@ class UpgradeCleanupHandler(BaseHandler):
                         {"phase": "cleanup", "status": "success"},
                     )
                 else:
-                    failure_count += 1
-                    failed_devices.append(device_name)
+                    outcome.failed_device = device_name
                     await ctx.emit_progress(
                         f"Cleanup failed: {result.error}",
                         device_id,
@@ -195,10 +216,9 @@ class UpgradeCleanupHandler(BaseHandler):
                     )
 
                 # Store output context
-                device_context = {
+                outcome.context = {
                     "removed_packages": result.removed_packages or [],
                 }
-                output_context[device_id] = device_context
 
                 # Build evidence with proper structure for artifact saving
                 removed = result.removed_packages or []
@@ -217,6 +237,13 @@ class UpgradeCleanupHandler(BaseHandler):
                 if result.cli_output:
                     content_lines.append(f"\n--- CLI Output ---\n{result.cli_output}")
 
+                if result.cli_output and not getattr(ssh, "streams_timing_output", False):
+                    # Live view: the cleanup transcript ("install remove
+                    # inactive") reaches the Logs tab — unless the transport
+                    # already streamed it live (Phase B sinks set
+                    # streams_timing_output).
+                    await ctx.emit_output(result.cli_output, device=device, command="cleanup")
+
                 evidence_item = {
                     "kind": "cli_output",
                     "name": f"Cleanup: {device_name}",
@@ -232,14 +259,14 @@ class UpgradeCleanupHandler(BaseHandler):
                         "error": result.error,
                     },
                 }
-                all_evidence.append(evidence_item)
+                outcome.evidence.append(evidence_item)
 
             except Exception as e:
                 logger.error(f"Cleanup failed for {device_name}: {e}")
-                failure_count += 1
-                failed_devices.append(device_name)
+                outcome.ok = False
+                outcome.failed_device = device_name
 
-                all_evidence.append(
+                outcome.evidence.append(
                     {
                         "kind": "cli_output",
                         "name": f"Cleanup Error: {device_name}",
@@ -253,6 +280,29 @@ class UpgradeCleanupHandler(BaseHandler):
                         },
                     }
                 )
+
+            return outcome
+
+        outcomes = await for_each_target_device(
+            target_devices,
+            _process_device,
+            max_parallel=max_parallel_from_config(ctx.config),
+        )
+
+        # Merge per-device results in device order — deterministic regardless
+        # of completion order when devices run in parallel.
+        all_evidence = [item for outcome in outcomes for item in outcome.evidence]
+        success_count = sum(1 for outcome in outcomes if outcome.ok)
+        failure_count = sum(1 for outcome in outcomes if not outcome.ok)
+        failed_devices = [
+            outcome.failed_device for outcome in outcomes if outcome.failed_device is not None
+        ]
+        total_removed = [item for outcome in outcomes for item in outcome.removed]
+        output_context = {
+            outcome.device_id: outcome.context
+            for outcome in outcomes
+            if outcome.context is not None
+        }
 
         # Determine overall success
         overall_success = failure_count == 0

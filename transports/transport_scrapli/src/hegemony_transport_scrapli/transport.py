@@ -27,7 +27,11 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from hegemony_step_sdk import ConnectionCancellationRegistry, DeviceConnectionSpec
+from hegemony_step_sdk import (
+    ConnectionCancellationRegistry,
+    DeviceConnectionSpec,
+    TransportOutputSink,
+)
 
 try:
     from scrapli import AsyncScrapli
@@ -161,12 +165,18 @@ class ScrapliTransport:
     #: check_type-style id claimed under the hegemony.device_transports group.
     transport_id = "scrapli"
 
+    #: Feature flag the host checks before passing ``output_sink`` (Phase B
+    #: live streaming): hosts that predate sinks never pass the kwarg, and
+    #: hosts that support them skip wheels without this attribute.
+    supports_output_sink = True
+
     def __init__(
         self,
         spec: DeviceConnectionSpec,
         *,
         cancellation_registry: ConnectionCancellationRegistry | None = None,
         step_run_id: str | None = None,
+        output_sink: TransportOutputSink | None = None,
     ):
         """Initialize the scrapli transport from a resolved connection spec.
 
@@ -176,6 +186,11 @@ class ScrapliTransport:
             cancellation_registry: Host registry used to force-close live
                 connections on cancellation; a no-op registry is used when None.
             step_run_id: Key under which connections register for cancellation.
+            output_sink: Optional host-built sink for live output streaming.
+                Scrapli is natively async, so timing-mode reads push chunks
+                straight to the sink. Only timing-mode commands stream
+                (driver ``send_command`` is prompt-based and yields no
+                partial output).
         """
         if AsyncScrapli is None:
             raise ImportError(
@@ -189,6 +204,10 @@ class ScrapliTransport:
         self._cancellation_registry: ConnectionCancellationRegistry = (
             cancellation_registry if cancellation_registry is not None else _NULL_CANCELLATION
         )
+        self._output_sink = output_sink
+        #: Duck-typed flag handlers read to skip duplicate completed-output
+        #: emissions for paths this transport streams live.
+        self.streams_timing_output = output_sink is not None
 
         self.username = spec.username or None
         self.password = spec.password
@@ -203,6 +222,24 @@ class ScrapliTransport:
         self.connect_timeout = spec.connect_timeout
         self.command_timeout = spec.command_timeout
         self.jump_host = spec.jump_host
+
+    async def _stream_push(self, text: str) -> None:
+        """Push a session chunk to the live-output sink (event loop)."""
+        if self._output_sink is None or not text:
+            return
+        try:
+            await self._output_sink.push(text)
+        except Exception:  # noqa: BLE001 - streaming must never fail the command
+            logger.debug("output sink push failed", exc_info=True)
+
+    async def _stream_flush(self) -> None:
+        """Drain any buffered live output at the end of a streamed command."""
+        if self._output_sink is None:
+            return
+        try:
+            await self._output_sink.flush()
+        except Exception:  # noqa: BLE001 - best-effort tail flush
+            logger.debug("output sink flush failed", exc_info=True)
 
     def _get_connection_params(
         self, *, timeout_transport: float | None = None, connect_timeout: float | None = None
@@ -591,6 +628,9 @@ class ScrapliTransport:
             if self.step_run_id:
                 self._cancellation_registry.register(self.step_run_id, connection)
 
+            # Command boundary marker for the live view (same exposure as the
+            # Phase A events' attrs.command labelling).
+            await self._stream_push(f"$ {command}\n")
             connection.channel.write(command + "\n")
 
             pattern_found = False
@@ -612,6 +652,7 @@ class ScrapliTransport:
                     break
                 if chunk:
                     combined_output += chunk
+                    await self._stream_push(chunk)
                     quiet_reads = 0
                 else:
                     quiet_reads += 1
@@ -689,6 +730,7 @@ class ScrapliTransport:
                 latency_ms=elapsed_ms,
             )
         finally:
+            await self._stream_flush()
             if self.step_run_id and connection:
                 self._cancellation_registry.unregister(self.step_run_id, connection)
             await _safe_close(connection)

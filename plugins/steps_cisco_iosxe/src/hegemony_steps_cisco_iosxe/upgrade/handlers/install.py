@@ -11,17 +11,21 @@ maintenance window. It will cause device reboot.
 """
 
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     DEFAULT_DEVICE_PLATFORM,
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
     StepKind,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 from ..driver import UpgradeMode, get_driver
@@ -66,6 +70,28 @@ class UpgradeInstallConfig(BaseModel):
         description="For install mode: commit to prevent automatic rollback",
         json_schema_extra={"x_show_when": {"field": "upgrade_mode", "value": "install"}},
     )
+    max_parallel_devices: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Devices upgraded concurrently (1 = sequential)",
+    )
+
+
+@dataclass
+class _DeviceOutcome:
+    """One device's results, merged in device order after the fan-out.
+
+    Workers collect into these locals instead of shared collections so
+    aggregation stays deterministic when devices run in parallel.
+    """
+
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    ok: bool = False
+    failed_device: str | None = None
+    device_id: Any = None
+    context: dict[str, Any] | None = None
 
 
 class UpgradeInstallHandler(BaseHandler):
@@ -150,22 +176,18 @@ class UpgradeInstallHandler(BaseHandler):
                 summary=f"Unsupported platform: {platform}",
             )
 
-        all_evidence: list[dict[str, Any]] = []
-        success_count = 0
-        failure_count = 0
-        failed_devices = []
-        output_context = {}
-
         services = ctx.require_services()
-        for device in target_devices:
+
+        async def _process_device(device: dict[str, Any]) -> _DeviceOutcome:
+            outcome = _DeviceOutcome()
             device_id = device.get("id", "unknown")
             device_name = device.get("name", device_id)
+            outcome.device_id = device_id
             host = device.get("mgmt_host")
             if not host:
                 logger.error(f"Install skipped for {device_name}: missing mgmt_host")
-                failure_count += 1
-                failed_devices.append(device_name)
-                all_evidence.append(
+                outcome.failed_device = device_name
+                outcome.evidence.append(
                     {
                         "kind": "cli_output",
                         "name": f"Install Error: {device_name}",
@@ -179,7 +201,7 @@ class UpgradeInstallHandler(BaseHandler):
                         },
                     }
                 )
-                continue
+                return outcome
 
             await ctx.emit_progress(
                 f"Starting upgrade on {device_name}",
@@ -202,8 +224,16 @@ class UpgradeInstallHandler(BaseHandler):
                     commit=commit,
                 )
 
+                if result.cli_output and not getattr(ssh, "streams_timing_output", False):
+                    # Live view: surface the install session transcript in the
+                    # Logs tab once the (long) timing command returns — but only
+                    # when the transport didn't already stream it live (Phase B
+                    # sinks set streams_timing_output; emitting again would
+                    # duplicate the whole transcript).
+                    await ctx.emit_output(result.cli_output, device=device, command="install")
+
                 if result.success:
-                    success_count += 1
+                    outcome.ok = True
 
                     if result.reboot_triggered:
                         summary = "Install completed, device rebooting"
@@ -220,8 +250,7 @@ class UpgradeInstallHandler(BaseHandler):
                             {"phase": "install", "status": "configured"},
                         )
                 else:
-                    failure_count += 1
-                    failed_devices.append(device_name)
+                    outcome.failed_device = device_name
                     await ctx.emit_progress(
                         f"Install failed: {result.error}",
                         device_id,
@@ -229,12 +258,11 @@ class UpgradeInstallHandler(BaseHandler):
                     )
 
                 # Store output context
-                device_context = {
+                outcome.context = {
                     "reboot_triggered": result.reboot_triggered,
                     "activated": result.activated,
                     "committed": result.committed,
                 }
-                output_context[device_id] = device_context
 
                 # Build evidence with proper structure for artifact saving
                 content_lines = [
@@ -270,21 +298,22 @@ class UpgradeInstallHandler(BaseHandler):
                         "error": result.error,
                     },
                 }
-                all_evidence.append(evidence_item)
+                outcome.evidence.append(evidence_item)
 
             except Exception as e:
                 error_str = str(e).lower()
                 # Connection loss is expected during reboot
                 if "connection" in error_str or "timeout" in error_str or "ssh" in error_str:
                     logger.info(f"Connection lost for {device_name} - expected during reboot")
-                    success_count += 1
+                    outcome.ok = True
+                    outcome.failed_device = None
 
-                    output_context[device_id] = {
+                    outcome.context = {
                         "reboot_triggered": True,
                         "activated": True,
                     }
 
-                    all_evidence.append(
+                    outcome.evidence.append(
                         {
                             "kind": "cli_output",
                             "name": f"Install: {device_name}",
@@ -307,10 +336,10 @@ class UpgradeInstallHandler(BaseHandler):
                     )
                 else:
                     logger.error(f"Install failed for {device_name}: {e}")
-                    failure_count += 1
-                    failed_devices.append(device_name)
+                    outcome.ok = False
+                    outcome.failed_device = device_name
 
-                    all_evidence.append(
+                    outcome.evidence.append(
                         {
                             "kind": "cli_output",
                             "name": f"Install Error: {device_name}",
@@ -324,6 +353,28 @@ class UpgradeInstallHandler(BaseHandler):
                             },
                         }
                     )
+
+            return outcome
+
+        outcomes = await for_each_target_device(
+            target_devices,
+            _process_device,
+            max_parallel=max_parallel_from_config(ctx.config),
+        )
+
+        # Merge per-device results in device order — deterministic regardless
+        # of completion order when devices run in parallel.
+        all_evidence = [item for outcome in outcomes for item in outcome.evidence]
+        success_count = sum(1 for outcome in outcomes if outcome.ok)
+        failure_count = sum(1 for outcome in outcomes if not outcome.ok)
+        failed_devices = [
+            outcome.failed_device for outcome in outcomes if outcome.failed_device is not None
+        ]
+        output_context = {
+            outcome.device_id: outcome.context
+            for outcome in outcomes
+            if outcome.context is not None
+        }
 
         # Determine overall success
         overall_success = failure_count == 0

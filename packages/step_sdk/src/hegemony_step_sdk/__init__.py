@@ -14,9 +14,18 @@ callable under the ``hegemony.step_handlers`` entry-point group and registers
 from __future__ import annotations
 
 from ._version import SDK_ABI_VERSION, __version__
+from .concurrency import (
+    MAX_PARALLEL_DEVICES_LIMIT,
+    for_each_target_device,
+    max_parallel_from_config,
+)
 from .contract import (
     DEFAULT_DEVICE_PLATFORM,
     MAX_CHAIN_OUTPUT_CHARS,
+    OUTPUT_EVENT_CHUNK_CHARS,
+    OUTPUT_EVENT_MAX_CHARS,
+    OUTPUT_MILESTONE,
+    OUTPUT_TRUNCATION_NOTICE,
     BaseHandler,
     HandlerContext,
     HandlerResult,
@@ -46,6 +55,7 @@ from .transports import (
     ConnectionCancellationRegistry,
     DeviceConnectionSpec,
     JumpHostSpec,
+    TransportOutputSink,
     TransportRegistry,
 )
 
@@ -56,6 +66,11 @@ __all__ = [
     "DEFAULT_DEVICE_MGMT_PORT",
     "DEFAULT_DEVICE_PLATFORM",
     "MAX_CHAIN_OUTPUT_CHARS",
+    "MAX_PARALLEL_DEVICES_LIMIT",
+    "OUTPUT_EVENT_CHUNK_CHARS",
+    "OUTPUT_EVENT_MAX_CHARS",
+    "OUTPUT_MILESTONE",
+    "OUTPUT_TRUNCATION_NOTICE",
     "PROBE_ENTRY_POINT_GROUP",
     "SDK_ABI_VERSION",
     "STEP_HANDLER_ENTRY_POINT_GROUP",
@@ -79,7 +94,10 @@ __all__ = [
     "StepHandlerRegistry",
     "StepKind",
     "Transport",
+    "TransportOutputSink",
     "TransportRegistry",
     "__version__",
+    "for_each_target_device",
+    "max_parallel_from_config",
     "resolve_target_devices_for_roles",
 ]

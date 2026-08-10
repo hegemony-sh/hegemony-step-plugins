@@ -6,16 +6,20 @@
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
     StepKind,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +54,26 @@ class PollUntilConfig(BaseModel):
         title="Invert Match",
         description="Succeed when pattern does NOT match",
     )
+    max_parallel_devices: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Devices polled concurrently (1 = sequential)",
+    )
+
+
+@dataclass
+class _DeviceOutcome:
+    """One device's results, merged in device order after the fan-out.
+
+    Workers collect into these locals instead of shared lists so aggregation
+    stays deterministic when devices run in parallel.
+    """
+
+    evidence: list[dict] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    success: bool = True
 
 
 class PollUntilHandler(BaseHandler):
@@ -109,19 +133,17 @@ class PollUntilHandler(BaseHandler):
                     summary="Poll configuration error",
                 )
 
-        all_evidence = []
-        all_success = True
-        device_errors = []
-
         services = ctx.require_services()
-        for device in target_devices:
+
+        async def _process_device(device: dict) -> _DeviceOutcome:
+            outcome = _DeviceOutcome()
             device_id = device.get("id", device.get("mgmt_host"))
             device_name = device.get("name", device_id)
             host = device.get("mgmt_host")
             if not host:
-                all_success = False
-                device_errors.append(f"{device_name}: no mgmt_host configured")
-                continue
+                outcome.success = False
+                outcome.errors.append(f"{device_name}: no mgmt_host configured")
+                return outcome
 
             attempt = 0
             last_output = ""
@@ -141,6 +163,9 @@ class PollUntilHandler(BaseHandler):
                     output = result.output
                     last_output = output
                     all_outputs.append({"attempt": attempt, "output_preview": output[:500]})
+                    if output:
+                        # Live view: each poll attempt's output into the Logs tab
+                        await ctx.emit_output(output, device=device, command=command)
 
                     # Check match condition
                     matched = False
@@ -155,7 +180,7 @@ class PollUntilHandler(BaseHandler):
 
                     if matched:
                         device_success = True
-                        all_evidence.append(
+                        outcome.evidence.append(
                             {
                                 "kind": "poll_result",
                                 "name": (
@@ -182,11 +207,11 @@ class PollUntilHandler(BaseHandler):
                         await asyncio.sleep(interval)
 
                 if not device_success:
-                    all_success = False
-                    device_errors.append(
+                    outcome.success = False
+                    outcome.errors.append(
                         f"{device_name}: condition not matched after {max_attempts} attempts"
                     )
-                    all_evidence.append(
+                    outcome.evidence.append(
                         {
                             "kind": "poll_result",
                             "name": (
@@ -210,9 +235,9 @@ class PollUntilHandler(BaseHandler):
 
             except Exception as e:
                 logger.error(f"Poll error on {device_name}: {e}")
-                all_success = False
-                device_errors.append(f"{device_name}: {str(e)}")
-                all_evidence.append(
+                outcome.success = False
+                outcome.errors.append(f"{device_name}: {str(e)}")
+                outcome.evidence.append(
                     {
                         "kind": "poll_result",
                         "name": f"poll_error_{device_name}",
@@ -224,6 +249,18 @@ class PollUntilHandler(BaseHandler):
                         },
                     }
                 )
+
+            return outcome
+
+        outcomes = await for_each_target_device(
+            target_devices,
+            _process_device,
+            max_parallel=max_parallel_from_config(ctx.config),
+        )
+
+        all_evidence = [item for outcome in outcomes for item in outcome.evidence]
+        device_errors = [error for outcome in outcomes for error in outcome.errors]
+        all_success = all(outcome.success for outcome in outcomes)
 
         if all_success:
             summary = f"Condition matched on all {len(target_devices)} device(s)"
