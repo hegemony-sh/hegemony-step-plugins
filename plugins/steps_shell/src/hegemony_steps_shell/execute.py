@@ -13,6 +13,7 @@ implements it) is resolved from ``device.access_config`` via
 
 import logging
 import shlex
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -129,6 +130,21 @@ class ShellExecuteConfig(BaseModel):
     )
 
 
+@dataclass
+class _DeviceOutcome:
+    """One host's results, merged in device order after the fan-out.
+
+    Workers collect into these locals instead of shared lists so aggregation
+    stays deterministic when hosts run in parallel.
+    """
+
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    output_parts: list[str] = field(default_factory=list)
+    executed: int = 0
+    success: bool = True
+
+
 class ShellExecuteHandler(BaseHandler):
     """Run shell commands on each target host over the device's shell transport."""
 
@@ -173,27 +189,22 @@ class ShellExecuteHandler(BaseHandler):
             )
 
         services = ctx.require_services()
-        all_evidence: list[dict[str, Any]] = []
-        device_errors: list[str] = []
-        combined_output_parts: list[str] = []
-        executed = 0
-        all_success = True
 
-        async def _process_device(device: dict[str, Any]) -> None:
-            nonlocal all_success, executed
+        async def _process_device(device: dict[str, Any]) -> _DeviceOutcome:
+            outcome = _DeviceOutcome()
             device_id = device.get("id", device.get("mgmt_host"))
             device_name = device.get("name", device_id)
             if not device.get("mgmt_host"):
-                all_success = False
-                device_errors.append(f"{device_name}: no mgmt_host configured")
-                return
+                outcome.success = False
+                outcome.errors.append(f"{device_name}: no mgmt_host configured")
+                return outcome
 
             try:
                 transport = await services.open_shell(device)
             except Exception as exc:
-                all_success = False
-                device_errors.append(f"{device_name}: {exc}")
-                all_evidence.append(
+                outcome.success = False
+                outcome.errors.append(f"{device_name}: {exc}")
+                outcome.evidence.append(
                     {
                         "kind": "cli_output",
                         "name": f"Error ({device_name})",
@@ -207,15 +218,15 @@ class ShellExecuteHandler(BaseHandler):
                         },
                     }
                 )
-                return
+                return outcome
 
             try:
                 for original, remote_command in zip(commands, composed, strict=True):
                     result = await transport.run(remote_command, timeout=command_timeout)
-                    executed += 1
+                    outcome.executed += 1
                     ok = result.exit_code == 0
                     if result.stdout:
-                        combined_output_parts.append(result.stdout)
+                        outcome.output_parts.append(result.stdout)
 
                     # Live view: surface each command's output in the Logs tab —
                     # unless the transport already streamed it live (Phase B
@@ -237,7 +248,7 @@ class ShellExecuteHandler(BaseHandler):
                         if len(target_devices) > 1
                         else command_display
                     )
-                    all_evidence.append(
+                    outcome.evidence.append(
                         {
                             "kind": "cli_output",
                             "name": display_name_suffix,
@@ -256,29 +267,36 @@ class ShellExecuteHandler(BaseHandler):
                         }
                     )
                     if not ok:
-                        all_success = False
+                        outcome.success = False
                         detail = (result.stderr or result.stdout or "").strip().splitlines()
                         first_line = detail[0] if detail else ""
-                        device_errors.append(
+                        outcome.errors.append(
                             f"{device_name}: exit {result.exit_code}"
                             + (f" ({first_line})" if first_line else "")
                         )
                         if fail_fast:
                             break
             except Exception as exc:
-                all_success = False
-                device_errors.append(f"{device_name}: {exc}")
+                outcome.success = False
+                outcome.errors.append(f"{device_name}: {exc}")
             finally:
                 try:
                     await transport.close()
                 except Exception:  # noqa: BLE001 - closing is best-effort
                     logger.debug("shell transport close failed", exc_info=True)
+            return outcome
 
-        await for_each_target_device(
+        outcomes = await for_each_target_device(
             target_devices,
             _process_device,
             max_parallel=max_parallel_from_config(ctx.config),
         )
+
+        all_evidence = [item for outcome in outcomes for item in outcome.evidence]
+        device_errors = [error for outcome in outcomes for error in outcome.errors]
+        combined_output_parts = [part for outcome in outcomes for part in outcome.output_parts]
+        executed = sum(outcome.executed for outcome in outcomes)
+        all_success = all(outcome.success for outcome in outcomes)
 
         if all_success:
             summary = f"Executed {len(commands)} command(s) on {len(target_devices)} host(s)"

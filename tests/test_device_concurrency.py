@@ -71,6 +71,43 @@ class TestForEachTargetDevice:
         else:  # pragma: no cover - the call must raise
             raise AssertionError("expected the worker exception to propagate")
 
+    async def test_worker_exception_cancels_inflight_siblings(self):
+        first_started = asyncio.Event()
+        cancelled: list[str] = []
+
+        async def _worker(device: dict[str, Any]) -> str:
+            if device["name"] == "dev-1":
+                await first_started.wait()
+                raise RuntimeError("boom")
+            first_started.set()
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.append(device["name"])
+                raise
+            return device["name"]  # pragma: no cover - always cancelled
+
+        try:
+            await asyncio.wait_for(
+                for_each_target_device(_devices(2), _worker, max_parallel=2), timeout=5
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "boom"
+        else:  # pragma: no cover - the call must raise
+            raise AssertionError("expected the worker exception to propagate")
+        # The still-running sibling was cancelled, not left dangling.
+        assert cancelled == ["dev-0"]
+
+    async def test_staggered_completion_still_returns_device_order(self):
+        async def _work(device: dict[str, Any]) -> str:
+            # Later devices finish first — results must stay in device order.
+            index = int(device["name"].split("-")[1])
+            await asyncio.sleep(0.03 - index * 0.01)
+            return device["name"]
+
+        results = await for_each_target_device(_devices(3), _work, max_parallel=3)
+        assert results == ["dev-0", "dev-1", "dev-2"]
+
 
 class TestMaxParallelFromConfig:
     def test_default_and_clamping(self):
@@ -89,7 +126,9 @@ class TestMaxParallelFromConfig:
 class TestHandlerParallelism:
     """netcli.execute overlaps device work when the config asks for it."""
 
-    def _ctx(self, recorder: list, devices: list[dict], **config) -> HandlerContext:
+    def _ctx(
+        self, recorder: list, devices: list[dict], services: Any = None, **config
+    ) -> HandlerContext:
         async def _record(message, device_id, attrs):
             recorder.append((message, device_id, attrs))
             return True
@@ -104,7 +143,7 @@ class TestHandlerParallelism:
             config={"commands": ["show version"], **config},
             target_roles=["primary"],
             target_devices_by_role={"primary": devices},
-            services=cast(HandlerServices, self._services()),
+            services=cast(HandlerServices, services if services is not None else self._services()),
             _emit_progress=_record,
         )
 
@@ -155,3 +194,47 @@ class TestHandlerParallelism:
         # Every device still produced its output events.
         outputs = [e for e in events if e[2] and e[2].get("milestone") == "output"]
         assert len(outputs) == 6
+
+    async def test_parallel_aggregation_preserves_device_order(self):
+        """Evidence/stdout follow device order even when completion order differs.
+
+        Workers collect into per-device results that are merged after the
+        fan-out, so the first-configured device leads the artifact list and
+        the chained stdout even when it finishes last.
+        """
+        from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+        class _Result:
+            def __init__(self, name: str) -> None:
+                self.command = "show version"
+                self.output = f"version {name}"
+                self.exit_code = 0
+                self.error = None
+                self.latency_ms = 1.0
+
+        class _Transport:
+            def __init__(self, name: str, delay: float) -> None:
+                self._name = name
+                self._delay = delay
+
+            async def execute_commands(self, commands):
+                await asyncio.sleep(self._delay)
+                return [_Result(self._name)]
+
+        class _Services:
+            def connect(self, device, *, platform=None, **kwargs):
+                index = int(device["name"].removeprefix("sw"))
+                # Earlier devices are slowest — completion order is reversed.
+                return _Transport(device["name"], 0.03 - index * 0.01)
+
+        devices = [{"id": None, "name": f"sw{i}", "mgmt_host": f"192.0.2.{i}"} for i in range(3)]
+        events: list = []
+        ctx = self._ctx(events, devices, services=_Services(), max_parallel_devices=3)
+        result = await ExecuteCLIActionHandler().execute(ctx)
+        assert result.success is True
+        assert [e["content_json"]["device_name"] for e in result.evidence] == ["sw0", "sw1", "sw2"]
+        assert (result.output or {}).get("stdout", "").splitlines() == [
+            "version sw0",
+            "version sw1",
+            "version sw2",
+        ]

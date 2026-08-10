@@ -54,7 +54,8 @@ async def for_each_target_device(
 
     Workers are expected to handle their own per-device errors (the
     sequential loops always did); an exception escaping a worker propagates
-    and cancels the remaining concurrent workers.
+    and cancels the remaining concurrent workers (``asyncio.gather`` alone
+    would leave them running, so cancellation is explicit here).
     """
     if max_parallel <= 1:
         return [await worker(device) for device in devices]
@@ -65,4 +66,13 @@ async def for_each_target_device(
         async with semaphore:
             return await worker(device)
 
-    return list(await asyncio.gather(*(_bounded(device) for device in devices)))
+    tasks = [asyncio.ensure_future(_bounded(device)) for device in devices]
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        # Reap every task so cancellations complete and nothing leaks into
+        # the event loop's unhandled-exception hook.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise

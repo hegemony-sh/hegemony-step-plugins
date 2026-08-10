@@ -5,6 +5,7 @@
 """ExecuteCLIActionHandler: execute CLI commands on devices as actions."""
 
 import logging
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -56,6 +57,22 @@ def _top_level_cli_failure_detail(*, error: str | None, exit_code: int) -> str:
     return f"CLI command failed with exit code {exit_code}"
 
 
+@dataclass
+class _DeviceOutcome:
+    """One device's results, merged in device order after the fan-out.
+
+    Workers collect into these locals instead of shared lists so aggregation
+    stays deterministic when devices run in parallel (completion order varies;
+    device order does not).
+    """
+
+    evidence: list[dict] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    output_parts: list[str] = field(default_factory=list)
+    success: bool = True
+    commands_run: int = 0
+
+
 class ExecuteCLIActionHandler(BaseHandler):
     """Handler for executing CLI commands as an action."""
 
@@ -87,23 +104,17 @@ class ExecuteCLIActionHandler(BaseHandler):
                 summary="Missing command configuration",
             )
 
-        all_evidence = []
-        all_success = True
-        device_errors = []
-        total_commands = 0
-        combined_output_parts: list[str] = []
-
         services = ctx.require_services()
 
-        async def _process_device(device: dict) -> None:
-            nonlocal all_success, total_commands
+        async def _process_device(device: dict) -> _DeviceOutcome:
+            outcome = _DeviceOutcome()
             device_id = device.get("id", device.get("mgmt_host"))
             device_name = device.get("name", device_id)
             host = device.get("mgmt_host")
             if not host:
-                all_success = False
-                device_errors.append(f"{device_name}: no mgmt_host configured")
-                return
+                outcome.success = False
+                outcome.errors.append(f"{device_name}: no mgmt_host configured")
+                return outcome
 
             try:
                 ssh = services.connect(device, platform=device.get("platform"))
@@ -144,7 +155,7 @@ class ExecuteCLIActionHandler(BaseHandler):
                                 )
 
                     if full_output:
-                        combined_output_parts.append(full_output)
+                        outcome.output_parts.append(full_output)
                         # Live view: the config-session transcript streams too.
                         # The host redacts every platform-resolved secret
                         # (device/enable/bastion credentials, secret()/file()
@@ -156,15 +167,15 @@ class ExecuteCLIActionHandler(BaseHandler):
                         await ctx.emit_output(full_output, device=device, command="configure")
 
                     if has_error:
-                        all_success = False
-                        device_errors.append(f"{device_name}: {error_msg}")
+                        outcome.success = False
+                        outcome.errors.append(f"{device_name}: {error_msg}")
 
                     artifact_name = (
                         f"Configuration ({device_name})"
                         if len(target_devices) > 1
                         else "Configuration"
                     )
-                    all_evidence.append(
+                    outcome.evidence.append(
                         {
                             "kind": "cli_output",
                             "name": artifact_name,
@@ -194,12 +205,12 @@ class ExecuteCLIActionHandler(BaseHandler):
                             else command_display
                         )
                         if result.output:
-                            combined_output_parts.append(result.output)
+                            outcome.output_parts.append(result.output)
                             # Live view: per-command output into the Logs tab
                             await ctx.emit_output(
                                 result.output, device=device, command=result.command
                             )
-                        all_evidence.append(
+                        outcome.evidence.append(
                             {
                                 "kind": "cli_output",
                                 "name": cmd_name,
@@ -216,19 +227,19 @@ class ExecuteCLIActionHandler(BaseHandler):
                             }
                         )
                         if result.exit_code != 0:
-                            all_success = False
+                            outcome.success = False
                             failure_detail = _top_level_cli_failure_detail(
                                 error=result.error,
                                 exit_code=result.exit_code,
                             )
-                            device_errors.append(f"{device_name}: {failure_detail}")
+                            outcome.errors.append(f"{device_name}: {failure_detail}")
 
-                total_commands += len(commands)
+                outcome.commands_run = len(commands)
 
             except Exception as e:
-                all_success = False
-                device_errors.append(f"{device_name}: {str(e)}")
-                all_evidence.append(
+                outcome.success = False
+                outcome.errors.append(f"{device_name}: {str(e)}")
+                outcome.evidence.append(
                     {
                         "kind": "cli_output",
                         "name": f"Error ({device_name})",
@@ -243,11 +254,19 @@ class ExecuteCLIActionHandler(BaseHandler):
                     }
                 )
 
-        await for_each_target_device(
+            return outcome
+
+        outcomes = await for_each_target_device(
             target_devices,
             _process_device,
             max_parallel=max_parallel_from_config(ctx.config),
         )
+
+        all_evidence = [item for outcome in outcomes for item in outcome.evidence]
+        device_errors = [error for outcome in outcomes for error in outcome.errors]
+        combined_output_parts = [part for outcome in outcomes for part in outcome.output_parts]
+        all_success = all(outcome.success for outcome in outcomes)
+        total_commands = sum(outcome.commands_run for outcome in outcomes)
 
         if all_success:
             summary = f"Executed {len(commands)} commands on {len(target_devices)} device(s)"

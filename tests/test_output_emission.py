@@ -198,8 +198,13 @@ class TestHandlerWiring:
     @pytest.mark.asyncio
     async def test_netcli_execute_config_mode_streams_transcript(self):
         """Config transcripts stream too — the host redacts every
-        platform-resolved secret from progress events and artifacts, so the
-        handler no longer has to withhold the session from the Logs tab."""
+        platform-resolved secret (device/enable/bastion credentials,
+        secret()/file() template values) from progress events and artifacts,
+        so the handler no longer has to withhold the session from the Logs
+        tab. Literals an operator types straight into a command list are the
+        documented residual — indistinguishable from ordinary config text —
+        which is why this transcript uses neutral commands; see
+        docs/development/ssh-output-streaming.md in the host repo."""
         from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
 
         class _Result:
@@ -224,7 +229,8 @@ class TestHandlerWiring:
             config={
                 "commands": [
                     "configure terminal",
-                    "username admin password hunter2",
+                    "interface GigabitEthernet1/0/1",
+                    "description uplink to core",
                     "end",
                 ]
             },
@@ -237,7 +243,7 @@ class TestHandlerWiring:
         out = _output_events(events)
         assert len(out) == 1
         assert out[0][2]["command"] == "configure"
-        assert "echo of username admin password hunter2" in out[0][0]
+        assert "echo of description uplink to core" in out[0][0]
         # The transcript still lands in evidence artifacts too.
         assert any(e.get("kind") == "cli_output" for e in result.evidence)
 
