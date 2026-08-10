@@ -5,17 +5,21 @@
 """ExecuteCLIActionHandler: execute CLI commands on devices as actions."""
 
 import logging
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
     StepKind,
     command_label,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +41,13 @@ class ExecuteCliConfig(BaseModel):
             "x_col_span": 2,
         },
     )
+    max_parallel_devices: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Devices processed concurrently (1 = sequential)",
+    )
 
 
 def _top_level_cli_failure_detail(*, error: str | None, exit_code: int) -> str:
@@ -44,6 +55,22 @@ def _top_level_cli_failure_detail(*, error: str | None, exit_code: int) -> str:
     if error:
         return error
     return f"CLI command failed with exit code {exit_code}"
+
+
+@dataclass
+class _DeviceOutcome:
+    """One device's results, merged in device order after the fan-out.
+
+    Workers collect into these locals instead of shared lists so aggregation
+    stays deterministic when devices run in parallel (completion order varies;
+    device order does not).
+    """
+
+    evidence: list[dict] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    output_parts: list[str] = field(default_factory=list)
+    success: bool = True
+    commands_run: int = 0
 
 
 class ExecuteCLIActionHandler(BaseHandler):
@@ -77,21 +104,17 @@ class ExecuteCLIActionHandler(BaseHandler):
                 summary="Missing command configuration",
             )
 
-        all_evidence = []
-        all_success = True
-        device_errors = []
-        total_commands = 0
-        combined_output_parts: list[str] = []
-
         services = ctx.require_services()
-        for device in target_devices:
+
+        async def _process_device(device: dict) -> _DeviceOutcome:
+            outcome = _DeviceOutcome()
             device_id = device.get("id", device.get("mgmt_host"))
             device_name = device.get("name", device_id)
             host = device.get("mgmt_host")
             if not host:
-                all_success = False
-                device_errors.append(f"{device_name}: no mgmt_host configured")
-                continue
+                outcome.success = False
+                outcome.errors.append(f"{device_name}: no mgmt_host configured")
+                return outcome
 
             try:
                 ssh = services.connect(device, platform=device.get("platform"))
@@ -132,18 +155,27 @@ class ExecuteCLIActionHandler(BaseHandler):
                                 )
 
                     if full_output:
-                        combined_output_parts.append(full_output)
+                        outcome.output_parts.append(full_output)
+                        # Live view: the config-session transcript streams too.
+                        # The host redacts every platform-resolved secret
+                        # (device/enable/bastion credentials, secret()/file()
+                        # template values) from progress events and artifacts
+                        # alike, so a credential echoed by the device reaches
+                        # neither surface in clear. Operator-typed literals are
+                        # out of scope — we redact used secrets, no more; see
+                        # docs/development/ssh-output-streaming.md (host repo).
+                        await ctx.emit_output(full_output, device=device, command="configure")
 
                     if has_error:
-                        all_success = False
-                        device_errors.append(f"{device_name}: {error_msg}")
+                        outcome.success = False
+                        outcome.errors.append(f"{device_name}: {error_msg}")
 
                     artifact_name = (
                         f"Configuration ({device_name})"
                         if len(target_devices) > 1
                         else "Configuration"
                     )
-                    all_evidence.append(
+                    outcome.evidence.append(
                         {
                             "kind": "cli_output",
                             "name": artifact_name,
@@ -173,8 +205,12 @@ class ExecuteCLIActionHandler(BaseHandler):
                             else command_display
                         )
                         if result.output:
-                            combined_output_parts.append(result.output)
-                        all_evidence.append(
+                            outcome.output_parts.append(result.output)
+                            # Live view: per-command output into the Logs tab
+                            await ctx.emit_output(
+                                result.output, device=device, command=result.command
+                            )
+                        outcome.evidence.append(
                             {
                                 "kind": "cli_output",
                                 "name": cmd_name,
@@ -191,19 +227,19 @@ class ExecuteCLIActionHandler(BaseHandler):
                             }
                         )
                         if result.exit_code != 0:
-                            all_success = False
+                            outcome.success = False
                             failure_detail = _top_level_cli_failure_detail(
                                 error=result.error,
                                 exit_code=result.exit_code,
                             )
-                            device_errors.append(f"{device_name}: {failure_detail}")
+                            outcome.errors.append(f"{device_name}: {failure_detail}")
 
-                total_commands += len(commands)
+                outcome.commands_run = len(commands)
 
             except Exception as e:
-                all_success = False
-                device_errors.append(f"{device_name}: {str(e)}")
-                all_evidence.append(
+                outcome.success = False
+                outcome.errors.append(f"{device_name}: {str(e)}")
+                outcome.evidence.append(
                     {
                         "kind": "cli_output",
                         "name": f"Error ({device_name})",
@@ -217,6 +253,20 @@ class ExecuteCLIActionHandler(BaseHandler):
                         },
                     }
                 )
+
+            return outcome
+
+        outcomes = await for_each_target_device(
+            target_devices,
+            _process_device,
+            max_parallel=max_parallel_from_config(ctx.config),
+        )
+
+        all_evidence = [item for outcome in outcomes for item in outcome.evidence]
+        device_errors = [error for outcome in outcomes for error in outcome.errors]
+        combined_output_parts = [part for outcome in outcomes for part in outcome.output_parts]
+        all_success = all(outcome.success for outcome in outcomes)
+        total_commands = sum(outcome.commands_run for outcome in outcomes)
 
         if all_success:
             summary = f"Executed {len(commands)} commands on {len(target_devices)} device(s)"

@@ -73,6 +73,30 @@ class DeviceConnectionSpec:
     jump_host: JumpHostSpec | None = None
 
 
+class TransportOutputSink(Protocol):
+    """Host-owned sink for live session-output streaming (Phase B).
+
+    The host builds one sink per ``connect()`` call and passes it to
+    transport constructors that advertise ``supports_output_sink = True``
+    (feature-detected, so wheels and hosts upgrade independently). The sink
+    owns batching, sanitization (ANSI stripping, credential redaction), and
+    emission as Logs-tab output events — transports only push raw chunks.
+
+    All entry points are best-effort and never raise into the transport.
+    ``push`` is for event-loop producers; ``push_from_thread`` marshals from
+    executor threads (netmiko); ``flush``/``flush_from_thread`` drain any
+    buffered tail at the end of a streamed command.
+    """
+
+    async def push(self, text: str, *, stream: str = "stdout") -> None: ...
+
+    def push_from_thread(self, text: str, *, stream: str = "stdout") -> None: ...
+
+    async def flush(self) -> None: ...
+
+    def flush_from_thread(self, timeout: float = 5.0) -> None: ...
+
+
 class ConnectionCancellationRegistry(Protocol):
     """Host-owned registry the transport uses to make blocking I/O cancellable.
 

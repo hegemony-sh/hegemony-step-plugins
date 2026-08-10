@@ -16,6 +16,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from .enums import StepKind
 from .services import HandlerServices
@@ -28,6 +29,48 @@ MAX_CHAIN_OUTPUT_CHARS = 4096
 
 #: Platform string assumed for device transports when a step doesn't specify one.
 DEFAULT_DEVICE_PLATFORM = "ios-xe"
+
+#: ``attrs.milestone`` value the UI's Logs tab keys on for terminal output.
+OUTPUT_MILESTONE = "output"
+
+#: Preferred maximum characters per emitted output event (split on line
+#: boundaries). Each event is one HTTP POST plus one row-locked insert
+#: host-side, so emissions batch whole command results rather than lines.
+OUTPUT_EVENT_CHUNK_CHARS = 8_192
+
+#: Cap on total characters emitted per call to
+#: :meth:`HandlerContext.emit_output`. Full output always remains available
+#: in the step's evidence artifacts; the event stream is a live view.
+OUTPUT_EVENT_MAX_CHARS = 65_536
+
+#: Marker line appended when an emission is cut at OUTPUT_EVENT_MAX_CHARS.
+OUTPUT_TRUNCATION_NOTICE = "… [output truncated — full output in artifacts]"
+
+
+def _chunk_on_line_boundaries(text: str, chunk_chars: int) -> list[str]:
+    """Split ``text`` into chunks of at most ``chunk_chars``, preferring newlines.
+
+    A single line longer than ``chunk_chars`` is hard-split rather than
+    emitted oversized.
+    """
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in text.splitlines(keepends=True):
+        while len(line) > chunk_chars:
+            if current:
+                chunks.append("".join(current))
+                current, current_len = [], 0
+            chunks.append(line[:chunk_chars])
+            line = line[chunk_chars:]
+        if current_len + len(line) > chunk_chars and current:
+            chunks.append("".join(current))
+            current, current_len = [], 0
+        current.append(line)
+        current_len += len(line)
+    if current:
+        chunks.append("".join(current))
+    return chunks
 
 
 @dataclass
@@ -178,6 +221,69 @@ class HandlerContext:
         if self._emit_progress:
             return await self._emit_progress(message, device_id, attrs)
         return False
+
+    async def emit_output(
+        self,
+        text: str,
+        *,
+        stream: str = "stdout",
+        device: dict[str, Any] | None = None,
+        command: str | None = None,
+    ) -> bool:
+        """Emit command/session output for the UI's live terminal (Logs tab).
+
+        Events carry ``attrs={"milestone": "output", "stream": ...}`` — the
+        shape the Logs tab streams, established by ``container.run``. Long
+        text is split on line boundaries into events of at most
+        :data:`OUTPUT_EVENT_CHUNK_CHARS` and capped at
+        :data:`OUTPUT_EVENT_MAX_CHARS` with a truncation marker; evidence
+        artifacts remain the durable, uncapped record.
+
+        Best-effort like :meth:`emit_progress`: never raises, returns
+        ``True`` only if every chunk was accepted.
+
+        Args:
+            text: Raw output text (batched per command/attempt, not per line).
+            stream: ``"stdout"`` or ``"stderr"``.
+            device: Optional device dict; its ``id`` is forwarded as the
+                event's ``device_id`` only when it is a valid UUID (the host
+                rejects the whole event otherwise), and its name is carried
+                in ``attrs.device_name`` for display.
+            command: Optional command this output belongs to (labelled into
+                ``attrs.command``).
+        """
+        if not text:
+            return False
+
+        if len(text) > OUTPUT_EVENT_MAX_CHARS:
+            text = text[:OUTPUT_EVENT_MAX_CHARS].rstrip("\n") + "\n" + OUTPUT_TRUNCATION_NOTICE
+
+        attrs: dict[str, Any] = {"milestone": OUTPUT_MILESTONE, "stream": stream}
+        device_id: str | None = None
+        if device is not None:
+            raw_id = device.get("id")
+            try:
+                device_id = str(UUID(str(raw_id)))
+            except (ValueError, TypeError, AttributeError):
+                device_id = None
+            name = device.get("name") or device.get("mgmt_host")
+            if name:
+                attrs["device_name"] = str(name)
+        if command:
+            attrs["command"] = command_label(command)
+
+        # Chunks are forwarded verbatim (no synthetic newlines) so the live
+        # log stays a faithful view of the underlying output, matching
+        # container.run's raw pass-through. The UI renders an event's final
+        # unterminated fragment as its own line either way.
+        ok = True
+        for chunk in _chunk_on_line_boundaries(text, OUTPUT_EVENT_CHUNK_CHARS):
+            try:
+                sent = await self.emit_progress(chunk, device_id, dict(attrs))
+            except Exception:  # noqa: BLE001 - output streaming must never fail the step
+                sent = False
+            ok = ok and sent
+        return ok
 
     def require_services(self) -> HandlerServices:
         """Return the injected services, failing fast when the host didn't bind them.
