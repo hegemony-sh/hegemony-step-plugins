@@ -19,12 +19,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
     StepKind,
     command_label,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,6 +120,13 @@ class ShellExecuteConfig(BaseModel):
         ge=1,
         title="Per-command timeout (sec)",
     )
+    max_parallel_devices: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Hosts processed concurrently (1 = sequential)",
+    )
 
 
 class ShellExecuteHandler(BaseHandler):
@@ -169,13 +179,14 @@ class ShellExecuteHandler(BaseHandler):
         executed = 0
         all_success = True
 
-        for device in target_devices:
+        async def _process_device(device: dict[str, Any]) -> None:
+            nonlocal all_success, executed
             device_id = device.get("id", device.get("mgmt_host"))
             device_name = device.get("name", device_id)
             if not device.get("mgmt_host"):
                 all_success = False
                 device_errors.append(f"{device_name}: no mgmt_host configured")
-                continue
+                return
 
             try:
                 transport = await services.open_shell(device)
@@ -196,7 +207,7 @@ class ShellExecuteHandler(BaseHandler):
                         },
                     }
                 )
-                continue
+                return
 
             try:
                 for original, remote_command in zip(commands, composed, strict=True):
@@ -262,6 +273,12 @@ class ShellExecuteHandler(BaseHandler):
                     await transport.close()
                 except Exception:  # noqa: BLE001 - closing is best-effort
                     logger.debug("shell transport close failed", exc_info=True)
+
+        await for_each_target_device(
+            target_devices,
+            _process_device,
+            max_parallel=max_parallel_from_config(ctx.config),
+        )
 
         if all_success:
             summary = f"Executed {len(commands)} command(s) on {len(target_devices)} host(s)"

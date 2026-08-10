@@ -11,11 +11,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
     StepKind,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,6 +52,13 @@ class PollUntilConfig(BaseModel):
         default=False,
         title="Invert Match",
         description="Succeed when pattern does NOT match",
+    )
+    max_parallel_devices: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Devices polled concurrently (1 = sequential)",
     )
 
 
@@ -114,14 +124,16 @@ class PollUntilHandler(BaseHandler):
         device_errors = []
 
         services = ctx.require_services()
-        for device in target_devices:
+
+        async def _process_device(device: dict) -> None:
+            nonlocal all_success
             device_id = device.get("id", device.get("mgmt_host"))
             device_name = device.get("name", device_id)
             host = device.get("mgmt_host")
             if not host:
                 all_success = False
                 device_errors.append(f"{device_name}: no mgmt_host configured")
-                continue
+                return
 
             attempt = 0
             last_output = ""
@@ -227,6 +239,12 @@ class PollUntilHandler(BaseHandler):
                         },
                     }
                 )
+
+        await for_each_target_device(
+            target_devices,
+            _process_device,
+            max_parallel=max_parallel_from_config(ctx.config),
+        )
 
         if all_success:
             summary = f"Condition matched on all {len(target_devices)} device(s)"

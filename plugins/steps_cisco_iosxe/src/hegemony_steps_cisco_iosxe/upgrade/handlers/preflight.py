@@ -15,17 +15,20 @@ This handler should run in PREPARE phase to validate upgrade readiness.
 """
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     DEFAULT_DEVICE_PLATFORM,
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
     StepKind,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 from ..driver import UpgradeMode, get_driver
@@ -70,6 +73,13 @@ class UpgradePreflightConfig(BaseModel):
         ge=100000000,
         title="Min Free Space (bytes)",
         description="Minimum free disk space required (default: 1GB)",
+    )
+    max_parallel_devices: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Devices checked concurrently (1 = sequential)",
     )
 
 
@@ -142,7 +152,9 @@ class UpgradePreflightHandler(BaseHandler):
         output_context = {}
 
         services = ctx.require_services()
-        for device in target_devices:
+
+        async def _process_device(device: dict[str, Any]) -> None:
+            nonlocal success_count, failure_count
             device_id = device.get("id", "unknown")
             device_name = device.get("name", device_id)
             host = device.get("mgmt_host")
@@ -164,7 +176,7 @@ class UpgradePreflightHandler(BaseHandler):
                         },
                     }
                 )
-                continue
+                return
 
             await ctx.emit_progress(f"Running preflight checks on {device_name}", device_id)
 
@@ -235,6 +247,11 @@ class UpgradePreflightHandler(BaseHandler):
                     content_lines.append("\n--- CLI Outputs ---")
                     for cmd, output in result.cli_outputs.items():
                         content_lines.append(f"\n> {cmd}\n{output}")
+                        if output:
+                            # Live view: preflight command outputs reach the
+                            # Logs tab (show commands — never streamed by the
+                            # transport, so no dedup guard needed).
+                            await ctx.emit_output(output, device=device, command=cmd)
 
                 evidence_item = {
                     "kind": "cli_output",
@@ -277,6 +294,12 @@ class UpgradePreflightHandler(BaseHandler):
                         },
                     }
                 )
+
+        await for_each_target_device(
+            target_devices,
+            _process_device,
+            max_parallel=max_parallel_from_config(ctx.config),
+        )
 
         # Determine overall success
         overall_success = failure_count == 0

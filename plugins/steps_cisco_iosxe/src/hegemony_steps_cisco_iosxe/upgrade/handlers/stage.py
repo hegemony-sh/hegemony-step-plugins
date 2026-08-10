@@ -17,11 +17,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     DEFAULT_DEVICE_PLATFORM,
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
     StepKind,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 from ..api_client import get_file_device_download_url
@@ -122,6 +125,13 @@ class UpgradeStageConfig(BaseModel):
         default=False,
         title="Force re-transfer even if file exists",
         json_schema_extra={"x_col_span": 2},
+    )
+    max_parallel_devices: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Devices staged concurrently (1 = sequential)",
     )
 
 
@@ -249,7 +259,8 @@ class UpgradeStageHandler(BaseHandler):
         failed_devices = []
         output_context = {}
 
-        for device in target_devices:
+        async def _process_device(device: dict[str, Any]) -> None:
+            nonlocal success_count, failure_count
             device_id = device.get("id", "unknown")
             device_name = device.get("name", device_id)
             host = device.get("mgmt_host")
@@ -271,7 +282,7 @@ class UpgradeStageHandler(BaseHandler):
                         },
                     }
                 )
-                continue
+                return
 
             await ctx.emit_progress(f"Staging file on {device_name}", device_id)
 
@@ -357,6 +368,12 @@ class UpgradeStageHandler(BaseHandler):
                 if result.cli_output:
                     content_lines.append(f"\n--- CLI Output ---\n{result.cli_output}")
 
+                if result.cli_output and not getattr(ssh, "streams_timing_output", False):
+                    # Live view: the staging transcript (copy dialog, verify)
+                    # reaches the Logs tab — unless the transport already
+                    # streamed it live (Phase B sinks set streams_timing_output).
+                    await ctx.emit_output(result.cli_output, device=device, command="stage")
+
                 evidence_item = {
                     "kind": "cli_output",
                     "name": f"Stage: {device_name}",
@@ -399,6 +416,12 @@ class UpgradeStageHandler(BaseHandler):
                         },
                     }
                 )
+
+        await for_each_target_device(
+            target_devices,
+            _process_device,
+            max_parallel=max_parallel_from_config(ctx.config),
+        )
 
         # Determine overall success
         overall_success = failure_count == 0

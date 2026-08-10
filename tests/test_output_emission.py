@@ -196,8 +196,10 @@ class TestHandlerWiring:
         assert out[0][0] == "output of show version"
 
     @pytest.mark.asyncio
-    async def test_netcli_execute_config_mode_streams_nothing(self):
-        """Config-mode transcripts may echo credentials — artifact-only."""
+    async def test_netcli_execute_config_mode_streams_transcript(self):
+        """Config transcripts stream too — the host redacts every
+        platform-resolved secret from progress events and artifacts, so the
+        handler no longer has to withhold the session from the Logs tab."""
         from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
 
         class _Result:
@@ -232,8 +234,11 @@ class TestHandlerWiring:
         )
         result = await ExecuteCLIActionHandler().execute(ctx)
         assert result.success is True
-        assert _output_events(events) == []
-        # The transcript still lands in evidence artifacts
+        out = _output_events(events)
+        assert len(out) == 1
+        assert out[0][2]["command"] == "configure"
+        assert "echo of username admin password hunter2" in out[0][0]
+        # The transcript still lands in evidence artifacts too.
         assert any(e.get("kind") == "cli_output" for e in result.evidence)
 
     @pytest.mark.asyncio

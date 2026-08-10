@@ -9,11 +9,14 @@ import logging
 from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     StepKind,
     command_label,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +36,13 @@ class CollectEvidenceConfig(BaseModel):
             "x_rows": 3,
             "x_col_span": 2,
         },
+    )
+    max_parallel_devices: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Devices processed concurrently (1 = sequential)",
     )
 
 
@@ -84,7 +94,9 @@ class CollectEvidenceHandler(BaseHandler):
         failed_devices = []
 
         services = ctx.require_services()
-        for device in target_devices:
+
+        async def _process_device(device: dict) -> None:
+            nonlocal total_success, total_failure
             device_id = device.get("id", "unknown")
             device_name = device.get("name", device_id)
             host = device.get("mgmt_host")
@@ -99,7 +111,7 @@ class CollectEvidenceHandler(BaseHandler):
                         "content_text": f"Device {device_name} has no mgmt_host configured",
                     }
                 )
-                continue
+                return
 
             try:
                 ssh = services.connect(device, platform=device.get("platform"))
@@ -151,6 +163,12 @@ class CollectEvidenceHandler(BaseHandler):
                         },
                     }
                 )
+
+        await for_each_target_device(
+            target_devices,
+            _process_device,
+            max_parallel=max_parallel_from_config(ctx.config),
+        )
 
         metrics = {
             "device_count": len(target_devices),

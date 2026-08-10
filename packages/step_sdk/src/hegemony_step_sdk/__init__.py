@@ -14,6 +14,11 @@ callable under the ``hegemony.step_handlers`` entry-point group and registers
 from __future__ import annotations
 
 from ._version import SDK_ABI_VERSION, __version__
+from .concurrency import (
+    MAX_PARALLEL_DEVICES_LIMIT,
+    for_each_target_device,
+    max_parallel_from_config,
+)
 from .contract import (
     DEFAULT_DEVICE_PLATFORM,
     MAX_CHAIN_OUTPUT_CHARS,
@@ -61,6 +66,7 @@ __all__ = [
     "DEFAULT_DEVICE_MGMT_PORT",
     "DEFAULT_DEVICE_PLATFORM",
     "MAX_CHAIN_OUTPUT_CHARS",
+    "MAX_PARALLEL_DEVICES_LIMIT",
     "OUTPUT_EVENT_CHUNK_CHARS",
     "OUTPUT_EVENT_MAX_CHARS",
     "OUTPUT_MILESTONE",
@@ -91,5 +97,7 @@ __all__ = [
     "TransportOutputSink",
     "TransportRegistry",
     "__version__",
+    "for_each_target_device",
+    "max_parallel_from_config",
     "resolve_target_devices_for_roles",
 ]

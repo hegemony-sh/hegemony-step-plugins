@@ -10,12 +10,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
     StepKind,
     command_label,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,6 +39,13 @@ class ExecuteCliConfig(BaseModel):
             "x_rows": 3,
             "x_col_span": 2,
         },
+    )
+    max_parallel_devices: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Devices processed concurrently (1 = sequential)",
     )
 
 
@@ -84,14 +94,16 @@ class ExecuteCLIActionHandler(BaseHandler):
         combined_output_parts: list[str] = []
 
         services = ctx.require_services()
-        for device in target_devices:
+
+        async def _process_device(device: dict) -> None:
+            nonlocal all_success, total_commands
             device_id = device.get("id", device.get("mgmt_host"))
             device_name = device.get("name", device_id)
             host = device.get("mgmt_host")
             if not host:
                 all_success = False
                 device_errors.append(f"{device_name}: no mgmt_host configured")
-                continue
+                return
 
             try:
                 ssh = services.connect(device, platform=device.get("platform"))
@@ -133,11 +145,15 @@ class ExecuteCLIActionHandler(BaseHandler):
 
                     if full_output:
                         combined_output_parts.append(full_output)
-                        # Deliberately NOT streamed to the Logs tab: config-mode
-                        # sessions echo credential lines (username/password,
-                        # RADIUS keys, …). The transcript stays artifact-only;
-                        # see docs/development/ssh-output-streaming.md (host
-                        # repo) — "Secrets in output".
+                        # Live view: the config-session transcript streams too.
+                        # The host redacts every platform-resolved secret
+                        # (device/enable/bastion credentials, secret()/file()
+                        # template values) from progress events and artifacts
+                        # alike, so a credential echoed by the device reaches
+                        # neither surface in clear. Operator-typed literals are
+                        # out of scope — we redact used secrets, no more; see
+                        # docs/development/ssh-output-streaming.md (host repo).
+                        await ctx.emit_output(full_output, device=device, command="configure")
 
                     if has_error:
                         all_success = False
@@ -226,6 +242,12 @@ class ExecuteCLIActionHandler(BaseHandler):
                         },
                     }
                 )
+
+        await for_each_target_device(
+            target_devices,
+            _process_device,
+            max_parallel=max_parallel_from_config(ctx.config),
+        )
 
         if all_success:
             summary = f"Executed {len(commands)} commands on {len(target_devices)} device(s)"
