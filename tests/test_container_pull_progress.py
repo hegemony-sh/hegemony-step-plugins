@@ -225,6 +225,29 @@ def test_auth_header_missing_config_is_anonymous(tmp_path: Path) -> None:
     assert build_registry_auth_header("python:3.12", {"DOCKER_CONFIG": str(tmp_path)}) == {}
 
 
+@pytest.mark.parametrize(
+    "packed",
+    [
+        "not-valid-base64!!!",  # binascii.Error (a ValueError subclass)
+        "////",  # decodes to bytes that are not UTF-8
+        "bm9jb2xvbg==",  # valid base64, but no "user:password" separator
+    ],
+)
+def test_auth_header_malformed_entry_is_anonymous(tmp_path: Path, packed: str) -> None:
+    """A broken auth entry must never fail the pull — it falls back to anonymous.
+
+    The pull would otherwise crash before ``stream_pull``'s error boundary,
+    skipping the CLI fallback entirely.
+    """
+    env = _write_config(tmp_path, {"auths": {"registry.example.com": {"auth": packed}}})
+    assert build_registry_auth_header("registry.example.com/tool:v1", env) == {}
+
+
+def test_auth_header_unreadable_config_is_anonymous(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("{not json", encoding="utf-8")
+    assert build_registry_auth_header("python:3.12", {"DOCKER_CONFIG": str(tmp_path)}) == {}
+
+
 # --- stream_pull over httpx.MockTransport ----------------------------------
 
 
@@ -383,6 +406,29 @@ async def test_stream_pull_unsupported_docker_host_raises_without_io() -> None:
             docker_host="ssh://user@host",
             env={},
             emit=_EmitRecorder(),
+        )
+
+
+async def test_stream_pull_preflight_failure_becomes_engine_pull_error(monkeypatch) -> None:
+    """An unexpected pre-flight error still routes the caller to the CLI fallback.
+
+    Reference parsing and credential loading run before the HTTP exchange; if
+    they escaped as some other exception the step would fail outright instead
+    of falling back to ``docker pull``.
+    """
+    monkeypatch.setattr(
+        "hegemony_steps_container.pull_progress.build_registry_auth_header",
+        lambda image, env: (_ for _ in ()).throw(RuntimeError("config exploded")),
+    )
+    with pytest.raises(EnginePullError, match="pre-flight failed"):
+        await stream_pull(
+            image="alpine:3.20",
+            docker_host="",
+            env={},
+            emit=_EmitRecorder(),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=_stream_body([]))
+            ),
         )
 
 

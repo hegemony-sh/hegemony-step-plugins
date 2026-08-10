@@ -399,15 +399,26 @@ async def stream_pull(
     the caller should fall back to the CLI pull. ``asyncio.CancelledError``
     passes through untouched for step cancellation.
     """
-    from_image, tag = parse_image_reference(image)
-    headers = build_registry_auth_header(image, env)
+    # Pre-flight sits inside the EnginePullError boundary as well: this
+    # module's contract is that *every* failure degrades to the CLI pull, and
+    # an unexpected error while parsing the reference, reading credentials, or
+    # building the transport would otherwise fail the step outright instead of
+    # falling back. (CancelledError derives from BaseException, so step
+    # cancellation still propagates untouched.)
+    try:
+        from_image, tag = parse_image_reference(image)
+        headers = build_registry_auth_header(image, env)
 
-    base_url = "http://docker"
-    if transport is None:
-        endpoint = resolve_engine_endpoint(docker_host, env)
-        base_url = endpoint.base_url
-        if endpoint.kind == "uds":
-            transport = httpx.AsyncHTTPTransport(uds=endpoint.uds_path)
+        base_url = "http://docker"
+        if transport is None:
+            endpoint = resolve_engine_endpoint(docker_host, env)
+            base_url = endpoint.base_url
+            if endpoint.kind == "uds":
+                transport = httpx.AsyncHTTPTransport(uds=endpoint.uds_path)
+    except EnginePullError:
+        raise
+    except Exception as e:
+        raise EnginePullError(f"pull pre-flight failed ({type(e).__name__}): {e}"[:200]) from e
 
     aggregator = PullProgressAggregator()
     last_emit = now()
