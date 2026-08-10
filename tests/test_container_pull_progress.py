@@ -251,6 +251,14 @@ def test_auth_header_unreadable_config_is_anonymous(tmp_path: Path) -> None:
 # --- stream_pull over httpx.MockTransport ----------------------------------
 
 
+# The layer-less lines the daemon closes a successful pull with; stream_pull
+# treats their absence as a truncated pull and falls back to the CLI.
+_TERMINAL_LINES = [
+    {"status": f"Digest: {_DIGEST}"},
+    {"status": "Status: Downloaded newer image for alpine:3.20"},
+]
+
+
 def _stream_body(lines: list[dict[str, Any]]) -> bytes:
     return b"".join(json.dumps(obj).encode() + b"\r\n" for obj in lines)
 
@@ -283,6 +291,7 @@ async def test_stream_pull_emits_throttled_progress_and_phase_change() -> None:
         {"status": "Downloading", "id": "aaa", "progressDetail": {"current": 10, "total": 100}},
         {"status": "Downloading", "id": "aaa", "progressDetail": {"current": 50, "total": 100}},
         {"status": "Download complete", "id": "aaa"},
+        *_TERMINAL_LINES,
     ]
     seen: list[httpx.Request] = []
 
@@ -334,6 +343,7 @@ async def test_stream_pull_pct_never_regresses() -> None:
         {"status": "Downloading", "id": "aaa", "progressDetail": {"current": 100, "total": 100}},
         {"status": "Pulling fs layer", "id": "bbb"},
         {"status": "Downloading", "id": "bbb", "progressDetail": {"current": 0, "total": 900}},
+        *_TERMINAL_LINES,
     ]
     emit = _EmitRecorder()
     clock = _Clock([0.0, 0.5, 2.1, 2.2, 4.5])
@@ -409,6 +419,49 @@ async def test_stream_pull_unsupported_docker_host_raises_without_io() -> None:
         )
 
 
+async def test_stream_pull_truncated_stream_raises() -> None:
+    """A stream that stops before the completion status must fall back.
+
+    A clean early close raises nothing on its own, so without this the pull
+    would report success and ``docker create`` would fail with "No such
+    image" instead of the CLI finishing the job.
+    """
+    lines = [
+        {"status": "Pulling fs layer", "id": "aaa"},
+        {"status": "Downloading", "id": "aaa", "progressDetail": {"current": 50, "total": 100}},
+    ]
+    with pytest.raises(EnginePullError, match="without a completion status"):
+        await stream_pull(
+            image="alpine:3.20",
+            docker_host="",
+            env={},
+            emit=_EmitRecorder(),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=_stream_body(lines))
+            ),
+            now=_Clock([0.0]),
+        )
+
+
+async def test_stream_pull_digest_only_terminal_is_accepted() -> None:
+    """``Digest:`` alone closes the pull for an already-current image."""
+    lines = [
+        {"status": "Pulling from library/alpine", "id": "3.20"},
+        {"status": "Already exists", "id": "aaa"},
+        {"status": f"Digest: {_DIGEST}"},
+    ]
+    await stream_pull(
+        image="alpine:3.20",
+        docker_host="",
+        env={},
+        emit=_EmitRecorder(),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=_stream_body(lines))
+        ),
+        now=_Clock([0.0]),
+    )
+
+
 async def test_stream_pull_preflight_failure_becomes_engine_pull_error(monkeypatch) -> None:
     """An unexpected pre-flight error still routes the caller to the CLI fallback.
 
@@ -439,7 +492,10 @@ async def test_stream_pull_sends_registry_auth(tmp_path: Path) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(200, content=_stream_body([{"status": "Already up to date"}]))
+        return httpx.Response(
+            200,
+            content=_stream_body([{"status": "Status: Image is up to date for tool:v1"}]),
+        )
 
     await stream_pull(
         image="registry.example.com/tool:v1",

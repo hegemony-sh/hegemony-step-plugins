@@ -363,6 +363,22 @@ class PullProgressAggregator:
         )
 
 
+def _is_terminal_status(obj: Mapping[str, Any]) -> bool:
+    """True for the top-level line that closes a successful pull.
+
+    The daemon ends a pull with layer-less ``Digest: sha256:...`` and
+    ``Status: Downloaded newer image for ...`` / ``Status: Image is up to date
+    for ...`` objects. Their absence means the stream stopped early, which
+    :func:`stream_pull` treats as a failure. (The opening
+    ``Pulling from <repo>`` banner carries the tag in ``id``, so it is not
+    mistaken for a completion line.)
+    """
+    if obj.get("id"):
+        return False
+    status = obj.get("status")
+    return isinstance(status, str) and status.startswith(("Status:", "Digest:"))
+
+
 def _format_progress_message(image: str, snap: PullSnapshot, pct: float | None) -> str:
     mb = 1e6
     if pct is not None and snap.phase == "extracting":
@@ -425,6 +441,7 @@ async def stream_pull(
     last_phase = "downloading"
     last_pct = 0.0
     emitted = 0
+    saw_terminal = False
 
     try:
         # trust_env=False is load-bearing: worker environments carry proxy
@@ -463,6 +480,8 @@ async def stream_pull(
                 if not isinstance(obj, dict):
                     continue
                 aggregator.feed(obj)
+                if _is_terminal_status(obj):
+                    saw_terminal = True
 
                 snap = aggregator.snapshot()
                 if snap.layers_total == 0:
@@ -502,6 +521,14 @@ async def stream_pull(
                 last_emit = ts
                 last_phase = snap.phase
                 emitted += 1
+
+            if not saw_terminal:
+                # A cleanly closed stream that never announced completion has
+                # not necessarily produced the image; returning here would
+                # skip the fallback and leave `docker create` to fail with
+                # "No such image". Falling back costs one mostly-cached
+                # `docker pull`; a false success costs the step.
+                raise EnginePullError("pull stream ended without a completion status")
     except EnginePullError:
         raise
     except (httpx.HTTPError, httpx.StreamError, OSError) as e:
