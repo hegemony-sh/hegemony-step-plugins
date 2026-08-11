@@ -20,6 +20,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerServices
+from hegemony_steps_container.pull_progress import EnginePullUnsupported
 from hegemony_steps_container.run import RunContainerHandler, _docker_env
 
 
@@ -68,6 +69,14 @@ def _install_docker_mocks(monkeypatch) -> dict[str, list]:
     ``exec`` (list of (argv, env) from asyncio.create_subprocess_exec).
     """
     captured: dict[str, list] = {"run": [], "exec": []}
+
+    # Force the pull onto the mocked-CLI path: the Engine-API streaming pull
+    # would otherwise dial a real docker socket from unit tests, and these
+    # tests assert the DOCKER_HOST plumbing of the CLI `docker pull` itself.
+    monkeypatch.setattr(
+        "hegemony_steps_container.run.stream_pull",
+        AsyncMock(side_effect=EnginePullUnsupported("disabled in tests")),
+    )
 
     def fake_subprocess_run(cmd, *args, **kwargs):
         captured["run"].append((list(cmd), kwargs.get("env")))
