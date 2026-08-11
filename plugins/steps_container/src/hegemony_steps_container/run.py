@@ -2158,7 +2158,12 @@ class RunContainerHandler(BaseHandler):
         pull_start = time.monotonic()
         pull_method = "api"
         outcome: PullOutcome | None = None
-        remaining = max(deadline - pull_start, 1)
+        # No floor: a second granted to a step that has already run out is a
+        # second it does not have, and a pull that succeeds inside it leaves
+        # the step running past its own deadline. Out of time is a timeout.
+        remaining = deadline - pull_start
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired([docker_bin, "pull", image], 0)
         try:
             outcome = await asyncio.wait_for(
                 stream_pull(
@@ -2182,7 +2187,9 @@ class RunContainerHandler(BaseHandler):
                 attrs={"milestone": "pull_fallback", "image": image, "reason": reason},
             )
             pull_method = "cli"
-            remaining = max(deadline - time.monotonic(), 1)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired([docker_bin, "pull", image], 0) from None
             pull_proc = await self._run_docker(
                 docker_bin, ["pull", image], env=docker_env, timeout=remaining
             )

@@ -280,6 +280,7 @@ class PullProgressAggregator:
 
     def __init__(self) -> None:
         self._layers: dict[str, _LayerState] = {}
+        self._saw_unknown_status = False
 
     def _layer(self, layer_id: str) -> _LayerState:
         state = self._layers.get(layer_id)
@@ -341,7 +342,24 @@ class PullProgressAggregator:
             state.done = True
             state.download_done = True
             state.already_exists = True
-        # Anything else: ignore (forward compatibility).
+        else:
+            # Ignored for progress (forward compatibility), but remembered:
+            # a layer this module cannot read may still be moving bytes, and
+            # the total is only honest if every layer was accounted for.
+            self._saw_unknown_status = True
+
+    @property
+    def fully_measured(self) -> bool:
+        """True when every layer's download size is known.
+
+        A total assembled from *some* of the layers is not a smaller truth,
+        it is a wrong number: it silently attributes the whole pull the size
+        of the part this module happened to understand. Callers report
+        :data:`BYTES_UNKNOWN` instead of publishing one.
+        """
+        if self._saw_unknown_status:
+            return False
+        return all(s.already_exists or s.dl_total > 0 for s in self._layers.values())
 
     def snapshot(self) -> PullSnapshot:
         layers = self._layers.values()
@@ -589,11 +607,12 @@ async def stream_pull(
     except (httpx.HTTPError, httpx.StreamError, OSError) as e:
         raise EnginePullError(str(e)[:200] or type(e).__name__) from e
 
-    # A daemon that fetched a newer image while reporting no layer totals
-    # leaves us with nothing to say. Reporting the 0 the aggregator holds
-    # would claim the opposite of what happened.
+    # A daemon that fetched a newer image while reporting no layer totals —
+    # or only some of them — leaves us with nothing honest to say. Reporting
+    # the aggregator's figure would claim a byte count for the whole pull
+    # that describes only the part this module could read.
     snap = aggregator.snapshot()
-    measured = up_to_date or snap.bytes_total > 0
+    measured = up_to_date or (snap.bytes_total > 0 and aggregator.fully_measured)
     return PullOutcome(
         up_to_date=up_to_date,
         bytes_downloaded=snap.bytes_current if measured else BYTES_UNKNOWN,

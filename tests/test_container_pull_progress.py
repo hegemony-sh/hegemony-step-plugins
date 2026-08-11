@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -869,3 +870,82 @@ async def test_image_size_lookup_skipped_once_the_deadline_is_gone(monkeypatch) 
 
     assert size is None
     assert calls == []
+
+
+async def test_stream_pull_will_not_report_a_partial_byte_count() -> None:
+    """One readable layer does not license a total for the whole pull.
+
+    A daemon that mixes vocabularies — one layer reporting classic
+    Downloading totals, another a status this module does not interpret —
+    would otherwise publish the readable layer's bytes as the pull's total,
+    which is not a smaller truth but a wrong number.
+    """
+    lines = [
+        {"status": "Pulling fs layer", "id": "aaa"},
+        {"status": "Downloading", "id": "aaa", "progressDetail": {"current": 100, "total": 100}},
+        {"status": "Pull complete", "id": "aaa"},
+        {"status": "Some future containerd status", "id": "bbb"},
+        *_TERMINAL_LINES,
+    ]
+
+    outcome = await stream_pull(
+        image="alpine:3.20",
+        docker_host="",
+        env={},
+        emit=_EmitRecorder(),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
+        now=_Clock([0.0, 5.0]),
+    )
+
+    assert outcome.bytes_downloaded == BYTES_UNKNOWN
+
+
+async def test_stream_pull_will_not_report_bytes_for_an_unsized_layer() -> None:
+    """Same rule for a recognised layer that never announced its size."""
+    lines = [
+        {"status": "Pulling fs layer", "id": "aaa"},
+        {"status": "Downloading", "id": "aaa", "progressDetail": {"current": 100, "total": 100}},
+        {"status": "Pulling fs layer", "id": "bbb"},
+        {"status": "Downloading", "id": "bbb", "progressDetail": {}},
+        *_TERMINAL_LINES,
+    ]
+
+    outcome = await stream_pull(
+        image="alpine:3.20",
+        docker_host="",
+        env={},
+        emit=_EmitRecorder(),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
+        now=_Clock([0.0, 5.0]),
+    )
+
+    assert outcome.bytes_downloaded == BYTES_UNKNOWN
+
+
+def test_aggregator_reports_full_measurement_when_every_layer_is_sized() -> None:
+    agg = PullProgressAggregator()
+    agg.feed({"status": "Already exists", "id": "ccc"})
+    agg.feed({"status": "Pulling fs layer", "id": "aaa"})
+    agg.feed({"status": "Downloading", "id": "aaa", "progressDetail": {"current": 1, "total": 2}})
+    assert agg.fully_measured is True
+
+    agg.feed({"status": "Some future containerd status", "id": "bbb"})
+    assert agg.fully_measured is False
+
+
+async def test_pull_raises_timeout_rather_than_borrowing_a_second(monkeypatch) -> None:
+    """An exhausted deadline is a timeout, not a one-second reprieve."""
+    stream_mock = AsyncMock(return_value=PullOutcome(up_to_date=False, bytes_downloaded=1))
+    monkeypatch.setattr("hegemony_steps_container.run.stream_pull", stream_mock)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        await RunContainerHandler()._pull_image(
+            docker_bin="docker",
+            image="alpine:3.20",
+            docker_env=None,
+            docker_host="",
+            deadline=time.monotonic() - 1,
+            emit=_EmitRecorder(),
+        )
+
+    stream_mock.assert_not_awaited()
