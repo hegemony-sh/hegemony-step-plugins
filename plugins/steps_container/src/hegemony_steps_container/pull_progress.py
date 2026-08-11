@@ -36,6 +36,10 @@ import httpx
 
 DEFAULT_UNIX_SOCKET = "/var/run/docker.sock"
 
+# Sentinel for PullOutcome.bytes_downloaded: the pull fetched something but
+# never said how much. Distinct from 0, which asserts nothing was fetched.
+BYTES_UNKNOWN = -1
+
 # Docker Hub credentials live under the legacy index key in config.json; the
 # other aliases show up from tooling that writes the modern hostnames.
 DOCKER_HUB_AUTH_KEYS = (
@@ -233,6 +237,26 @@ class _LayerState:
 
 
 @dataclass(frozen=True)
+class PullOutcome:
+    """What a finished pull actually did, for the completion event.
+
+    ``up_to_date`` comes from the daemon's own closing status line rather
+    than from byte math: a pull that moved no bytes is not proof the image
+    was already complete (a daemon may report no layer objects at all), and
+    the daemon states it outright.
+
+    ``bytes_downloaded`` is ``BYTES_UNKNOWN`` when the pull moved data but
+    never reported how much — a daemon whose statuses this module does not
+    interpret, or the CLI fallback, where a piped ``docker pull`` prints no
+    progress at all. Callers must not treat that as zero: "we did not
+    measure" and "nothing was fetched" are opposite facts about a pull.
+    """
+
+    up_to_date: bool
+    bytes_downloaded: int
+
+
+@dataclass(frozen=True)
 class PullSnapshot:
     """One aggregated view of the pull, ready for an event emission."""
 
@@ -256,6 +280,7 @@ class PullProgressAggregator:
 
     def __init__(self) -> None:
         self._layers: dict[str, _LayerState] = {}
+        self._saw_unknown_status = False
 
     def _layer(self, layer_id: str) -> _LayerState:
         state = self._layers.get(layer_id)
@@ -317,7 +342,24 @@ class PullProgressAggregator:
             state.done = True
             state.download_done = True
             state.already_exists = True
-        # Anything else: ignore (forward compatibility).
+        else:
+            # Ignored for progress (forward compatibility), but remembered:
+            # a layer this module cannot read may still be moving bytes, and
+            # the total is only honest if every layer was accounted for.
+            self._saw_unknown_status = True
+
+    @property
+    def fully_measured(self) -> bool:
+        """True when every layer's download size is known.
+
+        A total assembled from *some* of the layers is not a smaller truth,
+        it is a wrong number: it silently attributes the whole pull the size
+        of the part this module happened to understand. Callers report
+        :data:`BYTES_UNKNOWN` instead of publishing one.
+        """
+        if self._saw_unknown_status:
+            return False
+        return all(s.already_exists or s.dl_total > 0 for s in self._layers.values())
 
     def snapshot(self) -> PullSnapshot:
         layers = self._layers.values()
@@ -379,6 +421,35 @@ def _is_terminal_status(obj: Mapping[str, Any]) -> bool:
     return isinstance(status, str) and status.startswith(("Status:", "Digest:"))
 
 
+def _says_up_to_date(obj: Mapping[str, Any]) -> bool:
+    """True for the daemon's "nothing to fetch" closing line.
+
+    A pull that finds every layer present ends with ``Status: Image is up to
+    date for <ref>`` instead of ``Status: Downloaded newer image for <ref>``.
+    The docker CLI prints the same sentence, so both pull paths recognise a
+    cached image the same way.
+    """
+    status = obj.get("status")
+    return isinstance(status, str) and "image is up to date" in status.lower()
+
+
+def format_size(num_bytes: int) -> str:
+    """Render a byte count the way ``docker images`` does — SI units, not binary.
+
+    Matching docker's own display matters more than binary correctness here:
+    the number is there to be recognised next to the one the reader gets from
+    `docker images`, and 1.02 GB vs 972 MiB for the same image invites a
+    bug report.
+    """
+    if num_bytes >= 1_000_000_000:
+        return f"{num_bytes / 1e9:.1f} GB"
+    if num_bytes >= 1_000_000:
+        return f"{num_bytes / 1e6:.0f} MB"
+    if num_bytes >= 1_000:
+        return f"{num_bytes / 1e3:.0f} kB"
+    return f"{num_bytes} B"
+
+
 def _format_progress_message(image: str, snap: PullSnapshot, pct: float | None) -> str:
     mb = 1e6
     if pct is not None and snap.phase == "extracting":
@@ -406,14 +477,14 @@ async def stream_pull(
     emit: Callable[..., Awaitable[None]],
     transport: httpx.AsyncBaseTransport | None = None,
     now: Callable[[], float] = time.monotonic,
-) -> None:
+) -> PullOutcome:
     """Pull ``image`` via the Engine API, emitting throttled progress events.
 
     ``emit`` is the handler's ``_safe_emit_progress`` (``message, attrs=...``).
     ``transport`` and ``now`` are test seams (``httpx.MockTransport`` and a
-    scripted clock). Returns on success; raises :class:`EnginePullError` when
-    the caller should fall back to the CLI pull. ``asyncio.CancelledError``
-    passes through untouched for step cancellation.
+    scripted clock). Returns a :class:`PullOutcome` on success; raises
+    :class:`EnginePullError` when the caller should fall back to the CLI pull.
+    ``asyncio.CancelledError`` passes through untouched for step cancellation.
     """
     # Pre-flight sits inside the EnginePullError boundary as well: this
     # module's contract is that *every* failure degrades to the CLI pull, and
@@ -442,6 +513,7 @@ async def stream_pull(
     last_pct = 0.0
     emitted = 0
     saw_terminal = False
+    up_to_date = False
 
     try:
         # trust_env=False is load-bearing: worker environments carry proxy
@@ -482,6 +554,7 @@ async def stream_pull(
                 aggregator.feed(obj)
                 if _is_terminal_status(obj):
                     saw_terminal = True
+                    up_to_date = up_to_date or _says_up_to_date(obj)
 
                 snap = aggregator.snapshot()
                 if snap.layers_total == 0:
@@ -533,3 +606,14 @@ async def stream_pull(
         raise
     except (httpx.HTTPError, httpx.StreamError, OSError) as e:
         raise EnginePullError(str(e)[:200] or type(e).__name__) from e
+
+    # A daemon that fetched a newer image while reporting no layer totals —
+    # or only some of them — leaves us with nothing honest to say. Reporting
+    # the aggregator's figure would claim a byte count for the whole pull
+    # that describes only the part this module could read.
+    snap = aggregator.snapshot()
+    measured = up_to_date or (snap.bytes_total > 0 and aggregator.fully_measured)
+    return PullOutcome(
+        up_to_date=up_to_date,
+        bytes_downloaded=snap.bytes_current if measured else BYTES_UNKNOWN,
+    )

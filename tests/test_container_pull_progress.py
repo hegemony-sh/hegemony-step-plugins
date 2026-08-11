@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import base64
 import json
+import re
+import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -26,10 +29,13 @@ import pytest
 
 from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerServices
 from hegemony_steps_container.pull_progress import (
+    BYTES_UNKNOWN,
     EnginePullError,
     EnginePullUnsupported,
+    PullOutcome,
     PullProgressAggregator,
     build_registry_auth_header,
+    format_size,
     parse_image_reference,
     resolve_engine_endpoint,
     stream_pull,
@@ -554,15 +560,31 @@ def _ctx(events: list[tuple[str, dict[str, Any]]]) -> HandlerContext:
     )
 
 
-def _install_docker_mocks(monkeypatch, *, pull_returncode: int = 0) -> dict[str, list]:
-    """Mock both docker subprocess seams; docker pull exits pull_returncode."""
+def _install_docker_mocks(
+    monkeypatch,
+    *,
+    pull_returncode: int = 0,
+    pull_stdout: str = "",
+    image_size: str | None = "120000000",
+) -> dict[str, list]:
+    """Mock both docker subprocess seams; docker pull exits pull_returncode.
+
+    ``image_size`` is what ``docker image inspect --format {{.Size}}`` prints;
+    None makes that call fail, which is the "daemon will not say" path.
+    """
     captured: dict[str, list] = {"run": [], "exec": []}
 
     def fake_subprocess_run(cmd, *args, **kwargs):
         captured["run"].append((list(cmd), kwargs.get("env")))
         argv = list(cmd)
-        if len(argv) >= 2 and argv[0] == "docker" and argv[1] == "pull":
-            return SimpleNamespace(returncode=pull_returncode, stdout="", stderr="pull exploded")
+        if argv[:2] == ["docker", "pull"]:
+            return SimpleNamespace(
+                returncode=pull_returncode, stdout=pull_stdout, stderr="pull exploded"
+            )
+        if argv[:3] == ["docker", "image", "inspect"]:
+            if image_size is None:
+                return SimpleNamespace(returncode=1, stdout="", stderr="No such image")
+            return SimpleNamespace(returncode=0, stdout=f"{image_size}\n", stderr="")
         # `docker ps` (preflight) must return no names so no extra rm is spawned.
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -645,3 +667,285 @@ async def test_execute_fallback_pull_failure_matches_todays_result(monkeypatch) 
     assert result.success is False
     assert result.error is not None and result.error.startswith("Docker pull failed:")
     assert result.summary == "Failed to pull image alpine:3.20"
+
+
+# --- what the completion event says ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("num_bytes", "expected"),
+    [
+        (0, "0 B"),
+        (999, "999 B"),
+        (1_000, "1 kB"),
+        (120_000_000, "120 MB"),
+        (999_999_999, "1000 MB"),
+        (1_020_000_000, "1.0 GB"),
+    ],
+)
+def test_format_size_matches_docker_images_units(num_bytes: int, expected: str) -> None:
+    """SI units, like `docker images` — not binary, whatever the pedants say."""
+    assert format_size(num_bytes) == expected
+
+
+async def test_stream_pull_reports_bytes_it_moved() -> None:
+    lines = [
+        {"status": "Pulling fs layer", "id": "aaa"},
+        {"status": "Downloading", "id": "aaa", "progressDetail": {"current": 100, "total": 100}},
+        {"status": "Pull complete", "id": "aaa"},
+        *_TERMINAL_LINES,
+    ]
+
+    outcome = await stream_pull(
+        image="alpine:3.20",
+        docker_host="",
+        env={},
+        emit=_EmitRecorder(),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
+        now=_Clock([0.0, 5.0]),
+    )
+
+    assert outcome.up_to_date is False
+    assert outcome.bytes_downloaded == 100
+
+
+async def test_stream_pull_reports_an_image_that_was_already_there() -> None:
+    """Every layer cached: the daemon says so outright, and no bytes move."""
+    lines = [
+        {"status": "Already exists", "id": "aaa"},
+        {"status": f"Digest: {_DIGEST}"},
+        {"status": "Status: Image is up to date for alpine:3.20"},
+    ]
+
+    outcome = await stream_pull(
+        image="alpine:3.20",
+        docker_host="",
+        env={},
+        emit=_EmitRecorder(),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
+        now=_Clock([0.0, 5.0]),
+    )
+
+    assert outcome.up_to_date is True
+    assert outcome.bytes_downloaded == 0
+
+
+async def test_execute_completion_reports_the_image_size(monkeypatch) -> None:
+    _install_docker_mocks(monkeypatch, image_size="120000000")
+    monkeypatch.setattr(
+        "hegemony_steps_container.run.stream_pull",
+        AsyncMock(return_value=PullOutcome(up_to_date=False, bytes_downloaded=120_000_000)),
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = await RunContainerHandler().execute(_ctx(events))
+    assert result.success is True
+
+    message, attrs = next((msg, a) for msg, a in events if a.get("milestone") == "pull_complete")
+    assert re.fullmatch(r"Image pulled in \d+\.\ds \(120 MB\)", message), message
+    assert attrs["image_size_bytes"] == 120_000_000
+    assert attrs["image_up_to_date"] is False
+    assert attrs["bytes_downloaded"] == 120_000_000
+
+
+async def test_execute_completion_says_when_nothing_was_fetched(monkeypatch) -> None:
+    """The common case: a flow reusing one image across several steps."""
+    _install_docker_mocks(monkeypatch, image_size="120000000")
+    monkeypatch.setattr(
+        "hegemony_steps_container.run.stream_pull",
+        AsyncMock(return_value=PullOutcome(up_to_date=True, bytes_downloaded=0)),
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = await RunContainerHandler().execute(_ctx(events))
+    assert result.success is True
+
+    message, attrs = next((msg, a) for msg, a in events if a.get("milestone") == "pull_complete")
+    assert re.fullmatch(r"Image already present \(120 MB\), checked in \d+\.\ds", message), message
+    assert attrs["image_up_to_date"] is True
+    assert attrs["bytes_downloaded"] == 0
+
+
+async def test_execute_completion_reads_up_to_date_off_the_cli_pull(monkeypatch) -> None:
+    """The fallback path recognises a cached image from the CLI's own words."""
+    _install_docker_mocks(
+        monkeypatch,
+        pull_stdout="Status: Image is up to date for alpine:3.20\n",
+        image_size="120000000",
+    )
+    monkeypatch.setattr(
+        "hegemony_steps_container.run.stream_pull",
+        AsyncMock(side_effect=EnginePullUnsupported("TLS daemon")),
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = await RunContainerHandler().execute(_ctx(events))
+    assert result.success is True
+
+    message, attrs = next((msg, a) for msg, a in events if a.get("milestone") == "pull_complete")
+    assert message.startswith("Image already present (120 MB)")
+    assert attrs["pull_method"] == "cli"
+    assert attrs["image_up_to_date"] is True
+    # A piped `docker pull` prints no byte progress, so the field is absent
+    # rather than a zero that would read as "nothing was downloaded".
+    assert "bytes_downloaded" not in attrs
+
+
+async def test_execute_completion_survives_a_daemon_that_will_not_size_it(monkeypatch) -> None:
+    """A missing caption must not cost the step a pull it already completed."""
+    _install_docker_mocks(monkeypatch, image_size=None)
+    monkeypatch.setattr(
+        "hegemony_steps_container.run.stream_pull",
+        AsyncMock(return_value=PullOutcome(up_to_date=False, bytes_downloaded=1)),
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = await RunContainerHandler().execute(_ctx(events))
+    assert result.success is True
+
+    message, attrs = next((msg, a) for msg, a in events if a.get("milestone") == "pull_complete")
+    assert re.fullmatch(r"Image pulled in \d+\.\ds", message), message
+    assert "image_size_bytes" not in attrs
+
+
+async def test_stream_pull_will_not_call_an_unmeasured_pull_zero() -> None:
+    """A daemon that fetched something without saying how much reports unknown.
+
+    Containerd-store daemons emit statuses this module does not interpret, so
+    the aggregator can hold 0 bytes for a pull that really moved data. Passing
+    that 0 on would assert the opposite of what happened — the same reason the
+    CLI path reports unknown rather than zero.
+    """
+    lines = [
+        {"status": "Some future containerd status", "id": "aaa"},
+        {"status": f"Digest: {_DIGEST}"},
+        {"status": "Status: Downloaded newer image for alpine:3.20"},
+    ]
+
+    outcome = await stream_pull(
+        image="alpine:3.20",
+        docker_host="",
+        env={},
+        emit=_EmitRecorder(),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
+        now=_Clock([0.0, 5.0]),
+    )
+
+    assert outcome.up_to_date is False
+    assert outcome.bytes_downloaded == BYTES_UNKNOWN
+
+
+async def test_execute_omits_bytes_downloaded_when_unmeasured(monkeypatch) -> None:
+    _install_docker_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "hegemony_steps_container.run.stream_pull",
+        AsyncMock(return_value=PullOutcome(up_to_date=False, bytes_downloaded=BYTES_UNKNOWN)),
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = await RunContainerHandler().execute(_ctx(events))
+    assert result.success is True
+
+    attrs = next(a for _msg, a in events if a.get("milestone") == "pull_complete")
+    assert "bytes_downloaded" not in attrs
+    assert attrs["image_up_to_date"] is False
+
+
+async def test_image_size_lookup_skipped_once_the_deadline_is_gone(monkeypatch) -> None:
+    """The caption never buys itself time a step has already overrun."""
+    calls: list[list[str]] = []
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="120000000\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_subprocess_run)
+
+    size = await RunContainerHandler()._image_size_bytes(
+        docker_bin="docker",
+        image="alpine:3.20",
+        docker_env=None,
+        deadline=time.monotonic() - 1,
+    )
+
+    assert size is None
+    assert calls == []
+
+
+async def test_stream_pull_will_not_report_a_partial_byte_count() -> None:
+    """One readable layer does not license a total for the whole pull.
+
+    A daemon that mixes vocabularies — one layer reporting classic
+    Downloading totals, another a status this module does not interpret —
+    would otherwise publish the readable layer's bytes as the pull's total,
+    which is not a smaller truth but a wrong number.
+    """
+    lines = [
+        {"status": "Pulling fs layer", "id": "aaa"},
+        {"status": "Downloading", "id": "aaa", "progressDetail": {"current": 100, "total": 100}},
+        {"status": "Pull complete", "id": "aaa"},
+        {"status": "Some future containerd status", "id": "bbb"},
+        *_TERMINAL_LINES,
+    ]
+
+    outcome = await stream_pull(
+        image="alpine:3.20",
+        docker_host="",
+        env={},
+        emit=_EmitRecorder(),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
+        now=_Clock([0.0, 5.0]),
+    )
+
+    assert outcome.bytes_downloaded == BYTES_UNKNOWN
+
+
+async def test_stream_pull_will_not_report_bytes_for_an_unsized_layer() -> None:
+    """Same rule for a recognised layer that never announced its size."""
+    lines = [
+        {"status": "Pulling fs layer", "id": "aaa"},
+        {"status": "Downloading", "id": "aaa", "progressDetail": {"current": 100, "total": 100}},
+        {"status": "Pulling fs layer", "id": "bbb"},
+        {"status": "Downloading", "id": "bbb", "progressDetail": {}},
+        *_TERMINAL_LINES,
+    ]
+
+    outcome = await stream_pull(
+        image="alpine:3.20",
+        docker_host="",
+        env={},
+        emit=_EmitRecorder(),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
+        now=_Clock([0.0, 5.0]),
+    )
+
+    assert outcome.bytes_downloaded == BYTES_UNKNOWN
+
+
+def test_aggregator_reports_full_measurement_when_every_layer_is_sized() -> None:
+    agg = PullProgressAggregator()
+    agg.feed({"status": "Already exists", "id": "ccc"})
+    agg.feed({"status": "Pulling fs layer", "id": "aaa"})
+    agg.feed({"status": "Downloading", "id": "aaa", "progressDetail": {"current": 1, "total": 2}})
+    assert agg.fully_measured is True
+
+    agg.feed({"status": "Some future containerd status", "id": "bbb"})
+    assert agg.fully_measured is False
+
+
+async def test_pull_raises_timeout_rather_than_borrowing_a_second(monkeypatch) -> None:
+    """An exhausted deadline is a timeout, not a one-second reprieve."""
+    stream_mock = AsyncMock(return_value=PullOutcome(up_to_date=False, bytes_downloaded=1))
+    monkeypatch.setattr("hegemony_steps_container.run.stream_pull", stream_mock)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        await RunContainerHandler()._pull_image(
+            docker_bin="docker",
+            image="alpine:3.20",
+            docker_env=None,
+            docker_host="",
+            deadline=time.monotonic() - 1,
+            emit=_EmitRecorder(),
+        )
+
+    stream_mock.assert_not_awaited()
