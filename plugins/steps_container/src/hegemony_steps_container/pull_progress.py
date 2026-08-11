@@ -233,6 +233,20 @@ class _LayerState:
 
 
 @dataclass(frozen=True)
+class PullOutcome:
+    """What a finished pull actually did, for the completion event.
+
+    ``up_to_date`` comes from the daemon's own closing status line rather
+    than from byte math: a pull that moved no bytes is not proof the image
+    was already complete (a daemon may report no layer objects at all), and
+    the daemon states it outright.
+    """
+
+    up_to_date: bool
+    bytes_downloaded: int
+
+
+@dataclass(frozen=True)
 class PullSnapshot:
     """One aggregated view of the pull, ready for an event emission."""
 
@@ -379,6 +393,35 @@ def _is_terminal_status(obj: Mapping[str, Any]) -> bool:
     return isinstance(status, str) and status.startswith(("Status:", "Digest:"))
 
 
+def _says_up_to_date(obj: Mapping[str, Any]) -> bool:
+    """True for the daemon's "nothing to fetch" closing line.
+
+    A pull that finds every layer present ends with ``Status: Image is up to
+    date for <ref>`` instead of ``Status: Downloaded newer image for <ref>``.
+    The docker CLI prints the same sentence, so both pull paths recognise a
+    cached image the same way.
+    """
+    status = obj.get("status")
+    return isinstance(status, str) and "image is up to date" in status.lower()
+
+
+def format_size(num_bytes: int) -> str:
+    """Render a byte count the way ``docker images`` does — SI units, not binary.
+
+    Matching docker's own display matters more than binary correctness here:
+    the number is there to be recognised next to the one the reader gets from
+    `docker images`, and 1.02 GB vs 972 MiB for the same image invites a
+    bug report.
+    """
+    if num_bytes >= 1_000_000_000:
+        return f"{num_bytes / 1e9:.1f} GB"
+    if num_bytes >= 1_000_000:
+        return f"{num_bytes / 1e6:.0f} MB"
+    if num_bytes >= 1_000:
+        return f"{num_bytes / 1e3:.0f} kB"
+    return f"{num_bytes} B"
+
+
 def _format_progress_message(image: str, snap: PullSnapshot, pct: float | None) -> str:
     mb = 1e6
     if pct is not None and snap.phase == "extracting":
@@ -406,14 +449,14 @@ async def stream_pull(
     emit: Callable[..., Awaitable[None]],
     transport: httpx.AsyncBaseTransport | None = None,
     now: Callable[[], float] = time.monotonic,
-) -> None:
+) -> PullOutcome:
     """Pull ``image`` via the Engine API, emitting throttled progress events.
 
     ``emit`` is the handler's ``_safe_emit_progress`` (``message, attrs=...``).
     ``transport`` and ``now`` are test seams (``httpx.MockTransport`` and a
-    scripted clock). Returns on success; raises :class:`EnginePullError` when
-    the caller should fall back to the CLI pull. ``asyncio.CancelledError``
-    passes through untouched for step cancellation.
+    scripted clock). Returns a :class:`PullOutcome` on success; raises
+    :class:`EnginePullError` when the caller should fall back to the CLI pull.
+    ``asyncio.CancelledError`` passes through untouched for step cancellation.
     """
     # Pre-flight sits inside the EnginePullError boundary as well: this
     # module's contract is that *every* failure degrades to the CLI pull, and
@@ -442,6 +485,7 @@ async def stream_pull(
     last_pct = 0.0
     emitted = 0
     saw_terminal = False
+    up_to_date = False
 
     try:
         # trust_env=False is load-bearing: worker environments carry proxy
@@ -482,6 +526,7 @@ async def stream_pull(
                 aggregator.feed(obj)
                 if _is_terminal_status(obj):
                     saw_terminal = True
+                    up_to_date = up_to_date or _says_up_to_date(obj)
 
                 snap = aggregator.snapshot()
                 if snap.layers_total == 0:
@@ -533,3 +578,5 @@ async def stream_pull(
         raise
     except (httpx.HTTPError, httpx.StreamError, OSError) as e:
         raise EnginePullError(str(e)[:200] or type(e).__name__) from e
+
+    return PullOutcome(up_to_date=up_to_date, bytes_downloaded=aggregator.snapshot().bytes_current)

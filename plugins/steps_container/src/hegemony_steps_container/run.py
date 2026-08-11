@@ -28,9 +28,13 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
-from .pull_progress import EnginePullError, stream_pull
+from .pull_progress import EnginePullError, PullOutcome, format_size, stream_pull
 
 logger = logging.getLogger(__name__)
+
+# The image-size lookup is a caption, not a step operation: bounded well below
+# any step deadline so a wedged daemon costs a missing number, not the step.
+_IMAGE_INSPECT_TIMEOUT = 15.0
 
 
 def _docker_env(docker_host: str) -> dict[str, str] | None:
@@ -2147,9 +2151,10 @@ class RunContainerHandler(BaseHandler):
         )
         pull_start = time.monotonic()
         pull_method = "api"
+        outcome: PullOutcome | None = None
         remaining = max(deadline - pull_start, 1)
         try:
-            await asyncio.wait_for(
+            outcome = await asyncio.wait_for(
                 stream_pull(
                     image=image,
                     docker_host=docker_host,
@@ -2181,17 +2186,76 @@ class RunContainerHandler(BaseHandler):
                     error=f"Docker pull failed: {pull_proc.stderr[:500]}",
                     summary=f"Failed to pull image {image}",
                 )
+            # The CLI prints the same closing sentence the API stream carries,
+            # so a cached image reads the same on both paths. Bytes moved are
+            # not recoverable here — a piped `docker pull` prints no progress.
+            outcome = PullOutcome(
+                up_to_date="image is up to date" in pull_proc.stdout.lower(),
+                bytes_downloaded=-1,
+            )
         pull_duration = time.monotonic() - pull_start
-        await emit(
-            f"Image pulled in {pull_duration:.1f}s",
-            attrs={
-                "milestone": "pull_complete",
-                "image_pull_duration_seconds": round(pull_duration, 1),
-                "image": image,
-                "pull_method": pull_method,
-            },
+        image_size = await self._image_size_bytes(
+            docker_bin=docker_bin, image=image, docker_env=docker_env, deadline=deadline
         )
+
+        # Steps reuse images constantly — the same image across a whole flow is
+        # the normal case — and a pull that fetched nothing looked identical to
+        # one that fetched a gigabyte. Say which happened, and how big the
+        # thing is either way.
+        size_note = f" ({format_size(image_size)})" if image_size is not None else ""
+        if outcome is not None and outcome.up_to_date:
+            message = f"Image already present{size_note}, checked in {pull_duration:.1f}s"
+        else:
+            message = f"Image pulled in {pull_duration:.1f}s{size_note}"
+
+        attrs: dict[str, Any] = {
+            "milestone": "pull_complete",
+            "image_pull_duration_seconds": round(pull_duration, 1),
+            "image": image,
+            "pull_method": pull_method,
+        }
+        if image_size is not None:
+            attrs["image_size_bytes"] = image_size
+        if outcome is not None:
+            attrs["image_up_to_date"] = outcome.up_to_date
+            if outcome.bytes_downloaded >= 0:
+                attrs["bytes_downloaded"] = outcome.bytes_downloaded
+        await emit(message, attrs=attrs)
         return None
+
+    async def _image_size_bytes(
+        self,
+        *,
+        docker_bin: str,
+        image: str,
+        docker_env: dict[str, str] | None,
+        deadline: float,
+    ) -> int | None:
+        """On-disk size of ``image``, or None when the daemon will not say.
+
+        The number ``docker images`` prints — the unpacked size — rather than
+        the bytes that crossed the wire. It is the figure a reader can check
+        against their own daemon, and the only one that still means something
+        when the pull transferred nothing at all.
+
+        Never fails the step: this is a caption on an event that has already
+        succeeded, so a daemon that is slow or terse just loses the caption.
+        """
+        try:
+            proc = await self._run_docker(
+                docker_bin,
+                ["image", "inspect", "--format", "{{.Size}}", image],
+                env=docker_env,
+                timeout=min(max(deadline - time.monotonic(), 1), _IMAGE_INSPECT_TIMEOUT),
+            )
+        except (subprocess.SubprocessError, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        try:
+            return int(proc.stdout.strip())
+        except ValueError:
+            return None
 
     @staticmethod
     async def _run_docker(
