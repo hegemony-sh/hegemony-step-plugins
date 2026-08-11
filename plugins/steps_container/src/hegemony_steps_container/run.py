@@ -28,7 +28,13 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
-from .pull_progress import EnginePullError, PullOutcome, format_size, stream_pull
+from .pull_progress import (
+    BYTES_UNKNOWN,
+    EnginePullError,
+    PullOutcome,
+    format_size,
+    stream_pull,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2191,7 +2197,7 @@ class RunContainerHandler(BaseHandler):
             # not recoverable here — a piped `docker pull` prints no progress.
             outcome = PullOutcome(
                 up_to_date="image is up to date" in pull_proc.stdout.lower(),
-                bytes_downloaded=-1,
+                bytes_downloaded=BYTES_UNKNOWN,
             )
         pull_duration = time.monotonic() - pull_start
         image_size = await self._image_size_bytes(
@@ -2218,7 +2224,7 @@ class RunContainerHandler(BaseHandler):
             attrs["image_size_bytes"] = image_size
         if outcome is not None:
             attrs["image_up_to_date"] = outcome.up_to_date
-            if outcome.bytes_downloaded >= 0:
+            if outcome.bytes_downloaded != BYTES_UNKNOWN:
                 attrs["bytes_downloaded"] = outcome.bytes_downloaded
         await emit(message, attrs=attrs)
         return None
@@ -2238,15 +2244,20 @@ class RunContainerHandler(BaseHandler):
         against their own daemon, and the only one that still means something
         when the pull transferred nothing at all.
 
-        Never fails the step: this is a caption on an event that has already
-        succeeded, so a daemon that is slow or terse just loses the caption.
+        Never fails the step, and never extends it: this is a caption on an
+        event that has already succeeded, so a daemon that is slow or terse
+        just loses the caption. A step already out of time skips the lookup
+        rather than spending another second of a budget it has overrun.
         """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
         try:
             proc = await self._run_docker(
                 docker_bin,
                 ["image", "inspect", "--format", "{{.Size}}", image],
                 env=docker_env,
-                timeout=min(max(deadline - time.monotonic(), 1), _IMAGE_INSPECT_TIMEOUT),
+                timeout=min(remaining, _IMAGE_INSPECT_TIMEOUT),
             )
         except (subprocess.SubprocessError, OSError):
             return None

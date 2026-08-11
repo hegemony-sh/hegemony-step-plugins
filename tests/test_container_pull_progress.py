@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -27,6 +28,7 @@ import pytest
 
 from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerServices
 from hegemony_steps_container.pull_progress import (
+    BYTES_UNKNOWN,
     EnginePullError,
     EnginePullUnsupported,
     PullOutcome,
@@ -803,3 +805,67 @@ async def test_execute_completion_survives_a_daemon_that_will_not_size_it(monkey
     message, attrs = next((msg, a) for msg, a in events if a.get("milestone") == "pull_complete")
     assert re.fullmatch(r"Image pulled in \d+\.\ds", message), message
     assert "image_size_bytes" not in attrs
+
+
+async def test_stream_pull_will_not_call_an_unmeasured_pull_zero() -> None:
+    """A daemon that fetched something without saying how much reports unknown.
+
+    Containerd-store daemons emit statuses this module does not interpret, so
+    the aggregator can hold 0 bytes for a pull that really moved data. Passing
+    that 0 on would assert the opposite of what happened — the same reason the
+    CLI path reports unknown rather than zero.
+    """
+    lines = [
+        {"status": "Some future containerd status", "id": "aaa"},
+        {"status": f"Digest: {_DIGEST}"},
+        {"status": "Status: Downloaded newer image for alpine:3.20"},
+    ]
+
+    outcome = await stream_pull(
+        image="alpine:3.20",
+        docker_host="",
+        env={},
+        emit=_EmitRecorder(),
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
+        now=_Clock([0.0, 5.0]),
+    )
+
+    assert outcome.up_to_date is False
+    assert outcome.bytes_downloaded == BYTES_UNKNOWN
+
+
+async def test_execute_omits_bytes_downloaded_when_unmeasured(monkeypatch) -> None:
+    _install_docker_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "hegemony_steps_container.run.stream_pull",
+        AsyncMock(return_value=PullOutcome(up_to_date=False, bytes_downloaded=BYTES_UNKNOWN)),
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = await RunContainerHandler().execute(_ctx(events))
+    assert result.success is True
+
+    attrs = next(a for _msg, a in events if a.get("milestone") == "pull_complete")
+    assert "bytes_downloaded" not in attrs
+    assert attrs["image_up_to_date"] is False
+
+
+async def test_image_size_lookup_skipped_once_the_deadline_is_gone(monkeypatch) -> None:
+    """The caption never buys itself time a step has already overrun."""
+    calls: list[list[str]] = []
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="120000000\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_subprocess_run)
+
+    size = await RunContainerHandler()._image_size_bytes(
+        docker_bin="docker",
+        image="alpine:3.20",
+        docker_env=None,
+        deadline=time.monotonic() - 1,
+    )
+
+    assert size is None
+    assert calls == []

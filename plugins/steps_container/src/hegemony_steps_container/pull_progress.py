@@ -36,6 +36,10 @@ import httpx
 
 DEFAULT_UNIX_SOCKET = "/var/run/docker.sock"
 
+# Sentinel for PullOutcome.bytes_downloaded: the pull fetched something but
+# never said how much. Distinct from 0, which asserts nothing was fetched.
+BYTES_UNKNOWN = -1
+
 # Docker Hub credentials live under the legacy index key in config.json; the
 # other aliases show up from tooling that writes the modern hostnames.
 DOCKER_HUB_AUTH_KEYS = (
@@ -240,6 +244,12 @@ class PullOutcome:
     than from byte math: a pull that moved no bytes is not proof the image
     was already complete (a daemon may report no layer objects at all), and
     the daemon states it outright.
+
+    ``bytes_downloaded`` is ``BYTES_UNKNOWN`` when the pull moved data but
+    never reported how much — a daemon whose statuses this module does not
+    interpret, or the CLI fallback, where a piped ``docker pull`` prints no
+    progress at all. Callers must not treat that as zero: "we did not
+    measure" and "nothing was fetched" are opposite facts about a pull.
     """
 
     up_to_date: bool
@@ -579,4 +589,12 @@ async def stream_pull(
     except (httpx.HTTPError, httpx.StreamError, OSError) as e:
         raise EnginePullError(str(e)[:200] or type(e).__name__) from e
 
-    return PullOutcome(up_to_date=up_to_date, bytes_downloaded=aggregator.snapshot().bytes_current)
+    # A daemon that fetched a newer image while reporting no layer totals
+    # leaves us with nothing to say. Reporting the 0 the aggregator holds
+    # would claim the opposite of what happened.
+    snap = aggregator.snapshot()
+    measured = up_to_date or snap.bytes_total > 0
+    return PullOutcome(
+        up_to_date=up_to_date,
+        bytes_downloaded=snap.bytes_current if measured else BYTES_UNKNOWN,
+    )
