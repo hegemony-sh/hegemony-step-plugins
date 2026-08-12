@@ -1057,8 +1057,8 @@ class RunContainerHandler(BaseHandler):
         that this step's packet counters can be scoped to this container; an
         address the daemon rejects as taken fails the start rather than
         launching under someone else's counters, and the platform allocates a
-        different one on the retry. Both empty is the ordinary case for a step
-        with no egress policy.
+        different one on the retry. Both are empty for the ordinary step, which
+        declares no egress policy.
         """
         image = config.get("image", "")
         command = config.get("command", [])
