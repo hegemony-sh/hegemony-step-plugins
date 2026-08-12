@@ -128,6 +128,15 @@ class ContainerRuntime:
     # for deny-all). Empty means no policy network — default networking.
     # An explicit config-level ``network_mode`` (admin host access) wins.
     docker_network: str = ""
+    # Addresses the container must take on ``docker_network`` (``--ip`` and
+    # ``--ip6``). The worker reserves them so it can scope this step's egress
+    # packet counters to this container alone; a policy network is shared by
+    # every step under the policy, so counters written against the subnet
+    # belong to all of them at once. Empty means let Docker allocate — the
+    # step runs identically, and its egress report covers the whole policy
+    # network instead of just itself.
+    docker_ip: str = ""
+    docker_ip6: str = ""
 
 
 @runtime_checkable
