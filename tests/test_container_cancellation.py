@@ -13,8 +13,10 @@ unshielded ``await`` in a cancelled task, so it cannot be the only thing
 standing between a cancelled step and a stranded docker client.
 
 ``execute()`` therefore catches the cancellation, kills the client, and
-re-raises. Both halves are asserted here: the client dies, and cancellation
-still propagates out of ``execute()``.
+re-raises. Covered here: the client dies whether cancellation lands while
+waiting on the exited process or mid-stream with the readers still attached,
+cancellation still propagates out of ``execute()``, and no helper task (the
+output flusher, most of all) survives the cancelled step.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerServices
 from hegemony_steps_container.run import RunContainerHandler
@@ -73,6 +76,14 @@ class _EmptyStream:
         return b""
 
 
+class _BlockingStream:
+    """A pipe that never yields a line, keeping the readers parked mid-stream."""
+
+    async def readline(self) -> bytes:
+        await asyncio.Event().wait()  # never set
+        raise AssertionError("unreachable")
+
+
 class _AttachedProc:
     """``docker start -a`` that never exits on its own, and records SIGKILL.
 
@@ -80,11 +91,11 @@ class _AttachedProc:
     exactly the state a cancellation has to interrupt.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, stream_cls: type = _EmptyStream) -> None:
         self.returncode: int | None = None
         self.killed = False
-        self.stdout = _EmptyStream()
-        self.stderr = _EmptyStream()
+        self.stdout = stream_cls()
+        self.stderr = stream_cls()
 
     async def wait(self) -> int:
         await asyncio.Event().wait()  # never set
@@ -94,32 +105,36 @@ class _AttachedProc:
         self.killed = True
 
 
-async def test_cancelled_step_kills_the_attached_docker_client(monkeypatch) -> None:
+def _install_mocks(monkeypatch, *, stream_cls: type) -> tuple[asyncio.Event, list[_AttachedProc]]:
+    """Mock every seam that would touch a real docker daemon.
+
+    ``stream_pull`` is mocked to succeed so the test never opens the local
+    docker socket; everything else is the same subprocess fakery as the
+    pull-progress harness.
+    """
     started = asyncio.Event()
     procs: list[_AttachedProc] = []
 
     def fake_subprocess_run(cmd, *args, **kwargs):
-        # Pull, image inspect, preflight ps, and the cleanup rm all land here.
+        # Image inspect, create, preflight ps, and the cleanup rm all land here.
         argv = list(cmd)
         if argv[:3] == ["docker", "image", "inspect"]:
             return SimpleNamespace(returncode=0, stdout="120000000\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     async def fake_create_subprocess_exec(*argv, **kwargs):
-        proc = _AttachedProc()
+        proc = _AttachedProc(stream_cls)
         procs.append(proc)
         started.set()
         return proc
 
+    monkeypatch.setattr("hegemony_steps_container.run.stream_pull", AsyncMock(return_value=None))
     monkeypatch.setattr("subprocess.run", fake_subprocess_run)
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+    return started, procs
 
-    task = asyncio.create_task(RunContainerHandler().execute(_ctx()))
-    await asyncio.wait_for(started.wait(), timeout=10)
-    # Let the readers drain and the handler park on proc.wait().
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
 
+async def _cancel_and_await(task: asyncio.Task) -> None:
     task.cancel()
     try:
         await asyncio.wait_for(task, timeout=10)
@@ -128,5 +143,45 @@ async def test_cancelled_step_kills_the_attached_docker_client(monkeypatch) -> N
     else:
         raise AssertionError("cancellation should propagate out of execute()")
 
+
+def _leaked_tasks() -> list[asyncio.Task]:
+    return [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
+
+
+async def test_cancelled_step_kills_the_attached_docker_client(monkeypatch) -> None:
+    """Cancellation while parked on the exited-process wait."""
+    started, procs = _install_mocks(monkeypatch, stream_cls=_EmptyStream)
+
+    task = asyncio.create_task(RunContainerHandler().execute(_ctx()))
+    await asyncio.wait_for(started.wait(), timeout=10)
+    # Let the readers drain and the handler park on proc.wait().
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    await _cancel_and_await(task)
+
     assert procs, "the attached docker client was never spawned"
     assert procs[0].killed, "cancelled step left `docker start -a` running"
+
+
+async def test_cancelled_step_mid_stream_leaves_no_tasks_behind(monkeypatch) -> None:
+    """Cancellation while the readers are still attached.
+
+    This is the path where gather() cancels the readers before they set their
+    done-flags, so the flusher's loop condition can never come true -- without
+    the explicit flusher cancel, one immortal task per cancelled step.
+    """
+    started, procs = _install_mocks(monkeypatch, stream_cls=_BlockingStream)
+
+    task = asyncio.create_task(RunContainerHandler().execute(_ctx()))
+    await asyncio.wait_for(started.wait(), timeout=10)
+    # Let the readers start and park on readline(), and the flusher on sleep().
+    await asyncio.sleep(0.05)
+
+    await _cancel_and_await(task)
+
+    assert procs[0].killed, "cancelled step left `docker start -a` running"
+    # Give the cancelled helpers one cycle to finish unwinding, then insist
+    # nothing from the step is still running.
+    await asyncio.sleep(0.05)
+    assert not _leaked_tasks(), "cancelled step left helper tasks running"

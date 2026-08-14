@@ -1928,6 +1928,18 @@ class RunContainerHandler(BaseHandler):
                     with contextlib.suppress(Exception):
                         await flusher_task
                     raise
+                except asyncio.CancelledError:
+                    # Outer cancellation. gather() has already cancelled the
+                    # readers, so they never reach their mark-done lines — and
+                    # the flusher's loop waits on exactly those flags, so
+                    # nothing else would ever stop it: one immortal task per
+                    # cancelled step. Cancel it (no await — same cancelled-task
+                    # rule as the caller's kill path) and let the cancellation
+                    # propagate.
+                    for t in reader_tasks:
+                        t.cancel()
+                    flusher_task.cancel()
+                    raise
 
                 # Readers done — let flusher complete its final flush
                 try:
