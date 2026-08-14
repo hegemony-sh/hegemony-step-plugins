@@ -1928,6 +1928,18 @@ class RunContainerHandler(BaseHandler):
                     with contextlib.suppress(Exception):
                         await flusher_task
                     raise
+                except asyncio.CancelledError:
+                    # Outer cancellation. gather() has already cancelled the
+                    # readers, so they never reach their mark-done lines — and
+                    # the flusher's loop waits on exactly those flags, so
+                    # nothing else would ever stop it: one immortal task per
+                    # cancelled step. Cancel it (no await — same cancelled-task
+                    # rule as the caller's kill path) and let the cancellation
+                    # propagate.
+                    for t in reader_tasks:
+                        t.cancel()
+                    flusher_task.cancel()
+                    raise
 
                 # Readers done — let flusher complete its final flush
                 try:
@@ -1962,6 +1974,23 @@ class RunContainerHandler(BaseHandler):
                     error=f"Container execution timed out after {timeout}s",
                     summary="Container timed out",
                 )
+            except asyncio.CancelledError:
+                # Cancellation (workflow cancelled, heartbeat timeout) is a
+                # BaseException, so it bypasses the `except Exception` clause
+                # below: without this branch, `finally` would be the only thing
+                # that runs. `finally` force-removes the container, which is
+                # what normally ends this attached client -- but it is an
+                # unshielded `await` in a cancelled task, so it cannot be the
+                # last line of defence. Kill the client here so `docker start
+                # -a` can never outlive the step it belongs to.
+                #
+                # Deliberately no `await proc.wait()`: awaiting inside an
+                # already-cancelling task is not guaranteed to make progress,
+                # and the event loop's child watcher reaps the killed process
+                # whether or not anyone waits on it.
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                raise
 
             raw_stdout = stdout_out
             raw_stderr = stderr_out
