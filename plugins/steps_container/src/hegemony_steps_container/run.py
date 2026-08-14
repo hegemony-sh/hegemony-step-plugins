@@ -1962,6 +1962,22 @@ class RunContainerHandler(BaseHandler):
                     error=f"Container execution timed out after {timeout}s",
                     summary="Container timed out",
                 )
+            except asyncio.CancelledError:
+                # Cancellation (workflow cancelled, heartbeat timeout) is a
+                # BaseException, so none of the `except` clauses below see it
+                # and `finally` is all that runs. That path force-removes the
+                # container, which does end this attached client -- but only
+                # when the cleanup `await` is not itself cancelled, and it is
+                # not shielded. Kill the client here so `docker start -a` can
+                # never outlive the step it belongs to.
+                #
+                # Deliberately no `await proc.wait()`: awaiting inside an
+                # already-cancelling task is not guaranteed to make progress,
+                # and the event loop's child watcher reaps the killed process
+                # whether or not anyone waits on it.
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                raise
 
             raw_stdout = stdout_out
             raw_stderr = stderr_out
