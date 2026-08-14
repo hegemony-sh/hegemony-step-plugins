@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, StepKind
 
+from .targets import all_probe_targets
+
 logger = logging.getLogger(__name__)
 
 _SCHEME_DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -104,12 +106,12 @@ class HttpProbeHandler(BaseHandler):
     default_config = {"scheme": "http", "path": "/", "expected_status": "200-399"}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
-        target_devices = ctx.get_target_devices()
+        target_devices = all_probe_targets(ctx)
         if not target_devices:
             return HandlerResult(
                 success=False,
-                error="No target devices configured",
-                summary="Missing target device",
+                error="No target devices or IPs configured",
+                summary="Missing targets",
             )
 
         scheme = ctx.config.get("scheme", "http")
@@ -145,8 +147,10 @@ class HttpProbeHandler(BaseHandler):
             verify=verify_tls, follow_redirects=follow_redirects, timeout=timeout_sec
         ) as client:
             for device in target_devices:
-                device_id = device.get("id", "unknown")
-                device_name = device.get("name", device_id)
+                # None for a direct-IP target: it has no inventory identity,
+                # and the artifact column behind evidence device_id is a UUID.
+                device_id = device.get("id")
+                device_name = device.get("name") or device_id or "unknown"
                 host = device.get("mgmt_host")
                 if not host:
                     failed_devices.append(f"{device_name} (no host)")

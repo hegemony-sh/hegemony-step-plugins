@@ -5,6 +5,7 @@
 """DnsProbeHandler: DNS resolution checks."""
 
 import asyncio
+import ipaddress
 import logging
 import time
 from typing import Any, Literal
@@ -15,7 +16,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, StepKind
 
+from .targets import all_probe_targets
+
 logger = logging.getLogger(__name__)
+
+
+def _looks_like_ip(value: str) -> bool:
+    """Is this target an address literal rather than a resolvable name?"""
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
 
 
 def normalize_answer(value: str) -> str:
@@ -91,12 +103,12 @@ class DnsProbeHandler(BaseHandler):
     default_config = {"record_type": "A", "timeout_sec": 5}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
-        target_devices = ctx.get_target_devices()
+        target_devices = all_probe_targets(ctx)
         if not target_devices:
             return HandlerResult(
                 success=False,
-                error="No target devices configured",
-                summary="Missing target device",
+                error="No target devices or IPs configured",
+                summary="Missing targets",
             )
 
         configured_name = str(ctx.config.get("query_name", "") or "").strip()
@@ -116,11 +128,19 @@ class DnsProbeHandler(BaseHandler):
         success_count = 0
 
         for device in target_devices:
-            device_id = device.get("id", "unknown")
-            device_name = device.get("name", device_id)
+            # None for a direct-IP target: it has no inventory identity, and
+            # the artifact column behind evidence device_id is a UUID.
+            device_id = device.get("id")
+            device_name = device.get("name") or device_id or "unknown"
             query_name = configured_name or device.get("hostname") or device.get("mgmt_host")
             if not query_name:
                 failed_devices.append(f"{device_name} (no name to resolve)")
+                continue
+            # A bare IP literal is not a DNS question. A direct-IP target only
+            # makes sense here alongside an explicit Name to Resolve; without
+            # one, resolving "8.8.8.8" as an A record would fail confusingly.
+            if not configured_name and _looks_like_ip(query_name):
+                failed_devices.append(f"{device_name} (IP target needs a Name to Resolve)")
                 continue
 
             answers: list[str] = []

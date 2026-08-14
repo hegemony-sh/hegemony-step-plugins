@@ -24,6 +24,8 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
+from .targets import all_probe_targets
+
 logger = logging.getLogger(__name__)
 
 
@@ -123,13 +125,13 @@ class ConnectivityCheckHandler(BaseHandler):
     default_config = {"check_type": "tcp_connect", "port": 22, "timeout_sec": 10, "attempts": 1}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
-        """Run connectivity check against all target devices."""
-        target_devices = ctx.get_target_devices()
+        """Run connectivity check against all targets (devices and direct IPs)."""
+        target_devices = all_probe_targets(ctx)
         if not target_devices:
             return HandlerResult(
                 success=False,
-                error="No target devices configured",
-                summary="Missing target device",
+                error="No target devices or IPs configured",
+                summary="Missing targets",
             )
 
         check_type = ctx.config.get("check_type", "tcp_connect")
@@ -168,8 +170,10 @@ class ConnectivityCheckHandler(BaseHandler):
         success_count = 0
 
         for device in target_devices:
-            device_id = device.get("id", "unknown")
-            device_name = device.get("name", device_id)
+            # None for a direct-IP target: it has no inventory identity, and
+            # the artifact column behind evidence device_id is a UUID.
+            device_id = device.get("id")
+            device_name = device.get("name") or device_id or "unknown"
             host = device.get("mgmt_host")
 
             if not host:
@@ -243,14 +247,14 @@ class ConnectivityCheckHandler(BaseHandler):
             return HandlerResult(
                 success=False,
                 error=f"Failed: {', '.join(failed_devices)}",
-                summary=f"{check_type}: {success_count}/{total} devices OK",
+                summary=f"{check_type}: {success_count}/{total} targets OK",
                 metrics=all_metrics,
                 evidence=all_evidence,
             )
 
         return HandlerResult(
             success=True,
-            summary=f"{check_type}: {success_count}/{total} devices OK",
+            summary=f"{check_type}: {success_count}/{total} targets OK",
             metrics=all_metrics,
             evidence=all_evidence,
         )

@@ -18,6 +18,8 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
+from .targets import all_probe_targets
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,12 +61,12 @@ class WaitReachableHandler(BaseHandler):
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Wait for all target devices to be reachable with stability window."""
-        target_devices = ctx.get_target_devices()
+        target_devices = all_probe_targets(ctx)
         if not target_devices:
             return HandlerResult(
                 success=False,
-                error="No target devices configured",
-                summary="Missing target device",
+                error="No target devices or IPs configured",
+                summary="Missing targets",
             )
 
         max_wait_seconds = ctx.config.get("max_wait_seconds", 300)
@@ -168,9 +170,9 @@ class WaitReachableHandler(BaseHandler):
                         {
                             "kind": "transport_meta",
                             "name": f"reachability_check_{device_name}",
-                            "device_id": device_id,
+                            "device_id": device.get("id"),
                             "content_json": {
-                                "device_id": device_id,
+                                "device_id": device.get("id"),
                                 "device_name": device_name,
                                 "host": device.get("mgmt_host"),
                                 "port": device.get("mgmt_port", 22),
