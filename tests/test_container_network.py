@@ -22,8 +22,7 @@ _BASE_CONFIG = {"image": "alpine:3.20", "command": ["echo hi"]}
 def _args(
     config: dict,
     docker_network: str = "",
-    docker_ip: str = "",
-    docker_ip6: str = "",
+    docker_mac: str = "",
 ) -> list[str]:
     return RunContainerHandler().build_docker_args(
         config=config,
@@ -31,8 +30,7 @@ def _args(
         run_id="run-1",
         step_run_id="step-1",
         docker_network=docker_network,
-        docker_ip=docker_ip,
-        docker_ip6=docker_ip6,
+        docker_mac=docker_mac,
     )
 
 
@@ -124,70 +122,55 @@ def test_network_disabled_still_works_without_policy_network() -> None:
 #
 # A policy network is shared by every step under the policy, so the firewall
 # counters written against its subnet belong to all of them at once. The
-# platform reserves an address per step so it can scope a step's egress report
-# to that step; the container has to actually take it, or the reservation
+# platform derives a hardware address per step so it can scope a step's egress
+# report to that step; the container has to actually take it, or the derivation
 # counts nothing.
 
 
-def test_reserved_addresses_are_pinned_on_the_policy_network() -> None:
+def test_the_step_s_mac_is_pinned_on_the_policy_network() -> None:
     args = _args(
         _BASE_CONFIG,
         docker_network="hegemony-egress-0123456789abcdef",
-        docker_ip="172.18.0.7",
-        docker_ip6="fd00:1::7",
+        docker_mac="02:42:ac:1f:00:5a",
     )
-    assert "--ip=172.18.0.7" in args
-    assert "--ip6=fd00:1::7" in args
+    assert "--mac-address=02:42:ac:1f:00:5a" in args
 
 
-def test_addresses_are_omitted_when_the_platform_reserved_none() -> None:
-    """The ordinary case, and the fallback when allocation did not work out:
-    Docker assigns, and the step's report covers the policy network instead."""
+def test_the_mac_is_omitted_when_the_platform_supplied_none() -> None:
+    """The ordinary case, and the fallback when attribution is unavailable:
+    Docker chooses, and the step's report covers the policy network instead."""
     args = _args(_BASE_CONFIG, docker_network="hegemony-egress-0123456789abcdef")
-    assert not [tok for tok in args if tok.startswith(("--ip=", "--ip6="))]
+    assert not [tok for tok in args if tok.startswith("--mac-address")]
 
 
-def test_one_family_can_be_pinned_without_the_other() -> None:
-    args = _args(
-        _BASE_CONFIG,
-        docker_network="hegemony-egress-0123456789abcdef",
-        docker_ip="172.18.0.7",
-    )
-    assert "--ip=172.18.0.7" in args
-    assert not [tok for tok in args if tok.startswith("--ip6=")]
-
-
-def test_deny_all_takes_no_address() -> None:
-    """`none` is not a network an address can be allocated from; passing one
-    would make docker reject the create outright."""
+def test_deny_all_takes_no_mac() -> None:
+    """`none` gives the container no interface for an address to sit on."""
     args = _args(
         _BASE_CONFIG,
         docker_network="none",
-        docker_ip="172.18.0.7",
-        docker_ip6="fd00:1::7",
+        docker_mac="02:42:ac:1f:00:5a",
     )
     assert "--network=none" in args
-    assert not [tok for tok in args if tok.startswith(("--ip=", "--ip6="))]
+    assert not [tok for tok in args if tok.startswith("--mac-address")]
 
 
-def test_host_access_network_mode_takes_no_address() -> None:
-    """An admin `network_mode` wins over the policy network, and an address
-    from a network the container is not on would fail the create."""
+def test_host_access_network_mode_takes_no_mac() -> None:
+    """An admin `network_mode` wins over the policy network, and the shared
+    netns it may name has no per-container address to pin."""
     args = _args(
         {**_BASE_CONFIG, "network_mode": "host"},
         docker_network="hegemony-egress-0123456789abcdef",
-        docker_ip="172.18.0.7",
+        docker_mac="02:42:ac:1f:00:5a",
     )
     assert "--network=host" in args
-    assert not [tok for tok in args if tok.startswith("--ip=")]
+    assert not [tok for tok in args if tok.startswith("--mac-address")]
 
 
-def test_runtime_addresses_default_empty() -> None:
+def test_runtime_mac_defaults_empty() -> None:
     runtime = ContainerRuntime(
         docker_bin="docker",
         shared_workspaces_enabled=False,
         shared_workspace_root="",
         shared_workspace_volume="",
     )
-    assert runtime.docker_ip == ""
-    assert runtime.docker_ip6 == ""
+    assert runtime.docker_mac == ""

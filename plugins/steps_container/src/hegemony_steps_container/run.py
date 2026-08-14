@@ -1034,8 +1034,7 @@ class RunContainerHandler(BaseHandler):
         shared_workspace_path: str | None = None,
         shared_workspace_volume: str | None = None,
         docker_network: str = "",
-        docker_ip: str = "",
-        docker_ip6: str = "",
+        docker_mac: str = "",
     ) -> list[str]:
         """Build the docker create command args from config.
 
@@ -1052,13 +1051,11 @@ class RunContainerHandler(BaseHandler):
           bind-mounted at ``/shared`` (legacy Docker-in-Docker mode requiring an
           identical host path).
 
-        ``docker_ip``/``docker_ip6`` pin the container's addresses on the policy
-        network. The platform reserves them before programming the firewall so
-        that this step's packet counters can be scoped to this container; an
-        address the daemon rejects as taken fails the start rather than
-        launching under someone else's counters, and the platform allocates a
-        different one on the retry. Both are empty for the ordinary step, which
-        declares no egress policy.
+        ``docker_mac`` pins the container's hardware address on the policy
+        network. The platform derives it from this step run's own id before
+        programming the firewall, so that this step's packet counters can be
+        scoped to this container rather than to every step sharing the policy.
+        It is empty for the ordinary step, which declares no egress policy.
         """
         image = config.get("image", "")
         command = config.get("command", [])
@@ -1096,15 +1093,12 @@ class RunContainerHandler(BaseHandler):
             args.append(f"--network={network_mode}")
         elif docker_network:
             args.append(f"--network={docker_network}")
-            # Only meaningful on a policy network, and only when the platform
-            # reserved an address: it is what lets the worker count this
-            # container's egress separately from every other step running
-            # under the same policy. `none` takes no address at all.
-            if docker_network != "none":
-                if docker_ip:
-                    args.append(f"--ip={docker_ip}")
-                if docker_ip6:
-                    args.append(f"--ip6={docker_ip6}")
+            # Only meaningful on a policy network: it is what lets the
+            # worker count this container's egress separately from every other
+            # step running under the same policy. `none` has no interface to
+            # give an address to.
+            if docker_network != "none" and docker_mac:
+                args.append(f"--mac-address={docker_mac}")
         elif network_disabled:
             args.append("--network=none")
 
@@ -1636,8 +1630,7 @@ class RunContainerHandler(BaseHandler):
                 shared_workspace_path=shared_workspace_path,
                 shared_workspace_volume=shared_workspace_volume,
                 docker_network=runtime.docker_network,
-                docker_ip=runtime.docker_ip,
-                docker_ip6=runtime.docker_ip6,
+                docker_mac=runtime.docker_mac,
             )
             # 8. Create the container
             create_proc = await self._run_docker(
