@@ -5,12 +5,16 @@
 """Cancellation of a running container.run step.
 
 A cancelled activity (workflow cancelled, or a heartbeat timeout) raises
-``asyncio.CancelledError`` inside ``execute()``. That is a ``BaseException``,
-so none of the handler's ``except`` clauses see it and only ``finally`` runs.
-``finally`` force-removes the container, which is what normally ends the
-attached ``docker start -a`` client -- but it is an unshielded ``await`` in a
-cancelled task, so it cannot be the only thing standing between a cancelled
-step and a stranded docker client. The handler kills the client directly.
+``asyncio.CancelledError`` inside ``execute()``. Being a ``BaseException`` it
+bypasses the handler's ``except Exception`` clause, so the only other thing
+that would run is ``finally``. ``finally`` force-removes the container, which
+is what normally ends the attached ``docker start -a`` client -- but it is an
+unshielded ``await`` in a cancelled task, so it cannot be the only thing
+standing between a cancelled step and a stranded docker client.
+
+``execute()`` therefore catches the cancellation, kills the client, and
+re-raises. Both halves are asserted here: the client dies, and cancellation
+still propagates out of ``execute()``.
 """
 
 from __future__ import annotations

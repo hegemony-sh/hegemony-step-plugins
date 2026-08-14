@@ -1964,12 +1964,13 @@ class RunContainerHandler(BaseHandler):
                 )
             except asyncio.CancelledError:
                 # Cancellation (workflow cancelled, heartbeat timeout) is a
-                # BaseException, so none of the `except` clauses below see it
-                # and `finally` is all that runs. That path force-removes the
-                # container, which does end this attached client -- but only
-                # when the cleanup `await` is not itself cancelled, and it is
-                # not shielded. Kill the client here so `docker start -a` can
-                # never outlive the step it belongs to.
+                # BaseException, so it bypasses the `except Exception` clause
+                # below: without this branch, `finally` would be the only thing
+                # that runs. `finally` force-removes the container, which is
+                # what normally ends this attached client -- but it is an
+                # unshielded `await` in a cancelled task, so it cannot be the
+                # last line of defence. Kill the client here so `docker start
+                # -a` can never outlive the step it belongs to.
                 #
                 # Deliberately no `await proc.wait()`: awaiting inside an
                 # already-cancelling task is not guaranteed to make progress,
