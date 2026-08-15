@@ -347,14 +347,120 @@ async def test_wait_reachable_accepts_ip_targets(monkeypatch):
 
     monkeypatch.setattr(handler, "_check_tcp", always_up)
     # Bare services: no enforce_egress bound, as in a host without the gate.
+    # stable_seconds stays within the config model's ge=1 bound so the test
+    # exercises a config real step validation would accept.
     ctx = _ip_target_ctx(
-        {"max_wait_seconds": 5, "stable_seconds": 0, "poll_interval": 1},
+        {"max_wait_seconds": 10, "stable_seconds": 1, "poll_interval": 1},
         ["192.0.2.7"],
         services=type("_Services", (), {})(),
     )
     result = await handler.execute(ctx)
     assert result.success is True, result.error
     assert [e["device_id"] for e in result.evidence] == [None]
+    assert "target(s) stable" in (result.summary or "")
+
+
+async def test_check_tcp_handles_an_ipv6_literal_without_raising():
+    """An IPv6 direct target is a reachability question, not a crash.
+
+    The old AF_INET socket raised on a v6 literal before the connect ever
+    ran; the family-agnostic path must return a plain bool even on hosts
+    whose kernel lacks IPv6 entirely.
+    """
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    handler = WaitReachableHandler()
+    reachable = await handler._check_tcp("2001:db8::7", 22, 0.2)
+    assert reachable is False
+
+
+async def test_http_probe_brackets_ipv6_literals_and_gates_every_hop(monkeypatch):
+    """IPv6 authorities are bracketed, and each request walks the egress gate."""
+    import httpx
+
+    from hegemony_steps_probe import http_check
+    from hegemony_steps_probe.http_check import HttpProbeHandler
+
+    seen_urls: list[str] = []
+
+    def transport_handler(request: httpx.Request) -> httpx.Response:
+        """Record each URL the client actually sends and answer 200."""
+        seen_urls.append(str(request.url))
+        return httpx.Response(200, text="ok")
+
+    transport = httpx.MockTransport(transport_handler)
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        """The handler's own client, rerouted through the mock transport."""
+        kwargs["transport"] = transport
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(http_check.httpx, "AsyncClient", client_with_mock_transport)
+
+    gated: list[tuple[str, int]] = []
+
+    class _Services:
+        async def enforce_egress(self, host, port, *, proto, kind):
+            gated.append((host, port))
+
+    handler = HttpProbeHandler()
+    ctx = _ip_target_ctx(
+        {"scheme": "http", "path": "/health", "port": 8080},
+        ["2001:db8::7"],
+        services=_Services(),
+    )
+    result = await handler.execute(ctx)
+    assert result.success is True, result.error
+    assert seen_urls == ["http://[2001:db8::7]:8080/health"]
+    # The gate saw the unbracketed host with the effective port.
+    assert gated == [("2001:db8::7", 8080)]
+
+
+async def test_http_probe_refuses_a_redirect_to_a_denied_destination(monkeypatch):
+    """A redirect must not launder a denied destination through an allowed
+    first hop: the request hook walks every hop past the gate, and the denial
+    propagates as the policy's reason instead of a failed check."""
+    import httpx
+
+    from hegemony_steps_probe import http_check
+    from hegemony_steps_probe.http_check import HttpProbeHandler
+
+    sent: list[str] = []
+
+    def transport_handler(request: httpx.Request) -> httpx.Response:
+        """First hop redirects to a host the policy denies."""
+        sent.append(str(request.url))
+        return httpx.Response(302, headers={"location": "http://198.51.100.99/steal"})
+
+    transport = httpx.MockTransport(transport_handler)
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        """The handler's own client, rerouted through the mock transport."""
+        kwargs["transport"] = transport
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(http_check.httpx, "AsyncClient", client_with_mock_transport)
+
+    class _Denied(Exception):
+        pass
+
+    class _Services:
+        async def enforce_egress(self, host, port, *, proto, kind):
+            if host == "198.51.100.99":
+                raise _Denied(f"{kind} to {host} refused by the flow egress policy")
+
+    handler = HttpProbeHandler()
+    ctx = _ip_target_ctx(
+        {"scheme": "http", "path": "/", "follow_redirects": True},
+        ["192.0.2.1"],
+        services=_Services(),
+    )
+    with pytest.raises(_Denied):
+        await handler.execute(ctx)
+    # The redirected request was never sent — only the allowed first hop was.
+    assert sent == ["http://192.0.2.1/"]
 
 
 async def test_execute_cli_connects_with_the_device_platform():

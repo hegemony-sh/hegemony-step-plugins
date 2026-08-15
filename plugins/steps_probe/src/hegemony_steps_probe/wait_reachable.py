@@ -5,8 +5,8 @@
 """WaitReachableHandler: wait until devices are reachable and stable."""
 
 import asyncio
+import contextlib
 import logging
-import socket
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -54,7 +54,7 @@ class WaitReachableHandler(BaseHandler):
     handler_id = "probe.wait_reachable"
     supported_kinds = [StepKind.WAIT]
     display_name = "Wait Reachable (Stable)"
-    description = "Wait until target devices stay reachable for a stability window."
+    description = "Wait until targets stay reachable for a stability window."
     category = "Checks"
     config_model = WaitReachableConfig
     default_config = {"max_wait_seconds": 300, "stable_seconds": 30, "poll_interval": 5}
@@ -121,8 +121,8 @@ class WaitReachableHandler(BaseHandler):
                 ]
                 return HandlerResult(
                     success=False,
-                    error=f"Timeout waiting for devices: {', '.join(not_stable)}",
-                    summary=f"Devices not reachable after {max_wait_seconds}s",
+                    error=f"Timeout waiting for targets: {', '.join(not_stable)}",
+                    summary=f"Targets not reachable after {max_wait_seconds}s",
                     metrics={"attempts": attempts, "elapsed_seconds": elapsed},
                     evidence=all_evidence,
                 )
@@ -183,7 +183,7 @@ class WaitReachableHandler(BaseHandler):
                     )
                 return HandlerResult(
                     success=True,
-                    summary=f"All {len(target_devices)} device(s) stable for {stable_seconds}s",
+                    summary=f"All {len(target_devices)} target(s) stable for {stable_seconds}s",
                     metrics={
                         "attempts": attempts,
                         "elapsed_seconds": elapsed,
@@ -196,14 +196,20 @@ class WaitReachableHandler(BaseHandler):
             await asyncio.sleep(poll_interval)
 
     async def _check_tcp(self, host: str, port: int, timeout: float) -> bool:
-        """Check TCP connectivity."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setblocking(False)
+        """Check TCP connectivity, whatever family the target resolves to.
+
+        ``open_connection`` picks the socket family from the address itself,
+        so an IPv6 direct target (or a hostname resolving only to AAAA) is a
+        reachability question, not an automatic failure the AF_INET-only
+        socket used to report.
+        """
         try:
-            loop = asyncio.get_running_loop()
-            await asyncio.wait_for(loop.sock_connect(sock, (host, port)), timeout=timeout)
-            return True
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=timeout
+            )
         except Exception:
             return False
-        finally:
-            sock.close()
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+        return True

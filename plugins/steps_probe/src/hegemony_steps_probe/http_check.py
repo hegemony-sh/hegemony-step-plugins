@@ -143,8 +143,28 @@ class HttpProbeHandler(BaseHandler):
         failed_devices: list[str] = []
         success_count = 0
 
+        # This handler drives its own httpx client rather than going through
+        # services.run_probe, which is where the host applies the flow egress
+        # gate — so without this hook a restricted policy would never see
+        # these targets. A *request* hook rather than a pre-dial check,
+        # because with follow_redirects every hop is a new destination and a
+        # redirect must not launder a denied one through an allowed first
+        # hop. A denial raises out of the request rather than being recorded
+        # as a failed check, so the step reports the policy's reason.
+        enforce = getattr(ctx.require_services(), "enforce_egress", None)
+
+        async def _authorize_request(request: httpx.Request) -> None:
+            """Walk every outgoing request, redirect hops included, past the gate."""
+            if enforce is None:
+                return
+            port = request.url.port or _SCHEME_DEFAULT_PORTS.get(request.url.scheme, 80)
+            await enforce(request.url.host, port, proto="tcp", kind="http check")
+
         async with httpx.AsyncClient(
-            verify=verify_tls, follow_redirects=follow_redirects, timeout=timeout_sec
+            verify=verify_tls,
+            follow_redirects=follow_redirects,
+            timeout=timeout_sec,
+            event_hooks={"request": [_authorize_request]},
         ) as client:
             for device in target_devices:
                 # None for a direct-IP target: it has no inventory identity,
@@ -156,18 +176,11 @@ class HttpProbeHandler(BaseHandler):
                     failed_devices.append(f"{device_name} (no host)")
                     continue
 
-                netloc = host if default_port else f"{host}:{effective_port}"
+                # A colon marks an IPv6 literal (hostnames and IPv4 cannot
+                # carry one), and a URL authority requires it bracketed.
+                authority = f"[{host}]" if ":" in host else host
+                netloc = authority if default_port else f"{authority}:{effective_port}"
                 url = f"{scheme}://{netloc}{path}"
-
-                # This handler drives its own httpx client rather than going
-                # through services.run_probe, which is where the host applies
-                # the flow egress gate — so without this call a restricted
-                # policy would never see these targets. Ask before dialling;
-                # a denial propagates rather than being recorded as a failed
-                # check, so the step reports the policy's reason.
-                enforce = getattr(ctx.require_services(), "enforce_egress", None)
-                if enforce is not None:
-                    await enforce(host, effective_port, proto="tcp", kind="http check")
 
                 outcome: dict[str, Any] = {}
                 for attempt in range(attempts):
@@ -200,7 +213,7 @@ class HttpProbeHandler(BaseHandler):
                 )
 
         total = len(target_devices)
-        summary = f"http {method} {path}: {success_count}/{total} devices OK"
+        summary = f"http {method} {path}: {success_count}/{total} targets OK"
         if failed_devices:
             return HandlerResult(
                 success=False,
