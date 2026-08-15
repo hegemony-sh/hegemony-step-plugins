@@ -216,6 +216,253 @@ async def test_connectivity_probe_reports_unsupported_check_type():
     assert "not available" in (result.error or "")
 
 
+def _ip_target_ctx(handler_config: dict[str, Any], ips: list[str], services=None, **kwargs):
+    """A ctx targeted purely by direct-IP selectors — no devices, no roles."""
+    return HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        phase="VERIFY",
+        kind="CHECK",
+        config=handler_config,
+        step_target_ips=ips,
+        services=cast(HandlerServices, services) if services is not None else None,
+        **kwargs,
+    )
+
+
+async def test_connectivity_probe_accepts_direct_ip_targets():
+    """A probe aims at addresses, not at inventory: IP selectors alone are a
+    complete targeting — this exact shape used to fail 'No target devices
+    configured' while the monitor handler accepted it."""
+    from hegemony_step_sdk import ProbeResult
+    from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
+
+    calls: list[str] = []
+
+    class _Services:
+        async def run_probe(self, check_type, address, options):
+            calls.append(address)
+            return ProbeResult(ok=True, metrics={"rtt_ms": 2.5})
+
+    handler = ConnectivityCheckHandler()
+    ctx = _ip_target_ctx(
+        {"check_type": "icmp_ping", "timeout_sec": 3},
+        ["192.0.2.7", "192.0.2.8"],
+        services=_Services(),
+    )
+    result = await handler.execute(ctx)
+    assert result.success is True, result.error
+    assert calls == ["192.0.2.7", "192.0.2.8"]
+    assert result.summary == "icmp_ping: 2/2 targets OK"
+    # No inventory identity: the evidence must not invent one — the artifact
+    # column behind device_id is a UUID and an address would not survive it.
+    assert [e["device_id"] for e in result.evidence] == [None, None]
+    assert result.metrics == {"192.0.2.7_ms": 2.5, "192.0.2.8_ms": 2.5}
+
+
+async def test_connectivity_probe_unions_devices_and_ips():
+    """Devices and direct IPs are one target list, devices first."""
+    from hegemony_step_sdk import ProbeResult
+    from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
+
+    calls: list[str] = []
+
+    class _Services:
+        async def run_probe(self, check_type, address, options):
+            calls.append(address)
+            return ProbeResult(ok=True, metrics={"connect_ms": 1.0})
+
+    handler = ConnectivityCheckHandler()
+    ctx = HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        phase="VERIFY",
+        kind="CHECK",
+        config={"check_type": "tcp_connect", "port": 443},
+        target_roles=["primary"],
+        target_devices_by_role={"primary": [{"id": "d1", "name": "r1", "mgmt_host": "192.0.2.1"}]},
+        step_target_ips=["198.51.100.9"],
+        services=cast(HandlerServices, _Services()),
+    )
+    result = await handler.execute(ctx)
+    assert result.success is True, result.error
+    assert calls == ["192.0.2.1", "198.51.100.9"]
+    assert result.summary == "tcp_connect: 2/2 targets OK"
+
+
+async def test_probe_handlers_fail_the_same_way_without_any_target():
+    """All four probe handlers speak with one voice when nothing is targeted."""
+    from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
+    from hegemony_steps_probe.dns_check import DnsProbeHandler
+    from hegemony_steps_probe.http_check import HttpProbeHandler
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    for handler in (
+        ConnectivityCheckHandler(),
+        DnsProbeHandler(),
+        HttpProbeHandler(),
+        WaitReachableHandler(),
+    ):
+        result = await handler.execute(_ip_target_ctx({}, []))
+        assert result.success is False, handler.handler_id
+        assert result.error == "No target devices or IPs configured", handler.handler_id
+
+
+async def test_dns_probe_refuses_a_bare_ip_target_without_a_query_name(monkeypatch):
+    """An IP literal is not a DNS question. Without a Name to Resolve the
+    target fails with a pointed message instead of a baffling NXDOMAIN; with
+    one, the IP target is simply where the question came from."""
+    from hegemony_steps_probe import dns_check
+    from hegemony_steps_probe.dns_check import DnsProbeHandler
+
+    handler = DnsProbeHandler()
+    result = await handler.execute(_ip_target_ctx({}, ["192.0.2.7"]))
+    assert result.success is False
+    assert "IP target needs a Name to Resolve" in (result.error or "")
+
+    async def fake_resolve(query_name, record_type, *, resolver_ip="", timeout_sec=5.0):
+        assert query_name == "device.example.com"
+        return ["192.0.2.7"]
+
+    monkeypatch.setattr(dns_check, "resolve_records", fake_resolve)
+    result = await handler.execute(
+        _ip_target_ctx({"query_name": "device.example.com"}, ["192.0.2.7"])
+    )
+    assert result.success is True, result.error
+
+
+async def test_wait_reachable_accepts_ip_targets(monkeypatch):
+    """Reachability needs an address, not a device record."""
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    handler = WaitReachableHandler()
+
+    async def always_up(host, port, timeout):
+        assert host == "192.0.2.7"
+        return True
+
+    monkeypatch.setattr(handler, "_check_tcp", always_up)
+    # Bare services: no enforce_egress bound, as in a host without the gate.
+    # stable_seconds stays within the config model's ge=1 bound so the test
+    # exercises a config real step validation would accept.
+    ctx = _ip_target_ctx(
+        {"max_wait_seconds": 10, "stable_seconds": 1, "poll_interval": 1},
+        ["192.0.2.7"],
+        services=type("_Services", (), {})(),
+    )
+    result = await handler.execute(ctx)
+    assert result.success is True, result.error
+    assert [e["device_id"] for e in result.evidence] == [None]
+    assert "target(s) stable" in (result.summary or "")
+
+
+async def test_check_tcp_handles_an_ipv6_literal_without_raising():
+    """An IPv6 direct target is a reachability question, not a crash.
+
+    The old AF_INET socket raised on a v6 literal before the connect ever
+    ran; the family-agnostic path must return a plain bool even on hosts
+    whose kernel lacks IPv6 entirely.
+    """
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    handler = WaitReachableHandler()
+    reachable = await handler._check_tcp("2001:db8::7", 22, 0.2)
+    assert reachable is False
+
+
+async def test_http_probe_brackets_ipv6_literals_and_gates_every_hop(monkeypatch):
+    """IPv6 authorities are bracketed, and each request walks the egress gate."""
+    import httpx
+
+    from hegemony_steps_probe import http_check
+    from hegemony_steps_probe.http_check import HttpProbeHandler
+
+    seen_urls: list[str] = []
+
+    def transport_handler(request: httpx.Request) -> httpx.Response:
+        """Record each URL the client actually sends and answer 200."""
+        seen_urls.append(str(request.url))
+        return httpx.Response(200, text="ok")
+
+    transport = httpx.MockTransport(transport_handler)
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        """The handler's own client, rerouted through the mock transport."""
+        kwargs["transport"] = transport
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(http_check.httpx, "AsyncClient", client_with_mock_transport)
+
+    gated: list[tuple[str, int]] = []
+
+    class _Services:
+        async def enforce_egress(self, host, port, *, proto, kind):
+            gated.append((host, port))
+
+    handler = HttpProbeHandler()
+    ctx = _ip_target_ctx(
+        {"scheme": "http", "path": "/health", "port": 8080},
+        ["2001:db8::7"],
+        services=_Services(),
+    )
+    result = await handler.execute(ctx)
+    assert result.success is True, result.error
+    assert seen_urls == ["http://[2001:db8::7]:8080/health"]
+    # The gate saw the unbracketed host with the effective port.
+    assert gated == [("2001:db8::7", 8080)]
+
+
+async def test_http_probe_refuses_a_redirect_to_a_denied_destination(monkeypatch):
+    """A redirect must not launder a denied destination through an allowed
+    first hop: the request hook walks every hop past the gate, and the denial
+    propagates as the policy's reason instead of a failed check."""
+    import httpx
+
+    from hegemony_steps_probe import http_check
+    from hegemony_steps_probe.http_check import HttpProbeHandler
+
+    sent: list[str] = []
+
+    def transport_handler(request: httpx.Request) -> httpx.Response:
+        """First hop redirects to a host the policy denies."""
+        sent.append(str(request.url))
+        return httpx.Response(302, headers={"location": "http://198.51.100.99/steal"})
+
+    transport = httpx.MockTransport(transport_handler)
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        """The handler's own client, rerouted through the mock transport."""
+        kwargs["transport"] = transport
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(http_check.httpx, "AsyncClient", client_with_mock_transport)
+
+    class _Denied(Exception):
+        pass
+
+    class _Services:
+        async def enforce_egress(self, host, port, *, proto, kind):
+            if host == "198.51.100.99":
+                raise _Denied(f"{kind} to {host} refused by the flow egress policy")
+
+    handler = HttpProbeHandler()
+    ctx = _ip_target_ctx(
+        {"scheme": "http", "path": "/", "follow_redirects": True},
+        ["192.0.2.1"],
+        services=_Services(),
+    )
+    with pytest.raises(_Denied):
+        await handler.execute(ctx)
+    # The redirected request was never sent — only the allowed first hop was.
+    assert sent == ["http://192.0.2.1/"]
+
+
 async def test_execute_cli_connects_with_the_device_platform():
     """netcli.execute forwards each device's platform to services.connect.
 
