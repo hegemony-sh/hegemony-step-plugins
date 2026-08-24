@@ -103,6 +103,9 @@ class GitSyncRepoHandler(BaseHandler):
             "force": force,
             "trigger_source": "scheduled",
         }
+        flow_ids = ctx.config.get("flow_ids")
+        if flow_ids:
+            payload["flow_ids"] = flow_ids
 
         max_attempts = 4
         last_exc: Exception | None = None

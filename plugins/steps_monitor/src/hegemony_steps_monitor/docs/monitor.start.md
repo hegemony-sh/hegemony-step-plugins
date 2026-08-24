@@ -16,7 +16,10 @@ configuration from its form fields.
 The provided configuration must include a `monitor_id` and a registered
 `check_id`; its `targets` selectors (role- or IP-based) are resolved to
 concrete addresses according to the configured address kind; the address
-family value is validated but does not currently affect address selection.
+family is a preference - `ipv4`/`ipv6` pick the first candidate address of
+that family for role-resolved devices, falling back to the kind's normal
+choice when no literal matches, while explicit IP targets are used as
+written.
 The step fails when the configuration or either id is missing, the check is
 not registered, the address kind or family is invalid, no targets resolve,
 or starting the monitor raises an error. On success it reports the monitor's

@@ -99,8 +99,8 @@ class StageResult:
     transfer_method: str = ""  # "http", "scp", "tftp", etc.
     transfer_elapsed_sec: float = 0.0
     hash_verified: bool = False
-    verified_hash: str | None = None  # MD5 or SHA256
-    hash_type: str = ""  # "md5", "sha256"
+    verified_hash: str | None = None  # MD5 (the only on-device check IOS-XE offers here)
+    hash_type: str = ""  # "md5"
     filesystem: str = ""
     full_path: str = ""  # e.g., "flash:cat9k_iosxe.17.09.01.SPA.bin"
     error: str | None = None
@@ -262,7 +262,6 @@ class UpgradeDriver(ABC):
         dest_filename: str,
         transfer_method: str = "auto",
         expected_md5: str | None = None,
-        expected_sha256: str | None = None,
         expected_size: int | None = None,
         overwrite: bool = False,
     ) -> StageResult:
@@ -282,7 +281,6 @@ class UpgradeDriver(ABC):
             dest_filename: Filename on device
             transfer_method: "auto", "http", "https", "scp", "tftp"
             expected_md5: Expected MD5 hash for verification
-            expected_sha256: Expected SHA256 hash for verification
             expected_size: Expected file size in bytes
             overwrite: Overwrite if file already exists
 

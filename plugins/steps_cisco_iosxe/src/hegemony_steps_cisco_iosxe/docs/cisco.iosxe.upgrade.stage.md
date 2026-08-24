@@ -24,13 +24,16 @@ pull when the source is an HTTP(S) URL. Selecting SCP is not yet supported by
 this step and fails with an explanatory error, so keep auto or an explicit
 HTTP(S) method.
 
-The transfer runs on every execution: a file already on the destination
-filesystem under the same name is replaced (the overwrite toggle exists for
-a future skip-if-verified path, but no documented field supplies the
-expected size that path needs, so today it does not change behavior). After
-a transfer, the MD5 checksum, when given, is verified on the device with
-`verify /md5`; note that only MD5 is checked on the device. Max Parallel
-Devices controls how many devices are staged concurrently.
+The MD5 checksum makes staging idempotent: when one is configured and a
+file already exists under the destination name, it is verified on the
+device with `verify /md5` and, if it matches, the transfer is skipped -
+that is what makes rerunning after a partial failure cheap. A file that
+fails the check, or an existing file with no checksum to prove it, is
+transferred again; turn on the overwrite option to force a fresh transfer
+regardless. After every transfer the checksum, when given, is verified the
+same way. Only MD5 is checked on the device - IOS-XE's `verify` offers no
+SHA-256 - so there is no SHA-256 field. Max Parallel Devices controls how
+many devices are staged concurrently.
 
 ## Output
 
@@ -57,5 +60,6 @@ device failing fails the whole step, though per-device evidence is still
 recorded.
 
 The step's default timeout is 7200 seconds, and each device-side HTTP
-transfer is capped at one hour. Rerunning after a partial failure is safe -
-already-staged devices simply transfer the image again.
+transfer is capped at one hour. Rerunning after a partial failure is cheap
+when an MD5 checksum is configured: devices whose staged image verifies are
+skipped. Without a checksum, every rerun transfers the image again.

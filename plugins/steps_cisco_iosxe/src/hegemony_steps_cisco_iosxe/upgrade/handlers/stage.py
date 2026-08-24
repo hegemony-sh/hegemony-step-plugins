@@ -119,24 +119,15 @@ class UpgradeStageConfig(BaseModel):
         ),
         json_schema_extra={"x_placeholder": "flash:"},
     )
-    expected_sha256: str = Field(
-        default="",
-        title="SHA-256 Checksum (optional)",
-        description=(
-            "SHA-256 hash of the image, recorded with the step for reference. "
-            "On-device integrity verification currently runs only against the "
-            "MD5 checksum, so fill in that field for an enforced check."
-        ),
-        json_schema_extra={
-            "x_placeholder": "a1b2c3d4e5f6...",
-            "x_col_span": 2,
-            "x_disabled_when": {"field": "file_ids", "is_not_empty": True},
-        },
-    )
     expected_md5: str = Field(
         default="",
         title="MD5 Checksum (optional)",
-        description="MD5 hash for on-device verification",
+        description=(
+            "MD5 hash verified on the device with verify /md5 after a "
+            "transfer - and before one: a file already staged under the "
+            "destination name that passes this check is not transferred "
+            "again."
+        ),
         json_schema_extra={
             "x_placeholder": "d41d8cd98f00b204e9800998ecf8427e",
             "x_col_span": 2,
@@ -196,7 +187,6 @@ class UpgradeStageHandler(BaseHandler):
         dest_fs: Destination filesystem (default: "flash:")
         transfer_method: "auto", "http", "https", "scp", "tftp" (default: "auto")
         expected_md5: MD5 hash for verification
-        expected_sha256: SHA256 hash for verification
         expected_size: Expected file size in bytes
         overwrite: Force re-transfer even if file exists (default: false)
 
@@ -282,7 +272,6 @@ class UpgradeStageHandler(BaseHandler):
         dest_fs = ctx.config.get("dest_fs", "flash:")
         transfer_method = ctx.config.get("transfer_method", "auto")
         expected_md5 = ctx.config.get("expected_md5")
-        expected_sha256 = ctx.config.get("expected_sha256")
         expected_size = ctx.config.get("expected_size")
         overwrite = ctx.config.get("overwrite", False)
 
@@ -332,7 +321,6 @@ class UpgradeStageHandler(BaseHandler):
                     dest_filename=dest_filename,
                     transfer_method=transfer_method,
                     expected_md5=expected_md5,
-                    expected_sha256=expected_sha256,
                     expected_size=expected_size,
                     overwrite=overwrite,
                 )

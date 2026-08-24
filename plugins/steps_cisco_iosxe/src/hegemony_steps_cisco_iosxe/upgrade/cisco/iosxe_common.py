@@ -176,7 +176,6 @@ async def stage_image(
     dest_filename: str,
     transfer_method: str,
     expected_md5: str | None,
-    expected_sha256: str | None,
     expected_size: int | None,
     overwrite: bool,
     select_transfer_method_fn,
@@ -203,15 +202,12 @@ async def stage_image(
         file_exists = "No such file" not in dir_output and "%Error" not in dir_output
         actual_size = parse_file_size_from_dir(dir_output, dest_filename) if file_exists else None
 
-        # If file exists with correct size and not forcing overwrite, verify hash
-        if (
-            file_exists
-            and not overwrite
-            and expected_size
-            and actual_size
-            and actual_size == expected_size
-        ):
-            # Size matches, verify hash if provided
+        # A file already on the device is reused only when we can prove it is
+        # the right one: the MD5 checksum, when configured, is verified on the
+        # device; otherwise a supplied expected size must match. With neither,
+        # the transfer runs again - re-transferring is safer than trusting a
+        # name collision or a partial earlier transfer.
+        if file_exists and not overwrite:
             if expected_md5:
                 hash_verified, hash_output = await verify_md5(ssh, full_path, expected_md5)
                 cli_outputs.append(hash_output)
@@ -222,7 +218,7 @@ async def stage_image(
                         success=True,
                         staged=True,
                         skipped=True,
-                        transferred_bytes=actual_size,
+                        transferred_bytes=actual_size or 0,
                         hash_verified=True,
                         verified_hash=expected_md5,
                         hash_type="md5",
@@ -230,7 +226,8 @@ async def stage_image(
                         full_path=full_path,
                         cli_output="\n".join(cli_outputs),
                     )
-            else:
+                logger.info("Existing image failed MD5 check, re-staging: %s", full_path)
+            elif expected_size and actual_size and actual_size == expected_size:
                 # No hash to verify, size matches = assume good
                 logger.info("Image already exists with correct size: %s", full_path)
                 return StageResult(

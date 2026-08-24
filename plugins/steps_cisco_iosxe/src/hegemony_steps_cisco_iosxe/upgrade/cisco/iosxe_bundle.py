@@ -197,7 +197,6 @@ class IOSXEBundleDriver(UpgradeDriver):
         dest_filename: str,
         transfer_method: str = "auto",
         expected_md5: str | None = None,
-        expected_sha256: str | None = None,
         expected_size: int | None = None,
         overwrite: bool = False,
     ) -> StageResult:
@@ -213,7 +212,6 @@ class IOSXEBundleDriver(UpgradeDriver):
             dest_filename=dest_filename,
             transfer_method=transfer_method,
             expected_md5=expected_md5,
-            expected_sha256=expected_sha256,
             expected_size=expected_size,
             overwrite=overwrite,
             select_transfer_method_fn=self.select_transfer_method,

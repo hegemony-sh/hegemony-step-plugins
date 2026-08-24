@@ -168,3 +168,43 @@ async def test_stop_handler_calls_services():
     )
     assert result.success is True
     assert services.stop_calls == [("m1", "join_fired")]
+
+
+def test_address_family_prefers_matching_literal():
+    """ipv4/ipv6 pick the first candidate of that family for role devices."""
+    devices = {
+        "core": [
+            {
+                "id": "d1",
+                "mgmt_ips": ["10.0.0.1", "2001:db8::1"],
+                "mgmt_host": "r1.example",
+            }
+        ]
+    }
+    config = {"address_kind": "primary", "targets": [{"type": "role", "role": "core"}]}
+
+    v6 = resolve_targets({**config, "address_family": "ipv6"}, devices)
+    assert [t["address"] for t in v6] == ["2001:db8::1"]
+    v4 = resolve_targets({**config, "address_family": "ipv4"}, devices)
+    assert [t["address"] for t in v4] == ["10.0.0.1"]
+    auto = resolve_targets({**config, "address_family": "auto"}, devices)
+    assert [t["address"] for t in auto] == ["10.0.0.1"]
+
+
+def test_address_family_falls_back_when_no_literal_matches():
+    """A preference, not a filter: hostnames and lone v4 still resolve under ipv6."""
+    devices = {"core": [{"id": "d1", "mgmt_host": "r1.example"}]}
+    resolved = resolve_targets(
+        {"address_family": "ipv6", "targets": [{"type": "role", "role": "core"}]},
+        devices,
+    )
+    assert [t["address"] for t in resolved] == ["r1.example"]
+
+
+def test_address_family_leaves_explicit_ip_targets_alone():
+    """Explicit IP selectors are used exactly as written, whatever the family."""
+    resolved = resolve_targets(
+        {"address_family": "ipv6", "targets": [{"type": "ip", "addresses": ["10.9.9.9"]}]},
+        {},
+    )
+    assert [t["address"] for t in resolved] == ["10.9.9.9"]
