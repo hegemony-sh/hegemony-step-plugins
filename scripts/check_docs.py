@@ -15,14 +15,15 @@ gate fires only when it bumps its pin, which is too late to help the person
 who forgot the page. Checks:
 
 - registered handler ids and doc pages match 1:1 both ways, per package;
-- every page carries the SPDX header, exactly one H1 (first), a title that
-  names the subject (no process words, no subtitle, no version, no trailing
-  period), and the handler id in a code span;
-- prose survives rendering: no raw HTML outside the SPDX comment, no bare
-  ``{{`` outside code, no images, no mermaid, and links only absolute
-  ``https://`` or in-page anchors;
+- every page satisfies the page contract - the structural and renderability
+  rules live in :func:`hegemony_step_sdk.docs.check_page`, beside the bundle
+  loader, so hosts and harvest tooling validate with identical logic;
 - every config-model field has a non-empty ``title`` and ``description``;
-- each plugin README mentions every handler id the plugin registers.
+- each plugin README mentions every handler id the plugin registers. This
+  check is substring-weak by design: an id appearing anywhere in the README
+  (a comment included) passes. It proves the README was touched when a
+  handler was added, not that the mention is prose - do not mistake it for
+  more.
 
 Exit is non-zero with one line per violation; run via ``task docs:check``.
 ``tests/test_docs_bundles.py`` runs the same checks under pytest so plain
@@ -31,39 +32,21 @@ Exit is non-zero with one line per violation; run via ``task docs:check``.
 
 from __future__ import annotations
 
-import re
 import sys
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
 
-from hegemony_step_sdk.docs import DocsBundleError, load_docs_bundle
+from hegemony_step_sdk.docs import (
+    DocsBundleError,
+    check_page as sdk_check_page,
+    load_docs_bundle,
+    prose_outside_code,
+)
+
+__all__ = ["check_page", "main", "prose_outside_code", "registered_handlers"]
 
 ROOT = Path(__file__).resolve().parents[1]
-
-SPDX_HEADER_RE = re.compile(
-    r"\A<!--\nSPDX-FileCopyrightText: [^\n]+\n\nSPDX-License-Identifier: [^\n]+\n-->\n"
-)
-H1_RE = re.compile(r"^# (.+)$", re.MULTILINE)
-HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-FENCE_RE = re.compile(r"^[ \t]*(```+|~~~+).*?^[ \t]*\1[ \t]*$", re.DOTALL | re.MULTILINE)
-CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1(?!`)", re.DOTALL)
-PARAGRAPH_SPLIT_RE = re.compile(r"(\n[ \t]*\n)")
-RAW_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
-IMAGE_RE = re.compile(r"!\[")
-NON_HTTPS_LINK_RE = re.compile(r"\]\((?!https://|#)[^)]+\)")
-REF_LINK_DEF_RE = re.compile(r"^ {0,3}\[[^\]]+\]:[ \t]*(\S+)", re.MULTILINE)
-AUTOLINK_RE = re.compile(r"<([A-Za-z][A-Za-z0-9+.-]*:[^<>\s]*)>")
-TITLE_PROCESS_RE = re.compile(
-    r"\b(draft|final|improved|new|obsolete|proposal|revised|tbd|todo|updated|wip)\b",
-    re.IGNORECASE,
-)
-TITLE_SUFFIX_RE = re.compile(
-    r"\b(doc|docs|documentation|guide|notes|plan|readme|spec|specification|study)\s*$",
-    re.IGNORECASE,
-)
-TITLE_VERSION_RE = re.compile(r"\bv\d+(\.\d+)*\b", re.IGNORECASE)
-TITLE_SUBTITLE_RE = re.compile(r"\s[-–—]\s|:")
 
 
 class _CollectingRegistry:
@@ -90,92 +73,9 @@ def registered_handlers() -> dict[str, list[Any]]:
     return by_package
 
 
-def _blank(match: re.Match[str]) -> str:
-    """Newline-preserving replacement, so blanked stretches keep line geometry."""
-    return "\n" * match.group(0).count("\n")
-
-
-def prose_outside_code(text: str) -> str:
-    """The page's prose with the SPDX comment, fences, and code spans blanked."""
-    text = HTML_COMMENT_RE.sub(_blank, text)
-    text = FENCE_RE.sub(_blank, text)
-    # Code spans are matched per paragraph (a span cannot contain a blank
-    # line), so one stray backtick cannot invert code and prose for the
-    # rest of the page.
-    return "".join(
-        part if PARAGRAPH_SPLIT_RE.fullmatch(part) else CODE_SPAN_RE.sub(_blank, part)
-        for part in PARAGRAPH_SPLIT_RE.split(text)
-    )
-
-
 def check_page(package: str, doc_id: str, text: str) -> list[str]:
-    """Structural and renderability violations for one page."""
-    where = f"{package}/docs/{doc_id}.md"
-    problems: list[str] = []
-
-    if not SPDX_HEADER_RE.match(text):
-        problems.append(f"{where}: must open with the SPDX HTML-comment header")
-
-    # Headings are counted with fenced code blanked, so a `# comment` line
-    # inside a shell example is not mistaken for a second H1.
-    body = FENCE_RE.sub(_blank, HTML_COMMENT_RE.sub("", text))
-    h1s = H1_RE.findall(body)
-    if len(h1s) != 1:
-        problems.append(f"{where}: needs exactly one H1, found {len(h1s)}")
-    elif not body.lstrip().startswith(f"# {h1s[0]}"):
-        problems.append(f"{where}: the H1 must be the first heading on the page")
-    if h1s:
-        title = h1s[0].strip()
-        for pattern, why in (
-            (TITLE_PROCESS_RE, "contains an authoring-process word"),
-            (TITLE_SUFFIX_RE, "ends in a genre suffix"),
-            (TITLE_VERSION_RE, "pins a version"),
-            (TITLE_SUBTITLE_RE, "carries a subtitle after a dash or colon"),
-        ):
-            if pattern.search(title):
-                problems.append(f"{where}: title {title!r} {why}")
-        if title.endswith("."):
-            problems.append(f"{where}: title {title!r} ends with a period")
-
-    if f"`{doc_id}`" not in text:
-        problems.append(f"{where}: must name its handler id in a code span (`{doc_id}`)")
-
-    prose = prose_outside_code(text)
-    for tag in sorted(set(RAW_TAG_RE.findall(prose))):
-        problems.append(
-            f"{where}: {tag} in prose is raw HTML the renderer drops - wrap it in backticks"
-        )
-    if "{{" in prose:
-        problems.append(f"{where}: bare {{{{ in prose - template examples belong in code spans")
-    if IMAGE_RE.search(prose):
-        problems.append(f"{where}: images are not allowed in plugin docs")
-    if "```mermaid" in text:
-        problems.append(f"{where}: mermaid diagrams are not allowed in plugin docs")
-    for link in NON_HTTPS_LINK_RE.findall(prose):
-        problems.append(
-            f"{where}: link {link!r} must be absolute https:// or an in-page anchor - "
-            "a bundled page has no base to resolve anything else against"
-        )
-    # Reference-style definitions ([name]: destination) render links too;
-    # CommonMark allows the destination in angle brackets.
-    for match in REF_LINK_DEF_RE.finditer(prose):
-        dest = match.group(1).strip("<>")
-        if not dest.startswith(("https://", "#")):
-            problems.append(
-                f"{where}: link definition {dest!r} must be absolute https:// or an "
-                "in-page anchor - a bundled page has no base to resolve anything "
-                "else against"
-            )
-    # Autolinks (<scheme:...>) render as links and carry their own scheme.
-    for match in AUTOLINK_RE.finditer(prose):
-        dest = match.group(1)
-        if not dest.startswith("https://"):
-            problems.append(
-                f"{where}: autolink <{dest}> must use https:// - plain-http and "
-                "other schemes are not allowed in plugin pages"
-            )
-
-    return problems
+    """The SDK's page contract, with violations prefixed by this repo's layout."""
+    return sdk_check_page(doc_id, text, where=f"{package}/docs/{doc_id}.md")
 
 
 def check_config_models(handlers: list[Any]) -> list[str]:
@@ -197,7 +97,12 @@ def check_config_models(handlers: list[Any]) -> list[str]:
 
 
 def check_readme(package: str, handler_ids: set[str]) -> list[str]:
-    """The owning plugin's README must mention every id it registers."""
+    """The owning plugin's README must mention every id it registers.
+
+    Substring matching on purpose (see the module docstring): cheap, zero
+    false negatives on missing mentions, and honest about proving presence
+    rather than prose quality.
+    """
     matches = list(ROOT.glob(f"*/*/src/{package}"))
     if not matches:
         return [f"{package}: cannot locate the plugin directory for its README"]

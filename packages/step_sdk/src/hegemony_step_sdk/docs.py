@@ -26,6 +26,17 @@ The loader is deliberately strict, and the strictness is the contract:
 Every violation raises :class:`DocsBundleError`. Producer-side gates want
 the failure; a host wraps the call so a bad bundle degrades to "no docs"
 and can never fail plugin registration or a catalog request.
+
+Beside the loader lives the page contract's checker, :func:`check_page`:
+the structural and renderability rules a page must satisfy (SPDX header,
+exactly one leading H1, subject-naming title, handler id in a code span, no
+raw HTML or images in prose, https-only links). It ships in the SDK - not in
+any one repository's scripts - so the producer gate, a host's sanitizer or
+claims tooling, and a documentation harvest all validate with *identical*
+logic instead of divergent regex approximations: the contract and its
+checker travel together, versioned. The regexes are deliberate CommonMark
+approximations (no parser dependency); they live in exactly one place so a
+parsing fix lands everywhere at once.
 """
 
 from __future__ import annotations
@@ -108,3 +119,128 @@ def load_docs_bundle(package: str) -> dict[str, str]:
         pages[doc_id] = text
 
     return dict(sorted(pages.items()))
+
+
+# --- The page contract -------------------------------------------------------
+#
+# Shared by the producer gate (scripts/check_docs.py in this repository), and
+# importable by hosts and harvest tooling so every consumer of a page judges
+# it by the same rules.
+
+SPDX_HEADER_RE = re.compile(
+    r"\A<!--\nSPDX-FileCopyrightText: [^\n]+\n\nSPDX-License-Identifier: [^\n]+\n-->\n"
+)
+H1_RE = re.compile(r"^# (.+)$", re.MULTILINE)
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+FENCE_RE = re.compile(r"^[ \t]*(```+|~~~+).*?^[ \t]*\1[ \t]*$", re.DOTALL | re.MULTILINE)
+CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1(?!`)", re.DOTALL)
+PARAGRAPH_SPLIT_RE = re.compile(r"(\n[ \t]*\n)")
+RAW_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
+IMAGE_RE = re.compile(r"!\[")
+NON_HTTPS_LINK_RE = re.compile(r"\]\((?!https://|#)[^)]+\)")
+REF_LINK_DEF_RE = re.compile(r"^ {0,3}\[[^\]]+\]:[ \t]*(\S+)", re.MULTILINE)
+AUTOLINK_RE = re.compile(r"<([A-Za-z][A-Za-z0-9+.-]*:[^<>\s]*)>")
+TITLE_PROCESS_RE = re.compile(
+    r"\b(draft|final|improved|new|obsolete|proposal|revised|tbd|todo|updated|wip)\b",
+    re.IGNORECASE,
+)
+TITLE_SUFFIX_RE = re.compile(
+    r"\b(doc|docs|documentation|guide|notes|plan|readme|spec|specification|study)\s*$",
+    re.IGNORECASE,
+)
+TITLE_VERSION_RE = re.compile(r"\bv\d+(\.\d+)*\b", re.IGNORECASE)
+TITLE_SUBTITLE_RE = re.compile(r"\s[-–—]\s|:")
+
+
+def _blank(match: re.Match[str]) -> str:
+    """Newline-preserving replacement, so blanked stretches keep line geometry."""
+    return "\n" * match.group(0).count("\n")
+
+
+def prose_outside_code(text: str) -> str:
+    """The page's prose with the SPDX comment, fences, and code spans blanked."""
+    text = HTML_COMMENT_RE.sub(_blank, text)
+    text = FENCE_RE.sub(_blank, text)
+    # Code spans are matched per paragraph (a span cannot contain a blank
+    # line), so one stray backtick cannot invert code and prose for the
+    # rest of the page.
+    return "".join(
+        part if PARAGRAPH_SPLIT_RE.fullmatch(part) else CODE_SPAN_RE.sub(_blank, part)
+        for part in PARAGRAPH_SPLIT_RE.split(text)
+    )
+
+
+def check_page(doc_id: str, text: str, *, where: str | None = None) -> list[str]:
+    """Structural and renderability violations for one page, as messages.
+
+    An empty list means the page satisfies the contract. ``where`` prefixes
+    each message (defaults to ``docs/<doc_id>.md``); callers with more
+    context - a gate naming the package, a harvest naming the wheel - pass
+    their own.
+    """
+    where = where or f"{DOCS_DIR_NAME}/{doc_id}.md"
+    problems: list[str] = []
+
+    if not SPDX_HEADER_RE.match(text):
+        problems.append(f"{where}: must open with the SPDX HTML-comment header")
+
+    # Headings are counted with fenced code blanked, so a `# comment` line
+    # inside a shell example is not mistaken for a second H1.
+    body = FENCE_RE.sub(_blank, HTML_COMMENT_RE.sub("", text))
+    h1s = H1_RE.findall(body)
+    if len(h1s) != 1:
+        problems.append(f"{where}: needs exactly one H1, found {len(h1s)}")
+    elif not body.lstrip().startswith(f"# {h1s[0]}"):
+        problems.append(f"{where}: the H1 must be the first heading on the page")
+    if h1s:
+        title = h1s[0].strip()
+        for pattern, why in (
+            (TITLE_PROCESS_RE, "contains an authoring-process word"),
+            (TITLE_SUFFIX_RE, "ends in a genre suffix"),
+            (TITLE_VERSION_RE, "pins a version"),
+            (TITLE_SUBTITLE_RE, "carries a subtitle after a dash or colon"),
+        ):
+            if pattern.search(title):
+                problems.append(f"{where}: title {title!r} {why}")
+        if title.endswith("."):
+            problems.append(f"{where}: title {title!r} ends with a period")
+
+    if f"`{doc_id}`" not in text:
+        problems.append(f"{where}: must name its handler id in a code span (`{doc_id}`)")
+
+    prose = prose_outside_code(text)
+    for tag in sorted(set(RAW_TAG_RE.findall(prose))):
+        problems.append(
+            f"{where}: {tag} in prose is raw HTML the renderer drops - wrap it in backticks"
+        )
+    if "{{" in prose:
+        problems.append(f"{where}: bare {{{{ in prose - template examples belong in code spans")
+    if IMAGE_RE.search(prose):
+        problems.append(f"{where}: images are not allowed in plugin docs")
+    if "```mermaid" in text:
+        problems.append(f"{where}: mermaid diagrams are not allowed in plugin docs")
+    for link in NON_HTTPS_LINK_RE.findall(prose):
+        problems.append(
+            f"{where}: link {link!r} must be absolute https:// or an in-page anchor - "
+            "a bundled page has no base to resolve anything else against"
+        )
+    # Reference-style definitions ([name]: destination) render links too;
+    # CommonMark allows the destination in angle brackets.
+    for match in REF_LINK_DEF_RE.finditer(prose):
+        dest = match.group(1).strip("<>")
+        if not dest.startswith(("https://", "#")):
+            problems.append(
+                f"{where}: link definition {dest!r} must be absolute https:// or an "
+                "in-page anchor - a bundled page has no base to resolve anything "
+                "else against"
+            )
+    # Autolinks (<scheme:...>) render as links and carry their own scheme.
+    for match in AUTOLINK_RE.finditer(prose):
+        dest = match.group(1)
+        if not dest.startswith("https://"):
+            problems.append(
+                f"{where}: autolink <{dest}> must use https:// - plain-http and "
+                "other schemes are not allowed in plugin pages"
+            )
+
+    return problems
