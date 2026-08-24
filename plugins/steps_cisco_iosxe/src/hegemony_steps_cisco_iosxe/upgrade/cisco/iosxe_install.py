@@ -67,8 +67,8 @@ class IOSXEInstallDriver(UpgradeDriver):
     transfer_capabilities = TransferCapabilities(
         http=True,
         https=True,
-        scp=True,
-        # No TFTP implementation exists anywhere in the stage path.
+        # Neither SCP push nor TFTP is implemented anywhere in the stage path.
+        scp=False,
         tftp=False,
     )
 

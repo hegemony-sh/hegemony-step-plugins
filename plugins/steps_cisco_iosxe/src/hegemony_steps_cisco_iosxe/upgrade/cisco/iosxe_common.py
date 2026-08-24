@@ -241,7 +241,18 @@ async def stage_image(
                     cli_output="\n".join(cli_outputs),
                 )
 
-        # Need to transfer
+        # Need to transfer. Only the device-side HTTP(S) pull exists, so an
+        # unusable source URL must fail here - not surface later as a garbled
+        # copy command or an unimplemented-method error after auto-selection.
+        if not source_url.startswith(("http://", "https://")):
+            return StageResult(
+                success=False,
+                error=(
+                    f"Source URL {source_url!r} is not an HTTP(S) URL - the "
+                    "device-side HTTP(S) pull is the only implemented transfer"
+                ),
+                cli_output="\n".join(cli_outputs),
+            )
         transfer_method = select_transfer_method_fn(
             preferred=transfer_method,
             http_url_available=source_url.startswith(("http://", "https://")),
@@ -265,24 +276,11 @@ async def stage_image(
                     cli_output="\n".join(cli_outputs),
                 )
 
-        elif transfer_method == "scp":
-            # SCP transfer requires the image to be downloaded locally first, then
-            # transferred using the transport's scp_put(). This is handled at the handler
-            # level (UpgradeStageHandler) rather than in the driver because:
-            # 1. The handler manages local image cache and download
-            # 2. SCP push is different from device-initiated HTTP/TFTP pull
-            # Currently, use transfer_method="auto" or "https" for driver-level staging.
-            # Handler-level SCP support is planned for future implementation.
-            return StageResult(
-                success=False,
-                error="SCP transfer requires handler-level implementation (use auto or https transfer_method)",
-                cli_output="\n".join(cli_outputs),
-            )
-
         else:
             # No implementation may ever fall through: before this branch an
             # explicit "tftp" skipped the transfer entirely and could report
-            # success with no file on the device.
+            # success with no file on the device. "scp" (a worker-side push,
+            # planned but never implemented) fails here the same way.
             return StageResult(
                 success=False,
                 error=(

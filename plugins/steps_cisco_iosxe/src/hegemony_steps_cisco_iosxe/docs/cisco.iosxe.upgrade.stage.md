@@ -20,9 +20,12 @@ filename; with a manual Source URL, Destination Filename is required.
 Configuring both sources at once fails the step before touching any device.
 
 Transfer Method defaults to auto, which prefers a device-side HTTPS or HTTP
-pull when the source is an HTTP(S) URL. Only the HTTP(S) pull is implemented:
-selecting SCP fails with an explanatory error, so keep auto or an explicit
-HTTP(S) method.
+pull when the source is an HTTP(S) URL - the only transfer implemented, so
+the source must be an `http://` or `https://` URL. Prefer an HTTPS source or
+set the MD5 checksum for plain-http sources; an unverified http transfer has
+no integrity check. Legacy stored values such as `scp` or `tftp`, and a step
+definition still carrying the removed `expected_sha256` field, fail with an
+explanatory error.
 
 The MD5 checksum makes staging idempotent: when one is configured and a
 file already exists under the destination name, it is verified on the
@@ -31,7 +34,7 @@ that is what makes rerunning after a partial failure cheap. A file that
 fails the check, or an existing file with no checksum to prove it, is
 transferred again (advanced: a step's raw definition may carry an
 `expected_size` - with no checksum, a size match also skips the
-transfer); turn on the overwrite option to force a fresh transfer
+transfer, a weaker guarantee than a checksum); turn on the overwrite option to force a fresh transfer
 regardless. After every transfer the checksum, when given, is verified the
 same way. Only MD5 is checked on the device - IOS-XE's `verify` offers no
 SHA-256 - so there is no SHA-256 field. Max Parallel Devices controls how
@@ -58,7 +61,8 @@ The step fails immediately when both or neither image source is configured,
 when the selected repository file cannot be resolved to a device-reachable
 URL, or when no upgrade driver exists for the configured platform and mode.
 Per-device failures include a missing management host, a failed HTTP
-transfer, a failed MD5 verification, an explicit SCP transfer method, and
+transfer, a failed MD5 verification, a non-HTTP(S) source URL, a legacy
+`scp` or `tftp` transfer method, and
 SSH errors. Any single
 device failing fails the whole step, though per-device evidence is still
 recorded.

@@ -8,6 +8,7 @@ Historically the skip required an expected file size that no configuration
 field supplies, so every rerun re-transferred the image. The gate is now the
 MD5 checksum: an existing file that verifies on the device is skipped, one
 that fails the check (or has no checksum to prove it) is transferred again.
+A raw-definition ``expected_size`` is the no-checksum fallback.
 """
 
 from __future__ import annotations
@@ -50,6 +51,8 @@ class _FakeTransport:
 
 _EXISTS = "-rw-  987654321  Jan 1 2026  img.bin"
 _MISSING = "%Error opening flash:img.bin (No such file or directory)"
+# The IOS-XE dir format the size parser understands: index, size, date, name.
+_EXISTS_SIZED = "  3   987654321 Jan 25 2026 12:19:36.0000000000 +00:00 img.bin"
 
 
 def _select(preferred, http_url_available):
@@ -125,3 +128,56 @@ async def test_unimplemented_transfer_method_is_an_error_not_a_false_success():
     assert result.success is False
     assert "not implemented" in (result.error or "")
     assert ssh.transfers == []
+
+
+@pytest.mark.asyncio
+async def test_existing_file_matching_expected_size_is_skipped_without_md5():
+    """The no-checksum fallback: a raw-definition expected_size reuses the file."""
+    ssh = _FakeTransport(dir_output=_EXISTS_SIZED)
+    result = await _stage(ssh, expected_size=987654321)
+    assert result.success and result.skipped and not result.hash_verified
+    assert ssh.transfers == []
+
+
+@pytest.mark.asyncio
+async def test_existing_file_with_wrong_expected_size_is_retransferred():
+    ssh = _FakeTransport(dir_output=_EXISTS_SIZED)
+    result = await _stage(ssh, expected_size=1234)
+    assert ssh.transfers == ["flash:img.bin"]
+    # The fake still reports the old size after the transfer, so the
+    # post-transfer size verification fails - also worth pinning.
+    assert result.success is False
+    assert "Size mismatch" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_scp_transfer_method_is_an_error_not_a_false_success():
+    """SCP was never implemented; a legacy stored value fails explicitly."""
+    ssh = _FakeTransport(dir_output=_MISSING)
+    result = await _stage(ssh, transfer_method="scp", select_transfer_method_fn=lambda **_: "scp")
+    assert result.success is False
+    assert "not implemented" in (result.error or "")
+    assert ssh.transfers == []
+
+
+@pytest.mark.asyncio
+async def test_non_http_source_url_is_rejected_before_transfer():
+    ssh = _FakeTransport(dir_output=_MISSING)
+    result = await _stage(ssh, source_url="ftp://repo.example/img.bin")
+    assert result.success is False
+    assert "not an HTTP(S) URL" in (result.error or "")
+    assert ssh.transfers == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_expected_sha256_config_is_rejected_not_ignored():
+    """extra="allow" accepts the removed field; the handler must fail it loudly."""
+    from types import SimpleNamespace
+
+    from hegemony_steps_cisco_iosxe.upgrade.handlers.stage import UpgradeStageHandler
+
+    handler = UpgradeStageHandler.__new__(UpgradeStageHandler)
+    ctx: Any = SimpleNamespace(config={"expected_sha256": "deadbeef"})
+    result = await UpgradeStageHandler.execute(handler, ctx)
+    assert result.success is False
+    assert "expected_sha256" in (result.error or "")

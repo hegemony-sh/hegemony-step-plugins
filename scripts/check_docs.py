@@ -52,6 +52,7 @@ PARAGRAPH_SPLIT_RE = re.compile(r"(\n[ \t]*\n)")
 RAW_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
 IMAGE_RE = re.compile(r"!\[")
 NON_HTTPS_LINK_RE = re.compile(r"\]\((?!https://|#)[^)]+\)")
+REF_LINK_DEF_RE = re.compile(r"^ {0,3}\[[^\]]+\]:[ \t]*(\S+)", re.MULTILINE)
 TITLE_PROCESS_RE = re.compile(
     r"\b(draft|final|improved|new|obsolete|proposal|revised|tbd|todo|updated|wip)\b",
     re.IGNORECASE,
@@ -154,6 +155,15 @@ def check_page(package: str, doc_id: str, text: str) -> list[str]:
             f"{where}: link {link!r} must be absolute https:// or an in-page anchor - "
             "a bundled page has no base to resolve anything else against"
         )
+    # Reference-style definitions ([name]: destination) render links too.
+    for match in REF_LINK_DEF_RE.finditer(prose):
+        dest = match.group(1)
+        if not dest.startswith(("https://", "#")):
+            problems.append(
+                f"{where}: link definition {dest!r} must be absolute https:// or an "
+                "in-page anchor - a bundled page has no base to resolve anything "
+                "else against"
+            )
 
     return problems
 

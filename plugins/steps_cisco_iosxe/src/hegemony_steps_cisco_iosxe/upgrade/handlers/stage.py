@@ -56,21 +56,20 @@ class UpgradeStageConfig(BaseModel):
             }
         },
     )
-    transfer_method: Literal["auto", "http", "https", "scp"] = Field(
+    transfer_method: Literal["auto", "http", "https"] = Field(
         default="auto",
         title="Transfer Method",
         description=(
             "How the image reaches the device. Auto (the default) prefers a "
-            "device-side HTTPS/HTTP pull when the source is an HTTP(S) URL. "
-            "Selecting SCP is not yet supported by this step and fails with an "
-            "explanatory error."
+            "device-side HTTPS/HTTP pull when the source is an HTTP(S) URL - "
+            "the only transfer implemented. Legacy stored values such as scp "
+            "or tftp fail with an explanatory error."
         ),
         json_schema_extra={
             "x_option_labels": {
                 "auto": "Auto (detect best method)",
                 "http": "HTTP",
                 "https": "HTTPS",
-                "scp": "SCP",
             }
         },
     )
@@ -184,7 +183,7 @@ class UpgradeStageHandler(BaseHandler):
         dest_filename: Target filename on device (defaults from selected file repository file)
         upgrade_mode: "install" or "bundle" (default: "install")
         dest_fs: Destination filesystem (default: "flash:")
-        transfer_method: "auto", "http", "https", "scp" (default: "auto")
+        transfer_method: "auto", "http", "https" (default: "auto")
         expected_md5: MD5 hash for verification
         expected_size: Expected file size in bytes
         overwrite: Force re-transfer even if file exists (default: false)
@@ -208,6 +207,18 @@ class UpgradeStageHandler(BaseHandler):
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Stage upgrade file on all target devices."""
+        # The config model allows extra keys, so a definition predating the
+        # SHA-256 removal is still accepted - fail it loudly instead of
+        # silently running without the integrity check it configured.
+        if ctx.config.get("expected_sha256"):
+            return HandlerResult(
+                success=False,
+                error=(
+                    "expected_sha256 is no longer supported - IOS-XE's verify "
+                    "offers MD5 only; set expected_md5 instead"
+                ),
+                summary="Unsupported expected_sha256 configuration",
+            )
         services = ctx.require_services()
         target_devices = ctx.get_target_devices()
         if not target_devices:

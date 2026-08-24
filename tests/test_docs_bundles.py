@@ -108,6 +108,16 @@ def test_check_page_flags_raw_html_with_attributes(check_docs):
     assert any("raw HTML" in p for p in problems), problems
 
 
+def test_check_page_flags_non_https_reference_link_definitions(check_docs):
+    """`[name]: destination` renders a link too - same https-only contract."""
+    page = (
+        _PAGE_HEADER
+        + "\n# Thing\n\nThe `x` handler; see [docs][ref].\n\n[ref]: http://example.com\n"
+    )
+    problems = check_docs.check_page("pkg", "x", page)
+    assert any("link definition" in p for p in problems), problems
+
+
 def test_check_page_ignores_h1_lookalikes_in_fences(check_docs):
     """A shell comment inside a fence is not a second H1."""
     page = _PAGE_HEADER + "\n# Thing\n\nThe `x` handler.\n\n```sh\n# just a comment\nls\n```\n"
