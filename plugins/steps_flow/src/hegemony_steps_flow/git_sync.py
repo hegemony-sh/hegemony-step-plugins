@@ -30,12 +30,34 @@ class GitSyncRepoConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    git_repo_id: str = Field(min_length=1, title="Git Repository")
-    conflict_policy: Literal["reject_dirty", "overwrite", "skip"] = Field(
-        default="reject_dirty", title="Conflict Policy"
+    git_repo_id: str = Field(
+        min_length=1,
+        title="Git Repository",
+        description="UUID of the git repository whose flow definitions are pulled by this sync.",
     )
-    force: bool = Field(default=False, title="Force")
-    flow_ids: list[str] | None = Field(default=None, title="Limit to Flows")
+    conflict_policy: Literal["reject_dirty", "overwrite", "skip"] = Field(
+        default="reject_dirty",
+        title="Conflict Policy",
+        description=(
+            "How the sync treats flows with local modifications: reject_dirty "
+            "rejects them, overwrite replaces them with the repository "
+            "version, and skip leaves them out of the sync. Defaults to "
+            "reject_dirty."
+        ),
+    )
+    force: bool = Field(
+        default=False,
+        title="Force",
+        description="Force the pull sync regardless of the conflict policy. Defaults to false.",
+    )
+    flow_ids: list[str] | None = Field(
+        default=None,
+        title="Limit to Flows",
+        description=(
+            "Optional list of flow UUIDs limiting the sync scope. Leave "
+            "unset to sync every flow tracked by the repository."
+        ),
+    )
 
 
 class GitSyncRepoHandler(BaseHandler):

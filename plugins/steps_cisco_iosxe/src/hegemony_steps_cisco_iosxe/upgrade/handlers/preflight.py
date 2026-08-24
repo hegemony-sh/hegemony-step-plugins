@@ -45,6 +45,13 @@ class UpgradePreflightConfig(BaseModel):
     upgrade_mode: Literal["install", "bundle"] = Field(
         default="install",
         title="Upgrade Mode",
+        description=(
+            "Which IOS-XE upgrade workflow to validate: install mode (modern "
+            'devices using the "install" command) or bundle mode (legacy devices '
+            "booting a monolithic .bin image). Install mode also verifies that "
+            "the device actually supports the install command. Defaults to "
+            "install mode."
+        ),
         json_schema_extra={
             "x_option_labels": {
                 "install": "Install Mode (modern IOS-XE)",
@@ -67,6 +74,11 @@ class UpgradePreflightConfig(BaseModel):
     dest_fs: str = Field(
         default="flash:",
         title="Destination Filesystem",
+        description=(
+            "Device filesystem checked for free space and for an already staged "
+            'image. Defaults to "flash:"; a trailing colon is added '
+            "automatically if omitted."
+        ),
         json_schema_extra={"x_placeholder": "flash:"},
     )
     min_free_bytes: int = Field(

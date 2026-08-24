@@ -42,6 +42,13 @@ class UpgradeStageConfig(BaseModel):
     upgrade_mode: Literal["install", "bundle"] = Field(
         default="install",
         title="Upgrade Mode",
+        description=(
+            "Which IOS-XE upgrade workflow the staged image is intended for: "
+            "install mode (modern devices) or bundle mode (legacy devices). The "
+            "transfer itself behaves the same in both modes; keep this "
+            "consistent with the install step that follows. Defaults to install "
+            "mode."
+        ),
         json_schema_extra={
             "x_option_labels": {
                 "install": "Install Mode (modern IOS-XE)",
@@ -52,6 +59,12 @@ class UpgradeStageConfig(BaseModel):
     transfer_method: Literal["auto", "http", "https", "scp", "tftp"] = Field(
         default="auto",
         title="Transfer Method",
+        description=(
+            "How the image reaches the device. Auto (the default) prefers a "
+            "device-side HTTPS/HTTP pull when the source is an HTTP(S) URL. "
+            "Selecting SCP is not yet supported by this step and fails with an "
+            "explanatory error."
+        ),
         json_schema_extra={
             "x_option_labels": {
                 "auto": "Auto (detect best method)",
@@ -100,12 +113,20 @@ class UpgradeStageConfig(BaseModel):
     dest_fs: str = Field(
         default="flash:",
         title="Destination Filesystem",
+        description=(
+            'Device filesystem the image is copied to. Defaults to "flash:"; a '
+            "trailing colon is added automatically if omitted."
+        ),
         json_schema_extra={"x_placeholder": "flash:"},
     )
     expected_sha256: str = Field(
         default="",
         title="SHA-256 Checksum (optional)",
-        description="SHA-256 hash for verification after transfer",
+        description=(
+            "SHA-256 hash of the image, recorded with the step for reference. "
+            "On-device integrity verification currently runs only against the "
+            "MD5 checksum, so fill in that field for an enforced check."
+        ),
         json_schema_extra={
             "x_placeholder": "a1b2c3d4e5f6...",
             "x_col_span": 2,
@@ -125,6 +146,12 @@ class UpgradeStageConfig(BaseModel):
     overwrite: bool = Field(
         default=False,
         title="Force re-transfer even if file exists",
+        description=(
+            "Transfer the image again even when a file with the same name is "
+            "already on the device. When off (the default), an existing file "
+            "whose size matches the expected size (and whose MD5 verifies, when "
+            "one is given) is reused and the transfer is skipped."
+        ),
         json_schema_extra={"x_col_span": 2},
     )
     max_parallel_devices: int = Field(

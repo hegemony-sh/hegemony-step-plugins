@@ -66,7 +66,9 @@ class DnsProbeConfig(BaseModel):
         json_schema_extra={"x_placeholder": "device.example.com", "x_col_span": 2},
     )
     record_type: Literal["A", "AAAA", "CNAME", "MX", "NS", "TXT"] = Field(
-        default="A", title="Record Type"
+        default="A",
+        title="Record Type",
+        description="Which kind of DNS record to query for. Defaults to A records.",
     )
     resolver: str = Field(
         default="",
@@ -85,7 +87,16 @@ class DnsProbeConfig(BaseModel):
             "x_placeholder": "192.0.2.10\n192.0.2.11",
         },
     )
-    timeout_sec: int = Field(default=5, ge=1, title="Timeout (sec)")
+    timeout_sec: int = Field(
+        default=5,
+        ge=1,
+        title="Timeout (sec)",
+        description=(
+            "Overall time budget for each resolution attempt, in seconds. A "
+            "lookup that has not answered in time counts as a failed attempt. "
+            "Defaults to 5."
+        ),
+    )
     attempts: int = Field(
         default=1, ge=1, le=10, title="Attempts", description="Number of attempts (1-10)"
     )

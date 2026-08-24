@@ -42,6 +42,11 @@ class ConnectivityCheckConfig(BaseModel):
     check_type: str = Field(
         default="tcp_connect",
         title="Check Type",
+        description=(
+            "Which probe to run against each target; the list comes from the "
+            "checks registered on the worker. Defaults to a TCP connection "
+            "attempt (tcp_connect) on the configured port."
+        ),
         json_schema_extra={
             "x_widget": "select",
             "x_options_source": "probes",
@@ -64,13 +69,25 @@ class ConnectivityCheckConfig(BaseModel):
             "x_hide_when": {"field": "check_type", "value": "icmp_ping"},
         },
     )
-    timeout_sec: int = Field(default=10, ge=1, title="Timeout (sec)")
+    timeout_sec: int = Field(
+        default=10,
+        ge=1,
+        title="Timeout (sec)",
+        description=(
+            "Time limit for each probe attempt, in seconds. An attempt that "
+            "does not complete in time counts as failed. Defaults to 10."
+        ),
+    )
     attempts: int = Field(
         default=1, ge=1, le=10, title="Attempts", description="Number of attempts (1-10)"
     )
     url_path: str = Field(
         default="",
         title="URL Path",
+        description=(
+            "URL path requested by the HTTP Health check; when omitted the "
+            "check requests /health. Ignored by every other check type."
+        ),
         json_schema_extra={
             "x_placeholder": "/health",
             "x_show_when": {"field": "check_type", "value": "http_health"},
@@ -80,6 +97,10 @@ class ConnectivityCheckConfig(BaseModel):
     hostname: str = Field(
         default="",
         title="Hostname to Resolve",
+        description=(
+            "DNS name the DNS Resolve check looks up against each target. "
+            "Ignored by every other check type."
+        ),
         json_schema_extra={
             "x_placeholder": "device.example.com",
             "x_show_when": {"field": "check_type", "value": "dns_resolve"},

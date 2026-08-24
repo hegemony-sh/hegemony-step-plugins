@@ -33,6 +33,11 @@ class PollUntilConfig(BaseModel):
     command: str = Field(
         default="",
         title="Command to Poll",
+        description=(
+            "Device CLI command run on every poll attempt; its output is "
+            "tested against the match condition. Required — the step fails "
+            "without it. Use {{ variable }} syntax for flow inputs."
+        ),
         json_schema_extra={"x_placeholder": "e.g., show standby brief", "x_col_span": 2},
     )
     match_regex: str = Field(
@@ -47,8 +52,25 @@ class PollUntilConfig(BaseModel):
         description="Literal string to find (case-insensitive)",
         json_schema_extra={"x_placeholder": "e.g., State is Active"},
     )
-    interval_seconds: int = Field(default=5, ge=1, title="Interval (sec)")
-    max_attempts: int = Field(default=12, ge=1, title="Max Attempts")
+    interval_seconds: int = Field(
+        default=5,
+        ge=1,
+        title="Interval (sec)",
+        description=(
+            "Seconds to wait between poll attempts (default 5, minimum 1). "
+            "No extra wait is added after the final attempt."
+        ),
+    )
+    max_attempts: int = Field(
+        default=12,
+        ge=1,
+        title="Max Attempts",
+        description=(
+            "Maximum times the command is run per device before the step "
+            "gives up and fails (default 12, minimum 1). Polling stops early "
+            "on the first attempt that satisfies the condition."
+        ),
+    )
     invert_match: bool = Field(
         default=False,
         title="Invert Match",

@@ -120,6 +120,12 @@ class ShellExecuteConfig(BaseModel):
         default=60,
         ge=1,
         title="Per-command timeout (sec)",
+        description=(
+            "Maximum time in seconds each command may run. The limit applies to "
+            "every command individually, not to the step as a whole; a command "
+            "that exceeds it fails the device and its remaining commands are "
+            "skipped. Defaults to 60 seconds."
+        ),
     )
     max_parallel_devices: int = Field(
         default=1,

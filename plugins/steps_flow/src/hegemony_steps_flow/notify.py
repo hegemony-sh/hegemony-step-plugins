@@ -42,8 +42,28 @@ class SendNotificationConfig(BaseModel):
             "x_col_span": 2,
         },
     )
-    title: str = Field(default="", json_schema_extra={"x_hidden": True})
-    message: str = Field(default="", json_schema_extra={"x_hidden": True})
+    title: str = Field(
+        default="",
+        title="Title",
+        description=(
+            "Notification title template, rendered by the notification "
+            "renderer with the full notification context (run values, step "
+            "outputs, secret()/env() helpers). Leave empty to use the shared "
+            "default title template."
+        ),
+        json_schema_extra={"x_hidden": True},
+    )
+    message: str = Field(
+        default="",
+        title="Message",
+        description=(
+            "Notification body template, rendered by the notification "
+            "renderer with the full notification context (run values, step "
+            "outputs, secret()/env() helpers). Leave empty to use the shared "
+            "default body template."
+        ),
+        json_schema_extra={"x_hidden": True},
+    )
 
 
 class SendNotificationHandler(BaseHandler):
