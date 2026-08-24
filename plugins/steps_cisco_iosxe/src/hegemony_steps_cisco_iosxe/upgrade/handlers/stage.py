@@ -56,7 +56,7 @@ class UpgradeStageConfig(BaseModel):
             }
         },
     )
-    transfer_method: Literal["auto", "http", "https", "scp", "tftp"] = Field(
+    transfer_method: Literal["auto", "http", "https", "scp"] = Field(
         default="auto",
         title="Transfer Method",
         description=(
@@ -71,7 +71,6 @@ class UpgradeStageConfig(BaseModel):
                 "http": "HTTP",
                 "https": "HTTPS",
                 "scp": "SCP",
-                "tftp": "TFTP",
             }
         },
     )
@@ -93,9 +92,7 @@ class UpgradeStageConfig(BaseModel):
     source_url: str = Field(
         default="",
         title="Source URL",
-        description=(
-            "Manual URL fallback (http/https/scp/tftp). Do not combine with File Repository File."
-        ),
+        description=("Manual URL fallback (http/https). Do not combine with File Repository File."),
         json_schema_extra={
             "x_placeholder": "https://repo.example.com/images/cat9k_iosxe.17.09.04a.SPA.bin",
             "x_col_span": 2,
@@ -178,14 +175,14 @@ class UpgradeStageHandler(BaseHandler):
     Required params:
         platform: Device platform (e.g., "ios-xe")
         Either:
-            - source_url: URL to download file from (http/https/scp/tftp)
+            - source_url: URL to download file from (http/https)
             - file_ids: file repository file ID array (must contain exactly one ID for this handler)
 
     Optional params:
         dest_filename: Target filename on device (defaults from selected file repository file)
         upgrade_mode: "install" or "bundle" (default: "install")
         dest_fs: Destination filesystem (default: "flash:")
-        transfer_method: "auto", "http", "https", "scp", "tftp" (default: "auto")
+        transfer_method: "auto", "http", "https", "scp" (default: "auto")
         expected_md5: MD5 hash for verification
         expected_size: Expected file size in bytes
         overwrite: Force re-transfer even if file exists (default: false)

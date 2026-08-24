@@ -70,7 +70,8 @@ class IOSXEBundleDriver(UpgradeDriver):
         http=True,
         https=True,
         scp=True,
-        tftp=True,
+        # No TFTP implementation exists anywhere in the stage path.
+        tftp=False,
     )
 
     async def preflight(

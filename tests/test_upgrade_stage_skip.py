@@ -115,3 +115,13 @@ async def test_missing_file_is_transferred():
     result = await _stage(ssh, expected_md5="abc123")
     assert result.success and not result.skipped
     assert ssh.transfers == ["flash:img.bin"]
+
+
+@pytest.mark.asyncio
+async def test_unimplemented_transfer_method_is_an_error_not_a_false_success():
+    """An explicit tftp used to skip the transfer and report success anyway."""
+    ssh = _FakeTransport(dir_output=_MISSING)
+    result = await _stage(ssh, transfer_method="tftp", select_transfer_method_fn=lambda **_: "tftp")
+    assert result.success is False
+    assert "not implemented" in (result.error or "")
+    assert ssh.transfers == []

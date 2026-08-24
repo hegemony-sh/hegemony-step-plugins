@@ -279,6 +279,19 @@ async def stage_image(
                 cli_output="\n".join(cli_outputs),
             )
 
+        else:
+            # No implementation may ever fall through: before this branch an
+            # explicit "tftp" skipped the transfer entirely and could report
+            # success with no file on the device.
+            return StageResult(
+                success=False,
+                error=(
+                    f"Transfer method {transfer_method!r} is not implemented "
+                    "(use auto, http, or https)"
+                ),
+                cli_output="\n".join(cli_outputs),
+            )
+
         transfer_elapsed = time.time() - transfer_start
 
         # Verify transferred file

@@ -20,8 +20,8 @@ filename; with a manual Source URL, Destination Filename is required.
 Configuring both sources at once fails the step before touching any device.
 
 Transfer Method defaults to auto, which prefers a device-side HTTPS or HTTP
-pull when the source is an HTTP(S) URL. Selecting SCP is not yet supported by
-this step and fails with an explanatory error, so keep auto or an explicit
+pull when the source is an HTTP(S) URL. Only the HTTP(S) pull is implemented:
+selecting SCP fails with an explanatory error, so keep auto or an explicit
 HTTP(S) method.
 
 The MD5 checksum makes staging idempotent: when one is configured and a
