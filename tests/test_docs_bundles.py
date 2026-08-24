@@ -124,6 +124,23 @@ def test_check_page_ignores_h1_lookalikes_in_fences(check_docs):
     assert check_docs.check_page("pkg", "x", page) == []
 
 
+def test_check_page_accepts_tilde_fences_and_bracketed_definitions(check_docs):
+    """Tilde fences are code too, and CommonMark brackets are a valid destination."""
+    page = (
+        _PAGE_HEADER
+        + "\n# Thing\n\nThe `x` handler; see [docs][ref].\n\n~~~sh\n# just a comment\n~~~\n\n"
+        + "[ref]: <https://example.com>\n"
+    )
+    assert check_docs.check_page("pkg", "x", page) == []
+
+
+def test_check_page_flags_non_https_autolinks(check_docs):
+    """An autolink renders as a link, so it obeys the same https-only contract."""
+    page = _PAGE_HEADER + "\n# Thing\n\nThe `x` handler; see <http://example.com>.\n"
+    problems = check_docs.check_page("pkg", "x", page)
+    assert any("autolink" in p for p in problems), problems
+
+
 def test_every_real_plugin_satisfies_the_contract(monkeypatch, capsys):
     """The repo-wide gate: pages 1:1 with handlers, field docs, READMEs."""
     monkeypatch.syspath_prepend(str(SCRIPTS))

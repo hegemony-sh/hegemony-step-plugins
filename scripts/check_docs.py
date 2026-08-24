@@ -46,13 +46,14 @@ SPDX_HEADER_RE = re.compile(
 )
 H1_RE = re.compile(r"^# (.+)$", re.MULTILINE)
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-FENCE_RE = re.compile(r"^[ \t]*```.*?^[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE)
+FENCE_RE = re.compile(r"^[ \t]*(```+|~~~+).*?^[ \t]*\1[ \t]*$", re.DOTALL | re.MULTILINE)
 CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1(?!`)", re.DOTALL)
 PARAGRAPH_SPLIT_RE = re.compile(r"(\n[ \t]*\n)")
 RAW_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
 IMAGE_RE = re.compile(r"!\[")
 NON_HTTPS_LINK_RE = re.compile(r"\]\((?!https://|#)[^)]+\)")
 REF_LINK_DEF_RE = re.compile(r"^ {0,3}\[[^\]]+\]:[ \t]*(\S+)", re.MULTILINE)
+AUTOLINK_RE = re.compile(r"<([A-Za-z][A-Za-z0-9+.-]*:[^<>\s]*)>")
 TITLE_PROCESS_RE = re.compile(
     r"\b(draft|final|improved|new|obsolete|proposal|revised|tbd|todo|updated|wip)\b",
     re.IGNORECASE,
@@ -155,14 +156,23 @@ def check_page(package: str, doc_id: str, text: str) -> list[str]:
             f"{where}: link {link!r} must be absolute https:// or an in-page anchor - "
             "a bundled page has no base to resolve anything else against"
         )
-    # Reference-style definitions ([name]: destination) render links too.
+    # Reference-style definitions ([name]: destination) render links too;
+    # CommonMark allows the destination in angle brackets.
     for match in REF_LINK_DEF_RE.finditer(prose):
-        dest = match.group(1)
+        dest = match.group(1).strip("<>")
         if not dest.startswith(("https://", "#")):
             problems.append(
                 f"{where}: link definition {dest!r} must be absolute https:// or an "
                 "in-page anchor - a bundled page has no base to resolve anything "
                 "else against"
+            )
+    # Autolinks (<scheme:...>) render as links and carry their own scheme.
+    for match in AUTOLINK_RE.finditer(prose):
+        dest = match.group(1)
+        if not dest.startswith("https://"):
+            problems.append(
+                f"{where}: autolink <{dest}> must use https:// - plain-http and "
+                "other schemes are not allowed in plugin pages"
             )
 
     return problems
