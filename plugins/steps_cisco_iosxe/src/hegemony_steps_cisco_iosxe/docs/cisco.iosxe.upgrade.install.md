@@ -39,9 +39,10 @@ Later steps can read the step's result under its node id, for example
 device id whose entries hold `reboot_triggered`, `activated`, and
 `committed` for each device.
 
-One evidence artifact is saved per device, named `Install: <device>` (or
-`Install Error: <device>` for a device that failed), with
-the full install-session transcript and status flags. The summary line
+One evidence artifact is saved per device, named `Install: <device>` -
+success or failure; a device that could not be attempted at all (no
+management host, an unexpected error) gets `Install Error: <device>`
+instead - with the full install-session transcript and status flags. The summary line
 reports how many devices started installing and how many are rebooting.
 
 ## When It Fails

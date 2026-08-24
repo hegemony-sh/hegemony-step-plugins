@@ -45,8 +45,10 @@ of all commands across all hosts, capped at 4096 characters. Full outputs are
 preserved as `cli_output` evidence artifacts: one per command per device,
 named after the command's first line (shortened to 80 characters) with the
 device name appended when more than one host is targeted. Each artifact
-records the device, the command, the exit code, and the captured stderr; a
-failed command's artifact shows its stderr in place of stdout, and a host that
+records the device, the command, the exit code, and the captured stderr
+(capped like the chainable stdout); a failed command's artifact shows its
+stderr in place of stdout - or its stdout, when nothing was written to
+stderr - and a host that
 cannot be reached contributes an "Error" artifact with the connection message.
 Metrics record `command_count` (configured commands), `device_count`, and
 `total_executions` (commands actually run across all hosts).

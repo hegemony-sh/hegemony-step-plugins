@@ -19,7 +19,8 @@ who forgot the page. Checks:
   names the subject (no process words, no subtitle, no version, no trailing
   period), and the handler id in a code span;
 - prose survives rendering: no raw HTML outside the SPDX comment, no bare
-  ``{{`` outside code, no images, no mermaid, no relative links;
+  ``{{`` outside code, no images, no mermaid, and links only absolute
+  ``https://`` or in-page anchors;
 - every config-model field has a non-empty ``title`` and ``description``;
 - each plugin README mentions every handler id the plugin registers.
 
@@ -48,9 +49,9 @@ HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 FENCE_RE = re.compile(r"^[ \t]*```.*?^[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE)
 CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1(?!`)", re.DOTALL)
 PARAGRAPH_SPLIT_RE = re.compile(r"(\n[ \t]*\n)")
-RAW_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*\s*/?>")
+RAW_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>")
 IMAGE_RE = re.compile(r"!\[")
-RELATIVE_LINK_RE = re.compile(r"\]\((?!https://|#)[^)]+\)")
+NON_HTTPS_LINK_RE = re.compile(r"\]\((?!https://|#)[^)]+\)")
 TITLE_PROCESS_RE = re.compile(
     r"\b(draft|final|improved|new|obsolete|proposal|revised|tbd|todo|updated|wip)\b",
     re.IGNORECASE,
@@ -87,19 +88,20 @@ def registered_handlers() -> dict[str, list[Any]]:
     return by_package
 
 
+def _blank(match: re.Match[str]) -> str:
+    """Newline-preserving replacement, so blanked stretches keep line geometry."""
+    return "\n" * match.group(0).count("\n")
+
+
 def prose_outside_code(text: str) -> str:
     """The page's prose with the SPDX comment, fences, and code spans blanked."""
-
-    def blank(match: re.Match[str]) -> str:
-        return "\n" * match.group(0).count("\n")
-
-    text = HTML_COMMENT_RE.sub(blank, text)
-    text = FENCE_RE.sub(blank, text)
+    text = HTML_COMMENT_RE.sub(_blank, text)
+    text = FENCE_RE.sub(_blank, text)
     # Code spans are matched per paragraph (a span cannot contain a blank
     # line), so one stray backtick cannot invert code and prose for the
     # rest of the page.
     return "".join(
-        part if PARAGRAPH_SPLIT_RE.fullmatch(part) else CODE_SPAN_RE.sub(blank, part)
+        part if PARAGRAPH_SPLIT_RE.fullmatch(part) else CODE_SPAN_RE.sub(_blank, part)
         for part in PARAGRAPH_SPLIT_RE.split(text)
     )
 
@@ -112,7 +114,9 @@ def check_page(package: str, doc_id: str, text: str) -> list[str]:
     if not SPDX_HEADER_RE.match(text):
         problems.append(f"{where}: must open with the SPDX HTML-comment header")
 
-    body = HTML_COMMENT_RE.sub("", text)
+    # Headings are counted with fenced code blanked, so a `# comment` line
+    # inside a shell example is not mistaken for a second H1.
+    body = FENCE_RE.sub(_blank, HTML_COMMENT_RE.sub("", text))
     h1s = H1_RE.findall(body)
     if len(h1s) != 1:
         problems.append(f"{where}: needs exactly one H1, found {len(h1s)}")
@@ -145,8 +149,11 @@ def check_page(package: str, doc_id: str, text: str) -> list[str]:
         problems.append(f"{where}: images are not allowed in plugin docs")
     if "```mermaid" in text:
         problems.append(f"{where}: mermaid diagrams are not allowed in plugin docs")
-    for link in RELATIVE_LINK_RE.findall(prose):
-        problems.append(f"{where}: relative link {link!r} has nothing to resolve against")
+    for link in NON_HTTPS_LINK_RE.findall(prose):
+        problems.append(
+            f"{where}: link {link!r} must be absolute https:// or an in-page anchor - "
+            "a bundled page has no base to resolve anything else against"
+        )
 
     return problems
 

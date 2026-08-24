@@ -29,8 +29,9 @@ the DNS Resolve check. Timeout (sec) bounds each attempt (default 10), and
 Attempts (default 1, up to 10) retries a failing target with a half-second
 pause between tries — one success ends the retries for that target.
 
-The optional SOCKS5 Proxy routes the TCP-based checks through an
-authenticated `socks5://user:pass@host:port` proxy, such as a lab bastion,
+The optional SOCKS5 Proxy routes the TCP-based checks through a
+`socks5://user:pass@host:port` proxy (credentials optional; `socks5h://`
+resolves DNS at the proxy), such as a lab bastion,
 and its value may pull the password from a `{{ secret('...') }}` template.
 Checks that cannot carry a proxy — ICMP Ping among them — reject a
 configured one instead of silently probing the wrong path.

@@ -137,8 +137,10 @@ class UpgradeStageConfig(BaseModel):
         description=(
             "Transfer the image again even when a file with the same name is "
             "already on the device. When off (the default), an existing file "
-            "whose size matches the expected size (and whose MD5 verifies, when "
-            "one is given) is reused and the transfer is skipped."
+            "that passes the MD5 check is reused and the transfer is skipped; "
+            "with no checksum configured the image is transferred again, "
+            "unless the step's raw definition carries an expected_size that "
+            "matches the existing file."
         ),
         json_schema_extra={"x_col_span": 2},
     )

@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from hegemony_step_sdk.docs import (
+    MAX_BUNDLE_BYTES,
     MAX_PAGE_BYTES,
     DocsBundleError,
     load_docs_bundle,
@@ -66,13 +67,51 @@ def test_missing_docs_dir_is_an_empty_bundle(synthetic_package):
         ),
         (lambda d: (d / "fake.bin.md").write_bytes(b"\xff\xfe"), "not valid UTF-8"),
         (lambda d: (d / "fake.nul.md").write_bytes(b"# x\x00"), "NUL byte"),
+        (
+            # Every page individually at the cap, but their sum over the
+            # bundle cap.
+            lambda d: [
+                (d / f"fake.part{i}.md").write_bytes(b"x" * MAX_PAGE_BYTES)
+                for i in range(MAX_BUNDLE_BYTES // MAX_PAGE_BYTES + 1)
+            ],
+            "bundle exceeds",
+        ),
+        (
+            lambda d: (shutil.rmtree(d), d.write_text("x", encoding="utf-8")),
+            "not a directory",
+        ),
     ],
-    ids=["subdir", "non-md", "bad-id", "oversized", "bad-utf8", "nul"],
+    ids=["subdir", "non-md", "bad-id", "oversized", "bad-utf8", "nul", "bundle-cap", "docs-file"],
 )
 def test_contract_violations_raise(synthetic_package, setup, fragment):
     setup(synthetic_package / "docs")
     with pytest.raises(DocsBundleError, match=fragment):
         load_docs_bundle("fake_steps_plugin")
+
+
+_PAGE_HEADER = (
+    "<!--\nSPDX-FileCopyrightText: 2026 Test\n\nSPDX-License-Identifier: AGPL-3.0-or-later\n-->\n"
+)
+
+
+@pytest.fixture
+def check_docs(monkeypatch):
+    """The gate module, importable from its scripts/ home."""
+    monkeypatch.syspath_prepend(str(SCRIPTS))
+    return importlib.import_module("check_docs")
+
+
+def test_check_page_flags_raw_html_with_attributes(check_docs):
+    """An attributed tag is still raw HTML the renderer drops."""
+    page = _PAGE_HEADER + '\n# Thing\n\nThe `x` handler; see <a href="https://e.example"> it.\n'
+    problems = check_docs.check_page("pkg", "x", page)
+    assert any("raw HTML" in p for p in problems), problems
+
+
+def test_check_page_ignores_h1_lookalikes_in_fences(check_docs):
+    """A shell comment inside a fence is not a second H1."""
+    page = _PAGE_HEADER + "\n# Thing\n\nThe `x` handler.\n\n```sh\n# just a comment\nls\n```\n"
+    assert check_docs.check_page("pkg", "x", page) == []
 
 
 def test_every_real_plugin_satisfies_the_contract(monkeypatch, capsys):

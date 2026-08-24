@@ -23,8 +23,10 @@ instead. Devices that only support bundle mode fail the install-mode check.
 
 Image Filename is optional; when set, the step looks for that file on the
 destination filesystem. If the image is already present, a shortfall against
-Min Free Space is downgraded from a failure to a warning, since no new
-transfer is needed. Target Version is also optional; in install mode it is
+Min Free Space is downgraded from a failure to a warning: staging can
+reuse the file already there when its MD5 checksum verifies. A stage that
+re-transfers anyway - no checksum to verify, or overwrite turned on -
+still needs the space. Target Version is also optional; in install mode it is
 matched against committed versions in `show install summary`, and in bundle
 mode against the running version, so a device that already runs the target is
 reported rather than failed.
@@ -41,9 +43,10 @@ Later steps can read the step's result under its node id, for example
 device id whose entries hold `current_version`, `free_bytes`, `image_exists`,
 `install_mode_supported`, and `target_version_installed` for each device.
 
-One evidence artifact is saved per device, named `Preflight: <device>` (or
-`Preflight Error: <device>` for a device that failed),
-containing a human-readable summary plus the raw output of the show commands
+One evidence artifact is saved per device, named `Preflight: <device>`
+whether its checks passed or failed; a device that could not be checked at
+all (no management host, an unexpected error) gets
+`Preflight Error: <device>` instead. The artifact contains a human-readable summary plus the raw output of the show commands
 that were run. The same command outputs also stream to the step's live logs
 while it runs.
 

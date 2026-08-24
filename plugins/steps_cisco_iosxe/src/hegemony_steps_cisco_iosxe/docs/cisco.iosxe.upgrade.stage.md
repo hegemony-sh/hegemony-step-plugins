@@ -29,7 +29,9 @@ file already exists under the destination name, it is verified on the
 device with `verify /md5` and, if it matches, the transfer is skipped -
 that is what makes rerunning after a partial failure cheap. A file that
 fails the check, or an existing file with no checksum to prove it, is
-transferred again; turn on the overwrite option to force a fresh transfer
+transferred again (advanced: a step's raw definition may carry an
+`expected_size` - with no checksum, a size match also skips the
+transfer); turn on the overwrite option to force a fresh transfer
 regardless. After every transfer the checksum, when given, is verified the
 same way. Only MD5 is checked on the device - IOS-XE's `verify` offers no
 SHA-256 - so there is no SHA-256 field. Max Parallel Devices controls how
@@ -43,9 +45,11 @@ Later steps can read the step's result under its node id, for example
 device id whose entries hold `staged`, `skipped`, `full_path`,
 `hash_verified`, and `transferred_bytes` for each device.
 
-One evidence artifact is saved per device, named `Stage: <device>` (or
-`Stage Error: <device>` for a device that failed), with the
-transfer transcript, method, duration, and verification results. The summary
+One evidence artifact is saved per device: `Stage: <device>` - success or
+failure - holds the transfer transcript, method, duration, and
+verification results, while a device that could not be attempted at all
+(no management host, an unexpected error) gets `Stage Error: <device>`
+with the error text instead. The summary
 line reports how many devices were staged and how many already had the file.
 
 ## When It Fails
@@ -62,4 +66,5 @@ recorded.
 The step's default timeout is 7200 seconds, and each device-side HTTP
 transfer is capped at one hour. Rerunning after a partial failure is cheap
 when an MD5 checksum is configured: devices whose staged image verifies are
-skipped. Without a checksum, every rerun transfers the image again.
+skipped. Without a checksum, a rerun transfers the image again unless the
+raw definition's `expected_size` matches the staged file.

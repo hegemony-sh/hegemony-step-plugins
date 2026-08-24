@@ -28,7 +28,7 @@ class ConnectivityMonitorConfig(BaseModel):
         description=(
             "The kind of probe sent to each target on every sample, such as a "
             "TCP connection attempt, an ICMP echo, an HTTP health request, or "
-            "a DNS lookup. Options come from the host check registry and the "
+            "a DNS lookup. Options come from the host's monitor check registry and the "
             "value is validated when the step runs. Defaults to a plain TCP "
             "connect check."
         ),

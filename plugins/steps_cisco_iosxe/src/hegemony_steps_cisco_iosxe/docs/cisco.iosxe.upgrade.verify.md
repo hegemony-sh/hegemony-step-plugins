@@ -36,9 +36,11 @@ Later steps can read the step's result under its node id, for example
 device id whose entries hold `current_version`, `version_match`,
 `version_changed`, and `committed` for each device.
 
-One evidence artifact is saved per device, named `Verify: <device>` (a
-failed device gets `Verify Error: <device>`, a timed-out one
-`Verify Timeout: <device>`), with
+One evidence artifact is saved per device, named `Verify: <device>`
+whether verification passed or failed; a device that never came back gets
+`Verify Timeout: <device>`, and one that could not be checked at all (no
+management host, an unexpected error) gets `Verify Error: <device>`. The
+artifact carries
 the verification transcript plus the number of reconnect attempts and how
 long the device took to come back. Command outputs also stream to the step's
 live logs.

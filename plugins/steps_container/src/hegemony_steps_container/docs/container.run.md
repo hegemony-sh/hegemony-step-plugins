@@ -14,7 +14,8 @@ containerlab — can run as a flow step this way.
 
 ## Using It
 
-Docker Image is the only required field: a full reference including tag. The
+Docker Image is the only required field: an image reference such as
+`alpine:3.20` (a reference without a tag pulls `latest`). The
 image is pulled before every run (a cached image is detected and reported, not
 re-downloaded). Command holds shell lines that run sequentially under
 `set -e`, so the first failing line aborts the script. With no entrypoint

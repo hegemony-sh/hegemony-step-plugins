@@ -33,7 +33,9 @@ asserts once against the entire artifact. Every line applies the operator to
 each selected line and requires all of them to pass. In line scope, Line
 Filter is a regex choosing which lines count (empty selects every non-empty
 line), and Minimum Lines (default 1) fails the step when fewer lines are
-selected, so a filter that matches nothing cannot pass vacuously.
+selected - so under the default, a filter that matches nothing cannot
+pass vacuously. Setting Minimum Lines to 0 removes that floor and lets
+an empty selection pass.
 
 Custom Message, when set, replaces the generated pass summary and the
 generated failure error with your own wording.

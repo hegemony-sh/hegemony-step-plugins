@@ -65,6 +65,11 @@ def load_docs_bundle(package: str) -> dict[str, str]:
     """
     docs_dir = files(package) / DOCS_DIR_NAME
     if not docs_dir.is_dir():
+        if docs_dir.is_file():
+            raise DocsBundleError(
+                f"{package}: {DOCS_DIR_NAME} is not a directory; a bundle is a "
+                "flat directory of <handler_id>.md pages"
+            )
         return {}
 
     pages: dict[str, str] = {}
@@ -83,10 +88,13 @@ def load_docs_bundle(package: str) -> dict[str, str]:
             raise DocsBundleError(
                 f"{package}: docs/{name} has an invalid doc id (must match {DOC_ID_RE.pattern})"
             )
-        raw = entry.read_bytes()
+        # Bounded read: never pull more than the cap plus one sentinel byte
+        # into memory, whatever size the resource claims to be.
+        with entry.open("rb") as stream:
+            raw = stream.read(MAX_PAGE_BYTES + 1)
         if len(raw) > MAX_PAGE_BYTES:
             raise DocsBundleError(
-                f"{package}: docs/{name} is {len(raw)} bytes (page cap is {MAX_PAGE_BYTES})"
+                f"{package}: docs/{name} exceeds the page cap ({MAX_PAGE_BYTES} bytes)"
             )
         total_bytes += len(raw)
         if total_bytes > MAX_BUNDLE_BYTES:

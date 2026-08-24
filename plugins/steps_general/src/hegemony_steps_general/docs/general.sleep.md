@@ -13,7 +13,7 @@ to propagate — when there is nothing to poll and a plain delay is enough.
 
 ## Using It
 
-Duration is the only setting that matters: the step waits exactly that many
+Duration sets the wait: the step pauses exactly that many
 seconds (the editor pre-fills 30; minimum 1) and then succeeds. The wait is a plain
 timer — nothing is checked or polled while it runs — and the step targets
 no devices, so there is no target picker.

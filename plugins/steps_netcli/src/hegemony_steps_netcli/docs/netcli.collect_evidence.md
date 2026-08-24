@@ -9,7 +9,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 `netcli.collect_evidence` is a check step that runs CLI commands on each
 target device and captures every command's output as an evidence artifact.
 Use it to record device state — before-and-after snapshots, verification
-output, audit trails — without changing anything.
+output, audit trails. It is meant for read-only show commands, but nothing
+enforces that: a configured command runs as written, so keep anything that
+changes device state in `netcli.execute`.
 
 ## Using It
 
@@ -19,8 +21,9 @@ templates for flow inputs and earlier step results, resolved before the
 step runs. On each device all commands are executed together in one
 session, in order, and each command's output becomes its own artifact.
 
-Leaving the command list empty is not an error: the step succeeds with a
-"No commands configured" summary and collects nothing. Max Parallel Devices
+Leaving the command list empty is not an error: as long as at least one
+target device is configured, the step succeeds with a "No commands
+configured" summary and collects nothing. Max Parallel Devices
 controls the fan-out: 1 (the default) processes devices strictly one after
 another, higher values run up to that many devices concurrently (capped at
 32). Command output reaches the step's live log per device, once that

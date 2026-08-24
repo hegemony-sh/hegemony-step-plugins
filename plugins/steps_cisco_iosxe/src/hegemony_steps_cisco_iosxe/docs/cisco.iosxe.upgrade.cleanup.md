@@ -34,9 +34,10 @@ devices), and `output_context`, a mapping keyed by device id whose entry
 holds `removed_packages`, the list of packages or files removed on that
 device.
 
-One evidence artifact is saved per device, named `Cleanup: <device>` (or
-`Cleanup Error: <device>` for a device that failed), with
-the cleanup transcript and the list of removed items. The summary line
+One evidence artifact is saved per device, named `Cleanup: <device>` -
+success or failure; a device that could not be attempted at all (no
+management host, an unexpected error) gets `Cleanup Error: <device>`
+instead - with the cleanup transcript and the list of removed items. The summary line
 reports how many devices were cleaned and how many items were removed.
 
 ## When It Fails
