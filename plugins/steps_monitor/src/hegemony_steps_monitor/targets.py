@@ -12,6 +12,7 @@ of the host's Monitor* enums, so the wheel carries no host imports.
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
 
 #: Address kinds a role selector may resolve (string values of the host's
@@ -50,17 +51,48 @@ def extract_ip_addresses(selector: Any) -> list[str]:
     return ips
 
 
-def get_device_address(device: dict[str, Any], address_kind: str) -> str | None:
-    """Extract the address from a device dict for the given address kind."""
+def _literal_family(address: Any) -> str | None:
+    """``"ipv4"``/``"ipv6"`` for an IP literal, ``None`` for hostnames/junk."""
+    if not isinstance(address, str) or not address:
+        return None
+    try:
+        parsed = ipaddress.ip_address(address.strip("[]"))
+    except ValueError:
+        return None
+    return "ipv6" if parsed.version == 6 else "ipv4"
+
+
+def _address_candidates(device: dict[str, Any], address_kind: str) -> list[str]:
+    """The addresses an address kind may resolve to, in preference order."""
     if address_kind == "primary":
-        ips = device.get("mgmt_ips", [])
-        return ips[0] if ips else device.get("mgmt_host")
-    if address_kind == "loopback":
-        return device.get("loopback_ip") or device.get("mgmt_host")
-    if address_kind == "custom":
-        return device.get("hostname") or device.get("mgmt_host")
-    # "mgmt" and any unknown kind fall back to the management host.
-    return device.get("mgmt_host")
+        candidates = [*device.get("mgmt_ips", []), device.get("mgmt_host")]
+    elif address_kind == "loopback":
+        candidates = [device.get("loopback_ip"), device.get("mgmt_host")]
+    elif address_kind == "custom":
+        candidates = [device.get("hostname"), device.get("mgmt_host")]
+    else:
+        # "mgmt" and any unknown kind fall back to the management host.
+        candidates = [device.get("mgmt_host")]
+    return [c for c in candidates if isinstance(c, str) and c]
+
+
+def get_device_address(
+    device: dict[str, Any], address_kind: str, address_family: str = "auto"
+) -> str | None:
+    """Extract the address from a device dict for the given address kind.
+
+    ``address_family`` is a preference (the host's MonitorAddressFamily
+    semantics): with ``ipv4``/``ipv6`` the first candidate that is an IP
+    literal of that family wins; when no candidate matches — hostnames
+    included, since their family is unknowable without resolving them — the
+    ordinary first candidate is used rather than dropping the device.
+    """
+    candidates = _address_candidates(device, address_kind)
+    if address_family in ("ipv4", "ipv6"):
+        for candidate in candidates:
+            if _literal_family(candidate) == address_family:
+                return candidate
+    return candidates[0] if candidates else None
 
 
 def resolve_targets(
@@ -71,6 +103,11 @@ def resolve_targets(
 
     Returns a list of ``{instance_id, selector_index, selector_type, role,
     device_id, address}`` dicts (``selector_type`` is ``"role"`` or ``"ip"``).
+
+    ``address_family`` is honored as a preference for role-resolved devices:
+    ``ipv4``/``ipv6`` pick the first candidate address of that family and fall
+    back to the kind's normal choice when no literal matches. Explicit ``ip``
+    selectors are used exactly as written.
 
     Raises:
         ValueError: for an unknown ``address_kind`` or ``address_family`` —
@@ -90,7 +127,7 @@ def resolve_targets(
         if selector_type == "role":
             role = selector.get("role", "")
             for device in target_devices_by_role.get(role, []):
-                address = get_device_address(device, address_kind)
+                address = get_device_address(device, address_kind, address_family)
                 if address:
                     targets.append(
                         {

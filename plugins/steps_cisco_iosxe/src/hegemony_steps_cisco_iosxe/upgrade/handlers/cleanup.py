@@ -40,6 +40,12 @@ class UpgradeCleanupConfig(BaseModel):
     upgrade_mode: Literal["install", "bundle"] = Field(
         default="install",
         title="Upgrade Mode",
+        description=(
+            'Which cleanup workflow to run: install mode uses "install remove '
+            'inactive", while bundle mode deletes old .bin images from flash '
+            "that the boot configuration no longer references. Defaults to "
+            "install mode."
+        ),
         json_schema_extra={
             "x_option_labels": {
                 "install": "Install Mode (modern IOS-XE)",

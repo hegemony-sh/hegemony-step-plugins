@@ -152,7 +152,15 @@ class RunFlowConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow", json_schema_extra={"x_widget": "run-flow"})
 
-    flow_id: str = Field(default="", title="Flow")
+    flow_id: str = Field(
+        default="",
+        title="Flow",
+        description=(
+            "UUID of the committed child flow to launch. Provide exactly one "
+            "of flow_id / flow_name; leave this empty when selecting the "
+            "child flow by name."
+        ),
+    )
     flow_name: str = Field(
         default="",
         title="Flow name",
@@ -162,12 +170,62 @@ class RunFlowConfig(BaseModel):
             "exactly one of flow_id / flow_name."
         ),
     )
-    version: int | None = Field(default=None, ge=1, title="Version")
-    wait_for_completion: bool = Field(default=True, title="Wait for completion")
-    run_name: str | None = Field(default=None, title="Child run name")
-    field_mappings: dict[str, Any] = Field(default_factory=dict, title="Field mappings")
-    target_mappings: dict[str, Any] = Field(default_factory=dict, title="Target mappings")
-    poll_interval_seconds: float = Field(default=5, ge=1, le=60, title="Poll interval (sec)")
+    version: int | None = Field(
+        default=None,
+        ge=1,
+        title="Version",
+        description=(
+            "Committed version number of the child flow to run, starting at "
+            "1. Omit to launch the newest committed version at start time."
+        ),
+    )
+    wait_for_completion: bool = Field(
+        default=True,
+        title="Wait for completion",
+        description=(
+            "When enabled (the default), the step polls the child run until "
+            "it finishes and mirrors its result, exposing the child flow's "
+            "outputs. Disable to succeed as soon as the child run is created."
+        ),
+    )
+    run_name: str | None = Field(
+        default=None,
+        title="Child run name",
+        description=(
+            "Name given to the child run. Leave empty to derive one from the "
+            "parent run's name plus a short random suffix."
+        ),
+    )
+    field_mappings: dict[str, Any] = Field(
+        default_factory=dict,
+        title="Field mappings",
+        description=(
+            "Values for the child flow's input fields: one entry per field "
+            "id with mode default (keep the child's default), literal, or "
+            "template, plus the value to pass. Managed by the run-flow "
+            "editor widget."
+        ),
+    )
+    target_mappings: dict[str, Any] = Field(
+        default_factory=dict,
+        title="Target mappings",
+        description=(
+            "Device binding for each child target role: mode child_default, "
+            "parent_role (forwarding the devices this run bound to the given "
+            "parent_role_id), or none. Managed by the run-flow editor widget."
+        ),
+    )
+    poll_interval_seconds: float = Field(
+        default=5,
+        ge=1,
+        le=60,
+        title="Poll interval (sec)",
+        description=(
+            "Seconds between status checks of the child run while waiting "
+            "for completion; values are clamped to 1-60 and default to 5. "
+            "Ignored when the step does not wait."
+        ),
+    )
 
 
 class RunFlowHandler(BaseHandler):

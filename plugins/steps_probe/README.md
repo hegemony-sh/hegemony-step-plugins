@@ -9,7 +9,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 Outside-observation reachability probes (tcp/icmp): one-shot connectivity
 checks and stable-reachability waits. No device credentials involved.
 
-Handlers: `probe.connectivity`, `probe.wait_reachable`.
+Handlers: `probe.connectivity`, `probe.dns`, `probe.http`,
+`probe.wait_reachable`.
 
 Namespace prefix (= entry-point name): `probe.` — see the repo-level
 `CONVENTIONS.md` for the naming rules.

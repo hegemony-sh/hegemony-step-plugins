@@ -61,13 +61,19 @@ tasks:
     cmds:
       - uv run reuse lint
 
+  docs:check:
+    desc: Verify every plugin documents its handlers (doc pages, field docs, READMEs)
+    cmds:
+      - uv run python scripts/check_docs.py
+
   lint:
-    desc: Run Python lint, formatting, typecheck, and REUSE checks
+    desc: Run Python lint, formatting, typecheck, REUSE, and plugin-docs checks
     cmds:
       - task: ruff
       - task: fmt:check
       - task: ty
       - task: reuse:lint
+      - task: docs:check
 
   build:
     desc: Build all workspace wheels into dist/

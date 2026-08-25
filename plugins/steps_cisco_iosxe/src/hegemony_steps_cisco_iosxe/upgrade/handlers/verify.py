@@ -42,6 +42,12 @@ class UpgradeVerifyConfig(BaseModel):
     upgrade_mode: Literal["install", "bundle"] = Field(
         default="install",
         title="Upgrade Mode",
+        description=(
+            "Which verification workflow to run: install mode additionally "
+            'checks commit status with "show install summary" and can '
+            "auto-commit, while bundle mode checks the running version and boot "
+            "configuration only. Defaults to install mode."
+        ),
         json_schema_extra={
             "x_option_labels": {
                 "install": "Install Mode (modern IOS-XE)",

@@ -31,6 +31,12 @@ class CollectEvidenceConfig(BaseModel):
     commands: list[str] = Field(
         default_factory=list,
         title="Commands (one per line)",
+        description=(
+            "Device CLI commands whose outputs are captured as evidence, one "
+            "artifact per command per device. Use {{ variable }} syntax for "
+            "flow inputs. Leave empty to collect nothing (the step still "
+            "succeeds)."
+        ),
         json_schema_extra={
             "x_widget": "commands",
             "x_placeholder": "show version\nshow interfaces",

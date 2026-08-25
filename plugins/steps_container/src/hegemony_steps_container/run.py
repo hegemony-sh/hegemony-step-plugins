@@ -300,6 +300,11 @@ class RunContainerConfig(BaseModel):
     mounted_files: list[str] | None = Field(
         default=None,
         title="Attachments",
+        description=(
+            "Select which flow attachments are copied into the container under the "
+            "attachments mount path. Leave at All to copy every flow attachment; a "
+            "selector ending in / includes that folder recursively."
+        ),
         json_schema_extra={"x_widget": "mounted-files", "x_advanced": True, "x_col_span": 2},
     )
     artifacts_path: str = Field(

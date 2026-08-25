@@ -52,6 +52,12 @@ class AssertConfig(BaseModel):
     ] = Field(
         default="contains",
         title="Operator",
+        description=(
+            "How the artifact content is compared with the expected value. "
+            "Regex operators treat the expected value as a regular expression; "
+            "ordering operators compare numerically when both sides parse as "
+            "numbers, and as text otherwise. Defaults to Contains."
+        ),
         json_schema_extra={
             "x_option_labels": {
                 "contains": "Contains",
@@ -116,16 +122,35 @@ class AssertConfig(BaseModel):
     )
     command: str = Field(
         default="",
+        title="Evidence Command",
+        description=(
+            "The command whose collected output is asserted; the editor's "
+            "evidence-output picker sets it together with the Evidence Output "
+            "target. Each device bound to the target is checked against the "
+            "artifact the evidence step stored for that device and this "
+            "command."
+        ),
         json_schema_extra={"x_widget": "evidence-output-select", "x_widget_role": "command"},
     )
     expected: str = Field(
         default="",
         title="Expected Value / Pattern",
+        description=(
+            "The value compared against the artifact content: literal text for "
+            "the contains and equality operators, a regular expression for the "
+            "regex operators, or a number for the ordering operators."
+        ),
         json_schema_extra={"x_placeholder": "Expected value or regex pattern", "x_col_span": 2},
     )
     message: str = Field(
         default="",
         title="Custom Message (optional)",
+        description=(
+            "Shown verbatim as the step summary when the assertion passes and "
+            "as the error when it fails, replacing the generated messages. "
+            "Leave empty to get an auto-generated message that names the "
+            "operator and expected value."
+        ),
         json_schema_extra={
             "x_placeholder": "e.g., IOS-XE version must be 17.9 or higher",
             "x_col_span": 2,

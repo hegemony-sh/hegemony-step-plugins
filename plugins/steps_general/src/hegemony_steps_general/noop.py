@@ -22,7 +22,16 @@ class NoOpConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    delay_seconds: float = Field(default=0, ge=0, title="Delay (seconds)")
+    delay_seconds: float = Field(
+        default=0,
+        ge=0,
+        title="Delay (seconds)",
+        description=(
+            "Artificial delay before the step reports success. The default 0 "
+            "completes immediately; a positive value sleeps that many seconds "
+            "first. Cannot be negative."
+        ),
+    )
 
 
 class NoOpHandler(BaseHandler):

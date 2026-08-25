@@ -48,7 +48,7 @@ async def get_file_device_download_url(services: Any, file_id: str) -> FileDownl
 
         if response.status_code == 503:
             raise ValueError(
-                "External S3 URL not configured. Set HEGEMONY_S3_EXTERNAL_URL or use transfer='scp'"
+                "External S3 URL not configured. Set HEGEMONY_S3_EXTERNAL_URL so devices can reach repository files"
             )
 
         if response.status_code != 200:

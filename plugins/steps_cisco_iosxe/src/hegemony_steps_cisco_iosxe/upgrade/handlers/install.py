@@ -41,6 +41,13 @@ class UpgradeInstallConfig(BaseModel):
     upgrade_mode: Literal["install", "bundle"] = Field(
         default="install",
         title="Upgrade Mode",
+        description=(
+            'Which activation workflow to run: install mode uses the "install '
+            'add file ... activate commit" command, while bundle mode points '
+            "the boot system at the .bin image, saves the configuration, and "
+            "reloads. Defaults to install mode; it must match how the device "
+            "boots."
+        ),
         json_schema_extra={
             "x_option_labels": {
                 "install": "Install Mode (modern IOS-XE)",
@@ -57,6 +64,11 @@ class UpgradeInstallConfig(BaseModel):
     dest_fs: str = Field(
         default="flash:",
         title="Destination Filesystem",
+        description=(
+            "Device filesystem holding the staged image; combined with the "
+            'image filename to build the full image path. Defaults to "flash:"; '
+            "a trailing colon is added automatically if omitted."
+        ),
         json_schema_extra={"x_placeholder": "flash:"},
     )
     activate: bool = Field(

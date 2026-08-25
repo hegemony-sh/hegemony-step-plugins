@@ -25,10 +25,23 @@ class SleepConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    seconds: int = Field(default=30, ge=1, title="Duration (seconds)")
+    seconds: int = Field(
+        default=30,
+        ge=1,
+        title="Duration (seconds)",
+        description=(
+            "How many seconds the flow pauses at this step before moving on. "
+            "Must be at least 1; defaults to 30."
+        ),
+    )
     message: str = Field(
         default="",
         title="Message (optional)",
+        description=(
+            "Note recorded as the step summary and in the sleep evidence, "
+            "e.g. why the flow is waiting. When omitted, a generated "
+            "'Sleeping for N seconds' text is used."
+        ),
         json_schema_extra={"x_placeholder": "e.g., Waiting for BGP to converge"},
     )
 

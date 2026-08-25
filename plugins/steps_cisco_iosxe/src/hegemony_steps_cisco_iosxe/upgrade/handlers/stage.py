@@ -42,6 +42,13 @@ class UpgradeStageConfig(BaseModel):
     upgrade_mode: Literal["install", "bundle"] = Field(
         default="install",
         title="Upgrade Mode",
+        description=(
+            "Which IOS-XE upgrade workflow the staged image is intended for: "
+            "install mode (modern devices) or bundle mode (legacy devices). The "
+            "transfer itself behaves the same in both modes; keep this "
+            "consistent with the install step that follows. Defaults to install "
+            "mode."
+        ),
         json_schema_extra={
             "x_option_labels": {
                 "install": "Install Mode (modern IOS-XE)",
@@ -49,16 +56,20 @@ class UpgradeStageConfig(BaseModel):
             }
         },
     )
-    transfer_method: Literal["auto", "http", "https", "scp", "tftp"] = Field(
+    transfer_method: Literal["auto", "http", "https"] = Field(
         default="auto",
         title="Transfer Method",
+        description=(
+            "How the image reaches the device. Auto (the default) prefers a "
+            "device-side HTTPS/HTTP pull when the source is an HTTP(S) URL - "
+            "the only transfer implemented. Legacy stored values such as scp "
+            "or tftp fail with an explanatory error."
+        ),
         json_schema_extra={
             "x_option_labels": {
                 "auto": "Auto (detect best method)",
                 "http": "HTTP",
                 "https": "HTTPS",
-                "scp": "SCP",
-                "tftp": "TFTP",
             }
         },
     )
@@ -80,9 +91,7 @@ class UpgradeStageConfig(BaseModel):
     source_url: str = Field(
         default="",
         title="Source URL",
-        description=(
-            "Manual URL fallback (http/https/scp/tftp). Do not combine with File Repository File."
-        ),
+        description=("Manual URL fallback (http/https). Do not combine with File Repository File."),
         json_schema_extra={
             "x_placeholder": "https://repo.example.com/images/cat9k_iosxe.17.09.04a.SPA.bin",
             "x_col_span": 2,
@@ -100,22 +109,21 @@ class UpgradeStageConfig(BaseModel):
     dest_fs: str = Field(
         default="flash:",
         title="Destination Filesystem",
+        description=(
+            'Device filesystem the image is copied to. Defaults to "flash:"; a '
+            "trailing colon is added automatically if omitted."
+        ),
         json_schema_extra={"x_placeholder": "flash:"},
-    )
-    expected_sha256: str = Field(
-        default="",
-        title="SHA-256 Checksum (optional)",
-        description="SHA-256 hash for verification after transfer",
-        json_schema_extra={
-            "x_placeholder": "a1b2c3d4e5f6...",
-            "x_col_span": 2,
-            "x_disabled_when": {"field": "file_ids", "is_not_empty": True},
-        },
     )
     expected_md5: str = Field(
         default="",
         title="MD5 Checksum (optional)",
-        description="MD5 hash for on-device verification",
+        description=(
+            "MD5 hash verified on the device with verify /md5 after a "
+            "transfer - and before one: a file already staged under the "
+            "destination name that passes this check is not transferred "
+            "again."
+        ),
         json_schema_extra={
             "x_placeholder": "d41d8cd98f00b204e9800998ecf8427e",
             "x_col_span": 2,
@@ -125,6 +133,14 @@ class UpgradeStageConfig(BaseModel):
     overwrite: bool = Field(
         default=False,
         title="Force re-transfer even if file exists",
+        description=(
+            "Transfer the image again even when a file with the same name is "
+            "already on the device. When off (the default), an existing file "
+            "that passes the MD5 check is reused and the transfer is skipped; "
+            "with no checksum configured the image is transferred again, "
+            "unless the step's raw definition carries an expected_size that "
+            "matches the existing file."
+        ),
         json_schema_extra={"x_col_span": 2},
     )
     max_parallel_devices: int = Field(
@@ -160,16 +176,15 @@ class UpgradeStageHandler(BaseHandler):
     Required params:
         platform: Device platform (e.g., "ios-xe")
         Either:
-            - source_url: URL to download file from (http/https/scp/tftp)
+            - source_url: URL to download file from (http/https)
             - file_ids: file repository file ID array (must contain exactly one ID for this handler)
 
     Optional params:
         dest_filename: Target filename on device (defaults from selected file repository file)
         upgrade_mode: "install" or "bundle" (default: "install")
         dest_fs: Destination filesystem (default: "flash:")
-        transfer_method: "auto", "http", "https", "scp", "tftp" (default: "auto")
+        transfer_method: "auto", "http", "https" (default: "auto")
         expected_md5: MD5 hash for verification
-        expected_sha256: SHA256 hash for verification
         expected_size: Expected file size in bytes
         overwrite: Force re-transfer even if file exists (default: false)
 
@@ -192,6 +207,18 @@ class UpgradeStageHandler(BaseHandler):
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Stage upgrade file on all target devices."""
+        # The config model allows extra keys, so a definition predating the
+        # SHA-256 removal is still accepted - fail it loudly instead of
+        # silently running without the integrity check it configured.
+        if ctx.config.get("expected_sha256"):
+            return HandlerResult(
+                success=False,
+                error=(
+                    "expected_sha256 is no longer supported - IOS-XE's verify "
+                    "offers MD5 only; set expected_md5 instead"
+                ),
+                summary="Unsupported expected_sha256 configuration",
+            )
         services = ctx.require_services()
         target_devices = ctx.get_target_devices()
         if not target_devices:
@@ -255,7 +282,6 @@ class UpgradeStageHandler(BaseHandler):
         dest_fs = ctx.config.get("dest_fs", "flash:")
         transfer_method = ctx.config.get("transfer_method", "auto")
         expected_md5 = ctx.config.get("expected_md5")
-        expected_sha256 = ctx.config.get("expected_sha256")
         expected_size = ctx.config.get("expected_size")
         overwrite = ctx.config.get("overwrite", False)
 
@@ -305,7 +331,6 @@ class UpgradeStageHandler(BaseHandler):
                     dest_filename=dest_filename,
                     transfer_method=transfer_method,
                     expected_md5=expected_md5,
-                    expected_sha256=expected_sha256,
                     expected_size=expected_size,
                     overwrite=overwrite,
                 )

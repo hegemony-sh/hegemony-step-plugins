@@ -25,6 +25,13 @@ class ConnectivityMonitorConfig(BaseModel):
     check_type: str = Field(
         default="tcp_connect",
         title="Check Type",
+        description=(
+            "The kind of probe sent to each target on every sample, such as a "
+            "TCP connection attempt, an ICMP echo, an HTTP health request, or "
+            "a DNS lookup. Options come from the host's monitor check registry and the "
+            "value is validated when the step runs. Defaults to a plain TCP "
+            "connect check."
+        ),
         json_schema_extra={
             "x_widget": "select",
             "x_options_source": "monitor_checks",
@@ -41,17 +48,36 @@ class ConnectivityMonitorConfig(BaseModel):
         ge=1,
         le=65535,
         title="Port",
+        description=(
+            "TCP port probed on each target by the port-based checks such as "
+            "TCP Connect and HTTP Health. Ignored by checks that do not "
+            "connect to a port, such as ICMP Ping and DNS Resolve. Defaults "
+            "to 22 (SSH); must be between 1 and 65535."
+        ),
         json_schema_extra={
             "x_placeholder": "22",
             "x_hide_when": {"field": "check_type", "value": "icmp_ping"},
         },
     )
     interval_ms: int = Field(
-        default=5000, ge=100, title="Interval (ms)", json_schema_extra={"x_step": 100}
+        default=5000,
+        ge=100,
+        title="Interval (ms)",
+        description=(
+            "Time between successive samples, in milliseconds. Defaults to "
+            "5000 (one sample every five seconds); minimum 100."
+        ),
+        json_schema_extra={"x_step": 100},
     )
     schedule_mode: Literal["count", "duration", "until_join"] = Field(
         default="count",
         title="Schedule Mode",
+        description=(
+            "How the monitor decides when to stop sampling: after a fixed "
+            "number of samples, after a fixed duration, or - with Until Join "
+            "- when the flow engine stops it at the branch's join point. "
+            "Defaults to a fixed count."
+        ),
         json_schema_extra={
             "x_option_labels": {
                 "count": "Fixed Count",
@@ -64,18 +90,41 @@ class ConnectivityMonitorConfig(BaseModel):
         default=10,
         ge=1,
         title="Count",
+        description=(
+            "Number of samples to take before the monitor stops on its own. "
+            "Only used when Schedule Mode is Fixed Count. Defaults to 10; "
+            "minimum 1."
+        ),
         json_schema_extra={"x_show_when": {"field": "schedule_mode", "value": "count"}},
     )
     duration_sec: int = Field(
         default=60,
         ge=1,
         title="Duration (sec)",
+        description=(
+            "How long the monitor keeps sampling, in seconds, before it "
+            "stops on its own. Only used when Schedule Mode is Duration. "
+            "Defaults to 60; minimum 1."
+        ),
         json_schema_extra={"x_show_when": {"field": "schedule_mode", "value": "duration"}},
     )
-    timeout_sec: int = Field(default=10, ge=1, title="Timeout (sec)")
+    timeout_sec: int = Field(
+        default=10,
+        ge=1,
+        title="Timeout (sec)",
+        description=(
+            "Per-sample time limit in seconds: how long each probe waits for "
+            "an answer before giving up on that sample. Defaults to 10; "
+            "minimum 1."
+        ),
+    )
     url_path: str = Field(
         default="",
         title="URL Path",
+        description=(
+            "Request path for the HTTP Health check, e.g. /health. Used only "
+            "when Check Type is HTTP Health; when omitted, /health is probed."
+        ),
         json_schema_extra={
             "x_placeholder": "/health",
             "x_show_when": {"field": "check_type", "value": "http_health"},

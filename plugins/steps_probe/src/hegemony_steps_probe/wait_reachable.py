@@ -32,18 +32,29 @@ class WaitReachableConfig(BaseModel):
         default=300,
         ge=1,
         title="Max Wait (sec)",
+        description=(
+            "Overall deadline for the wait, in seconds. The step fails once "
+            "this much time passes without every target completing its "
+            "stability window. Defaults to 300."
+        ),
         json_schema_extra={"x_legacy_keys": ["max_wait"]},
     )
     stable_seconds: int = Field(
         default=30,
         ge=1,
         title="Stable (sec)",
+        description=(
+            "How long every target must remain continuously reachable before "
+            "the step succeeds, in seconds. A target that goes unreachable "
+            "restarts its window from zero. Defaults to 30."
+        ),
         json_schema_extra={"x_legacy_keys": ["stability_checks"]},
     )
     poll_interval: int = Field(
         default=5,
         ge=1,
         title="Poll Interval (sec)",
+        description="Seconds to wait between reachability polls. Defaults to 5.",
         json_schema_extra={"x_legacy_keys": ["check_interval"]},
     )
 

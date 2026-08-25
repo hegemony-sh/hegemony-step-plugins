@@ -47,8 +47,8 @@ class TransferCapabilities:
 
     http: bool = False  # Device can pull via HTTP (copy http://...)
     https: bool = False  # Device can pull via HTTPS
-    scp: bool = True  # Device accepts SCP push
-    tftp: bool = True  # Device can pull via TFTP
+    scp: bool = False  # SCP push is not implemented at any level yet
+    tftp: bool = False  # No TFTP implementation exists anywhere in the stage path
     ftp: bool = False  # Device can pull via FTP
 
 
@@ -96,11 +96,11 @@ class StageResult:
     staged: bool = False  # File now on device and verified
     skipped: bool = False  # True if file already existed
     transferred_bytes: int | None = None
-    transfer_method: str = ""  # "http", "scp", "tftp", etc.
+    transfer_method: str = ""  # "http", "https"
     transfer_elapsed_sec: float = 0.0
     hash_verified: bool = False
-    verified_hash: str | None = None  # MD5 or SHA256
-    hash_type: str = ""  # "md5", "sha256"
+    verified_hash: str | None = None  # MD5 (the only on-device check IOS-XE offers here)
+    hash_type: str = ""  # "md5"
     filesystem: str = ""
     full_path: str = ""  # e.g., "flash:cat9k_iosxe.17.09.01.SPA.bin"
     error: str | None = None
@@ -262,7 +262,6 @@ class UpgradeDriver(ABC):
         dest_filename: str,
         transfer_method: str = "auto",
         expected_md5: str | None = None,
-        expected_sha256: str | None = None,
         expected_size: int | None = None,
         overwrite: bool = False,
     ) -> StageResult:
@@ -280,9 +279,8 @@ class UpgradeDriver(ABC):
             source_url: URL to download file from (for HTTP/HTTPS transfer)
             dest_fs: Destination filesystem (e.g., "flash:")
             dest_filename: Filename on device
-            transfer_method: "auto", "http", "https", "scp", "tftp"
+            transfer_method: "auto", "http", "https"
             expected_md5: Expected MD5 hash for verification
-            expected_sha256: Expected SHA256 hash for verification
             expected_size: Expected file size in bytes
             overwrite: Overwrite if file already exists
 
@@ -385,7 +383,8 @@ class UpgradeDriver(ABC):
             scp_available: Whether SCP can be used
 
         Returns:
-            Selected transfer method: "http", "https", "scp", or "tftp"
+            Selected transfer method: "http", "https", or the unimplemented
+            "scp" fallback (fails downstream with an explicit error)
         """
         if preferred != "auto":
             return preferred
@@ -400,9 +399,6 @@ class UpgradeDriver(ABC):
 
         if scp_available and self.transfer_capabilities.scp:
             return "scp"
-
-        if self.transfer_capabilities.tftp:
-            return "tftp"
 
         # Fallback
         return "scp"

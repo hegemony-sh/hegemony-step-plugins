@@ -2,7 +2,13 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Install built wheels in a clean virtualenv and verify imports/entry points."""
+"""Install built wheels in a clean virtualenv and verify imports, entry points, and docs.
+
+The docs half is the only mechanical proof that a plugin's documentation
+bundle left git and entered the built artifact: it loads every step-handler
+package's bundle from the *installed* wheel and asserts one page per
+registered handler id.
+"""
 
 from __future__ import annotations
 
@@ -101,6 +107,29 @@ transport_names = {{entry.name for entry in transport_entries}}
 transport_expected = {EXPECTED_TRANSPORT_ENTRY_POINTS!r}
 transport_missing = transport_expected - transport_names
 assert not transport_missing, transport_missing
+
+# Plugin-owned docs: every step-handler wheel ships one page per registered
+# handler id, readable through the SDK loader from the installed package.
+from hegemony_step_sdk.docs import load_docs_bundle
+
+class _Reg:
+    api_version = 1
+    def __init__(self):
+        self.handlers = []
+    def register_handler_type(self, cls):
+        self.handlers.append(cls)
+
+for entry in entries:
+    reg = _Reg()
+    entry.load()(reg)
+    package = entry.value.split(":", 1)[0].split(".", 1)[0]
+    bundle = load_docs_bundle(package)
+    registered = {{cls.handler_id for cls in reg.handlers}}
+    assert registered == set(bundle), (
+        package,
+        sorted(registered - set(bundle)),
+        sorted(set(bundle) - registered),
+    )
 """
         subprocess.run([str(python), "-c", code], check=True)
     finally:

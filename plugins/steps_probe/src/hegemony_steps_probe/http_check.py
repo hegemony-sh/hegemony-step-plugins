@@ -56,6 +56,10 @@ class HttpProbeConfig(BaseModel):
     scheme: Literal["http", "https"] = Field(
         default="http",
         title="Scheme",
+        description=(
+            "Whether the request uses plain HTTP or TLS-protected HTTPS. Also "
+            "selects the default port (80 or 443) when Port is left empty."
+        ),
         json_schema_extra={"x_option_labels": {"http": "HTTP", "https": "HTTPS"}},
     )
     port: int | None = Field(
@@ -68,9 +72,21 @@ class HttpProbeConfig(BaseModel):
     path: str = Field(
         default="/",
         title="Path",
+        description=(
+            "Request path on the target, such as /health. A missing leading "
+            "slash is added automatically, and an empty value requests the "
+            "root path /."
+        ),
         json_schema_extra={"x_placeholder": "/health"},
     )
-    method: Literal["GET", "HEAD", "POST"] = Field(default="GET", title="Method")
+    method: Literal["GET", "HEAD", "POST"] = Field(
+        default="GET",
+        title="Method",
+        description=(
+            "HTTP request method to send. Defaults to GET; note that a HEAD "
+            "response has no body for the Body Contains assertion to match."
+        ),
+    )
     expected_status: str = Field(
         default="200-399",
         title="Expected Status",
@@ -85,10 +101,31 @@ class HttpProbeConfig(BaseModel):
     verify_tls: bool = Field(
         default=True,
         title="Verify TLS certificate",
+        description=(
+            "Validate the server's TLS certificate on HTTPS checks; turn off "
+            "for devices with self-signed certificates. Enabled by default "
+            "and ignored by plain HTTP checks."
+        ),
         json_schema_extra={"x_show_when": {"field": "scheme", "value": "https"}},
     )
-    follow_redirects: bool = Field(default=True, title="Follow redirects")
-    timeout_sec: int = Field(default=10, ge=1, title="Timeout (sec)")
+    follow_redirects: bool = Field(
+        default=True,
+        title="Follow redirects",
+        description=(
+            "Follow HTTP redirects and assert the final response. When "
+            "disabled, the redirect response itself is what Expected Status "
+            "and Body Contains see. Enabled by default."
+        ),
+    )
+    timeout_sec: int = Field(
+        default=10,
+        ge=1,
+        title="Timeout (sec)",
+        description=(
+            "Time limit for each request attempt, in seconds, covering "
+            "connection setup and the response. Defaults to 10."
+        ),
+    )
     attempts: int = Field(
         default=1, ge=1, le=10, title="Attempts", description="Number of attempts (1-10)"
     )
