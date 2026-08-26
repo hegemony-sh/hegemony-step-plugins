@@ -320,9 +320,12 @@ class RunContainerConfig(BaseModel):
         default="",
         title="New artifacts upload path",
         description=(
-            "Absolute path inside the container where newly created UTF-8 text files are "
-            "harvested as step artifacts after the container exits. Defaults to "
-            "/artifacts/new, or <artifacts_path>/new when you change the artifacts root."
+            "Absolute path inside the container where newly created files are harvested "
+            "after the container exits: UTF-8 text files become step artifacts, and every "
+            "other file is uploaded as a downloadable artifact up to the worker's per-file "
+            "cap (50 MiB by default). Files the harvest drops are listed in the step's "
+            "skipped-artifacts report. Defaults to /artifacts/new, or <artifacts_path>/new "
+            "when you change the artifacts root."
         ),
         json_schema_extra={"x_placeholder": "/artifacts/new", "x_advanced": True, "x_col_span": 2},
     )
@@ -580,23 +583,37 @@ def _decode_generated_artifact_text(raw_bytes: bytes) -> str | None:
         return None
 
 
+SKIP_REASON_UNREADABLE = "unreadable"
+SKIP_REASON_OUTSIDE_ROOT = "outside_staging_root"
+SKIP_REASON_TOO_LARGE = "too_large"
+
+_SKIP_REASON_LABELS = {
+    SKIP_REASON_UNREADABLE: "could not be read out of the harvest staging directory",
+    SKIP_REASON_OUTSIDE_ROOT: "resolved outside the harvest staging directory",
+    SKIP_REASON_TOO_LARGE: "larger than the worker's per-file artifact cap",
+}
+
+
 def _collect_generated_text_artifacts(
     staging_root: str, max_binary_size: int | None = None
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Read files harvested from the container's new-artifacts subfolder.
 
     Returns a tuple of ``(text_artifacts, binary_files, skipped_files)``:
     - ``text_artifacts``: UTF-8 text files as inline ``step_result`` artifacts.
     - ``binary_files``: metadata for non-text files to upload for download,
       each ``{"name", "path", "size", "content_type"}``.
-    - ``skipped_files``: count of files skipped (unreadable, traversal, or
-      binary files exceeding ``max_binary_size``).
+    - ``skipped_files``: one ``{"name", "size", "reason"}`` record per file that
+      produced no artifact - unreadable, resolved outside the staging root, or a
+      binary file over ``max_binary_size``. Records, not a bare count, so the
+      caller can name the dropped file and the cap it hit; a step that wrote a
+      too-large archive otherwise looks like it produced nothing at all.
     """
     import mimetypes
 
     artifacts: list[dict[str, Any]] = []
     binary_files: list[dict[str, Any]] = []
-    skipped_files = 0
+    skipped_files: list[dict[str, Any]] = []
 
     if not os.path.isdir(staging_root):
         return artifacts, binary_files, skipped_files
@@ -610,22 +627,30 @@ def _collect_generated_text_artifacts(
             if not os.path.isfile(file_path):
                 continue
 
+            # Resolve the reported name before touching the file: a path that
+            # escapes the staging root is rejected without being read at all.
+            relative_name = os.path.relpath(file_path, staging_root).replace(os.sep, "/")[:255]
+            if relative_name.startswith("../"):
+                skipped_files.append(
+                    {"name": relative_name, "size": None, "reason": SKIP_REASON_OUTSIDE_ROOT}
+                )
+                continue
+
             try:
                 file_size = os.path.getsize(file_path)
             except OSError:
-                skipped_files += 1
+                skipped_files.append(
+                    {"name": relative_name, "size": None, "reason": SKIP_REASON_UNREADABLE}
+                )
                 continue
 
             try:
                 with open(file_path, "rb") as fh:
                     raw_bytes = fh.read()
             except OSError:
-                skipped_files += 1
-                continue
-
-            relative_name = os.path.relpath(file_path, staging_root).replace(os.sep, "/")
-            if relative_name.startswith("../"):
-                skipped_files += 1
+                skipped_files.append(
+                    {"name": relative_name, "size": file_size, "reason": SKIP_REASON_UNREADABLE}
+                )
                 continue
 
             content_text = _decode_generated_artifact_text(raw_bytes)
@@ -633,7 +658,7 @@ def _collect_generated_text_artifacts(
                 artifacts.append(
                     {
                         "kind": "step_result",
-                        "name": relative_name[:255],
+                        "name": relative_name,
                         "content_text": content_text,
                     }
                 )
@@ -641,13 +666,15 @@ def _collect_generated_text_artifacts(
 
             # Binary file: schedule for upload unless it exceeds the size cap.
             if max_binary_size is not None and len(raw_bytes) > max_binary_size:
-                skipped_files += 1
+                skipped_files.append(
+                    {"name": relative_name, "size": file_size, "reason": SKIP_REASON_TOO_LARGE}
+                )
                 continue
 
             content_type, _ = mimetypes.guess_type(file_name)
             binary_files.append(
                 {
-                    "name": relative_name[:255],
+                    "name": relative_name,
                     "path": file_path,
                     "size": file_size,
                     "content_type": content_type or "application/octet-stream",
@@ -655,6 +682,49 @@ def _collect_generated_text_artifacts(
             )
 
     return artifacts, binary_files, skipped_files
+
+
+def _describe_skipped_artifacts(
+    skipped_files: list[dict[str, Any]],
+    *,
+    step_id: str,
+    new_artifacts_path: str,
+    max_binary_size: int | None,
+) -> dict[str, Any]:
+    """Render dropped harvest files as a ``step_result`` artifact.
+
+    The harvest is best-effort, so a dropped file used to leave no trace on the
+    run at all - only a worker log line nobody reading the run can see. This
+    puts the file name, its size, and the cap it exceeded on the step itself.
+    """
+    cap_note = (
+        f"per-file cap {max_binary_size} bytes"
+        if max_binary_size is not None
+        else "no per-file cap configured"
+    )
+    lines = [
+        f"{len(skipped_files)} file(s) written to {new_artifacts_path} produced no artifact "
+        f"({cap_note}).",
+        "",
+    ]
+    for entry in skipped_files:
+        size = entry.get("size")
+        size_note = f"{size} bytes" if isinstance(size, int) else "size unknown"
+        reason = str(entry.get("reason", ""))
+        lines.append(
+            f"- {entry.get('name')} ({size_note}): {_SKIP_REASON_LABELS.get(reason, reason)}"
+        )
+
+    return {
+        "kind": "step_result",
+        "name": f"skipped_artifacts_{step_id}",
+        "content_text": "\n".join(lines) + "\n",
+        "content_json": {
+            "new_artifacts_path": new_artifacts_path,
+            "max_file_size_bytes": max_binary_size,
+            "skipped": skipped_files,
+        },
+    }
 
 
 async def _upload_generated_binary_artifacts(ctx: Any, binary_files: list[dict[str, Any]]) -> int:
@@ -2007,6 +2077,8 @@ class RunContainerHandler(BaseHandler):
             duration = time.monotonic() - start_time
 
             generated_text_artifacts: list[dict[str, Any]] = []
+            skipped_generated_artifacts: list[dict[str, Any]] = []
+            generated_artifacts_cap: int | None = None
             try:
                 generated_artifacts_staging_dir = tempfile.mkdtemp(
                     prefix="hegemony-generated-artifacts-"
@@ -2033,13 +2105,13 @@ class RunContainerHandler(BaseHandler):
                         },
                     )
                 else:
-                    max_binary_size = runtime.artifact_max_file_size_bytes
+                    generated_artifacts_cap = runtime.artifact_max_file_size_bytes
                     (
                         generated_text_artifacts,
                         generated_binary_files,
                         skipped_generated_artifacts,
                     ) = _collect_generated_text_artifacts(
-                        generated_artifacts_staging_dir, max_binary_size
+                        generated_artifacts_staging_dir, generated_artifacts_cap
                     )
                     uploaded_binary = await _upload_generated_binary_artifacts(
                         ctx, generated_binary_files
@@ -2053,7 +2125,9 @@ class RunContainerHandler(BaseHandler):
                             "new_artifacts_path": new_artifacts_path,
                             "count": len(generated_text_artifacts),
                             "uploaded_binary": uploaded_binary,
-                            "skipped_non_text": skipped_generated_artifacts,
+                            "skipped": len(skipped_generated_artifacts),
+                            "skipped_detail": skipped_generated_artifacts,
+                            "max_file_size_bytes": generated_artifacts_cap,
                         },
                     )
 
@@ -2088,18 +2162,33 @@ class RunContainerHandler(BaseHandler):
                 }
             ]
             evidence.extend(generated_text_artifacts)
+            if skipped_generated_artifacts:
+                evidence.append(
+                    _describe_skipped_artifacts(
+                        skipped_generated_artifacts,
+                        step_id=ctx.step_id,
+                        new_artifacts_path=new_artifacts_path,
+                        max_binary_size=generated_artifacts_cap,
+                    )
+                )
 
             success = exit_code == 0
+            summary = (
+                f"Container exited with code {exit_code}"
+                if success
+                else f"Container failed with exit code {exit_code}"
+            )
+            if skipped_generated_artifacts:
+                summary += f" ({len(skipped_generated_artifacts)} artifact(s) skipped)"
             return HandlerResult(
                 success=success,
-                summary=f"Container exited with code {exit_code}"
-                if success
-                else f"Container failed with exit code {exit_code}",
+                summary=summary,
                 error=None if success else f"Exit code {exit_code}",
                 metrics={
                     "exit_code": exit_code,
                     "duration_seconds": round(duration, 2),
                     "image": image,
+                    "skipped_artifacts": len(skipped_generated_artifacts),
                 },
                 evidence=evidence,
                 output={

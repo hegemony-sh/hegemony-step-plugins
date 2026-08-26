@@ -37,8 +37,12 @@ step id. All these mount paths can be changed with the advanced path fields.
 To publish results, write files into the new-artifacts folder (default
 `/artifacts/new`): after the container exits, UTF-8 text files found there
 become step artifacts and other files are uploaded as downloadable files
-(up to the worker's per-file cap, 50 MiB by default - larger files are
-skipped with a log note).
+(up to the worker's per-file cap, 50 MiB by default). A file the harvest
+drops - over the cap, or unreadable - is named with its size and the cap it
+hit in a `skipped_artifacts_<step id>` artifact, counted in the step's
+`skipped_artifacts` metric, and noted in the step summary; raise
+`HEGEMONY_RUN_ARTIFACT_MAX_FILE_SIZE_BYTES` on the worker and the API to
+take a larger file. Skipping never fails the step.
 When the step uses shared or explicit execution affinity, the run's shared
 workspace is also mounted (default `/shared`) so files such as Terraform
 state persist across steps.
