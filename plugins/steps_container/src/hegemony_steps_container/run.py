@@ -5,6 +5,7 @@
 """RunContainerHandler: run commands inside Docker containers with provisioning."""
 
 import asyncio
+import codecs
 import contextlib
 import json
 import logging
@@ -573,15 +574,46 @@ def _write_staged_json_file(path: str, payload: Any) -> None:
         fh.write("\n")
 
 
-def _decode_generated_artifact_text(raw_bytes: bytes) -> str | None:
-    """Return UTF-8 text for generated artifacts, or None for binary payloads."""
-    if b"\0" in raw_bytes:
-        return None
+# Harvested files are read in chunks so a binary payload can be abandoned as
+# soon as it proves binary, rather than after it is already in memory.
+_HARVEST_READ_CHUNK_BYTES = 1024 * 1024
+
+
+def _read_harvested_text(file_path: str) -> str | None:
+    """Return the file's UTF-8 text, or None as soon as it proves binary.
+
+    Classification is incremental because the caller may be about to reject the
+    file for exceeding the artifact cap: reading a 200 MB archive in full only
+    to discard it costs the worker 200 MB of RSS for nothing, and the bytes are
+    never needed anyway - a binary artifact is uploaded by streaming from its
+    path. The first NUL byte or invalid sequence therefore ends the read.
+
+    Text is still accumulated in full. Inline text artifacts are uncapped, and
+    bounding them here would silently truncate ones that work today.
+
+    Raises ``OSError`` for an unreadable file; the caller records that.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    chunks: list[str] = []
     try:
-        return raw_bytes.decode("utf-8")
+        with open(file_path, "rb") as fh:
+            while True:
+                chunk = fh.read(_HARVEST_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if b"\0" in chunk:
+                    return None
+                chunks.append(decoder.decode(chunk))
+            # A trailing partial sequence is only an error once it is final.
+            chunks.append(decoder.decode(b"", final=True))
     except UnicodeDecodeError:
         return None
+    return "".join(chunks)
 
+
+# The platform's RunArtifact.name column bounds an artifact name; a skip
+# record is JSON and has no such limit.
+MAX_ARTIFACT_NAME_LEN = 255
 
 SKIP_REASON_UNREADABLE = "unreadable"
 SKIP_REASON_OUTSIDE_ROOT = "outside_staging_root"
@@ -648,8 +680,9 @@ def _collect_generated_text_artifacts(
 
         for file_name in files:
             file_path = os.path.join(root, file_name)
-            if not os.path.isfile(file_path):
-                continue
+            # Reported in full: a skip record is JSON, so it carries the whole
+            # path. Only an artifact *name* is bounded, at the point of use.
+            relative_name = os.path.relpath(file_path, staging_root).replace(os.sep, "/")
 
             # Containment is decided on the resolved path, before the file is
             # touched at all. `docker cp` preserves symlinks rather than
@@ -658,10 +691,18 @@ def _collect_generated_text_artifacts(
             # link's target on the *host* and publish it as step evidence. A
             # lexical check cannot see that: the link's relative name is
             # perfectly ordinary.
-            relative_name = os.path.relpath(file_path, staging_root).replace(os.sep, "/")[:255]
             if not _is_within_directory(resolved_root, os.path.realpath(file_path)):
                 skipped_files.append(
                     {"name": relative_name, "size": None, "reason": SKIP_REASON_OUTSIDE_ROOT}
+                )
+                continue
+
+            # Not a regular file: a dangling symlink, a fifo, a device node.
+            # Unharvestable, but not nothing - it was written to the folder and
+            # produced no artifact, which is exactly what this report is for.
+            if not os.path.isfile(file_path):
+                skipped_files.append(
+                    {"name": relative_name, "size": None, "reason": SKIP_REASON_UNREADABLE}
                 )
                 continue
 
@@ -674,27 +715,27 @@ def _collect_generated_text_artifacts(
                 continue
 
             try:
-                with open(file_path, "rb") as fh:
-                    raw_bytes = fh.read()
+                content_text = _read_harvested_text(file_path)
             except OSError:
                 skipped_files.append(
                     {"name": relative_name, "size": file_size, "reason": SKIP_REASON_UNREADABLE}
                 )
                 continue
 
-            content_text = _decode_generated_artifact_text(raw_bytes)
             if content_text is not None:
                 artifacts.append(
                     {
                         "kind": "step_result",
-                        "name": relative_name,
+                        "name": relative_name[:MAX_ARTIFACT_NAME_LEN],
                         "content_text": content_text,
                     }
                 )
                 continue
 
             # Binary file: schedule for upload unless it exceeds the size cap.
-            if max_binary_size is not None and len(raw_bytes) > max_binary_size:
+            # The size decides on its own - the payload was never read past the
+            # point it proved binary, and the upload streams from the path.
+            if max_binary_size is not None and file_size > max_binary_size:
                 skipped_files.append(
                     {"name": relative_name, "size": file_size, "reason": SKIP_REASON_TOO_LARGE}
                 )
@@ -703,7 +744,7 @@ def _collect_generated_text_artifacts(
             content_type, _ = mimetypes.guess_type(file_name)
             binary_files.append(
                 {
-                    "name": relative_name,
+                    "name": relative_name[:MAX_ARTIFACT_NAME_LEN],
                     "path": file_path,
                     "size": file_size,
                     "content_type": content_type or "application/octet-stream",

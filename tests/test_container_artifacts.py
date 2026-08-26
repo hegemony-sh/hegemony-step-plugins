@@ -22,12 +22,14 @@ from unittest.mock import AsyncMock
 from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerServices
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
 from hegemony_steps_container.run import (
+    MAX_ARTIFACT_NAME_LEN,
     SKIP_REASON_OUTSIDE_ROOT,
     SKIP_REASON_TOO_LARGE,
     SKIP_REASON_UNREADABLE,
     RunContainerHandler,
     _collect_generated_text_artifacts,
     _describe_skipped_artifacts,
+    _read_harvested_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -152,12 +154,139 @@ def test_symlink_inside_the_harvest_is_still_collected(tmp_path) -> None:
     assert {a["name"] for a in text_artifacts} == {"real.txt", "alias.txt"}
 
 
+def test_dangling_symlink_is_reported_not_passed_over(tmp_path) -> None:
+    """An unresolvable link produced no artifact, so it belongs in the report.
+
+    `os.path.isfile` is False for a dangling link, which used to mean the loop
+    skipped it before any record was made - the silence this change exists to
+    remove.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "broken.txt").symlink_to(staging / "never_written.txt")
+
+    text_artifacts, binary_files, skipped = _collect_generated_text_artifacts(
+        str(staging), max_binary_size=1024
+    )
+
+    assert text_artifacts == []
+    assert binary_files == []
+    assert skipped == [{"name": "broken.txt", "size": None, "reason": SKIP_REASON_UNREADABLE}]
+
+
+def test_skip_record_keeps_the_whole_path_that_the_name_bound_would_cut(tmp_path) -> None:
+    """Two deep paths sharing a 255-character prefix must stay distinguishable.
+
+    The artifact-name bound exists for the platform's name column; a skip
+    record is JSON and carries the full path.
+    """
+    staging = tmp_path / "staging"
+    deep = staging / ("a" * 100) / ("b" * 100) / ("c" * 100)
+    deep.mkdir(parents=True)
+    (deep / "archive.tar").write_bytes(b"\x00" * 2048)
+
+    _text, _binary, skipped = _collect_generated_text_artifacts(str(staging), max_binary_size=1024)
+
+    assert len(skipped) == 1
+    name = skipped[0]["name"]
+    assert len(name) > MAX_ARTIFACT_NAME_LEN
+    assert name == f"{'a' * 100}/{'b' * 100}/{'c' * 100}/archive.tar"
+
+
+def test_artifact_names_stay_within_the_platform_bound(tmp_path) -> None:
+    """The bound still applies where the name becomes an artifact name."""
+    staging = tmp_path / "staging"
+    deep = staging / ("a" * 100) / ("b" * 100) / ("c" * 100)
+    deep.mkdir(parents=True)
+    (deep / "notes.txt").write_text("hi\n", encoding="utf-8")
+    (deep / "blob.bin").write_bytes(b"\x00\x01")
+
+    text_artifacts, binary_files, skipped = _collect_generated_text_artifacts(
+        str(staging), max_binary_size=1024
+    )
+
+    assert skipped == []
+    assert len(text_artifacts[0]["name"]) == MAX_ARTIFACT_NAME_LEN
+    assert len(binary_files[0]["name"]) == MAX_ARTIFACT_NAME_LEN
+
+
 def test_missing_staging_root_harvests_nothing(tmp_path) -> None:
     """No staging directory (the docker cp failed) is empty, not an error."""
     text_artifacts, binary_files, skipped = _collect_generated_text_artifacts(
         str(tmp_path / "absent"), max_binary_size=1024
     )
     assert (text_artifacts, binary_files, skipped) == ([], [], [])
+
+
+class _CountingFile:
+    """A binary file wrapper that totals how many bytes were actually read."""
+
+    def __init__(self, fh, counter: list[int]) -> None:
+        """Wrap ``fh``, accumulating read sizes into ``counter``."""
+        self._fh = fh
+        self._counter = counter
+
+    def read(self, size: int = -1) -> bytes:
+        """Read from the wrapped handle and record how much came back."""
+        data = self._fh.read(size)
+        self._counter[0] += len(data)
+        return data
+
+    def __enter__(self):
+        """Enter the wrapped handle's context, yielding the counting wrapper."""
+        self._fh.__enter__()
+        return self
+
+    def __exit__(self, *exc_info):
+        """Close the wrapped handle."""
+        return self._fh.__exit__(*exc_info)
+
+
+def test_binary_classification_stops_at_the_first_nul(tmp_path, monkeypatch) -> None:
+    """An oversized binary is never buffered whole just to be rejected.
+
+    This is the 200 MB-tar case in miniature: the payload is not needed - a
+    binary artifact uploads by streaming from its path - so reading it in full
+    only to discard it would cost the worker its whole size in RSS.
+    """
+    payload = b"\x00" + b"A" * (4 * 1024 * 1024)
+    target = tmp_path / "archive.tar"
+    target.write_bytes(payload)
+
+    read_total = [0]
+    real_open = open
+
+    def counting_open(file, mode="r", *args, **kwargs):
+        """Wrap only the harvest's binary read; delegate everything else."""
+        fh = real_open(file, mode, *args, **kwargs)
+        if str(file) == str(target) and "b" in mode:
+            return _CountingFile(fh, read_total)
+        return fh
+
+    monkeypatch.setattr("builtins.open", counting_open)
+
+    assert _read_harvested_text(str(target)) is None
+    # One chunk, not the whole 4 MB file.
+    assert 0 < read_total[0] <= 1024 * 1024
+    assert read_total[0] < len(payload)
+
+
+def test_text_spanning_chunks_survives_a_split_multibyte_sequence(tmp_path) -> None:
+    """Chunked decoding must not mistake a straddling character for binary."""
+    target = tmp_path / "wide.txt"
+    # Longer than one read chunk, all multi-byte, so a boundary lands mid-character.
+    text = "é" * (1024 * 1024)
+    target.write_text(text, encoding="utf-8")
+
+    assert _read_harvested_text(str(target)) == text
+
+
+def test_invalid_utf8_without_a_nul_is_binary(tmp_path) -> None:
+    """A lone continuation byte is not text, even with no NUL to give it away."""
+    target = tmp_path / "odd.bin"
+    target.write_bytes(b"valid then \xff\xfe trailing")
+
+    assert _read_harvested_text(str(target)) is None
 
 
 # ---------------------------------------------------------------------------
