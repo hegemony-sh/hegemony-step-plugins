@@ -36,6 +36,7 @@ from hegemony_steps_container.run import (
 
 
 def test_text_is_inlined_and_binary_is_queued_for_upload(tmp_path) -> None:
+    """The two halves of a clean harvest: text inline, binary for upload."""
     (tmp_path / "report.txt").write_text("hello\n", encoding="utf-8")
     (tmp_path / "image.bin").write_bytes(b"\x00\x01\x02\x03")
 
@@ -64,6 +65,7 @@ def test_oversized_binary_is_skipped_with_a_named_record(tmp_path) -> None:
 
 
 def test_no_cap_uploads_a_binary_of_any_size(tmp_path) -> None:
+    """An unset cap means no cap - the size check is skipped entirely."""
     (tmp_path / "archive.tar").write_bytes(b"\x00" * 2048)
 
     _text, binary_files, skipped = _collect_generated_text_artifacts(
@@ -88,10 +90,12 @@ def test_text_file_is_never_size_capped(tmp_path) -> None:
 
 
 def test_unreadable_file_is_reported_rather_than_dropped(tmp_path, monkeypatch) -> None:
+    """A file the worker cannot stat is reported, not silently passed over."""
     (tmp_path / "locked.bin").write_bytes(b"\x00\x01")
     real_getsize = os.path.getsize
 
     def failing_getsize(path):
+        """Fail for the one file under test, delegate for the rest."""
         if str(path).endswith("locked.bin"):
             raise OSError("permission denied")
         return real_getsize(path)
@@ -149,6 +153,7 @@ def test_symlink_inside_the_harvest_is_still_collected(tmp_path) -> None:
 
 
 def test_missing_staging_root_harvests_nothing(tmp_path) -> None:
+    """No staging directory (the docker cp failed) is empty, not an error."""
     text_artifacts, binary_files, skipped = _collect_generated_text_artifacts(
         str(tmp_path / "absent"), max_binary_size=1024
     )
@@ -161,6 +166,7 @@ def test_missing_staging_root_harvests_nothing(tmp_path) -> None:
 
 
 def test_skip_report_names_the_file_its_size_and_the_cap() -> None:
+    """The report has to answer "where did my 200 MB tar go?" on its own."""
     artifact = _describe_skipped_artifacts(
         [{"name": "archive.tar", "size": 209_715_200, "reason": SKIP_REASON_TOO_LARGE}],
         step_id="build",
@@ -214,6 +220,7 @@ def test_skip_report_flattens_control_characters_in_names() -> None:
 
 
 def test_skip_report_handles_an_unset_cap_and_unknown_size() -> None:
+    """Neither an absent cap nor an unknown size may render as None."""
     artifact = _describe_skipped_artifacts(
         [{"name": "odd.bin", "size": None, "reason": SKIP_REASON_UNREADABLE}],
         step_id="build",
@@ -234,10 +241,12 @@ class _FakeServices:
     """Minimal HandlerServices stub for the container.run harvest path."""
 
     def __init__(self, artifact_max_file_size_bytes: int) -> None:
+        """Record the cap to advertise and start with nothing uploaded."""
         self._cap = artifact_max_file_size_bytes
         self.uploaded: list[str] = []
 
     def container_runtime(self) -> ContainerRuntime:
+        """The runtime the handler reads its per-file artifact cap from."""
         return ContainerRuntime(
             docker_bin="docker",
             shared_workspaces_enabled=False,
@@ -248,15 +257,19 @@ class _FakeServices:
         )
 
     async def fetch_run_attachments(self, run_id: str) -> list[dict]:
+        """No flow attachments: these tests only exercise the harvest."""
         return []
 
     async def fetch_run_step_outputs(self, run_id: str) -> dict[str, dict[str, Any]]:
+        """No upstream step outputs to stage into the container."""
         return {}
 
     async def fetch_run_artifacts(self, run_id: str) -> list[dict]:
+        """No upstream artifacts to mount under /artifacts."""
         return []
 
     async def upload_binary_artifact(self, run_id: str, *, name: str, **kwargs: Any) -> bool:
+        """Record the upload so a test can assert what was, and was not, sent."""
         self.uploaded.append(name)
         return True
 
@@ -269,6 +282,7 @@ def _install_docker_mocks(monkeypatch, harvest: dict[str, bytes]) -> None:
     )
 
     def fake_subprocess_run(cmd, *args, **kwargs):
+        """Answer every docker call, materializing the harvest on the cp."""
         cmd = list(cmd)
         if len(cmd) >= 4 and cmd[1] == "cp" and ":/artifacts/new/." in cmd[2]:
             for name, payload in harvest.items():
@@ -281,6 +295,7 @@ def _install_docker_mocks(monkeypatch, harvest: dict[str, bytes]) -> None:
     monkeypatch.setattr("subprocess.run", fake_subprocess_run)
 
     async def fake_create_subprocess_exec(*argv, **kwargs):
+        """A container that starts, produces no output, and exits 0."""
         proc = AsyncMock()
         proc.stdout = AsyncMock()
         proc.stdout.readline = AsyncMock(return_value=b"")
@@ -295,6 +310,7 @@ def _install_docker_mocks(monkeypatch, harvest: dict[str, bytes]) -> None:
 
 
 def _ctx(services: _FakeServices) -> HandlerContext:
+    """A minimal container.run step: default paths, trivial command."""
     return HandlerContext(
         run_id="run-12345678",
         flow_id="flow-1",
@@ -330,6 +346,7 @@ async def test_oversized_archive_surfaces_on_the_step_not_only_in_the_log(monkey
 
 
 async def test_a_clean_harvest_reports_no_skips(monkeypatch) -> None:
+    """The common case stays quiet: no report artifact, no summary suffix."""
     services = _FakeServices(artifact_max_file_size_bytes=1024)
     _install_docker_mocks(monkeypatch, {"report.txt": b"hello\n", "small.bin": b"\x00\x01\x02"})
 
@@ -358,6 +375,7 @@ async def test_timeout_keeps_the_skipped_artifacts_metric(monkeypatch) -> None:
     _install_docker_mocks(monkeypatch, {})
 
     async def timing_out_exec(*argv, **kwargs):
+        """A container that never returns, as the handler's timeout sees it."""
         raise subprocess.TimeoutExpired(cmd="docker start -a", timeout=1)
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", timing_out_exec)
