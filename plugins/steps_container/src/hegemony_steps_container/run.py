@@ -593,6 +593,28 @@ _SKIP_REASON_LABELS = {
     SKIP_REASON_TOO_LARGE: "larger than the worker's per-file artifact cap",
 }
 
+# Control characters are legal in filenames and would otherwise break the
+# one-line-per-file skip report, or forge entries in it.
+_ARTIFACT_DISPLAY_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+# The harvest log carries a sample of the skip records; the full list is on the
+# step itself. An unbounded list would let one step emit a huge log entry.
+_MAX_LOGGED_SKIP_RECORDS = 20
+
+
+def _display_name(name: Any) -> str:
+    """Flatten a harvested name for rendering into the skip report."""
+    return _ARTIFACT_DISPLAY_UNSAFE_RE.sub("?", str(name))
+
+
+def _is_within_directory(root: str, candidate: str) -> bool:
+    """True when ``candidate`` is ``root`` itself or lives beneath it.
+
+    Both arguments must already be resolved: this is a containment test, not a
+    normalization step.
+    """
+    return candidate == root or candidate.startswith(root.rstrip(os.sep) + os.sep)
+
 
 def _collect_generated_text_artifacts(
     staging_root: str, max_binary_size: int | None = None
@@ -618,6 +640,8 @@ def _collect_generated_text_artifacts(
     if not os.path.isdir(staging_root):
         return artifacts, binary_files, skipped_files
 
+    resolved_root = os.path.realpath(staging_root)
+
     for root, dirs, files in os.walk(staging_root):
         dirs.sort()
         files.sort()
@@ -627,10 +651,15 @@ def _collect_generated_text_artifacts(
             if not os.path.isfile(file_path):
                 continue
 
-            # Resolve the reported name before touching the file: a path that
-            # escapes the staging root is rejected without being read at all.
+            # Containment is decided on the resolved path, before the file is
+            # touched at all. `docker cp` preserves symlinks rather than
+            # dereferencing them, so a container that drops a symlink into its
+            # new-artifacts folder would otherwise have the worker open the
+            # link's target on the *host* and publish it as step evidence. A
+            # lexical check cannot see that: the link's relative name is
+            # perfectly ordinary.
             relative_name = os.path.relpath(file_path, staging_root).replace(os.sep, "/")[:255]
-            if relative_name.startswith("../"):
+            if not _is_within_directory(resolved_root, os.path.realpath(file_path)):
                 skipped_files.append(
                     {"name": relative_name, "size": None, "reason": SKIP_REASON_OUTSIDE_ROOT}
                 )
@@ -712,7 +741,8 @@ def _describe_skipped_artifacts(
         size_note = f"{size} bytes" if isinstance(size, int) else "size unknown"
         reason = str(entry.get("reason", ""))
         lines.append(
-            f"- {entry.get('name')} ({size_note}): {_SKIP_REASON_LABELS.get(reason, reason)}"
+            f"- {_display_name(entry.get('name'))} ({size_note}): "
+            f"{_SKIP_REASON_LABELS.get(reason, reason)}"
         )
 
     return {
@@ -2126,7 +2156,9 @@ class RunContainerHandler(BaseHandler):
                             "count": len(generated_text_artifacts),
                             "uploaded_binary": uploaded_binary,
                             "skipped": len(skipped_generated_artifacts),
-                            "skipped_detail": skipped_generated_artifacts,
+                            "skipped_detail": skipped_generated_artifacts[
+                                :_MAX_LOGGED_SKIP_RECORDS
+                            ],
                             "max_file_size_bytes": generated_artifacts_cap,
                         },
                     )
@@ -2205,7 +2237,14 @@ class RunContainerHandler(BaseHandler):
                 success=False,
                 error=f"Container timed out after {timeout}s (image: {image})",
                 summary=f"Timeout after {timeout}s",
-                metrics={"duration_seconds": round(duration, 2), "image": image},
+                # Zero, not absent: a timeout kills the container before the
+                # harvest runs, and consumers of the metric should not have to
+                # special-case the shape of a timed-out step.
+                metrics={
+                    "duration_seconds": round(duration, 2),
+                    "image": image,
+                    "skipped_artifacts": 0,
+                },
             )
         except FileNotFoundError:
             return HandlerResult(

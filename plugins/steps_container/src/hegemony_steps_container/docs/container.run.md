@@ -38,8 +38,9 @@ To publish results, write files into the new-artifacts folder (default
 `/artifacts/new`): after the container exits, UTF-8 text files found there
 become step artifacts and other files are uploaded as downloadable files
 (up to the worker's per-file cap, 50 MiB by default). A file the harvest
-drops - over the cap, or unreadable - is named with its size and the cap it
-hit in a `skipped_artifacts_<step id>` artifact, counted in the step's
+drops - over the cap, unreadable, or a symlink resolving outside the
+new-artifacts folder, which is never followed - is named with its size and
+the reason in a `skipped_artifacts_<step id>` artifact, counted in the step's
 `skipped_artifacts` metric, and noted in the step summary; raise
 `HEGEMONY_RUN_ARTIFACT_MAX_FILE_SIZE_BYTES` on the worker and the API to
 take a larger file. Skipping never fails the step.

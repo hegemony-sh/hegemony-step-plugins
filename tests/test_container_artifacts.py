@@ -14,6 +14,7 @@ produced nothing. These tests pin the reporting that replaced that silence.
 from __future__ import annotations
 
 import os
+import subprocess
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -21,6 +22,7 @@ from unittest.mock import AsyncMock
 from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerServices
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
 from hegemony_steps_container.run import (
+    SKIP_REASON_OUTSIDE_ROOT,
     SKIP_REASON_TOO_LARGE,
     SKIP_REASON_UNREADABLE,
     RunContainerHandler,
@@ -104,6 +106,48 @@ def test_unreadable_file_is_reported_rather_than_dropped(tmp_path, monkeypatch) 
     assert skipped == [{"name": "locked.bin", "size": None, "reason": SKIP_REASON_UNREADABLE}]
 
 
+def test_symlink_escaping_the_harvest_is_rejected_unread(tmp_path) -> None:
+    """A link out of the staging root is refused before it is ever opened.
+
+    `docker cp` preserves symlinks instead of dereferencing them, so a
+    container that writes `ln -s /etc/shadow /artifacts/new/x` hands the worker
+    a link whose *relative* name is perfectly ordinary. Following it would
+    publish a worker-host file as step evidence, so containment is decided on
+    the resolved path.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    outside = tmp_path / "host"
+    outside.mkdir()
+    secret = outside / "worker_secret.txt"
+    secret.write_text("HEGEMONY_DB_PASSWORD=hunter2\n", encoding="utf-8")
+
+    (staging / "leak.txt").symlink_to(secret)
+
+    text_artifacts, binary_files, skipped = _collect_generated_text_artifacts(
+        str(staging), max_binary_size=1024
+    )
+
+    assert text_artifacts == []
+    assert binary_files == []
+    assert skipped == [{"name": "leak.txt", "size": None, "reason": SKIP_REASON_OUTSIDE_ROOT}]
+
+
+def test_symlink_inside_the_harvest_is_still_collected(tmp_path) -> None:
+    """Containment rejects escapes, not links that stay in the folder."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "real.txt").write_text("ok\n", encoding="utf-8")
+    (staging / "alias.txt").symlink_to(staging / "real.txt")
+
+    text_artifacts, _binary, skipped = _collect_generated_text_artifacts(
+        str(staging), max_binary_size=1024
+    )
+
+    assert skipped == []
+    assert {a["name"] for a in text_artifacts} == {"real.txt", "alias.txt"}
+
+
 def test_missing_staging_root_harvests_nothing(tmp_path) -> None:
     text_artifacts, binary_files, skipped = _collect_generated_text_artifacts(
         str(tmp_path / "absent"), max_binary_size=1024
@@ -139,6 +183,34 @@ def test_skip_report_names_the_file_its_size_and_the_cap() -> None:
         "max_file_size_bytes": 52_428_800,
         "skipped": [{"name": "archive.tar", "size": 209_715_200, "reason": SKIP_REASON_TOO_LARGE}],
     }
+
+
+def test_skip_report_flattens_control_characters_in_names() -> None:
+    """A newline in a filename must not forge an extra line in the report."""
+    artifact = _describe_skipped_artifacts(
+        [
+            {
+                "name": "sneaky\n- forged.txt (1 bytes): larger than the cap",
+                "size": 4096,
+                "reason": SKIP_REASON_TOO_LARGE,
+            }
+        ],
+        step_id="build",
+        new_artifacts_path="/artifacts/new",
+        max_binary_size=1024,
+    )
+
+    body = artifact["content_text"].rstrip("\n").split("\n")
+    # Header, blank separator, and exactly one entry - the embedded newline
+    # did not open a second one.
+    assert len(body) == 3
+    entry = body[2]
+    assert entry.startswith("- sneaky?")
+    # The real size and reason are the ones this line ends with; the forged
+    # pair the filename carried is inert text inside the name.
+    assert entry.endswith("(4096 bytes): larger than the worker's per-file artifact cap")
+    # The record itself keeps the raw name for machine consumers.
+    assert artifact["content_json"]["skipped"][0]["name"].startswith("sneaky\n")
 
 
 def test_skip_report_handles_an_unset_cap_and_unknown_size() -> None:
@@ -273,6 +345,28 @@ async def test_a_clean_harvest_reports_no_skips(monkeypatch) -> None:
     names = {a["name"] for a in result.evidence}
     assert "report.txt" in names
     assert not any(name.startswith("skipped_artifacts") for name in names)
+
+
+async def test_timeout_keeps_the_skipped_artifacts_metric(monkeypatch) -> None:
+    """A timed-out step reports zero skips rather than omitting the key.
+
+    The harvest never runs on this path - the container is killed first - but
+    consumers of the metric should not have to special-case the shape of a
+    timed-out step.
+    """
+    services = _FakeServices(artifact_max_file_size_bytes=1024)
+    _install_docker_mocks(monkeypatch, {})
+
+    async def timing_out_exec(*argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="docker start -a", timeout=1)
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", timing_out_exec)
+
+    result = await RunContainerHandler().execute(_ctx(services))
+
+    assert result.success is False
+    assert result.metrics is not None
+    assert result.metrics["skipped_artifacts"] == 0
 
 
 # ---------------------------------------------------------------------------
