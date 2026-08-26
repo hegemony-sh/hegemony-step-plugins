@@ -5,6 +5,7 @@
 """RunContainerHandler: run commands inside Docker containers with provisioning."""
 
 import asyncio
+import codecs
 import contextlib
 import json
 import logging
@@ -320,9 +321,12 @@ class RunContainerConfig(BaseModel):
         default="",
         title="New artifacts upload path",
         description=(
-            "Absolute path inside the container where newly created UTF-8 text files are "
-            "harvested as step artifacts after the container exits. Defaults to "
-            "/artifacts/new, or <artifacts_path>/new when you change the artifacts root."
+            "Absolute path inside the container where newly created files are harvested "
+            "after the container exits: UTF-8 text files become step artifacts, and every "
+            "other file is uploaded as a downloadable artifact up to the worker's per-file "
+            "cap (50 MiB by default). Files the harvest drops are listed in the step's "
+            "skipped-artifacts report. Defaults to /artifacts/new, or <artifacts_path>/new "
+            "when you change the artifacts root."
         ),
         json_schema_extra={"x_placeholder": "/artifacts/new", "x_advanced": True, "x_col_span": 2},
     )
@@ -570,36 +574,105 @@ def _write_staged_json_file(path: str, payload: Any) -> None:
         fh.write("\n")
 
 
-def _decode_generated_artifact_text(raw_bytes: bytes) -> str | None:
-    """Return UTF-8 text for generated artifacts, or None for binary payloads."""
-    if b"\0" in raw_bytes:
-        return None
+# Harvested files are read in chunks so a binary payload can be abandoned as
+# soon as it proves binary, rather than after it is already in memory.
+_HARVEST_READ_CHUNK_BYTES = 1024 * 1024
+
+
+def _read_harvested_text(file_path: str) -> str | None:
+    """Return the file's UTF-8 text, or None as soon as it proves binary.
+
+    Classification is incremental because the caller may be about to reject the
+    file for exceeding the artifact cap: reading a 200 MB archive in full only
+    to discard it costs the worker 200 MB of RSS for nothing, and the bytes are
+    never needed anyway - a binary artifact is uploaded by streaming from its
+    path. The first NUL byte or invalid sequence therefore ends the read.
+
+    Text is still accumulated in full. Inline text artifacts are uncapped, and
+    bounding them here would silently truncate ones that work today.
+
+    Raises ``OSError`` for an unreadable file; the caller records that.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    chunks: list[str] = []
     try:
-        return raw_bytes.decode("utf-8")
+        with open(file_path, "rb") as fh:
+            while True:
+                chunk = fh.read(_HARVEST_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if b"\0" in chunk:
+                    return None
+                chunks.append(decoder.decode(chunk))
+            # A trailing partial sequence is only an error once it is final.
+            chunks.append(decoder.decode(b"", final=True))
     except UnicodeDecodeError:
         return None
+    return "".join(chunks)
+
+
+# The platform's RunArtifact.name column bounds an artifact name; a skip
+# record is JSON and has no such limit.
+MAX_ARTIFACT_NAME_LEN = 255
+
+SKIP_REASON_UNREADABLE = "unreadable"
+SKIP_REASON_OUTSIDE_ROOT = "outside_staging_root"
+SKIP_REASON_TOO_LARGE = "too_large"
+
+_SKIP_REASON_LABELS = {
+    SKIP_REASON_UNREADABLE: "could not be read out of the harvest staging directory",
+    SKIP_REASON_OUTSIDE_ROOT: "resolved outside the harvest staging directory",
+    SKIP_REASON_TOO_LARGE: "larger than the worker's per-file artifact cap",
+}
+
+# Control characters are legal in filenames and would otherwise break the
+# one-line-per-file skip report, or forge entries in it.
+_ARTIFACT_DISPLAY_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+# The harvest log carries a sample of the skip records; the full list is on the
+# step itself. An unbounded list would let one step emit a huge log entry.
+_MAX_LOGGED_SKIP_RECORDS = 20
+
+
+def _display_name(name: Any) -> str:
+    """Flatten a harvested name for rendering into the skip report."""
+    return _ARTIFACT_DISPLAY_UNSAFE_RE.sub("?", str(name))
+
+
+def _is_within_directory(root: str, candidate: str) -> bool:
+    """True when ``candidate`` is ``root`` itself or lives beneath it.
+
+    Both arguments must already be resolved: this is a containment test, not a
+    normalization step.
+    """
+    return candidate == root or candidate.startswith(root.rstrip(os.sep) + os.sep)
 
 
 def _collect_generated_text_artifacts(
     staging_root: str, max_binary_size: int | None = None
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Read files harvested from the container's new-artifacts subfolder.
 
     Returns a tuple of ``(text_artifacts, binary_files, skipped_files)``:
     - ``text_artifacts``: UTF-8 text files as inline ``step_result`` artifacts.
     - ``binary_files``: metadata for non-text files to upload for download,
       each ``{"name", "path", "size", "content_type"}``.
-    - ``skipped_files``: count of files skipped (unreadable, traversal, or
-      binary files exceeding ``max_binary_size``).
+    - ``skipped_files``: one ``{"name", "size", "reason"}`` record per file that
+      produced no artifact - unreadable, resolved outside the staging root, or a
+      binary file over ``max_binary_size``. Records, not a bare count, so the
+      caller can name the dropped file and the cap it hit; a step that wrote a
+      too-large archive otherwise looks like it produced nothing at all.
     """
     import mimetypes
 
     artifacts: list[dict[str, Any]] = []
     binary_files: list[dict[str, Any]] = []
-    skipped_files = 0
+    skipped_files: list[dict[str, Any]] = []
 
     if not os.path.isdir(staging_root):
         return artifacts, binary_files, skipped_files
+
+    resolved_root = os.path.realpath(staging_root)
 
     for root, dirs, files in os.walk(staging_root):
         dirs.sort()
@@ -607,47 +680,71 @@ def _collect_generated_text_artifacts(
 
         for file_name in files:
             file_path = os.path.join(root, file_name)
+            # Reported in full: a skip record is JSON, so it carries the whole
+            # path. Only an artifact *name* is bounded, at the point of use.
+            relative_name = os.path.relpath(file_path, staging_root).replace(os.sep, "/")
+
+            # Containment is decided on the resolved path, before the file is
+            # touched at all. `docker cp` preserves symlinks rather than
+            # dereferencing them, so a container that drops a symlink into its
+            # new-artifacts folder would otherwise have the worker open the
+            # link's target on the *host* and publish it as step evidence. A
+            # lexical check cannot see that: the link's relative name is
+            # perfectly ordinary.
+            if not _is_within_directory(resolved_root, os.path.realpath(file_path)):
+                skipped_files.append(
+                    {"name": relative_name, "size": None, "reason": SKIP_REASON_OUTSIDE_ROOT}
+                )
+                continue
+
+            # Not a regular file: a dangling symlink, a fifo, a device node.
+            # Unharvestable, but not nothing - it was written to the folder and
+            # produced no artifact, which is exactly what this report is for.
             if not os.path.isfile(file_path):
+                skipped_files.append(
+                    {"name": relative_name, "size": None, "reason": SKIP_REASON_UNREADABLE}
+                )
                 continue
 
             try:
                 file_size = os.path.getsize(file_path)
             except OSError:
-                skipped_files += 1
+                skipped_files.append(
+                    {"name": relative_name, "size": None, "reason": SKIP_REASON_UNREADABLE}
+                )
                 continue
 
             try:
-                with open(file_path, "rb") as fh:
-                    raw_bytes = fh.read()
+                content_text = _read_harvested_text(file_path)
             except OSError:
-                skipped_files += 1
+                skipped_files.append(
+                    {"name": relative_name, "size": file_size, "reason": SKIP_REASON_UNREADABLE}
+                )
                 continue
 
-            relative_name = os.path.relpath(file_path, staging_root).replace(os.sep, "/")
-            if relative_name.startswith("../"):
-                skipped_files += 1
-                continue
-
-            content_text = _decode_generated_artifact_text(raw_bytes)
             if content_text is not None:
                 artifacts.append(
                     {
                         "kind": "step_result",
-                        "name": relative_name[:255],
+                        "name": relative_name[:MAX_ARTIFACT_NAME_LEN],
                         "content_text": content_text,
                     }
                 )
                 continue
 
             # Binary file: schedule for upload unless it exceeds the size cap.
-            if max_binary_size is not None and len(raw_bytes) > max_binary_size:
-                skipped_files += 1
+            # The size decides on its own - the payload was never read past the
+            # point it proved binary, and the upload streams from the path.
+            if max_binary_size is not None and file_size > max_binary_size:
+                skipped_files.append(
+                    {"name": relative_name, "size": file_size, "reason": SKIP_REASON_TOO_LARGE}
+                )
                 continue
 
             content_type, _ = mimetypes.guess_type(file_name)
             binary_files.append(
                 {
-                    "name": relative_name[:255],
+                    "name": relative_name[:MAX_ARTIFACT_NAME_LEN],
                     "path": file_path,
                     "size": file_size,
                     "content_type": content_type or "application/octet-stream",
@@ -655,6 +752,50 @@ def _collect_generated_text_artifacts(
             )
 
     return artifacts, binary_files, skipped_files
+
+
+def _describe_skipped_artifacts(
+    skipped_files: list[dict[str, Any]],
+    *,
+    step_id: str,
+    new_artifacts_path: str,
+    max_binary_size: int | None,
+) -> dict[str, Any]:
+    """Render dropped harvest files as a ``step_result`` artifact.
+
+    The harvest is best-effort, so a dropped file used to leave no trace on the
+    run at all - only a worker log line nobody reading the run can see. This
+    puts the file name, its size, and the cap it exceeded on the step itself.
+    """
+    cap_note = (
+        f"per-file cap {max_binary_size} bytes"
+        if max_binary_size is not None
+        else "no per-file cap configured"
+    )
+    lines = [
+        f"{len(skipped_files)} file(s) written to {new_artifacts_path} produced no artifact "
+        f"({cap_note}).",
+        "",
+    ]
+    for entry in skipped_files:
+        size = entry.get("size")
+        size_note = f"{size} bytes" if isinstance(size, int) else "size unknown"
+        reason = str(entry.get("reason", ""))
+        lines.append(
+            f"- {_display_name(entry.get('name'))} ({size_note}): "
+            f"{_SKIP_REASON_LABELS.get(reason, reason)}"
+        )
+
+    return {
+        "kind": "step_result",
+        "name": f"skipped_artifacts_{step_id}",
+        "content_text": "\n".join(lines) + "\n",
+        "content_json": {
+            "new_artifacts_path": new_artifacts_path,
+            "max_file_size_bytes": max_binary_size,
+            "skipped": skipped_files,
+        },
+    }
 
 
 async def _upload_generated_binary_artifacts(ctx: Any, binary_files: list[dict[str, Any]]) -> int:
@@ -2007,6 +2148,8 @@ class RunContainerHandler(BaseHandler):
             duration = time.monotonic() - start_time
 
             generated_text_artifacts: list[dict[str, Any]] = []
+            skipped_generated_artifacts: list[dict[str, Any]] = []
+            generated_artifacts_cap: int | None = None
             try:
                 generated_artifacts_staging_dir = tempfile.mkdtemp(
                     prefix="hegemony-generated-artifacts-"
@@ -2033,13 +2176,13 @@ class RunContainerHandler(BaseHandler):
                         },
                     )
                 else:
-                    max_binary_size = runtime.artifact_max_file_size_bytes
+                    generated_artifacts_cap = runtime.artifact_max_file_size_bytes
                     (
                         generated_text_artifacts,
                         generated_binary_files,
                         skipped_generated_artifacts,
                     ) = _collect_generated_text_artifacts(
-                        generated_artifacts_staging_dir, max_binary_size
+                        generated_artifacts_staging_dir, generated_artifacts_cap
                     )
                     uploaded_binary = await _upload_generated_binary_artifacts(
                         ctx, generated_binary_files
@@ -2053,7 +2196,11 @@ class RunContainerHandler(BaseHandler):
                             "new_artifacts_path": new_artifacts_path,
                             "count": len(generated_text_artifacts),
                             "uploaded_binary": uploaded_binary,
-                            "skipped_non_text": skipped_generated_artifacts,
+                            "skipped": len(skipped_generated_artifacts),
+                            "skipped_detail": skipped_generated_artifacts[
+                                :_MAX_LOGGED_SKIP_RECORDS
+                            ],
+                            "max_file_size_bytes": generated_artifacts_cap,
                         },
                     )
 
@@ -2088,18 +2235,33 @@ class RunContainerHandler(BaseHandler):
                 }
             ]
             evidence.extend(generated_text_artifacts)
+            if skipped_generated_artifacts:
+                evidence.append(
+                    _describe_skipped_artifacts(
+                        skipped_generated_artifacts,
+                        step_id=ctx.step_id,
+                        new_artifacts_path=new_artifacts_path,
+                        max_binary_size=generated_artifacts_cap,
+                    )
+                )
 
             success = exit_code == 0
+            summary = (
+                f"Container exited with code {exit_code}"
+                if success
+                else f"Container failed with exit code {exit_code}"
+            )
+            if skipped_generated_artifacts:
+                summary += f" ({len(skipped_generated_artifacts)} artifact(s) skipped)"
             return HandlerResult(
                 success=success,
-                summary=f"Container exited with code {exit_code}"
-                if success
-                else f"Container failed with exit code {exit_code}",
+                summary=summary,
                 error=None if success else f"Exit code {exit_code}",
                 metrics={
                     "exit_code": exit_code,
                     "duration_seconds": round(duration, 2),
                     "image": image,
+                    "skipped_artifacts": len(skipped_generated_artifacts),
                 },
                 evidence=evidence,
                 output={
@@ -2116,7 +2278,14 @@ class RunContainerHandler(BaseHandler):
                 success=False,
                 error=f"Container timed out after {timeout}s (image: {image})",
                 summary=f"Timeout after {timeout}s",
-                metrics={"duration_seconds": round(duration, 2), "image": image},
+                # Zero, not absent: a timeout kills the container before the
+                # harvest runs, and consumers of the metric should not have to
+                # special-case the shape of a timed-out step.
+                metrics={
+                    "duration_seconds": round(duration, 2),
+                    "image": image,
+                    "skipped_artifacts": 0,
+                },
             )
         except FileNotFoundError:
             return HandlerResult(
