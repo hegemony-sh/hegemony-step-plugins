@@ -1,7 +1,7 @@
 version = 1
 SPDX-PackageName = "hegemony-step-plugins"
 SPDX-PackageSupplier = "Jakub Travnik <jakub.travnik@gmail.com>"
-SPDX-PackageDownloadLocation = "https://github.com/tvarohohlavy/hegemony-step-plugins"
+SPDX-PackageDownloadLocation = "https://github.com/hegemony-sh/hegemony-step-plugins"
 
 [[annotations]]
 path = "uv.lock"

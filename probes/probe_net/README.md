@@ -6,7 +6,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 # hegemony-probe-net
 
-Network reachability probes for [Hegemony](https://github.com/tvarohohlavy/Hegemony).
+Network reachability probes for [Hegemony](https://github.com/hegemony-sh/hegemony).
 
 Registers under the `hegemony.probes` entry-point group. Each probe implements
 one `check_type` and is consumed by **both** the background `MonitorManager`

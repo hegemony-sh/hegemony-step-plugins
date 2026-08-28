@@ -7,7 +7,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 # hegemony-transport-scrapli
 
 Scrapli network-CLI device transport for
-[Hegemony](https://github.com/tvarohohlavy/Hegemony).
+[Hegemony](https://github.com/hegemony-sh/hegemony).
 
 Registers the `scrapli` transport under the `hegemony.device_transports`
 entry-point group — an alternative to the default netmiko transport for the
