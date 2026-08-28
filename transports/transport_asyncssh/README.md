@@ -7,7 +7,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 # hegemony-transport-asyncssh
 
 AsyncSSH exec-channel device transport for
-[Hegemony](https://github.com/tvarohohlavy/Hegemony).
+[Hegemony](https://github.com/hegemony-sh/hegemony).
 
 Registers the `asyncssh` transport under the `hegemony.device_transports`
 entry-point group — for server-like devices (Linux hosts, whitebox NOS,

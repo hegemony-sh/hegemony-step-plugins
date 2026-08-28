@@ -7,7 +7,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 # hegemony-steps-monitor
 
 Background connectivity-monitor step handlers for
-[Hegemony](https://github.com/tvarohohlavy/Hegemony).
+[Hegemony](https://github.com/hegemony-sh/hegemony).
 
 Registers under the `hegemony.step_handlers` entry-point group with the claimed
 prefix `monitor`:

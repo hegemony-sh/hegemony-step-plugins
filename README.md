@@ -6,7 +6,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 # Hegemony Step Plugins
 
-Step-handler SDK and plugin wheels for [Hegemony](https://github.com/tvarohohlavy/Hegemony).
+Step-handler SDK and plugin wheels for [Hegemony](https://github.com/hegemony-sh/hegemony).
 
 Step handlers implement the work one flow step performs (run CLI commands on
 devices, launch a container, stage an upgrade image, …). Handler types are
