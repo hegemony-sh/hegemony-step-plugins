@@ -8,6 +8,15 @@ on:
   push:
     tags:
       - "v*"
+  # Cut a release without a terminal: dispatching on a branch creates the
+  # given tag at that branch's head inside this same run, then releases it —
+  # identical to pushing the tag by hand.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to create at this branch's head (vX.Y.Z)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -32,6 +41,35 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve release tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::release tag must look like vX.Y.Z, got '$TAG'"; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # The tag is created by this run itself on dispatch, so the release
+      # steps below behave exactly as on a tag push. A tag created with the
+      # workflow's own token does not trigger a second run.
+      - name: Create release tag (dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}"
+
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
@@ -47,16 +85,19 @@ jobs:
         run: uv sync --frozen --all-packages
 
       - name: Verify tag matches package versions
-        run: uv run python scripts/verify_release_version.py "${GITHUB_REF_NAME}"
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: uv run python scripts/verify_release_version.py "${TAG}"
 
       - name: Verify release does not already exist
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            echo "::error::Release ${GITHUB_REF_NAME} already exists; releases are immutable."
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "::error::Release ${TAG} already exists; releases are immutable."
             exit 1
           fi
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
 
       - name: Run tests
         run: uv run pytest -v --tb=short
@@ -79,9 +120,10 @@ jobs:
 
       - name: Publish GitHub Release assets
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/*.whl SHA256SUMS \
-            --title "${GITHUB_REF_NAME}" \
-            --notes "Hegemony step-handler SDK and plugin wheels for ${GITHUB_REF_NAME}." \
+          gh release create "${TAG}" dist/*.whl SHA256SUMS \
+            --title "${TAG}" \
+            --notes "Hegemony step-handler SDK and plugin wheels for ${TAG}." \
             --verify-tag
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
