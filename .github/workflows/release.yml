@@ -103,13 +103,19 @@ jobs:
       - name: Generate checksums
         run: sha256sum dist/*.whl > SHA256SUMS
 
-      # Artifact attestations need a public repository (or an Enterprise
-      # plan), so they are unavailable while the repos are private
-      # pre-launch. Gating on visibility rather than deleting the step means
-      # attestation resumes by itself the moment the repo goes public — there
-      # is nothing to remember to revert.
+      # Artifact attestations need a public repository or an Enterprise
+      # plan, so they are unavailable while the repos are private pre-launch
+      # — an ungated step fails the whole release run. This gate tests
+      # visibility only, so attestation switches back on by itself the moment
+      # the repository goes public and there is nothing to revert at launch;
+      # an Enterprise plan taken while still private would need the condition
+      # relaxed by hand. Both visibility sources are consulted so that one of
+      # them being absent for a given trigger cannot leave attestation
+      # silently off after launch.
       - name: Attest release asset provenance
-        if: github.event.repository.visibility == 'public'
+        if: >-
+          github.repository_visibility == 'public'
+          || github.event.repository.visibility == 'public'
         uses: actions/attest@281a49d4cbb0a72c9575a50d18f6deb515a11deb # v4
         with:
           subject-path: |
@@ -127,18 +133,36 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          # An existing ref may be a lightweight tag (object.type=commit) or an
-          # annotated one (object.type=tag), where object.sha is the tag
-          # object, not the commit — peel it before comparing.
-          existing_type="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
-            --jq .object.type 2>/dev/null || true)"
-          existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
-            --jq .object.sha 2>/dev/null || true)"
-          if [ "$existing_type" = "tag" ] && [ -n "$existing" ]; then
-            existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${existing}" \
-              --jq .object.sha)"
-          fi
-          if [ -n "$existing" ]; then
+          # gh api prints its 404 body on stdout, so an existing-tag check that
+          # captures stdout reads a missing tag as an existing one. Ask for
+          # matching refs instead: that endpoint answers 200 with an empty list
+          # when the tag is absent, so a real lookup failure (bad credentials,
+          # a 5xx) still fails this step under bash -e rather than falling
+          # through to tag creation.
+          refs="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${TAG}" \
+            --jq '.[] | [.ref, .object.type, .object.sha] | @tsv')"
+          # matching-refs matches by prefix (v1.2.3 also matches v1.2.30), so
+          # pick the exact ref out of the list.
+          match="$(printf '%s\n' "$refs" \
+            | awk -F'\t' -v r="refs/tags/${TAG}" '$1 == r { print $2 "\t" $3 }')"
+          if [ -n "$match" ]; then
+            ref_type="$(printf '%s' "$match" | cut -f1)"
+            existing="$(printf '%s' "$match" | cut -f2)"
+            # An annotated ref points at the tag object, not the commit — peel
+            # it. Tag objects can nest, so peel until the target is not a tag;
+            # the bound stops a malformed chain from looping forever.
+            peels=0
+            while [ "$ref_type" = "tag" ]; do
+              peels=$((peels + 1))
+              if [ "$peels" -gt 5 ]; then
+                echo "::error::Tag ${TAG} nests tag objects more than 5 deep."
+                exit 1
+              fi
+              peeled="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${existing}" \
+                --jq '[.object.type, .object.sha] | @tsv')"
+              ref_type="$(printf '%s' "$peeled" | cut -f1)"
+              existing="$(printf '%s' "$peeled" | cut -f2)"
+            done
             if [ "$existing" = "$GITHUB_SHA" ]; then
               echo "Tag ${TAG} already points at ${GITHUB_SHA}; reusing it."
               exit 0
