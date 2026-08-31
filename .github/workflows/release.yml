@@ -121,8 +121,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
+          # An existing ref may be a lightweight tag (object.type=commit) or an
+          # annotated one (object.type=tag), where object.sha is the tag
+          # object, not the commit — peel it before comparing.
+          existing_type="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
+            --jq .object.type 2>/dev/null || true)"
           existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
             --jq .object.sha 2>/dev/null || true)"
+          if [ "$existing_type" = "tag" ] && [ -n "$existing" ]; then
+            existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${existing}" \
+              --jq .object.sha)"
+          fi
           if [ -n "$existing" ]; then
             if [ "$existing" = "$GITHUB_SHA" ]; then
               echo "Tag ${TAG} already points at ${GITHUB_SHA}; reusing it."
