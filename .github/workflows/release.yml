@@ -127,18 +127,36 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          # Detect an existing tag by the lookup's EXIT STATUS, not its output:
-          # gh api prints the 404 body on stdout, so capturing stdout treats a
-          # missing tag as an existing one.
-          if ref_type="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
-            --jq .object.type 2>/dev/null)"; then
-            existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
-              --jq .object.sha)"
-            # An annotated ref points at the tag object, not the commit — peel it.
-            if [ "$ref_type" = "tag" ]; then
-              existing="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${existing}" \
-                --jq .object.sha)"
-            fi
+          # gh api prints its 404 body on stdout, so an existing-tag check that
+          # captures stdout reads a missing tag as an existing one. Ask for
+          # matching refs instead: that endpoint answers 200 with an empty list
+          # when the tag is absent, so a real lookup failure (bad credentials,
+          # a 5xx) still fails this step under bash -e rather than falling
+          # through to tag creation.
+          refs="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${TAG}" \
+            --jq '.[] | [.ref, .object.type, .object.sha] | @tsv')"
+          # matching-refs matches by prefix (v1.2.3 also matches v1.2.30), so
+          # pick the exact ref out of the list.
+          match="$(printf '%s\n' "$refs" \
+            | awk -F'\t' -v r="refs/tags/${TAG}" '$1 == r { print $2 "\t" $3 }')"
+          if [ -n "$match" ]; then
+            ref_type="$(printf '%s' "$match" | cut -f1)"
+            existing="$(printf '%s' "$match" | cut -f2)"
+            # An annotated ref points at the tag object, not the commit — peel
+            # it. Tag objects can nest, so peel until the target is not a tag;
+            # the bound stops a malformed chain from looping forever.
+            peels=0
+            while [ "$ref_type" = "tag" ]; do
+              peels=$((peels + 1))
+              if [ "$peels" -gt 5 ]; then
+                echo "::error::Tag ${TAG} nests tag objects more than 5 deep."
+                exit 1
+              fi
+              peeled="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${existing}" \
+                --jq '[.object.type, .object.sha] | @tsv')"
+              ref_type="$(printf '%s' "$peeled" | cut -f1)"
+              existing="$(printf '%s' "$peeled" | cut -f2)"
+            done
             if [ "$existing" = "$GITHUB_SHA" ]; then
               echo "Tag ${TAG} already points at ${GITHUB_SHA}; reusing it."
               exit 0
