@@ -103,13 +103,19 @@ jobs:
       - name: Generate checksums
         run: sha256sum dist/*.whl > SHA256SUMS
 
-      # Artifact attestations need a public repository (or an Enterprise
-      # plan), so they are unavailable while the repos are private
-      # pre-launch. Gating on visibility rather than deleting the step means
-      # attestation resumes by itself the moment the repo goes public — there
-      # is nothing to remember to revert.
+      # Artifact attestations need a public repository or an Enterprise
+      # plan, so they are unavailable while the repos are private pre-launch
+      # — an ungated step fails the whole release run. This gate tests
+      # visibility only, so attestation switches back on by itself the moment
+      # the repository goes public and there is nothing to revert at launch;
+      # an Enterprise plan taken while still private would need the condition
+      # relaxed by hand. Both visibility sources are consulted so that one of
+      # them being absent for a given trigger cannot leave attestation
+      # silently off after launch.
       - name: Attest release asset provenance
-        if: github.event.repository.visibility == 'public'
+        if: >-
+          github.repository_visibility == 'public'
+          || github.event.repository.visibility == 'public'
         uses: actions/attest@281a49d4cbb0a72c9575a50d18f6deb515a11deb # v4
         with:
           subject-path: |
