@@ -4,13 +4,13 @@
 
 [project]
 name = "hegemony-transport-asyncssh"
-version = "0.3.0"
+version = "0.3.1"
 description = "AsyncSSH exec-channel device transport for Hegemony"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.3.0",
+    "hegemony-step-sdk==0.3.1",
     "asyncssh>=2.23.0",
 ]
 
