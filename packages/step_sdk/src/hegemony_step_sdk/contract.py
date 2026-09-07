@@ -149,12 +149,21 @@ class HandlerContext:
     flow_id: str
     step_run_id: str
     step_id: str
+    # The step's ``phase`` and ``kind`` tags as plain strings ("" when the
+    # step carries neither). They are ordinary entries of ``tags`` below,
+    # mirrored here because every handler already reads them by name.
     phase: str
     kind: str
 
     # Flow/run names for templating
     flow_name: str = ""
     run_name: str = ""
+
+    # The step's free-form key=value tags, exactly as the author wrote them
+    # on the node (``env=prod``, ``risk=high``, ``phase=VERIFY`` ...). Read
+    # them to vary behaviour per tag; never write them. Empty when the step
+    # has none, and always empty on hosts older than this field.
+    tags: dict[str, str] = field(default_factory=dict)
 
     # Target devices grouped by role: role_name -> list of device dicts
     target_devices_by_role: dict[str, list[dict[str, Any]]] = field(default_factory=dict)

@@ -33,3 +33,8 @@ def register(registry) -> None:
 Handlers reach every platform facility — device transports, secret/template
 resolution, the internal API, notifications — through `ctx.services`
 (`HandlerServices`); plugin code never imports Hegemony internals.
+
+The step's own `key=value` tags arrive as `ctx.tags` (`env=prod`,
+`risk=high`, `phase=VERIFY` ...), so a handler can vary its behaviour per
+tag. `ctx.phase` and `ctx.kind` are the same two conventional tags as plain
+strings, `""` when the step carries neither.

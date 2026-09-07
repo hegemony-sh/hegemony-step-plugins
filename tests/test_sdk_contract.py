@@ -113,6 +113,47 @@ def test_handler_context_binds_services():
         raise AssertionError("require_services must fail when unbound")
 
 
+def test_handler_context_carries_the_step_tags():
+    """Handlers read the step's tags off the context; the map defaults to empty.
+
+    The host feature-detects this field before passing it, so it must be a
+    real dataclass field with a default rather than a property.
+    """
+    import dataclasses
+
+    names = {f.name for f in dataclasses.fields(sdk.HandlerContext)}
+    assert "tags" in names
+
+    bare = sdk.HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        phase="",
+        kind="",
+    )
+    assert bare.tags == {}
+
+    tagged = sdk.HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        phase="VERIFY",
+        kind="CHECK",
+        tags={"phase": "VERIFY", "kind": "CHECK", "env": "prod"},
+    )
+    assert tagged.tags["env"] == "prod"
+    # Each context gets its own map: a handler mutating one never leaks into another.
+    bare.tags["leak"] = "no"
+    assert (
+        "leak"
+        not in sdk.HandlerContext(
+            run_id="r", flow_id="f", step_run_id="sr", step_id="s", phase="", kind=""
+        ).tags
+    )
+
+
 def test_registry_protocol_shape():
     signature = inspect.signature(sdk.StepHandlerRegistry.register_handler_type)
     assert list(signature.parameters) == ["self", "handler_class"]
