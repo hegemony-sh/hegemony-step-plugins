@@ -56,8 +56,6 @@ def _ctx(config: dict[str, Any], services: _FakeServices) -> HandlerContext:
         flow_id="f",
         step_run_id="sr",
         step_id="s",
-        phase="IMPLEMENTATION",
-        kind="EXECUTE",
         config=config,
         target_roles=[],
         target_devices_by_role={},

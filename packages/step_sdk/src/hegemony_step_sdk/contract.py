@@ -149,8 +149,6 @@ class HandlerContext:
     flow_id: str
     step_run_id: str
     step_id: str
-    phase: str
-    kind: str
 
     # Flow/run names for templating
     flow_name: str = ""
@@ -195,6 +193,14 @@ class HandlerContext:
     # Progress callback (set by the host's execute_step activity)
     # Signature: async (message: str, device_id: str | None, attrs: dict | None) -> bool
     _emit_progress: Any = None
+
+    # The step's free-form key=value tags, exactly as the author wrote them
+    # on the node (``env=prod``, ``risk=high``, ``phase=VERIFY`` ...).
+    # ``phase`` and ``kind`` are ordinary keys of this map, not fields of
+    # their own: ``ctx.tags.get("phase", "")``. Treat the map as read-only:
+    # nothing enforces that, but a change here stays local to this context
+    # instance and never reaches the platform. Empty when the step has none.
+    tags: dict[str, str] = field(default_factory=dict)
 
     async def emit_progress(
         self,

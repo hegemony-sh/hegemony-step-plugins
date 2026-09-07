@@ -29,7 +29,7 @@ MAX_PARALLEL_DEVICES_LIMIT = 32
 def max_parallel_from_config(config: Mapping[str, Any]) -> int:
     """Read ``max_parallel_devices`` from a step config, clamped and safe.
 
-    Anything unparseable degrades to 1 (sequential) rather than failing the
+    Anything unparsable degrades to 1 (sequential) rather than failing the
     step over a display-level knob.
     """
     try:

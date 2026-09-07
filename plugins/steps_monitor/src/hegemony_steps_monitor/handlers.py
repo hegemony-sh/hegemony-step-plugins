@@ -84,7 +84,7 @@ class ConnectivityMonitorStartHandler(BaseHandler):
                 run_id=ctx.run_id,
                 step_id=ctx.step_id,
                 step_run_id=ctx.step_run_id,
-                phase=ctx.phase,
+                phase=ctx.tags.get("phase"),
             )
         except Exception as e:  # noqa: BLE001 - surfaced as a step failure
             logger.exception("Failed to start monitor %s", monitor_id)
@@ -296,7 +296,7 @@ class ConnectivityMonitorHandler(BaseHandler):
                 run_id=ctx.run_id,
                 step_id=ctx.step_id,
                 step_run_id=ctx.step_run_id,
-                phase=ctx.phase,
+                phase=ctx.tags.get("phase"),
             )
         except Exception as e:  # noqa: BLE001 - surfaced as a step failure
             logger.exception("Failed to start monitor %s", monitor_id)

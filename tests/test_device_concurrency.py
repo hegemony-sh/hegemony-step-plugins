@@ -138,8 +138,6 @@ class TestHandlerParallelism:
             flow_id="f",
             step_run_id="sr",
             step_id="s",
-            phase="EXECUTE",
-            kind="ACTION",
             config={"commands": ["show version"], **config},
             target_roles=["primary"],
             target_devices_by_role={"primary": devices},

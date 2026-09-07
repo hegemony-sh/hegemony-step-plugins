@@ -256,8 +256,6 @@ def _ctx(recorder: list, **overrides) -> HandlerContext:
         flow_id="f",
         step_run_id="sr",
         step_id="s",
-        phase="EXECUTE",
-        kind="ACTION",
         config={},
         _emit_progress=_record,
     )
