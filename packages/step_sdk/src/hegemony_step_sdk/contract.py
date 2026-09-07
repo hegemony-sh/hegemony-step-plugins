@@ -150,8 +150,10 @@ class HandlerContext:
     step_run_id: str
     step_id: str
     # The step's ``phase`` and ``kind`` tags as plain strings ("" when the
-    # step carries neither). They are ordinary entries of ``tags`` below,
-    # mirrored here because every handler already reads them by name.
+    # step carries neither). A host that fills ``tags`` below puts the same
+    # two values there under those keys; an older host leaves ``tags`` empty
+    # and these two remain the only place to read them. Read them from here
+    # rather than comparing against ``tags``.
     phase: str
     kind: str
 
@@ -160,9 +162,10 @@ class HandlerContext:
     run_name: str = ""
 
     # The step's free-form key=value tags, exactly as the author wrote them
-    # on the node (``env=prod``, ``risk=high``, ``phase=VERIFY`` ...). Read
-    # them to vary behaviour per tag; never write them. Empty when the step
-    # has none, and always empty on hosts older than this field.
+    # on the node (``env=prod``, ``risk=high``, ``phase=VERIFY`` ...). Treat
+    # the map as read-only: nothing enforces that, but a change here stays
+    # local to this context instance and never reaches the platform. Empty
+    # when the step has none, and always empty on hosts older than this field.
     tags: dict[str, str] = field(default_factory=dict)
 
     # Target devices grouped by role: role_name -> list of device dicts
