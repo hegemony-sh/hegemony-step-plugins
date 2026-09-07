@@ -149,13 +149,6 @@ class HandlerContext:
     flow_id: str
     step_run_id: str
     step_id: str
-    # The step's ``phase`` and ``kind`` tags as plain strings ("" when the
-    # step carries neither). A host that fills ``tags`` below puts the same
-    # two values there under those keys; an older host leaves ``tags`` empty
-    # and these two remain the only place to read them. Read them from here
-    # rather than comparing against ``tags``.
-    phase: str
-    kind: str
 
     # Flow/run names for templating
     flow_name: str = ""
@@ -202,12 +195,11 @@ class HandlerContext:
     _emit_progress: Any = None
 
     # The step's free-form key=value tags, exactly as the author wrote them
-    # on the node (``env=prod``, ``risk=high``, ``phase=VERIFY`` ...). Treat
-    # the map as read-only: nothing enforces that, but a change here stays
-    # local to this context instance and never reaches the platform. Empty
-    # when the step has none, and always empty on hosts older than this field.
-    # Declared last on purpose: a caller that builds the context positionally
-    # keeps every existing binding.
+    # on the node (``env=prod``, ``risk=high``, ``phase=VERIFY`` ...).
+    # ``phase`` and ``kind`` are ordinary keys of this map, not fields of
+    # their own: ``ctx.tags.get("phase", "")``. Treat the map as read-only:
+    # nothing enforces that, but a change here stays local to this context
+    # instance and never reaches the platform. Empty when the step has none.
     tags: dict[str, str] = field(default_factory=dict)
 
     async def emit_progress(

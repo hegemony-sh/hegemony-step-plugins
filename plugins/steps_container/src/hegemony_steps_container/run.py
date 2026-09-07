@@ -818,7 +818,7 @@ async def _upload_generated_binary_artifacts(ctx: Any, binary_files: list[dict[s
                 file_path=entry["path"],
                 step_run_id=ctx.step_run_id,
                 step_id=ctx.step_id,
-                phase=ctx.phase,
+                phase=ctx.tags.get("phase"),
                 content_type=entry.get("content_type"),
                 kind="downloadable_file",
             )

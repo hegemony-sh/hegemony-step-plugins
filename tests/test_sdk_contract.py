@@ -8,6 +8,7 @@ Pins the public API plugin authors rely on; the host keeps a mirror parity
 test so the duck-typed platform registry and this SDK stay in lock-step.
 """
 
+import dataclasses
 import inspect
 
 import hegemony_step_sdk as sdk
@@ -97,14 +98,7 @@ def test_step_kind_values():
 
 
 def test_handler_context_binds_services():
-    ctx = sdk.HandlerContext(
-        run_id="r",
-        flow_id="f",
-        step_run_id="sr",
-        step_id="s",
-        phase="EXECUTE",
-        kind="ACTION",
-    )
+    ctx = sdk.HandlerContext(run_id="r", flow_id="f", step_run_id="sr", step_id="s")
     try:
         ctx.require_services()
     except RuntimeError as exc:
@@ -119,19 +113,10 @@ def test_handler_context_carries_the_step_tags():
     The host feature-detects this field before passing it, so it must be a
     real dataclass field with a default rather than a property.
     """
-    import dataclasses
-
     names = {f.name for f in dataclasses.fields(sdk.HandlerContext)}
     assert "tags" in names
 
-    bare = sdk.HandlerContext(
-        run_id="r",
-        flow_id="f",
-        step_run_id="sr",
-        step_id="s",
-        phase="",
-        kind="",
-    )
+    bare = sdk.HandlerContext(run_id="r", flow_id="f", step_run_id="sr", step_id="s")
     assert bare.tags == {}
 
     tagged = sdk.HandlerContext(
@@ -139,37 +124,48 @@ def test_handler_context_carries_the_step_tags():
         flow_id="f",
         step_run_id="sr",
         step_id="s",
-        phase="VERIFY",
-        kind="CHECK",
         tags={"phase": "VERIFY", "kind": "CHECK", "env": "prod"},
     )
     assert tagged.tags["env"] == "prod"
+    # phase and kind are read the way every other tag is.
+    assert tagged.tags.get("phase", "") == "VERIFY"
+    assert bare.tags.get("phase", "") == ""
     # Each context gets its own map: a handler mutating one never leaks into another.
     bare.tags["leak"] = "no"
     assert (
         "leak"
-        not in sdk.HandlerContext(
-            run_id="r", flow_id="f", step_run_id="sr", step_id="s", phase="", kind=""
-        ).tags
+        not in sdk.HandlerContext(run_id="r", flow_id="f", step_run_id="sr", step_id="s").tags
     )
+
+
+def test_handler_context_has_no_phase_or_kind_field():
+    """``phase`` and ``kind`` exist only as keys of ``tags``.
+
+    The context declares no field for either, so a handler still reading
+    ``ctx.phase`` fails loudly instead of seeing a second, possibly stale,
+    copy of the tag.
+    """
+    names = {f.name for f in dataclasses.fields(sdk.HandlerContext)}
+    assert "phase" not in names
+    assert "kind" not in names
 
 
 def test_handler_context_keeps_positional_bindings():
-    """``tags`` is declared last so a positional caller binds nothing differently.
+    """A positional caller binds the run ids, then the two names, then the targets.
 
-    Regression for the field being inserted mid-list, which would have handed
-    ``target_devices_by_role`` to ``tags`` for anyone building the context
-    positionally.
+    Regression for a field sliding in ahead of ``target_devices_by_role``,
+    which would hand the device map to the wrong attribute for anyone
+    building the context positionally.
     """
     by_role = {"core": [{"id": "d1"}]}
-    positional = sdk.HandlerContext(
-        "r", "f", "sr", "s", "VERIFY", "CHECK", "Flow", "Run", by_role, ["core"]
-    )
+    positional = sdk.HandlerContext("r", "f", "sr", "s", "Flow", "Run", by_role, ["core"])
+    assert positional.step_id == "s"
+    assert positional.flow_name == "Flow"
+    assert positional.run_name == "Run"
     assert positional.target_devices_by_role is by_role
     assert positional.target_roles == ["core"]
     assert positional.tags == {}
     assert positional.get_target_devices() == [{"id": "d1"}]
-    assert [f.name for f in __import__("dataclasses").fields(sdk.HandlerContext)][-1] == "tags"
 
 
 def test_registry_protocol_shape():

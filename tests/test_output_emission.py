@@ -36,8 +36,6 @@ def _ctx(recorder, **overrides) -> HandlerContext:
         flow_id="f",
         step_run_id="sr",
         step_id="s",
-        phase="EXECUTE",
-        kind="ACTION",
         config={},
         _emit_progress=_record,
     )
@@ -269,7 +267,6 @@ class TestHandlerWiring:
         events = []
         ctx = _ctx(
             events,
-            kind="CHECK",
             config={"commands": ["show version"]},
             target_roles=["primary"],
             target_devices_by_role={"primary": [DEVICE]},
@@ -304,7 +301,6 @@ class TestHandlerWiring:
         events = []
         ctx = _ctx(
             events,
-            kind="CHECK",
             config={
                 "command": "show status",
                 "match_string": "READY",

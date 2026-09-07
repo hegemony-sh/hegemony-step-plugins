@@ -552,8 +552,6 @@ def _ctx(events: list[tuple[str, dict[str, Any]]]) -> HandlerContext:
         flow_id="flow-1",
         step_run_id="step-12345678",
         step_id="step-1",
-        phase="IMPLEMENTATION",
-        kind="ACTION",
         config={"image": "alpine:3.20", "command": ["echo hi"]},
         services=cast(HandlerServices, _FakeServices()),
         _emit_progress=record,

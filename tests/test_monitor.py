@@ -69,6 +69,7 @@ class _FakeServices:
         self._started = started
         self._stopped = stopped
         self.start_calls: list[tuple[dict, list]] = []
+        self.start_phases: list[str | None] = []
         self.stop_calls: list[tuple[str, str]] = []
 
     def is_check_registered(self, check_id: str) -> bool:
@@ -76,6 +77,7 @@ class _FakeServices:
 
     async def start_monitor(self, config, resolved_targets, **kw) -> str:
         self.start_calls.append((config, resolved_targets))
+        self.start_phases.append(kw.get("phase"))
         return self._started
 
     async def stop_monitor(self, monitor_id: str, *, reason: str = "step_requested") -> bool:
@@ -83,18 +85,22 @@ class _FakeServices:
         return self._stopped
 
 
-def _ctx(config: dict[str, Any], services: _FakeServices, devices=None) -> HandlerContext:
+def _ctx(
+    config: dict[str, Any],
+    services: _FakeServices,
+    devices=None,
+    tags: dict[str, str] | None = None,
+) -> HandlerContext:
     return HandlerContext(
         run_id="r",
         flow_id="f",
         step_run_id="sr",
         step_id="s",
-        phase="VERIFY",
-        kind="CHECK",
         config=config,
         target_roles=["core"],
         target_devices_by_role=devices or {"core": [{"id": "d1", "mgmt_host": "10.0.0.9"}]},
         services=cast(HandlerServices, services),
+        tags=tags or {},
     )
 
 
@@ -124,6 +130,25 @@ async def test_connectivity_forwards_socks_proxy_option():
     config, _ = services.start_calls[0]
     # A monitor can watch targets reachable only through a bastion.
     assert config["options"]["socks_proxy"] == proxy
+
+
+async def test_connectivity_hands_the_phase_tag_to_the_monitor():
+    """The monitor is filed under the step's ``phase`` tag, read straight off ``ctx.tags``.
+
+    An untagged step passes ``None``, which the platform reads as "no phase".
+    """
+    tagged = _FakeServices()
+    result = await ConnectivityMonitorHandler().execute(
+        _ctx({"check_type": "tcp_connect", "port": 22}, tagged, tags={"phase": "VERIFY"})
+    )
+    assert result.success is True
+    assert tagged.start_phases == ["VERIFY"]
+
+    untagged = _FakeServices()
+    await ConnectivityMonitorHandler().execute(
+        _ctx({"check_type": "tcp_connect", "port": 22}, untagged)
+    )
+    assert untagged.start_phases == [None]
 
 
 async def test_connectivity_rejects_unregistered_check():

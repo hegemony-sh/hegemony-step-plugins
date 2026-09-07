@@ -36,5 +36,5 @@ resolution, the internal API, notifications — through `ctx.services`
 
 The step's own `key=value` tags arrive as `ctx.tags` (`env=prod`,
 `risk=high`, `phase=VERIFY` ...), so a handler can vary its behaviour per
-tag. `ctx.phase` and `ctx.kind` are the same two conventional tags as plain
-strings, `""` when the step carries neither.
+tag. `phase` and `kind` are ordinary keys of that map, nothing more:
+`ctx.tags.get("phase", "")` is `""` when the step carries no such tag.

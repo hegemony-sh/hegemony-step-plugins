@@ -48,8 +48,6 @@ async def test_shell_execute_rejects_pwsh_env_combo():
         flow_id="f",
         step_run_id="sr",
         step_id="s",
-        phase="EXECUTE",
-        kind="ACTION",
         config={"commands": ["Get-Date"], "shell": "pwsh", "env": {"A": "1"}},
         target_roles=["primary"],
         target_devices_by_role={"primary": [{"id": "d1", "name": "h1", "mgmt_host": "192.0.2.1"}]},

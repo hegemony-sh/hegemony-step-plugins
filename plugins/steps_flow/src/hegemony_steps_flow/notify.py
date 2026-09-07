@@ -278,7 +278,7 @@ class SendNotificationHandler(BaseHandler):
                     json={
                         "step_run_id": ctx.step_run_id,
                         "step_id": ctx.step_id,
-                        "phase": ctx.phase,
+                        "phase": ctx.tags.get("phase", ""),
                         "kind": "notification",
                         "message": message,
                         "attrs": attrs,
