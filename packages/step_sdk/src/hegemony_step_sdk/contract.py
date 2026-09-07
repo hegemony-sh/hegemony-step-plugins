@@ -161,13 +161,6 @@ class HandlerContext:
     flow_name: str = ""
     run_name: str = ""
 
-    # The step's free-form key=value tags, exactly as the author wrote them
-    # on the node (``env=prod``, ``risk=high``, ``phase=VERIFY`` ...). Treat
-    # the map as read-only: nothing enforces that, but a change here stays
-    # local to this context instance and never reaches the platform. Empty
-    # when the step has none, and always empty on hosts older than this field.
-    tags: dict[str, str] = field(default_factory=dict)
-
     # Target devices grouped by role: role_name -> list of device dicts
     target_devices_by_role: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     # Step's target roles (which roles this step should run against)
@@ -207,6 +200,15 @@ class HandlerContext:
     # Progress callback (set by the host's execute_step activity)
     # Signature: async (message: str, device_id: str | None, attrs: dict | None) -> bool
     _emit_progress: Any = None
+
+    # The step's free-form key=value tags, exactly as the author wrote them
+    # on the node (``env=prod``, ``risk=high``, ``phase=VERIFY`` ...). Treat
+    # the map as read-only: nothing enforces that, but a change here stays
+    # local to this context instance and never reaches the platform. Empty
+    # when the step has none, and always empty on hosts older than this field.
+    # Declared last on purpose: a caller that builds the context positionally
+    # keeps every existing binding.
+    tags: dict[str, str] = field(default_factory=dict)
 
     async def emit_progress(
         self,

@@ -154,6 +154,24 @@ def test_handler_context_carries_the_step_tags():
     )
 
 
+def test_handler_context_keeps_positional_bindings():
+    """``tags`` is declared last so a positional caller binds nothing differently.
+
+    Regression for the field being inserted mid-list, which would have handed
+    ``target_devices_by_role`` to ``tags`` for anyone building the context
+    positionally.
+    """
+    by_role = {"core": [{"id": "d1"}]}
+    positional = sdk.HandlerContext(
+        "r", "f", "sr", "s", "VERIFY", "CHECK", "Flow", "Run", by_role, ["core"]
+    )
+    assert positional.target_devices_by_role is by_role
+    assert positional.target_roles == ["core"]
+    assert positional.tags == {}
+    assert positional.get_target_devices() == [{"id": "d1"}]
+    assert [f.name for f in __import__("dataclasses").fields(sdk.HandlerContext)][-1] == "tags"
+
+
 def test_registry_protocol_shape():
     signature = inspect.signature(sdk.StepHandlerRegistry.register_handler_type)
     assert list(signature.parameters) == ["self", "handler_class"]
