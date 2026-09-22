@@ -2,183 +2,42 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-name: Release Wheels
+# A merge to main is a release. The shared workflow runs semantic-release,
+# which reads the Conventional Commits since the last tag and decides whether
+# there is anything to release; .releaserc.json in this repository holds the
+# version bump, wheel build and asset list. There is no tag to push by hand.
+
+name: Release
 
 on:
   push:
-    tags:
-      - "v*"
-  # Cut a release without a terminal: dispatching on a branch creates the
-  # given tag at that branch's head inside this same run, then releases it —
-  # identical to pushing the tag by hand.
+    branches: [main]
+  # Re-run without a push: after adding RELEASE_TOKEN, or when a run failed
+  # after the merge. semantic-release decides from the commits whether there
+  # is anything to release, so a dispatch on an already released tip is a
+  # no-op rather than a duplicate.
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag to create at this branch's head (vX.Y.Z)
-        required: true
-        type: string
 
-permissions:
-  contents: read
-
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
-
-env:
-  PYTHON_VERSION: "3.12"
+permissions: {}
 
 jobs:
   release:
-    name: Build And Publish Wheel Assets
-    runs-on: ubuntu-latest
+    name: Release
+    # Belt and braces: GitHub already skips push runs whose head commit says
+    # [skip ci], which the release commit semantic-release pushes does.
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    uses: hegemony-sh/hegemony-workflows/.github/workflows/plugin-release.yml@main
+    # The union of what the called workflow's jobs need; it narrows per job
+    # (contents: write for the release, id-token + attestations for the
+    # provenance attestation of public releases).
     permissions:
-      contents: write # to create the GitHub Release and upload assets
-      id-token: write # to mint OIDC tokens for attestation signing
-      attestations: write # to attach build provenance attestations
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-
-      - name: Resolve release tag
-        id: tag
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            TAG="$INPUT_TAG"
-          else
-            TAG="$GITHUB_REF_NAME"
-          fi
-          # Strict vX.Y.Z. The line-count test rejects a multi-line input
-          # before the regex, because grep matches line by line — without it
-          # an embedded newline would corrupt $GITHUB_OUTPUT.
-          if [ "$(printf '%s' "$TAG" | wc -l)" -ne 0 ] \
-            || ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::release tag must look like vX.Y.Z, got '$TAG'"
-            exit 1
-          fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7
-        with:
-          version: "0.9.28"
-          enable-cache: false
-
-      - name: Install dependencies
-        run: uv sync --frozen --all-packages
-
-      - name: Verify tag matches package versions
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: uv run python scripts/verify_release_version.py "${TAG}"
-
-      - name: Verify release does not already exist
-        run: |
-          if gh release view "${TAG}" >/dev/null 2>&1; then
-            echo "::error::Release ${TAG} already exists; releases are immutable."
-            exit 1
-          fi
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
-
-      - name: Run tests
-        run: uv run pytest -v --tb=short
-
-      - name: Build wheels
-        run: uv run python scripts/build_wheels.py
-
-      - name: Smoke install wheels
-        run: uv run python scripts/smoke_install_wheels.py
-
-      - name: Generate checksums
-        run: sha256sum dist/*.whl > SHA256SUMS
-
-      # Artifact attestations need a public repository or an Enterprise
-      # plan, so they are unavailable while the repos are private pre-launch
-      # — an ungated step fails the whole release run. This gate tests
-      # visibility only, so attestation switches back on by itself the moment
-      # the repository goes public and there is nothing to revert at launch;
-      # an Enterprise plan taken while still private would need the condition
-      # relaxed by hand. Both visibility sources are consulted so that one of
-      # them being absent for a given trigger cannot leave attestation
-      # silently off after launch.
-      - name: Attest release asset provenance
-        if: >-
-          github.repository_visibility == 'public'
-          || github.event.repository.visibility == 'public'
-        uses: actions/attest@281a49d4cbb0a72c9575a50d18f6deb515a11deb # v4
-        with:
-          subject-path: |
-            dist/*.whl
-            SHA256SUMS
-
-      # Created only once every guard above has passed and the wheels are
-      # built, so a failed run never leaves a tag without a release. Re-runs
-      # are safe: an existing tag is accepted when it already points at this
-      # commit and rejected when it points anywhere else. A tag created with
-      # the workflow's own token does not trigger a second run.
-      - name: Create release tag (dispatch only)
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          # gh api prints its 404 body on stdout, so an existing-tag check that
-          # captures stdout reads a missing tag as an existing one. Ask for
-          # matching refs instead: that endpoint answers 200 with an empty list
-          # when the tag is absent, so a real lookup failure (bad credentials,
-          # a 5xx) still fails this step under bash -e rather than falling
-          # through to tag creation.
-          refs="$(gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${TAG}" \
-            --jq '.[] | [.ref, .object.type, .object.sha] | @tsv')"
-          # matching-refs matches by prefix (v1.2.3 also matches v1.2.30), so
-          # pick the exact ref out of the list.
-          match="$(printf '%s\n' "$refs" \
-            | awk -F'\t' -v r="refs/tags/${TAG}" '$1 == r { print $2 "\t" $3 }')"
-          if [ -n "$match" ]; then
-            ref_type="$(printf '%s' "$match" | cut -f1)"
-            existing="$(printf '%s' "$match" | cut -f2)"
-            # An annotated ref points at the tag object, not the commit — peel
-            # it. Tag objects can nest, so peel until the target is not a tag;
-            # the bound stops a malformed chain from looping forever.
-            peels=0
-            while [ "$ref_type" = "tag" ]; do
-              peels=$((peels + 1))
-              if [ "$peels" -gt 5 ]; then
-                echo "::error::Tag ${TAG} nests tag objects more than 5 deep."
-                exit 1
-              fi
-              peeled="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${existing}" \
-                --jq '[.object.type, .object.sha] | @tsv')"
-              ref_type="$(printf '%s' "$peeled" | cut -f1)"
-              existing="$(printf '%s' "$peeled" | cut -f2)"
-            done
-            if [ "$existing" = "$GITHUB_SHA" ]; then
-              echo "Tag ${TAG} already points at ${GITHUB_SHA}; reusing it."
-              exit 0
-            fi
-            echo "::error::Tag ${TAG} already exists at ${existing}, not ${GITHUB_SHA}."
-            exit 1
-          fi
-          gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
-            -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}"
-
-      - name: Publish GitHub Release assets
-        run: |
-          gh release create "${TAG}" dist/*.whl SHA256SUMS \
-            --title "${TAG}" \
-            --notes "Hegemony step-handler SDK and plugin wheels for ${TAG}." \
-            --verify-tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
+      contents: write
+      id-token: write
+      attestations: write
+    # Explicit mapping rather than `secrets: inherit`: the called workflow
+    # needs exactly one secret, and naming it keeps every other secret this
+    # repository holds, now or later, out of a workflow it does not own.
+    # RELEASE_TOKEN is a repository or organization secret; the called
+    # workflow fails fast with a clear message when it arrives empty.
+    secrets:
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}

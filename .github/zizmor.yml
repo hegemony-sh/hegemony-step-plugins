@@ -4,4 +4,14 @@
 
 # Zizmor configuration for GitHub Actions security scanning.
 # Exceptions intentionally removed: workflows should be policy-compliant by default.
-rules: {}
+rules:
+  unpinned-uses:
+    config:
+      # Third-party actions are pinned to a commit SHA. The release workflow
+      # this repository calls lives in the organization's own
+      # hegemony-workflows repository and is referenced by branch on purpose:
+      # the four plugin repositories pick up a fix to it without four pull
+      # requests. Anything else still has to be hash-pinned.
+      policies:
+        "hegemony-sh/*": ref-pin
+        "*": hash-pin

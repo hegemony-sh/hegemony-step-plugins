@@ -35,7 +35,7 @@ jobs:
           persist-credentials: false
       - uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6
         with:
-          configFile: .commitlintrc.yaml
+          configFile: commitlint.config.mjs
 
   lint-test-build:
     name: Lint, Test, Build Wheels

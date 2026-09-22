@@ -1,0 +1,118 @@
+{
+  "$comment": "0.x mode: while the major version is 0, the releaseRules below release a MINOR for a breaking change (feat!/fix! or a BREAKING CHANGE footer) instead of a major, so the line can evolve without a 1.0 promise. Delete the {\"breaking\": true} rule, and this comment, once the packages reach 1.0: from then on a breaking change must release a major again. CONTRIBUTING.md states the same rule for contributors. The conventionalcommits preset (installed by the shared workflow) is what makes a bare feat!:/fix!: count as breaking; the default angular preset does not parse the marker at all.",
+  "branches": [
+    "main"
+  ],
+  "plugins": [
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "preset": "conventionalcommits",
+        "releaseRules": [
+          {
+            "breaking": true,
+            "release": "minor"
+          },
+          {
+            "revert": true,
+            "release": "patch"
+          },
+          {
+            "type": "feat",
+            "release": "minor"
+          },
+          {
+            "type": "fix",
+            "release": "patch"
+          },
+          {
+            "type": "perf",
+            "release": "patch"
+          },
+          {
+            "type": "chore",
+            "release": false
+          },
+          {
+            "type": "docs",
+            "release": false
+          },
+          {
+            "type": "ci",
+            "release": false
+          },
+          {
+            "type": "test",
+            "release": false
+          },
+          {
+            "type": "refactor",
+            "release": false
+          },
+          {
+            "type": "build",
+            "release": false
+          },
+          {
+            "type": "style",
+            "release": false
+          }
+        ]
+      }
+    ],
+    [
+      "@semantic-release/release-notes-generator",
+      {
+        "preset": "conventionalcommits"
+      }
+    ],
+    [
+      "@semantic-release/changelog",
+      {
+        "changelogFile": "CHANGELOG.md"
+      }
+    ],
+    [
+      "@semantic-release/exec",
+      {
+        "verifyReleaseCmd": "if gh release view \"v${nextRelease.version}\" --repo \"$GITHUB_REPOSITORY\" >/dev/null 2>&1; then echo \"::error::Release v${nextRelease.version} already exists; releases are immutable.\"; exit 1; fi",
+        "prepareCmd": "uv run --no-sync python scripts/set_version.py ${nextRelease.version} && uv lock && uv run --no-sync python scripts/verify_release_version.py v${nextRelease.version} && uv run --no-sync python scripts/build_wheels.py && uv run --no-sync python scripts/smoke_install_wheels.py && (cd dist && sha256sum *.whl > SHA256SUMS)",
+        "successCmd": "echo NEW_RELEASE=true >> \"$GITHUB_ENV\" && echo NEW_RELEASE_VERSION=${nextRelease.version} >> \"$GITHUB_ENV\""
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": [
+          "CHANGELOG.md",
+          "uv.lock",
+          "packages/step_sdk/pyproject.toml",
+          "plugins/steps_general/pyproject.toml",
+          "plugins/steps_probe/pyproject.toml",
+          "plugins/steps_netcli/pyproject.toml",
+          "plugins/steps_evidence/pyproject.toml",
+          "plugins/steps_container/pyproject.toml",
+          "plugins/steps_flow/pyproject.toml",
+          "plugins/steps_cisco_iosxe/pyproject.toml",
+          "plugins/steps_shell/pyproject.toml",
+          "plugins/steps_monitor/pyproject.toml",
+          "probes/probe_net/pyproject.toml",
+          "transports/transport_netmiko/pyproject.toml",
+          "transports/transport_scrapli/pyproject.toml",
+          "transports/transport_asyncssh/pyproject.toml",
+          "packages/step_sdk/src/hegemony_step_sdk/_version.py"
+        ],
+        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "assets": [
+          "dist/*.whl",
+          "dist/SHA256SUMS"
+        ]
+      }
+    ]
+  ]
+}

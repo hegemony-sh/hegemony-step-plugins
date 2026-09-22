@@ -8,3 +8,15 @@ path = "uv.lock"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2025-2026 Jakub Travnik <jakub.travnik@gmail.com>"
 SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# JSON config files (no comment syntax) and the changelog semantic-release
+# rewrites on every release: a header at its top would be pushed below the
+# newest entry.
+[[annotations]]
+path = [
+    ".releaserc.json",
+    "CHANGELOG.md",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2025-2026 Jakub Travnik <jakub.travnik@gmail.com>"
+SPDX-License-Identifier = "AGPL-3.0-or-later"
