@@ -26,14 +26,20 @@ jobs:
     # Belt and braces: GitHub already skips push runs whose head commit says
     # [skip ci], which the release commit semantic-release pushes does.
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    uses: hegemony-sh/hegemony-workflows/.github/workflows/plugin-release.yml@main
+    # Pinned to a commit, never a branch: the called workflow receives
+    # RELEASE_TOKEN and this job's write permission, so what runs must be the
+    # reviewed code. The comment names the branch the pin was taken from; bump
+    # the SHA in a pull request to pick up a change merged there (the
+    # workflow's own release-tools lockfile moves with it).
+    uses: hegemony-sh/hegemony-workflows/.github/workflows/plugin-release.yml@f1880aea2e70fd3c7a5a03320067caf102066677 # main
     # The union of what the called workflow's jobs need; it narrows per job
-    # (contents: write for the release, id-token + attestations for the
-    # provenance attestation of public releases).
+    # (contents: write for the release; id-token, attestations and
+    # artifact-metadata for the provenance attestation of public releases).
     permissions:
       contents: write
       id-token: write
       attestations: write
+      artifact-metadata: write
     # Explicit mapping rather than `secrets: inherit`: the called workflow
     # needs exactly one secret, and naming it keeps every other secret this
     # repository holds, now or later, out of a workflow it does not own.

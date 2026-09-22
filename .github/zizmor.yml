@@ -7,11 +7,8 @@
 rules:
   unpinned-uses:
     config:
-      # Third-party actions are pinned to a commit SHA. The release workflow
-      # this repository calls lives in the organization's own
-      # hegemony-workflows repository and is referenced by branch on purpose:
-      # the four plugin repositories pick up a fix to it without four pull
-      # requests. Anything else still has to be hash-pinned.
+      # Everything is pinned to a commit SHA, the organization's own
+      # hegemony-workflows release workflow included: it receives the release
+      # token, so a bump to it is a reviewed pull request, not a branch move.
       policies:
-        "hegemony-sh/*": ref-pin
         "*": hash-pin
