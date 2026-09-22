@@ -20,10 +20,16 @@ concurrency:
 env:
   PYTHON_VERSION: "3.12"
 
+# Runner selection, as in the platform repository: the CI_RUNNER repository or
+# organization variable names the runner label (e.g. `self-hosted`); unset,
+# jobs fall back to GitHub-hosted ubuntu-latest, so one variable flips the
+# workflow back if the self-hosted host is down. The release workflow is not
+# included on purpose: it writes the release token into its workspace, which
+# must not outlive the job on a non-ephemeral runner.
 jobs:
   commit-lint:
     name: Lint Commit Messages
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     if: github.event_name == 'pull_request'
     permissions:
       contents: read # to check out commit history for commitlint
@@ -39,7 +45,7 @@ jobs:
 
   lint-test-build:
     name: Lint, Test, Build Wheels
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
