@@ -62,11 +62,26 @@ manual step any more: do not bump versions or push `v*` tags by hand.
 | `chore`, `docs`, `ci`, `test`, `refactor`, `build`, `style` | none |
 
 The 0.x rule is the `"breaking": true` entry in `.releaserc.json`'s
-`releaseRules`; delete it once the packages reach 1.0, so that a breaking
-change bumps the major again.
+`releaseRules`; once the packages reach 1.0, change its `release` to
+`major`. Deleting it is not enough: the rules are tried in order and the
+first match wins, so a breaking `feat` would still match the `feat` rule and
+release a minor.
 
 Releases are immutable. The pipeline refuses to run when a GitHub Release for
 the next tag already exists and never replaces published assets: fix forward
 with a new commit, which becomes the next release. Attestations are created
 only for public repositories, so releases cut while this repository is
 private ship checksums only.
+
+One failure a re-run cannot repair: semantic-release pushes the release
+commit and the `vX.Y.Z` tag before it publishes the GitHub Release, so if
+publication fails after that push the tag exists without a Release, and the
+next run reads the tag as the last release. Publish that tag's assets by hand
+from a checkout of the tag, as the shared workflow's
+[README](https://github.com/hegemony-sh/hegemony-workflows#recovering-a-tag-without-a-release)
+describes (`gh release create vX.Y.Z --verify-tag ... dist/*.whl
+dist/SHA256SUMS` after rebuilding the wheels at that tag).
+
+The shared workflow is pinned by commit in `.github/workflows/release.yml`;
+a change merged to it reaches this repository through a pull request that
+bumps that SHA.

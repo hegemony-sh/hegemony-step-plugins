@@ -1,5 +1,5 @@
 {
-  "$comment": "0.x mode: while the major version is 0, the releaseRules below release a MINOR for a breaking change (feat!/fix! or a BREAKING CHANGE footer) instead of a major, so the line can evolve without a 1.0 promise. Delete the {\"breaking\": true} rule, and this comment, once the packages reach 1.0: from then on a breaking change must release a major again. CONTRIBUTING.md states the same rule for contributors. The conventionalcommits preset (installed by the shared workflow) is what makes a bare feat!:/fix!: count as breaking; the default angular preset does not parse the marker at all.",
+  "$comment": "0.x mode: while the major version is 0, the releaseRules below release a MINOR for a breaking change (feat!/fix! or a BREAKING CHANGE footer) instead of a major, so the line can evolve without a 1.0 promise. Once the packages reach 1.0, change that rule's release to \"major\" and drop this comment. Deleting the rule would not do: releaseRules are tried in order and the first match wins, so a breaking feat would still match the feat rule below and release a minor. CONTRIBUTING.md states the same rule for contributors. The conventionalcommits preset (installed by the shared workflow) is what makes a bare feat!:/fix!: count as breaking; the default angular preset does not parse the marker at all.",
   "branches": [
     "main"
   ],
