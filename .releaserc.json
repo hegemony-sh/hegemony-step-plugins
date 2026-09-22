@@ -75,7 +75,7 @@
     [
       "@semantic-release/exec",
       {
-        "verifyReleaseCmd": "if gh release view \"v${nextRelease.version}\" --repo \"$GITHUB_REPOSITORY\" >/dev/null 2>&1; then echo \"::error::Release v${nextRelease.version} already exists; releases are immutable.\"; exit 1; fi",
+        "verifyReleaseCmd": "out=$(gh release view \"v${nextRelease.version}\" --repo \"$GITHUB_REPOSITORY\" 2>&1); rc=$?; if [ \"$rc\" -eq 0 ]; then echo \"::error::Release v${nextRelease.version} already exists; releases are immutable.\"; exit 1; fi; case \"$out\" in *\"release not found\"*) exit 0;; esac; echo \"::error::Could not confirm that Release v${nextRelease.version} is absent (gh release view exited $rc): $out\"; exit 1",
         "prepareCmd": "uv run --no-sync python scripts/set_version.py ${nextRelease.version} && uv lock && uv run --no-sync python scripts/verify_release_version.py v${nextRelease.version} && uv run --no-sync python scripts/build_wheels.py && uv run --no-sync python scripts/smoke_install_wheels.py && (cd dist && sha256sum *.whl > SHA256SUMS)",
         "successCmd": "echo NEW_RELEASE=true >> \"$GITHUB_ENV\" && echo NEW_RELEASE_VERSION=${nextRelease.version} >> \"$GITHUB_ENV\""
       }
