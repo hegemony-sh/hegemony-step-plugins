@@ -15,6 +15,7 @@ SPDX-License-Identifier = "AGPL-3.0-or-later"
 [[annotations]]
 path = [
     ".releaserc.json",
+    ".github/renovate.json",
     "CHANGELOG.md",
 ]
 precedence = "aggregate"
