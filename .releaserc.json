@@ -86,21 +86,11 @@
         "assets": [
           "CHANGELOG.md",
           "uv.lock",
-          "packages/step_sdk/pyproject.toml",
-          "plugins/steps_general/pyproject.toml",
-          "plugins/steps_probe/pyproject.toml",
-          "plugins/steps_netcli/pyproject.toml",
-          "plugins/steps_evidence/pyproject.toml",
-          "plugins/steps_container/pyproject.toml",
-          "plugins/steps_flow/pyproject.toml",
-          "plugins/steps_cisco_iosxe/pyproject.toml",
-          "plugins/steps_shell/pyproject.toml",
-          "plugins/steps_monitor/pyproject.toml",
-          "probes/probe_net/pyproject.toml",
-          "transports/transport_netmiko/pyproject.toml",
-          "transports/transport_scrapli/pyproject.toml",
-          "transports/transport_asyncssh/pyproject.toml",
-          "packages/step_sdk/src/hegemony_step_sdk/_version.py"
+          "packages/*/pyproject.toml",
+          "plugins/*/pyproject.toml",
+          "transports/*/pyproject.toml",
+          "probes/*/pyproject.toml",
+          "packages/*/src/*/_version.py"
         ],
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
