@@ -18,6 +18,11 @@ pull`` CLI, which stays the authoritative pull mechanism (registry credential
 helpers, exotic daemon transports). Layers fetched before a mid-stream failure
 are reused by the daemon, so the fallback only finishes the remainder.
 
+The one exception is a ``docker_host`` that names no daemon at all
+(:func:`require_docker_host`): that raises :class:`ValueError` and fails the
+step, because the CLI fallback would pull on the default socket, which inside
+the worker is the worker's own Docker daemon rather than the sandbox.
+
 Pure logic (reference parsing, endpoint resolution, auth-header construction,
 progress aggregation) is module-level so it unit-tests without I/O.
 """
@@ -31,10 +36,9 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
-
-DEFAULT_UNIX_SOCKET = "/var/run/docker.sock"
 
 # Sentinel for PullOutcome.bytes_downloaded: the pull fetched something but
 # never said how much. Distinct from 0, which asserts nothing was fetched.
@@ -87,20 +91,43 @@ class EngineEndpoint:
     base_url: str
 
 
+def require_docker_host(docker_host: str) -> str:
+    """Return the sandbox daemon endpoint, refusing a value that names none.
+
+    Every flow container runs on the Docker-in-Docker sandbox daemon that
+    ``ContainerRuntime.docker_host`` names. An empty value, or a bare
+    ``unix://`` without a socket path, leaves the docker CLI on its default
+    socket, which inside the worker is the worker's own Docker daemon. A
+    ``tcp://`` endpoint without a host names no daemon either: the CLI reads
+    it as ``localhost:2375``. All of them raise :class:`ValueError`. Never an
+    :class:`EnginePullError`: the pull path answers those by retrying with
+    the CLI, which would reach the very daemon the value failed to name.
+    """
+    host = docker_host.strip()
+    if not host or host == "unix://" or (host.startswith("tcp://") and not urlsplit(host).hostname):
+        raise ValueError(
+            "container.run needs the sandbox Docker daemon endpoint in "
+            f"ContainerRuntime.docker_host, got {docker_host!r}; it never falls back "
+            "to the worker's own Docker daemon"
+        )
+    return host
+
+
 def resolve_engine_endpoint(docker_host: str, env: Mapping[str, str]) -> EngineEndpoint:
     """Map a ``DOCKER_HOST`` value onto an httpx-reachable endpoint.
 
-    Supported shapes are exactly the ones this deployment produces (see
-    ``ContainerRuntime.docker_host``): empty / ``unix://`` for the host socket
-    and plain-TCP ``tcp://`` for the DinD sandbox daemon. Everything else —
-    ``ssh://``, ``npipe://``, ``fd://``, or a TLS daemon (``DOCKER_TLS_VERIFY``
-    in the effective subprocess environment) — raises
+    Supported shapes are the two the sandbox daemon is reached by (see
+    ``ContainerRuntime.docker_host``): plain-TCP ``tcp://`` and a unix socket
+    named by path (``unix:///var/run/dind/docker.sock``). An empty value or a
+    bare ``unix://`` names no daemon and raises :class:`ValueError` (see
+    :func:`require_docker_host`) instead of resolving to the default socket.
+    Everything else — ``ssh://``, ``npipe://``, ``fd://``, or a TLS daemon
+    (``DOCKER_TLS_VERIFY`` in the effective subprocess environment) — raises
     :class:`EnginePullUnsupported` so the CLI keeps handling it.
     """
-    if not docker_host:
-        return EngineEndpoint(kind="uds", uds_path=DEFAULT_UNIX_SOCKET, base_url="http://docker")
+    docker_host = require_docker_host(docker_host)
     if docker_host.startswith("unix://"):
-        path = docker_host[len("unix://") :] or DEFAULT_UNIX_SOCKET
+        path = docker_host[len("unix://") :]
         return EngineEndpoint(kind="uds", uds_path=path, base_url="http://docker")
     if docker_host.startswith("tcp://"):
         if env.get("DOCKER_TLS_VERIFY"):
@@ -485,9 +512,16 @@ async def stream_pull(
     scripted clock). Returns a :class:`PullOutcome` on success; raises
     :class:`EnginePullError` when the caller should fall back to the CLI pull.
     ``asyncio.CancelledError`` passes through untouched for step cancellation.
+    A ``docker_host`` that names no daemon raises :class:`ValueError` before
+    anything else (see :func:`require_docker_host`), which is not a fallback.
     """
+    # The one failure that must not degrade: with no sandbox daemon named, the
+    # CLI fallback would pull on the default socket, the worker's own daemon.
+    # So it is refused here, ahead of the EnginePullError boundary below.
+    docker_host = require_docker_host(docker_host)
+
     # Pre-flight sits inside the EnginePullError boundary as well: this
-    # module's contract is that *every* failure degrades to the CLI pull, and
+    # module's contract is that every other failure degrades to the CLI pull, and
     # an unexpected error while parsing the reference, reading credentials, or
     # building the transport would otherwise fail the step outright instead of
     # falling back. (CancelledError derives from BaseException, so step

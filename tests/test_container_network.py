@@ -44,6 +44,7 @@ def test_runtime_docker_network_defaults_empty() -> None:
         shared_workspaces_enabled=False,
         shared_workspace_root="",
         shared_workspace_volume="",
+        docker_host="tcp://dind:2375",
     )
     assert runtime.docker_network == ""
 
@@ -172,5 +173,6 @@ def test_runtime_mac_defaults_empty() -> None:
         shared_workspaces_enabled=False,
         shared_workspace_root="",
         shared_workspace_volume="",
+        docker_host="tcp://dind:2375",
     )
     assert runtime.docker_mac == ""

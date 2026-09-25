@@ -4,20 +4,24 @@
 
 """DOCKER_HOST daemon-selection plumbing for container.run.
 
-The handler must place ``DOCKER_HOST`` on every docker subprocess it spawns
-when ``ContainerRuntime.docker_host`` is set (selecting a Docker-in-Docker
-sandbox daemon), and pass nothing when it is empty (inherit the worker's
-environment / host socket — today's behavior). Daemon selection is
-environment, never argv, so the ``docker create`` arguments must be identical
-on either daemon.
+The handler must place ``DOCKER_HOST`` on every docker subprocess it spawns,
+pointing at the Docker-in-Docker sandbox daemon that
+``ContainerRuntime.docker_host`` names. A value that names no daemon (empty,
+blank, or a bare ``unix://``) is refused before any docker call: inheriting
+the worker's environment instead would reach the worker's own Docker daemon.
+Daemon selection is environment, never argv, so the ``docker create``
+arguments must be identical whichever daemon is selected.
 """
 
 from __future__ import annotations
 
+import inspect
 import os
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
+
+import pytest
 
 from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerServices
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
@@ -99,13 +103,19 @@ def _install_docker_mocks(monkeypatch) -> dict[str, list]:
     return captured
 
 
-def test_docker_env_helper_returns_none_when_unset() -> None:
-    assert _docker_env("") is None
+@pytest.mark.parametrize("docker_host", ["", "   ", "unix://", "tcp://", "tcp://:2375"])
+def test_docker_env_helper_refuses_a_host_that_names_no_daemon(docker_host: str) -> None:
+    with pytest.raises(ValueError, match="sandbox Docker daemon"):
+        _docker_env(docker_host)
+
+
+def test_docker_env_helper_places_the_host_without_surrounding_blanks() -> None:
+    env = _docker_env("  tcp://dind:2375\n")
+    assert env["DOCKER_HOST"] == "tcp://dind:2375"
 
 
 def test_docker_env_helper_overlays_docker_host() -> None:
     env = _docker_env("tcp://dind:2375")
-    assert env is not None
     assert env["DOCKER_HOST"] == "tcp://dind:2375"
     # Inherits the rest of the process environment (e.g. PATH), never replaces it.
     assert "PATH" in env
@@ -122,12 +132,12 @@ def test_docker_env_helper_drops_inherited_docker_context(monkeypatch) -> None:
     monkeypatch.setenv("DOCKER_CONTEXT", "some-context")
 
     env = _docker_env("tcp://dind:2375")
-    assert env is not None
     assert env["DOCKER_HOST"] == "tcp://dind:2375"
     assert "DOCKER_CONTEXT" not in env
 
-    # Unset docker_host keeps the plain environment (no override dict at all).
-    assert _docker_env("") is None
+    # No host is refused rather than handing back the inherited context.
+    with pytest.raises(ValueError):
+        _docker_env("")
 
 
 async def test_docker_host_set_applies_to_every_docker_call(monkeypatch) -> None:
@@ -151,20 +161,38 @@ async def test_docker_host_set_applies_to_every_docker_call(monkeypatch) -> None
         assert env["DOCKER_HOST"] == "tcp://dind:2375"
 
 
-async def test_docker_host_unset_passes_no_override(monkeypatch) -> None:
+@pytest.mark.parametrize("docker_host", ["", "   ", "unix://", "tcp://", "tcp://:2375", None])
+async def test_no_sandbox_daemon_fails_the_step_before_any_docker_call(
+    monkeypatch, docker_host: str | None
+) -> None:
+    """A runtime naming no sandbox daemon never reaches the worker's own.
+
+    The step fails like a config error, before preflight cleanup, the pull or
+    the ``finally`` removal spawn anything: every one of those would otherwise
+    inherit the worker's environment. ``None`` stands for a duck-typed host
+    that leaves the field unset.
+    """
     captured = _install_docker_mocks(monkeypatch)
 
-    result = await RunContainerHandler().execute(_ctx(_FakeServices("")))
-    assert result.success is True
+    result = await RunContainerHandler().execute(_ctx(_FakeServices(cast(str, docker_host))))
 
-    docker_runs = [(cmd, env) for cmd, env in captured["run"] if cmd and cmd[0] == "docker"]
-    assert docker_runs, "no docker subprocess was spawned"
-    for cmd, env in docker_runs:
-        # Unset => inherit the plain environment (env=None), byte-for-byte today.
-        assert env is None, f"unexpected env override on {cmd[:3]}: {env!r}"
+    assert result.success is False
+    assert result.summary == "Container sandbox not configured"
+    assert result.error is not None and "sandbox Docker daemon" in result.error
+    assert captured["run"] == []
+    assert captured["exec"] == []
 
-    for _argv, env in captured["exec"]:
-        assert env is None
+
+@pytest.mark.parametrize("helper", ["_preflight_cleanup", "_force_remove_container"])
+def test_cleanup_helpers_take_the_daemon_explicitly(helper: str) -> None:
+    """No default daemon to fall back on: every caller names the sandbox.
+
+    An empty default used to mean the worker's own daemon, so a call site that
+    left it out would sweep or remove containers there.
+    """
+    param = inspect.signature(getattr(RunContainerHandler, helper)).parameters["docker_host"]
+    assert param.default is inspect.Parameter.empty
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
 
 
 async def test_docker_create_argv_is_identical_regardless_of_daemon(monkeypatch) -> None:
@@ -180,10 +208,10 @@ async def test_docker_create_argv_is_identical_regardless_of_daemon(monkeypatch)
     await RunContainerHandler().execute(_ctx(_FakeServices("tcp://dind:2375")))
     argv_set = create_argv(captured_set)
 
-    captured_unset = _install_docker_mocks(monkeypatch)
-    await RunContainerHandler().execute(_ctx(_FakeServices("")))
-    argv_unset = create_argv(captured_unset)
+    captured_unix = _install_docker_mocks(monkeypatch)
+    await RunContainerHandler().execute(_ctx(_FakeServices("unix:///var/run/dind/docker.sock")))
+    argv_unix = create_argv(captured_unix)
 
-    assert argv_set == argv_unset
-    # DOCKER_HOST never leaks into the create arguments in either mode.
+    assert argv_set == argv_unix
+    # DOCKER_HOST never leaks into the create arguments on either daemon.
     assert not any("DOCKER_HOST" in tok for tok in argv_set)

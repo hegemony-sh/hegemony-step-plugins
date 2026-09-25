@@ -34,6 +34,7 @@ from .pull_progress import (
     EnginePullError,
     PullOutcome,
     format_size,
+    require_docker_host,
     stream_pull,
 )
 
@@ -44,16 +45,18 @@ logger = logging.getLogger(__name__)
 _IMAGE_INSPECT_TIMEOUT = 15.0
 
 
-def _docker_env(docker_host: str) -> dict[str, str] | None:
-    """Environment for a docker subprocess, optionally selecting the daemon.
+def _docker_env(docker_host: str) -> dict[str, str]:
+    """Environment for a docker subprocess, selecting the sandbox daemon.
 
-    When ``docker_host`` is set (the worker's ``container_docker_host`` setting,
-    surfaced as :attr:`ContainerRuntime.docker_host`), every docker invocation
-    the handler spawns gets ``DOCKER_HOST`` pointing at the sandbox daemon on top
-    of the inherited process environment. When empty, ``None`` is returned so the
-    subprocess inherits the plain environment unchanged — byte-for-byte today's
-    host-socket behavior. Daemon selection is environment, never argv, so the
-    ``docker create`` args are identical on either daemon.
+    ``docker_host`` is the worker's ``container_docker_host`` setting, surfaced
+    as :attr:`ContainerRuntime.docker_host`: every docker invocation the handler
+    spawns gets ``DOCKER_HOST`` pointing at the sandbox daemon on top of the
+    inherited process environment. A value that names no daemon (empty, or a
+    bare ``unix://``) raises :class:`ValueError` (see
+    :func:`require_docker_host`): there is no environment to inherit instead,
+    since the inherited one reaches the worker's own daemon.
+    Daemon selection is environment, never argv, so the ``docker create`` args
+    are identical whichever daemon is selected.
 
     The override is deliberately per invocation: exporting ``DOCKER_HOST``
     process-wide would also redirect the worker's own daemon queries (e.g. the
@@ -66,8 +69,7 @@ def _docker_env(docker_host: str) -> dict[str, str] | None:
     other docker-compatible tooling may resolve them differently) — daemon
     selection here must have exactly one source of truth.
     """
-    if not docker_host:
-        return None
+    docker_host = require_docker_host(docker_host)
     env = {key: value for key, value in os.environ.items() if key != "DOCKER_CONTEXT"}
     env["DOCKER_HOST"] = docker_host
     return env
@@ -154,8 +156,9 @@ class RunContainerConfig(BaseModel):
         title="Network mode",
         description=(
             "Optional. Use to attach to a specific Docker network (e.g. clab-mylab) or "
-            "share another container's namespace. Disabled when network access is "
-            "disabled; leave empty for default Docker networking."
+            "share another container's namespace (host shares the Docker-in-Docker "
+            "sandbox's, not the machine's). Disabled when network access is disabled; "
+            "leave empty for default Docker networking."
         ),
         json_schema_extra={
             "x_placeholder": "host | bridge | <docker-network> | container:<name>",
@@ -167,10 +170,12 @@ class RunContainerConfig(BaseModel):
     )
     attach_docker_socket: bool = Field(
         default=False,
-        title="Attach host Docker socket",
+        title="Attach sandbox Docker socket",
         description=(
-            "Mounts /var/run/docker.sock into the container, granting full control of the "
-            "host Docker daemon. Required for DinD tools like containerlab. Off by default."
+            "Mounts the Docker-in-Docker sandbox daemon's /var/run/docker.sock into the "
+            "container, giving it full control of the sandbox daemon (not the host's). "
+            "Required by tools that start their own containers, like containerlab. "
+            "Off by default."
         ),
         json_schema_extra={"x_advanced": True, "x_admin_only": True, "x_col_span": 2},
     )
@@ -178,9 +183,10 @@ class RunContainerConfig(BaseModel):
         default=False,
         title="Run as privileged",
         description=(
-            "Runs the container with --privileged, granting all host capabilities and "
-            "access to /proc/sys (needed by containerlab to adjust rp_filter, etc.). "
-            "Off by default."
+            "Runs the container with --privileged, granting all capabilities and access "
+            "to /proc/sys inside the Docker-in-Docker sandbox (needed by containerlab to "
+            "adjust rp_filter, etc.). The sandbox itself runs privileged, so the step "
+            "becomes a sandbox admin. Off by default."
         ),
         json_schema_extra={"x_advanced": True, "x_admin_only": True, "x_col_span": 2},
     )
@@ -188,9 +194,9 @@ class RunContainerConfig(BaseModel):
         default="",
         title="PID namespace",
         description=(
-            "Optional. Share the host PID namespace (host) or another container's "
-            "(container:<name>). Required by containerlab-in-Docker so it can resolve "
-            "sibling container PIDs. Leave empty for default isolation."
+            "Optional. Share the PID namespace of the Docker-in-Docker sandbox (host) or "
+            "of another container (container:<name>). Required by containerlab-in-Docker "
+            "so it can resolve sibling container PIDs. Leave empty for default isolation."
         ),
         json_schema_extra={
             "x_placeholder": "host | container:<name>",
@@ -203,12 +209,13 @@ class RunContainerConfig(BaseModel):
         default_factory=list,
         title="Extra bind mounts",
         description=(
-            "One per line, format <abs-src>:<abs-dst>[:opts]. Bypasses workspace "
-            "isolation; use sparingly (e.g. containerlab needs /var/run/netns shared)."
+            "One per line, format <abs-src>:<abs-dst>[:opts]. Sources resolve inside the "
+            "Docker-in-Docker sandbox, not on the host. Bypasses workspace isolation; use "
+            "sparingly (e.g. containerlab needs /var/run/netns shared)."
         ),
         json_schema_extra={
             "x_widget": "commands",
-            "x_placeholder": "/var/run/netns:/var/run/netns:shared\n/host/data:/data:ro",
+            "x_placeholder": "/var/run/netns:/var/run/netns:shared\n/srv/data:/data:ro",
             "x_rows": 3,
             "x_advanced": True,
             "x_admin_only": True,
@@ -884,7 +891,7 @@ class RunContainerHandler(BaseHandler):
     handler_id = "container.run"
     supported_kinds = [StepKind.ACTION, StepKind.EXECUTE]
     display_name = "Run Container"
-    description = "Run a command inside a Docker container on the worker host."
+    description = "Run a command inside a Docker container on the Docker-in-Docker sandbox."
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = RunContainerConfig
@@ -899,7 +906,7 @@ class RunContainerHandler(BaseHandler):
         r"^(host|bridge|default|container:[a-zA-Z0-9][a-zA-Z0-9._\-]*|[a-zA-Z0-9][a-zA-Z0-9._\-]*)$"
     )
     # `pid_mode`: only `host` or `container:<name>` are accepted. Required by
-    # clab-in-Docker to resolve sibling container PIDs from the host.
+    # clab-in-Docker to resolve sibling container PIDs in the sandbox's PID namespace.
     _PID_MODE_PATTERN = re.compile(r"^(host|container:[a-zA-Z0-9][a-zA-Z0-9._\-]*)$")
     # `extra_mounts` entries: `<src>:<dst>` or `<src>:<dst>:<opts>` where both
     # paths are absolute and opts are a comma list of alnum tokens (e.g.
@@ -1194,8 +1201,9 @@ class RunContainerHandler(BaseHandler):
           ``--mount type=volume,...,volume-subpath=<run_id>`` (Docker 26.1+).
           This is the preferred mode: no host path, no root, per-run isolation.
         - Otherwise, when ``shared_workspace_path`` is provided, that path is
-          bind-mounted at ``/shared`` (legacy Docker-in-Docker mode requiring an
-          identical host path).
+          bind-mounted at ``/shared`` (legacy mode: bind sources resolve on the
+          sandbox daemon's filesystem, so the worker's path must exist at the
+          identical path there).
 
         ``docker_mac`` pins the container's hardware address on the policy
         network. The platform derives it from this step run's own id before
@@ -1265,12 +1273,12 @@ class RunContainerHandler(BaseHandler):
             ]
         )
 
-        # Stack discriminator: several compose stacks (dev/prod/demo) can share
-        # one host Docker daemon, and the id labels alone cannot tell their
-        # flow containers apart. The worker sets HEGEMONY_STACK_NAME (its
-        # compose project name) so stack-scoped cleanup — the platform's
-        # startup janitor and demo reset — only ever touches its own stack's
-        # containers.
+        # Stack discriminator: the id labels alone cannot tell the flow
+        # containers of several compose stacks (dev/prod/demo) apart on one
+        # daemon. Each stack runs its own sandbox daemon, so this is defense in
+        # depth: the worker sets HEGEMONY_STACK_NAME (its compose project name)
+        # so stack-scoped cleanup — the platform's startup janitor and demo
+        # reset — only ever touches its own stack's containers.
         stack_name = os.environ.get("HEGEMONY_STACK_NAME", "").strip()
         if stack_name:
             args.extend(["--label", f"hegemony.stack={stack_name}"])
@@ -1284,26 +1292,30 @@ class RunContainerHandler(BaseHandler):
         # Force unbuffered output for common runtimes so streaming is real-time
         args.extend(["-e", "PYTHONUNBUFFERED=1"])
 
-        # Advanced: expose the host Docker socket (DinD, containerlab, etc.).
-        # This grants the container full control of the host Docker daemon;
-        # opt-in only.
+        # Advanced: expose the Docker socket (containerlab and other tools that
+        # start their own containers). The bind source resolves on the sandbox
+        # daemon's filesystem, so this is the sandbox daemon's own socket: full
+        # control of the sandbox daemon, not the host's. Opt-in only.
         if attach_docker_socket:
             args.extend(["-v", "/var/run/docker.sock:/var/run/docker.sock"])
 
-        # Advanced: run the container with full host privileges. Required for
-        # tools that need to write to /proc/sys (e.g. containerlab adjusting
-        # rp_filter) or manage devices. Opt-in only.
+        # Advanced: run the container with full privileges inside the sandbox,
+        # which itself runs privileged. Required for tools that need to write
+        # to /proc/sys (e.g. containerlab adjusting rp_filter) or manage
+        # devices. Opt-in only.
         if privileged:
             args.append("--privileged")
 
-        # Advanced: share the host PID namespace so the container can resolve
-        # sibling container PIDs (clab-in-Docker needs this to inspect netns
-        # paths of containers it creates via the host Docker socket).
+        # Advanced: share a PID namespace (``host`` is the sandbox's) so the
+        # container can resolve sibling container PIDs (clab-in-Docker needs
+        # this to inspect netns paths of containers it creates via the attached
+        # sandbox Docker socket).
         if pid_mode:
             args.append(f"--pid={pid_mode}")
 
-        # Advanced: arbitrary bind mounts (validated above). Used to share
-        # paths like /var/run/netns:/var/run/netns:shared with the host.
+        # Advanced: arbitrary bind mounts (validated above). Sources resolve
+        # on the sandbox daemon's filesystem; used to share paths like
+        # /var/run/netns:/var/run/netns:shared with the sandbox.
         if isinstance(extra_mounts, list):
             for m in extra_mounts:
                 if isinstance(m, str) and m:
@@ -1380,11 +1392,21 @@ class RunContainerHandler(BaseHandler):
         services = ctx.require_services()
         runtime = services.container_runtime()
 
+        # Every docker call below runs on the sandbox daemon: DOCKER_HOST is
+        # placed on each invocation (never process-wide — see _docker_env). A
+        # runtime that names no sandbox daemon is refused here, before the
+        # first docker call, rather than inheriting the worker's environment
+        # and with it the worker's own Docker daemon.
+        try:
+            docker_host = require_docker_host(runtime.docker_host or "")
+        except ValueError as e:
+            return HandlerResult(
+                success=False,
+                error=str(e),
+                summary="Container sandbox not configured",
+            )
+
         docker_bin = runtime.docker_bin
-        # Daemon selection for every docker call below. None (setting unset) means
-        # inherit the worker's environment / host socket; set means DOCKER_HOST is
-        # placed on each invocation (never process-wide — see _docker_env).
-        docker_host = runtime.docker_host
         docker_env = _docker_env(docker_host)
         image = ctx.config.get("image", "")
         timeout = ctx.config.get("timeout_seconds", ctx.timeout_seconds)
@@ -1433,7 +1455,7 @@ class RunContainerHandler(BaseHandler):
 
         try:
             # 1. Preflight cleanup
-            await self._preflight_cleanup(docker_bin, ctx, docker_host)
+            await self._preflight_cleanup(docker_bin, ctx, docker_host=docker_host)
 
             # 2. Create a temp staging directory for files to copy into container
             staging_dir = tempfile.mkdtemp(prefix="hegemony-container-")
@@ -1760,7 +1782,8 @@ class RunContainerHandler(BaseHandler):
             if ctx.shared_workspace and runtime.shared_workspaces_enabled:
                 workspace_dir = os.path.join(runtime.shared_workspace_root, ctx.run_id)
                 # Create the run's subdirectory inside the worker's mounted
-                # shared-workspace volume so the sibling container's
+                # shared-workspace volume, the directory the sandbox daemon's
+                # shared-workspace volume is backed by, so the step container's
                 # volume-subpath (or bind) mount resolves to existing content.
                 os.makedirs(workspace_dir, exist_ok=True)
                 volume_name = runtime.shared_workspace_volume.strip()
@@ -2273,7 +2296,7 @@ class RunContainerHandler(BaseHandler):
         except subprocess.TimeoutExpired:
             duration = time.monotonic() - start_time
             # Kill the container on timeout
-            await self._force_remove_container(docker_bin, container_name, docker_host)
+            await self._force_remove_container(docker_bin, container_name, docker_host=docker_host)
             return HandlerResult(
                 success=False,
                 error=f"Container timed out after {timeout}s (image: {image})",
@@ -2303,7 +2326,9 @@ class RunContainerHandler(BaseHandler):
         finally:
             # Best-effort cleanup
             try:
-                await self._force_remove_container(docker_bin, container_name, docker_host)
+                await self._force_remove_container(
+                    docker_bin, container_name, docker_host=docker_host
+                )
             except Exception as e:
                 logger.warning(f"Cleanup: container removal failed: {e}")
 
@@ -2349,7 +2374,7 @@ class RunContainerHandler(BaseHandler):
         *,
         docker_bin: str,
         image: str,
-        docker_env: dict[str, str] | None,
+        docker_env: dict[str, str],
         docker_host: str,
         deadline: float,
         emit: Callable[..., Awaitable[None]],
@@ -2386,7 +2411,7 @@ class RunContainerHandler(BaseHandler):
                 stream_pull(
                     image=image,
                     docker_host=docker_host,
-                    env=docker_env if docker_env is not None else os.environ,
+                    env=docker_env,
                     emit=emit,
                 ),
                 timeout=remaining,
@@ -2458,7 +2483,7 @@ class RunContainerHandler(BaseHandler):
         *,
         docker_bin: str,
         image: str,
-        docker_env: dict[str, str] | None,
+        docker_env: dict[str, str],
         deadline: float,
     ) -> int | None:
         """On-disk size of ``image``, or None when the daemon will not say.
@@ -2497,7 +2522,7 @@ class RunContainerHandler(BaseHandler):
         docker_bin: str,
         args: list[str],
         *,
-        env: dict[str, str] | None,
+        env: dict[str, str],
         timeout: float,
     ) -> subprocess.CompletedProcess[str]:
         """Run one docker CLI call with captured text output.
@@ -2521,13 +2546,13 @@ class RunContainerHandler(BaseHandler):
         return await asyncio.to_thread(_invoke)
 
     async def _preflight_cleanup(
-        self, docker_bin: str, ctx: HandlerContext, docker_host: str = ""
+        self, docker_bin: str, ctx: HandlerContext, *, docker_host: str
     ) -> None:
         """Remove pre-existing containers with matching labels before new attempt.
 
-        Sweeps the same daemon the run targets (``docker_host`` selects it, empty
-        = host socket), so a retry cleans up the previous attempt's container on
-        the daemon it was actually created on.
+        Sweeps the same sandbox daemon the run targets (``docker_host`` selects
+        it), so a retry cleans up the previous attempt's container on the
+        daemon it was actually created on.
         """
         docker_env = _docker_env(docker_host)
         try:
@@ -2549,18 +2574,20 @@ class RunContainerHandler(BaseHandler):
             stdout = str(result.stdout or "")
             for name in stdout.strip().splitlines():
                 if name:
-                    await self._force_remove_container(docker_bin, name.strip(), docker_host)
+                    await self._force_remove_container(
+                        docker_bin, name.strip(), docker_host=docker_host
+                    )
         except Exception as e:
             logger.warning(f"Preflight cleanup failed: {e}")
 
     @classmethod
     async def _force_remove_container(
-        cls, docker_bin: str, container_name: str, docker_host: str = ""
+        cls, docker_bin: str, container_name: str, *, docker_host: str
     ) -> None:
         """Force remove a container, ignoring errors if already gone.
 
-        ``docker_host`` (empty = host socket) selects the daemon so removal hits
-        the same daemon that created the container.
+        ``docker_host`` selects the sandbox daemon so removal hits the same
+        daemon that created the container.
         """
         docker_env = _docker_env(docker_host)
         with contextlib.suppress(Exception):

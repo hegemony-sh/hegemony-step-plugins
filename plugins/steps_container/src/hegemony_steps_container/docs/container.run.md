@@ -6,7 +6,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 # Run Container
 
-`container.run` runs a script inside a Docker container on the worker host.
+`container.run` runs a script inside a Docker container on the platform's
+Docker-in-Docker sandbox, never on the worker's own Docker daemon.
 Pick an image, write the command lines, and the step pulls the image, starts a
 fresh container, streams its output live, and cleans the container up when
 it is done. Any container-based tool — Python, Terraform, Ansible,
@@ -52,7 +53,7 @@ Defaults: working directory `/workspace`, 512m memory, 1.0 CPUs, 300 s
 timeout, normal Docker networking. Turn on "Disable network access" for full
 isolation, or set an egress policy mode with allow/deny rules for a
 per-step outbound firewall; an egress policy cannot be combined with the
-admin-only host-access options (network mode, host Docker socket, privileged,
+admin-only host-access options (network mode, sandbox Docker socket, privileged,
 PID namespace, extra bind mounts) or with disabled networking. Environment
 variables are passed through except keys starting with `HEGEMONY_`, which are
 reserved and ignored.
@@ -73,8 +74,10 @@ While the container runs, its output streams into the step's live log.
 The step succeeds only when the container exits with code 0; any non-zero
 exit code fails it with that code in the error. It also fails when config
 validation rejects the step, the image cannot be pulled, attachments or
-selected artifacts cannot be provisioned, or the Docker binary is missing on
-the worker. The timeout covers the whole step — image pull included — and on
+selected artifacts cannot be provisioned, the Docker binary is missing on the
+worker, or the worker has no Docker-in-Docker sandbox configured: the step
+never runs on the worker's own Docker daemon instead. The timeout covers the
+whole step — image pull included — and on
 expiry the container is killed and the step fails as timed out. Step-output
 snapshots and post-run artifact harvesting are best-effort: problems there
 are logged but do not fail the step. The container is force-removed after

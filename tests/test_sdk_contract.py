@@ -10,6 +10,7 @@ test so the duck-typed platform registry and this SDK stay in lock-step.
 
 import dataclasses
 import inspect
+from typing import Any
 
 import hegemony_step_sdk as sdk
 
@@ -166,6 +167,34 @@ def test_handler_context_keeps_positional_bindings():
     assert positional.target_roles == ["core"]
     assert positional.tags == {}
     assert positional.get_target_devices() == [{"id": "d1"}]
+
+
+def test_container_runtime_requires_the_sandbox_daemon():
+    """``docker_host`` has no default: a host must name the sandbox daemon.
+
+    The old empty default meant "inherit the worker's environment", which is
+    the worker's own Docker daemon. ``container.run`` refuses that now, so a
+    host that leaves the field out gets a TypeError naming ``docker_host``
+    where it constructs the runtime, and a type checker flags the call,
+    instead of handing the plugin an empty value to refuse.
+    """
+    field = next(f for f in dataclasses.fields(sdk.ContainerRuntime) if f.name == "docker_host")
+    assert field.default is dataclasses.MISSING
+    assert field.default_factory is dataclasses.MISSING
+
+    # Typed Any: leaving the argument out is the point of the call.
+    construct: Any = sdk.ContainerRuntime
+    try:
+        construct(
+            docker_bin="docker",
+            shared_workspaces_enabled=False,
+            shared_workspace_root="",
+            shared_workspace_volume="",
+        )
+    except TypeError as exc:
+        assert "docker_host" in str(exc)
+    else:
+        raise AssertionError("ContainerRuntime must require docker_host")
 
 
 def test_registry_protocol_shape():

@@ -39,7 +39,7 @@ class _FakeServices:
             shared_workspaces_enabled=False,
             shared_workspace_root="",
             shared_workspace_volume="",
-            docker_host="",
+            docker_host="tcp://dind:2375",
         )
 
     async def fetch_run_attachments(self, run_id: str) -> list[dict]:

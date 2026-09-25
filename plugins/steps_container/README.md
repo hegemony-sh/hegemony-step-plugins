@@ -6,9 +6,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 # hegemony-steps-container
 
-Container execution on the worker host. Deliberately its own wheel: the
-security-sensitive handler (docker socket, privileged mode) — hardened
-deployments simply don't install it.
+Container execution on the platform's Docker-in-Docker sandbox, never on the
+worker's own Docker daemon. Deliberately its own wheel: the security-sensitive
+handler (docker socket, privileged mode) — hardened deployments simply don't
+install it.
 
 Handlers: `container.run`.
 

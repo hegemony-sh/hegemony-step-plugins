@@ -107,19 +107,21 @@ class ShellTransport(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ContainerRuntime:
-    """Host container-execution environment served to the run_container handler."""
+    """The platform's container-execution environment served to the run_container handler."""
 
     docker_bin: str
     shared_workspaces_enabled: bool
     shared_workspace_root: str
     shared_workspace_volume: str
-    # Daemon selection for flow-container work. Empty means inherit the worker's
-    # environment (the host Docker socket) — today's behavior and the rollback
-    # story. When set (e.g. ``tcp://dind:2375``), the handler points ``DOCKER_HOST``
-    # at that daemon on every docker invocation it spawns — per invocation, never
-    # process-wide, and never in the ``docker create`` argv (selection is
-    # environment, not arguments).
-    docker_host: str = ""
+    # The sandbox Docker daemon every flow container runs on (e.g.
+    # ``tcp://dind:2375``, or an explicit ``unix:///path/to/docker.sock``).
+    # Required and non-empty: ``container.run`` refuses an empty value or a bare
+    # ``unix://`` rather than inheriting the worker's own environment, which
+    # would reach the worker's Docker daemon instead of the sandbox. The handler
+    # points ``DOCKER_HOST`` at this daemon on every docker invocation it spawns
+    # — per invocation, never process-wide, and never in the ``docker create``
+    # argv (selection is environment, not arguments).
+    docker_host: str
     # Files larger than this are skipped when harvesting generated artifacts.
     artifact_max_file_size_bytes: int = 52_428_800
     # Docker network to attach the step container to (``--network``), used by
@@ -234,7 +236,7 @@ class HandlerServices(Protocol):
         ...
 
     def container_runtime(self) -> ContainerRuntime:
-        """Describe the host's container-execution environment (docker binary, workspaces)."""
+        """Describe the platform's container-execution environment (docker binary, workspaces)."""
         ...
 
     async def open_shell(
