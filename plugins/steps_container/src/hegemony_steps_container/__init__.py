@@ -4,9 +4,10 @@
 
 """Docker container execution step handler for Hegemony.
 
-Container execution on the worker host. Deliberately its own wheel: the
-security-sensitive handler (docker socket, privileged mode) — hardened
-deployments simply don't install it.
+Container execution on the platform's Docker-in-Docker sandbox, never on the
+worker's own Docker daemon. Deliberately its own wheel: the security-sensitive
+handler (docker socket, privileged mode) — hardened deployments simply don't
+install it.
 
 Registers under the ``hegemony.step_handlers`` entry-point group; the entry
 point name is the claimed handler-id namespace prefix (``container``).

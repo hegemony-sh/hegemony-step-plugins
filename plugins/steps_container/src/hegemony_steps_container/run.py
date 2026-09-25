@@ -156,8 +156,9 @@ class RunContainerConfig(BaseModel):
         title="Network mode",
         description=(
             "Optional. Use to attach to a specific Docker network (e.g. clab-mylab) or "
-            "share another container's namespace. Disabled when network access is "
-            "disabled; leave empty for default Docker networking."
+            "share another container's namespace (host shares the Docker-in-Docker "
+            "sandbox's, not the machine's). Disabled when network access is disabled; "
+            "leave empty for default Docker networking."
         ),
         json_schema_extra={
             "x_placeholder": "host | bridge | <docker-network> | container:<name>",
@@ -169,10 +170,12 @@ class RunContainerConfig(BaseModel):
     )
     attach_docker_socket: bool = Field(
         default=False,
-        title="Attach host Docker socket",
+        title="Attach sandbox Docker socket",
         description=(
-            "Mounts /var/run/docker.sock into the container, granting full control of the "
-            "host Docker daemon. Required for DinD tools like containerlab. Off by default."
+            "Mounts the Docker-in-Docker sandbox daemon's /var/run/docker.sock into the "
+            "container, giving it full control of the sandbox daemon (not the host's). "
+            "Required by tools that start their own containers, like containerlab. "
+            "Off by default."
         ),
         json_schema_extra={"x_advanced": True, "x_admin_only": True, "x_col_span": 2},
     )
@@ -180,9 +183,10 @@ class RunContainerConfig(BaseModel):
         default=False,
         title="Run as privileged",
         description=(
-            "Runs the container with --privileged, granting all host capabilities and "
-            "access to /proc/sys (needed by containerlab to adjust rp_filter, etc.). "
-            "Off by default."
+            "Runs the container with --privileged, granting all capabilities and access "
+            "to /proc/sys inside the Docker-in-Docker sandbox (needed by containerlab to "
+            "adjust rp_filter, etc.). The sandbox itself runs privileged, so the step "
+            "becomes a sandbox admin. Off by default."
         ),
         json_schema_extra={"x_advanced": True, "x_admin_only": True, "x_col_span": 2},
     )
@@ -190,9 +194,9 @@ class RunContainerConfig(BaseModel):
         default="",
         title="PID namespace",
         description=(
-            "Optional. Share the host PID namespace (host) or another container's "
-            "(container:<name>). Required by containerlab-in-Docker so it can resolve "
-            "sibling container PIDs. Leave empty for default isolation."
+            "Optional. Share the PID namespace of the Docker-in-Docker sandbox (host) or "
+            "of another container (container:<name>). Required by containerlab-in-Docker "
+            "so it can resolve sibling container PIDs. Leave empty for default isolation."
         ),
         json_schema_extra={
             "x_placeholder": "host | container:<name>",
@@ -205,12 +209,13 @@ class RunContainerConfig(BaseModel):
         default_factory=list,
         title="Extra bind mounts",
         description=(
-            "One per line, format <abs-src>:<abs-dst>[:opts]. Bypasses workspace "
-            "isolation; use sparingly (e.g. containerlab needs /var/run/netns shared)."
+            "One per line, format <abs-src>:<abs-dst>[:opts]. Sources resolve inside the "
+            "Docker-in-Docker sandbox, not on the host. Bypasses workspace isolation; use "
+            "sparingly (e.g. containerlab needs /var/run/netns shared)."
         ),
         json_schema_extra={
             "x_widget": "commands",
-            "x_placeholder": "/var/run/netns:/var/run/netns:shared\n/host/data:/data:ro",
+            "x_placeholder": "/var/run/netns:/var/run/netns:shared\n/srv/data:/data:ro",
             "x_rows": 3,
             "x_advanced": True,
             "x_admin_only": True,
@@ -886,7 +891,7 @@ class RunContainerHandler(BaseHandler):
     handler_id = "container.run"
     supported_kinds = [StepKind.ACTION, StepKind.EXECUTE]
     display_name = "Run Container"
-    description = "Run a command inside a Docker container on the worker host."
+    description = "Run a command inside a Docker container on the Docker-in-Docker sandbox."
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = RunContainerConfig
@@ -901,7 +906,7 @@ class RunContainerHandler(BaseHandler):
         r"^(host|bridge|default|container:[a-zA-Z0-9][a-zA-Z0-9._\-]*|[a-zA-Z0-9][a-zA-Z0-9._\-]*)$"
     )
     # `pid_mode`: only `host` or `container:<name>` are accepted. Required by
-    # clab-in-Docker to resolve sibling container PIDs from the host.
+    # clab-in-Docker to resolve sibling container PIDs in the sandbox's PID namespace.
     _PID_MODE_PATTERN = re.compile(r"^(host|container:[a-zA-Z0-9][a-zA-Z0-9._\-]*)$")
     # `extra_mounts` entries: `<src>:<dst>` or `<src>:<dst>:<opts>` where both
     # paths are absolute and opts are a comma list of alnum tokens (e.g.
@@ -1196,8 +1201,9 @@ class RunContainerHandler(BaseHandler):
           ``--mount type=volume,...,volume-subpath=<run_id>`` (Docker 26.1+).
           This is the preferred mode: no host path, no root, per-run isolation.
         - Otherwise, when ``shared_workspace_path`` is provided, that path is
-          bind-mounted at ``/shared`` (legacy Docker-in-Docker mode requiring an
-          identical host path).
+          bind-mounted at ``/shared`` (legacy mode: bind sources resolve on the
+          sandbox daemon's filesystem, so the worker's path must exist at the
+          identical path there).
 
         ``docker_mac`` pins the container's hardware address on the policy
         network. The platform derives it from this step run's own id before
@@ -1267,12 +1273,12 @@ class RunContainerHandler(BaseHandler):
             ]
         )
 
-        # Stack discriminator: several compose stacks (dev/prod/demo) can share
-        # one host Docker daemon, and the id labels alone cannot tell their
-        # flow containers apart. The worker sets HEGEMONY_STACK_NAME (its
-        # compose project name) so stack-scoped cleanup — the platform's
-        # startup janitor and demo reset — only ever touches its own stack's
-        # containers.
+        # Stack discriminator: the id labels alone cannot tell the flow
+        # containers of several compose stacks (dev/prod/demo) apart on one
+        # daemon. Each stack runs its own sandbox daemon, so this is defense in
+        # depth: the worker sets HEGEMONY_STACK_NAME (its compose project name)
+        # so stack-scoped cleanup — the platform's startup janitor and demo
+        # reset — only ever touches its own stack's containers.
         stack_name = os.environ.get("HEGEMONY_STACK_NAME", "").strip()
         if stack_name:
             args.extend(["--label", f"hegemony.stack={stack_name}"])
@@ -1286,26 +1292,30 @@ class RunContainerHandler(BaseHandler):
         # Force unbuffered output for common runtimes so streaming is real-time
         args.extend(["-e", "PYTHONUNBUFFERED=1"])
 
-        # Advanced: expose the host Docker socket (DinD, containerlab, etc.).
-        # This grants the container full control of the host Docker daemon;
-        # opt-in only.
+        # Advanced: expose the Docker socket (containerlab and other tools that
+        # start their own containers). The bind source resolves on the sandbox
+        # daemon's filesystem, so this is the sandbox daemon's own socket: full
+        # control of the sandbox daemon, not the host's. Opt-in only.
         if attach_docker_socket:
             args.extend(["-v", "/var/run/docker.sock:/var/run/docker.sock"])
 
-        # Advanced: run the container with full host privileges. Required for
-        # tools that need to write to /proc/sys (e.g. containerlab adjusting
-        # rp_filter) or manage devices. Opt-in only.
+        # Advanced: run the container with full privileges inside the sandbox,
+        # which itself runs privileged. Required for tools that need to write
+        # to /proc/sys (e.g. containerlab adjusting rp_filter) or manage
+        # devices. Opt-in only.
         if privileged:
             args.append("--privileged")
 
-        # Advanced: share the host PID namespace so the container can resolve
-        # sibling container PIDs (clab-in-Docker needs this to inspect netns
-        # paths of containers it creates via the host Docker socket).
+        # Advanced: share a PID namespace (``host`` is the sandbox's) so the
+        # container can resolve sibling container PIDs (clab-in-Docker needs
+        # this to inspect netns paths of containers it creates via the attached
+        # sandbox Docker socket).
         if pid_mode:
             args.append(f"--pid={pid_mode}")
 
-        # Advanced: arbitrary bind mounts (validated above). Used to share
-        # paths like /var/run/netns:/var/run/netns:shared with the host.
+        # Advanced: arbitrary bind mounts (validated above). Sources resolve
+        # on the sandbox daemon's filesystem; used to share paths like
+        # /var/run/netns:/var/run/netns:shared with the sandbox.
         if isinstance(extra_mounts, list):
             for m in extra_mounts:
                 if isinstance(m, str) and m:
@@ -1772,7 +1782,8 @@ class RunContainerHandler(BaseHandler):
             if ctx.shared_workspace and runtime.shared_workspaces_enabled:
                 workspace_dir = os.path.join(runtime.shared_workspace_root, ctx.run_id)
                 # Create the run's subdirectory inside the worker's mounted
-                # shared-workspace volume so the sibling container's
+                # shared-workspace volume, the directory the sandbox daemon's
+                # shared-workspace volume is backed by, so the step container's
                 # volume-subpath (or bind) mount resolves to existing content.
                 os.makedirs(workspace_dir, exist_ok=True)
                 volume_name = runtime.shared_workspace_volume.strip()
