@@ -87,11 +87,17 @@ def test_parse_image_reference(image: str, expected: tuple[str, str]) -> None:
 # --- resolve_engine_endpoint -----------------------------------------------
 
 
-def test_resolve_endpoint_empty_targets_default_socket() -> None:
-    endpoint = resolve_engine_endpoint("", {})
-    assert endpoint.kind == "uds"
-    assert endpoint.uds_path == "/var/run/docker.sock"
-    assert endpoint.base_url == "http://docker"
+@pytest.mark.parametrize("docker_host", ["", "   ", "unix://", "tcp://", "tcp://:2375"])
+def test_resolve_endpoint_refuses_a_host_that_names_no_daemon(docker_host: str) -> None:
+    """No daemon named is an error, never the default socket.
+
+    Inside the worker, ``/var/run/docker.sock`` is the worker's own Docker
+    daemon, not the sandbox. And a ValueError, not EnginePullUnsupported: the
+    caller answers that one by pulling with the CLI on the same default socket.
+    """
+    with pytest.raises(ValueError, match="sandbox Docker daemon") as excinfo:
+        resolve_engine_endpoint(docker_host, {})
+    assert not isinstance(excinfo.value, EnginePullError)
 
 
 def test_resolve_endpoint_unix_scheme_custom_path() -> None:
@@ -115,7 +121,6 @@ def test_resolve_endpoint_plain_tcp() -> None:
         ("npipe:////./pipe/docker_engine", {}),
         ("fd://", {}),
         ("https://daemon:2376", {}),
-        ("tcp://", {}),
     ],
 )
 def test_resolve_endpoint_unsupported_shapes(docker_host: str, env: dict[str, str]) -> None:
@@ -311,7 +316,7 @@ async def test_stream_pull_emits_throttled_progress_and_phase_change() -> None:
     clock = _Clock([0.0, 1.0, 1.5, 2.5, 3.0])
     await stream_pull(
         image="alpine:3.20",
-        docker_host="",
+        docker_host="tcp://dind:2375",
         env={},
         emit=emit,
         transport=httpx.MockTransport(handler),
@@ -355,7 +360,7 @@ async def test_stream_pull_pct_never_regresses() -> None:
     clock = _Clock([0.0, 0.5, 2.1, 2.2, 4.5])
     await stream_pull(
         image="alpine:3.20",
-        docker_host="",
+        docker_host="tcp://dind:2375",
         env={},
         emit=emit,
         transport=httpx.MockTransport(
@@ -376,7 +381,7 @@ async def test_stream_pull_in_band_error_raises() -> None:
     with pytest.raises(EnginePullError, match="manifest unknown"):
         await stream_pull(
             image="alpine:3.20",
-            docker_host="",
+            docker_host="tcp://dind:2375",
             env={},
             emit=_EmitRecorder(),
             transport=httpx.MockTransport(
@@ -390,7 +395,7 @@ async def test_stream_pull_http_error_raises() -> None:
     with pytest.raises(EnginePullError, match="HTTP 500: server broke"):
         await stream_pull(
             image="alpine:3.20",
-            docker_host="",
+            docker_host="tcp://dind:2375",
             env={},
             emit=_EmitRecorder(),
             transport=httpx.MockTransport(
@@ -407,7 +412,7 @@ async def test_stream_pull_transport_error_wrapped() -> None:
     with pytest.raises(EnginePullError, match="connection refused"):
         await stream_pull(
             image="alpine:3.20",
-            docker_host="",
+            docker_host="tcp://dind:2375",
             env={},
             emit=_EmitRecorder(),
             transport=httpx.MockTransport(handler),
@@ -425,6 +430,39 @@ async def test_stream_pull_unsupported_docker_host_raises_without_io() -> None:
         )
 
 
+@pytest.mark.parametrize("docker_host", ["", "   ", "unix://", "tcp://", "tcp://:2375"])
+@pytest.mark.parametrize("injected_transport", [False, True])
+async def test_stream_pull_refuses_a_missing_daemon_instead_of_falling_back(
+    docker_host: str, injected_transport: bool
+) -> None:
+    """No daemon named raises ValueError, never an EnginePullError.
+
+    The caller answers EnginePullError by running ``docker pull`` on the
+    default socket, the worker's own daemon, so the refusal must not be caught
+    by the pre-flight boundary that wraps every other error. It also comes
+    first: no request is made even when a transport is injected.
+    """
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, content=_stream_body(_TERMINAL_LINES))
+
+    emit = _EmitRecorder()
+    with pytest.raises(ValueError, match="sandbox Docker daemon") as excinfo:
+        await stream_pull(
+            image="alpine:3.20",
+            docker_host=docker_host,
+            env={},
+            emit=emit,
+            transport=httpx.MockTransport(handler) if injected_transport else None,
+            now=_Clock([0.0]),
+        )
+    assert not isinstance(excinfo.value, EnginePullError)
+    assert seen == []
+    assert emit.calls == []
+
+
 async def test_stream_pull_truncated_stream_raises() -> None:
     """A stream that stops before the completion status must fall back.
 
@@ -439,7 +477,7 @@ async def test_stream_pull_truncated_stream_raises() -> None:
     with pytest.raises(EnginePullError, match="without a completion status"):
         await stream_pull(
             image="alpine:3.20",
-            docker_host="",
+            docker_host="tcp://dind:2375",
             env={},
             emit=_EmitRecorder(),
             transport=httpx.MockTransport(
@@ -458,7 +496,7 @@ async def test_stream_pull_digest_only_terminal_is_accepted() -> None:
     ]
     await stream_pull(
         image="alpine:3.20",
-        docker_host="",
+        docker_host="tcp://dind:2375",
         env={},
         emit=_EmitRecorder(),
         transport=httpx.MockTransport(
@@ -482,7 +520,7 @@ async def test_stream_pull_preflight_failure_becomes_engine_pull_error(monkeypat
     with pytest.raises(EnginePullError, match="pre-flight failed"):
         await stream_pull(
             image="alpine:3.20",
-            docker_host="",
+            docker_host="tcp://dind:2375",
             env={},
             emit=_EmitRecorder(),
             transport=httpx.MockTransport(
@@ -505,7 +543,7 @@ async def test_stream_pull_sends_registry_auth(tmp_path: Path) -> None:
 
     await stream_pull(
         image="registry.example.com/tool:v1",
-        docker_host="",
+        docker_host="tcp://dind:2375",
         env=env,
         emit=_EmitRecorder(),
         transport=httpx.MockTransport(handler),
@@ -520,7 +558,7 @@ async def test_stream_pull_sends_registry_auth(tmp_path: Path) -> None:
 class _FakeServices:
     """Minimal HandlerServices stub exercising only the container.run path."""
 
-    def __init__(self, docker_host: str = "") -> None:
+    def __init__(self, docker_host: str = "tcp://dind:2375") -> None:
         self._docker_host = docker_host
 
     def container_runtime(self) -> ContainerRuntime:
@@ -639,7 +677,7 @@ async def test_execute_skips_cli_pull_when_engine_succeeds(monkeypatch) -> None:
     assert stream_mock.await_args is not None
     kwargs = stream_mock.await_args.kwargs
     assert kwargs["image"] == "alpine:3.20"
-    assert kwargs["docker_host"] == ""
+    assert kwargs["docker_host"] == "tcp://dind:2375"
 
     pull_cmds = [cmd for cmd, _env in captured["run"] if cmd[:2] == ["docker", "pull"]]
     assert pull_cmds == []
@@ -696,7 +734,7 @@ async def test_stream_pull_reports_bytes_it_moved() -> None:
 
     outcome = await stream_pull(
         image="alpine:3.20",
-        docker_host="",
+        docker_host="tcp://dind:2375",
         env={},
         emit=_EmitRecorder(),
         transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
@@ -717,7 +755,7 @@ async def test_stream_pull_reports_an_image_that_was_already_there() -> None:
 
     outcome = await stream_pull(
         image="alpine:3.20",
-        docker_host="",
+        docker_host="tcp://dind:2375",
         env={},
         emit=_EmitRecorder(),
         transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
@@ -822,7 +860,7 @@ async def test_stream_pull_will_not_call_an_unmeasured_pull_zero() -> None:
 
     outcome = await stream_pull(
         image="alpine:3.20",
-        docker_host="",
+        docker_host="tcp://dind:2375",
         env={},
         emit=_EmitRecorder(),
         transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
@@ -862,7 +900,7 @@ async def test_image_size_lookup_skipped_once_the_deadline_is_gone(monkeypatch) 
     size = await RunContainerHandler()._image_size_bytes(
         docker_bin="docker",
         image="alpine:3.20",
-        docker_env=None,
+        docker_env={"DOCKER_HOST": "tcp://dind:2375"},
         deadline=time.monotonic() - 1,
     )
 
@@ -888,7 +926,7 @@ async def test_stream_pull_will_not_report_a_partial_byte_count() -> None:
 
     outcome = await stream_pull(
         image="alpine:3.20",
-        docker_host="",
+        docker_host="tcp://dind:2375",
         env={},
         emit=_EmitRecorder(),
         transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
@@ -910,7 +948,7 @@ async def test_stream_pull_will_not_report_bytes_for_an_unsized_layer() -> None:
 
     outcome = await stream_pull(
         image="alpine:3.20",
-        docker_host="",
+        docker_host="tcp://dind:2375",
         env={},
         emit=_EmitRecorder(),
         transport=httpx.MockTransport(lambda _r: httpx.Response(200, content=_stream_body(lines))),
@@ -940,10 +978,42 @@ async def test_pull_raises_timeout_rather_than_borrowing_a_second(monkeypatch) -
         await RunContainerHandler()._pull_image(
             docker_bin="docker",
             image="alpine:3.20",
-            docker_env=None,
-            docker_host="",
+            docker_env={"DOCKER_HOST": "tcp://dind:2375"},
+            docker_host="tcp://dind:2375",
             deadline=time.monotonic() - 1,
             emit=_EmitRecorder(),
         )
 
     stream_mock.assert_not_awaited()
+
+
+async def test_pull_without_a_daemon_fails_rather_than_pulling_on_the_default_one(
+    monkeypatch,
+) -> None:
+    """A missing daemon escapes the pull; the CLI fallback never runs.
+
+    The fallback's environment carries no ``DOCKER_HOST`` here, so a
+    ``docker pull`` would land on the worker's own daemon. The real
+    :func:`stream_pull` runs, with no transport injected.
+    """
+    calls: list[list[str]] = []
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_subprocess_run)
+    emit = _EmitRecorder()
+
+    with pytest.raises(ValueError, match="sandbox Docker daemon"):
+        await RunContainerHandler()._pull_image(
+            docker_bin="docker",
+            image="alpine:3.20",
+            docker_env={"PATH": "/usr/bin"},
+            docker_host="",
+            deadline=time.monotonic() + 60,
+            emit=emit,
+        )
+
+    assert calls == []
+    assert "pull_fallback" not in [attrs.get("milestone") for _msg, attrs in emit.calls]

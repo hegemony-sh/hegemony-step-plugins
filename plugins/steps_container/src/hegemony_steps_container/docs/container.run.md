@@ -73,8 +73,10 @@ While the container runs, its output streams into the step's live log.
 The step succeeds only when the container exits with code 0; any non-zero
 exit code fails it with that code in the error. It also fails when config
 validation rejects the step, the image cannot be pulled, attachments or
-selected artifacts cannot be provisioned, or the Docker binary is missing on
-the worker. The timeout covers the whole step — image pull included — and on
+selected artifacts cannot be provisioned, the Docker binary is missing on the
+worker, or the worker has no Docker-in-Docker sandbox configured: the step
+never runs on the worker's own Docker daemon instead. The timeout covers the
+whole step — image pull included — and on
 expiry the container is killed and the step fails as timed out. Step-output
 snapshots and post-run artifact harvesting are best-effort: problems there
 are logged but do not fail the step. The container is force-removed after

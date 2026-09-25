@@ -34,6 +34,7 @@ from .pull_progress import (
     EnginePullError,
     PullOutcome,
     format_size,
+    require_docker_host,
     stream_pull,
 )
 
@@ -44,16 +45,18 @@ logger = logging.getLogger(__name__)
 _IMAGE_INSPECT_TIMEOUT = 15.0
 
 
-def _docker_env(docker_host: str) -> dict[str, str] | None:
-    """Environment for a docker subprocess, optionally selecting the daemon.
+def _docker_env(docker_host: str) -> dict[str, str]:
+    """Environment for a docker subprocess, selecting the sandbox daemon.
 
-    When ``docker_host`` is set (the worker's ``container_docker_host`` setting,
-    surfaced as :attr:`ContainerRuntime.docker_host`), every docker invocation
-    the handler spawns gets ``DOCKER_HOST`` pointing at the sandbox daemon on top
-    of the inherited process environment. When empty, ``None`` is returned so the
-    subprocess inherits the plain environment unchanged — byte-for-byte today's
-    host-socket behavior. Daemon selection is environment, never argv, so the
-    ``docker create`` args are identical on either daemon.
+    ``docker_host`` is the worker's ``container_docker_host`` setting, surfaced
+    as :attr:`ContainerRuntime.docker_host`: every docker invocation the handler
+    spawns gets ``DOCKER_HOST`` pointing at the sandbox daemon on top of the
+    inherited process environment. A value that names no daemon (empty, or a
+    bare ``unix://``) raises :class:`ValueError` (see
+    :func:`require_docker_host`): there is no environment to inherit instead,
+    since the inherited one reaches the worker's own daemon.
+    Daemon selection is environment, never argv, so the ``docker create`` args
+    are identical whichever daemon is selected.
 
     The override is deliberately per invocation: exporting ``DOCKER_HOST``
     process-wide would also redirect the worker's own daemon queries (e.g. the
@@ -66,8 +69,7 @@ def _docker_env(docker_host: str) -> dict[str, str] | None:
     other docker-compatible tooling may resolve them differently) — daemon
     selection here must have exactly one source of truth.
     """
-    if not docker_host:
-        return None
+    docker_host = require_docker_host(docker_host)
     env = {key: value for key, value in os.environ.items() if key != "DOCKER_CONTEXT"}
     env["DOCKER_HOST"] = docker_host
     return env
@@ -1380,11 +1382,21 @@ class RunContainerHandler(BaseHandler):
         services = ctx.require_services()
         runtime = services.container_runtime()
 
+        # Every docker call below runs on the sandbox daemon: DOCKER_HOST is
+        # placed on each invocation (never process-wide — see _docker_env). A
+        # runtime that names no sandbox daemon is refused here, before the
+        # first docker call, rather than inheriting the worker's environment
+        # and with it the worker's own Docker daemon.
+        try:
+            docker_host = require_docker_host(runtime.docker_host or "")
+        except ValueError as e:
+            return HandlerResult(
+                success=False,
+                error=str(e),
+                summary="Container sandbox not configured",
+            )
+
         docker_bin = runtime.docker_bin
-        # Daemon selection for every docker call below. None (setting unset) means
-        # inherit the worker's environment / host socket; set means DOCKER_HOST is
-        # placed on each invocation (never process-wide — see _docker_env).
-        docker_host = runtime.docker_host
         docker_env = _docker_env(docker_host)
         image = ctx.config.get("image", "")
         timeout = ctx.config.get("timeout_seconds", ctx.timeout_seconds)
@@ -1433,7 +1445,7 @@ class RunContainerHandler(BaseHandler):
 
         try:
             # 1. Preflight cleanup
-            await self._preflight_cleanup(docker_bin, ctx, docker_host)
+            await self._preflight_cleanup(docker_bin, ctx, docker_host=docker_host)
 
             # 2. Create a temp staging directory for files to copy into container
             staging_dir = tempfile.mkdtemp(prefix="hegemony-container-")
@@ -2273,7 +2285,7 @@ class RunContainerHandler(BaseHandler):
         except subprocess.TimeoutExpired:
             duration = time.monotonic() - start_time
             # Kill the container on timeout
-            await self._force_remove_container(docker_bin, container_name, docker_host)
+            await self._force_remove_container(docker_bin, container_name, docker_host=docker_host)
             return HandlerResult(
                 success=False,
                 error=f"Container timed out after {timeout}s (image: {image})",
@@ -2303,7 +2315,9 @@ class RunContainerHandler(BaseHandler):
         finally:
             # Best-effort cleanup
             try:
-                await self._force_remove_container(docker_bin, container_name, docker_host)
+                await self._force_remove_container(
+                    docker_bin, container_name, docker_host=docker_host
+                )
             except Exception as e:
                 logger.warning(f"Cleanup: container removal failed: {e}")
 
@@ -2349,7 +2363,7 @@ class RunContainerHandler(BaseHandler):
         *,
         docker_bin: str,
         image: str,
-        docker_env: dict[str, str] | None,
+        docker_env: dict[str, str],
         docker_host: str,
         deadline: float,
         emit: Callable[..., Awaitable[None]],
@@ -2386,7 +2400,7 @@ class RunContainerHandler(BaseHandler):
                 stream_pull(
                     image=image,
                     docker_host=docker_host,
-                    env=docker_env if docker_env is not None else os.environ,
+                    env=docker_env,
                     emit=emit,
                 ),
                 timeout=remaining,
@@ -2458,7 +2472,7 @@ class RunContainerHandler(BaseHandler):
         *,
         docker_bin: str,
         image: str,
-        docker_env: dict[str, str] | None,
+        docker_env: dict[str, str],
         deadline: float,
     ) -> int | None:
         """On-disk size of ``image``, or None when the daemon will not say.
@@ -2497,7 +2511,7 @@ class RunContainerHandler(BaseHandler):
         docker_bin: str,
         args: list[str],
         *,
-        env: dict[str, str] | None,
+        env: dict[str, str],
         timeout: float,
     ) -> subprocess.CompletedProcess[str]:
         """Run one docker CLI call with captured text output.
@@ -2521,13 +2535,13 @@ class RunContainerHandler(BaseHandler):
         return await asyncio.to_thread(_invoke)
 
     async def _preflight_cleanup(
-        self, docker_bin: str, ctx: HandlerContext, docker_host: str = ""
+        self, docker_bin: str, ctx: HandlerContext, *, docker_host: str
     ) -> None:
         """Remove pre-existing containers with matching labels before new attempt.
 
-        Sweeps the same daemon the run targets (``docker_host`` selects it, empty
-        = host socket), so a retry cleans up the previous attempt's container on
-        the daemon it was actually created on.
+        Sweeps the same sandbox daemon the run targets (``docker_host`` selects
+        it), so a retry cleans up the previous attempt's container on the
+        daemon it was actually created on.
         """
         docker_env = _docker_env(docker_host)
         try:
@@ -2549,18 +2563,20 @@ class RunContainerHandler(BaseHandler):
             stdout = str(result.stdout or "")
             for name in stdout.strip().splitlines():
                 if name:
-                    await self._force_remove_container(docker_bin, name.strip(), docker_host)
+                    await self._force_remove_container(
+                        docker_bin, name.strip(), docker_host=docker_host
+                    )
         except Exception as e:
             logger.warning(f"Preflight cleanup failed: {e}")
 
     @classmethod
     async def _force_remove_container(
-        cls, docker_bin: str, container_name: str, docker_host: str = ""
+        cls, docker_bin: str, container_name: str, *, docker_host: str
     ) -> None:
         """Force remove a container, ignoring errors if already gone.
 
-        ``docker_host`` (empty = host socket) selects the daemon so removal hits
-        the same daemon that created the container.
+        ``docker_host`` selects the sandbox daemon so removal hits the same
+        daemon that created the container.
         """
         docker_env = _docker_env(docker_host)
         with contextlib.suppress(Exception):
