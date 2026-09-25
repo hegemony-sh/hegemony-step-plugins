@@ -1,3 +1,19 @@
+## [0.5.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.4.0...v0.5.0) (2026-09-25)
+
+### ⚠ BREAKING CHANGES
+
+* **sdk:** ContainerRuntime.docker_host is required and must name
+the sandbox daemon; container.run refuses "", a bare unix:// and a tcp://
+with no host instead of inheriting the worker's environment.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FVnouGuBTDymAFUEF8gMUy
+
+### Bug Fixes
+
+* describe the sandbox daemon, not the host's, in container.run ([1358883](https://github.com/hegemony-sh/hegemony-step-plugins/commit/135888315bac4c173f7622cf8d42fd3b906ae2f1))
+* **sdk:** refuse an empty docker_host instead of using the worker's Docker daemon ([db91891](https://github.com/hegemony-sh/hegemony-step-plugins/commit/db9189127bdfd634c673fe31c2d39d205faea68b))
+
 ## [0.4.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.3.1...v0.4.0) (2026-09-23)
 
 ### ⚠ BREAKING CHANGES

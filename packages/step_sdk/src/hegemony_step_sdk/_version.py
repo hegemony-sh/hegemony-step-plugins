@@ -11,5 +11,5 @@ refuse to load plugins from a newer, incompatible ABI.
 
 from __future__ import annotations
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 SDK_ABI_VERSION = 1
