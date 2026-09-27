@@ -18,10 +18,13 @@ from __future__ import annotations
 import json
 import re
 import shlex
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from pydantic import Field
 
+from hegemony_step_sdk import HandlerContext, StateBackendAccess
 from hegemony_steps_container.runner import (
     ContainerExecutionConfig,
     StagedFile,
@@ -57,6 +60,15 @@ _ADDRESS_RE = re.compile(r"^[^\s'\"]+$")
 
 #: pbkdf2 key provider minimum (OpenTofu refuses shorter passphrases).
 MIN_ENCRYPTION_PASSPHRASE = 16
+
+#: Managed state names, as the platform accepts them.
+STATE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+#: Backend overrides: ``*_override.tf`` replaces any backend (or cloud) block,
+#: and works when the configuration declares none.
+HTTP_BACKEND_OVERRIDE = 'terraform {\n  backend "http" {}\n}\n'
+LOCAL_BACKEND_OVERRIDE = 'terraform {\n  backend "local" {}\n}\n'
+#: How long state access outlives the step's own timeout (image pull, cleanup).
+STATE_ACCESS_MARGIN_SECONDS = 600
 
 
 class TfContainerConfig(ContainerExecutionConfig):
@@ -144,6 +156,42 @@ def address_list_errors(field_name: str, value: object) -> list[str]:
         for index, item in enumerate(value)
         if not isinstance(item, str) or not _ADDRESS_RE.match(item.strip())
     ]
+
+
+def state_name_errors(value: object) -> list[str]:
+    if not isinstance(value, str) or not STATE_NAME_RE.match(value.strip()):
+        return [
+            "'state_name' is required for managed state: 1-128 letters, digits, '.', '_' "
+            "or '-', starting with a letter or digit"
+        ]
+    return []
+
+
+def state_backend_env(access: StateBackendAccess) -> dict[str, str]:
+    """The ``http`` backend settings, for the sourced env file (never container env)."""
+    return {
+        "TF_HTTP_ADDRESS": access.address,
+        "TF_HTTP_LOCK_ADDRESS": access.lock_address,
+        "TF_HTTP_UNLOCK_ADDRESS": access.unlock_address,
+        "TF_HTTP_LOCK_METHOD": access.lock_method,
+        "TF_HTTP_UNLOCK_METHOD": access.unlock_method,
+        "TF_HTTP_USERNAME": access.username,
+        "TF_HTTP_PASSWORD": access.password,
+    }
+
+
+@asynccontextmanager
+async def managed_state_access(
+    ctx: HandlerContext, name: str | None, timeout_seconds: int
+) -> AsyncIterator[StateBackendAccess | None]:
+    """Access to the platform-managed state ``name`` for one step (None: not managed)."""
+    if not name:
+        yield None
+        return
+    async with ctx.require_services().open_state_backend(
+        name, ttl_seconds=timeout_seconds + STATE_ACCESS_MARGIN_SECONDS
+    ) as access:
+        yield access
 
 
 def secret_env_errors(value: object) -> list[str]:

@@ -47,6 +47,7 @@ from .services import (
     HandlerServices,
     ShellResult,
     ShellTransport,
+    StateBackendAccess,
     Transport,
 )
 from .transports import (
@@ -93,6 +94,7 @@ __all__ = [
     "ProbeResult",
     "ShellResult",
     "ShellTransport",
+    "StateBackendAccess",
     "StepHandlerRegistry",
     "StepKind",
     "Transport",

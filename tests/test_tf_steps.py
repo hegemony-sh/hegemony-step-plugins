@@ -9,13 +9,19 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 
-from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerServices
+from hegemony_step_sdk import (
+    ContainerRuntime,
+    HandlerContext,
+    HandlerServices,
+    StateBackendAccess,
+)
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
 from hegemony_steps_tf.apply import TfApplyHandler, build_apply_script, public_outputs
 from hegemony_steps_tf.common import (
@@ -25,6 +31,7 @@ from hegemony_steps_tf.common import (
     RUN_SCRIPT,
     SECRET_ENV_FILE,
     SECRET_VARS_FILE,
+    STATE_ACCESS_MARGIN_SECONDS,
     VARS_FILE,
     encryption_hcl,
     hcl_string,
@@ -124,6 +131,7 @@ def test_public_outputs_drop_sensitive_values():
 def test_plan_script_for_backend_state():
     config = TfPlanConfig.model_validate(
         {
+            "state": "backend",
             "source_dir": "terraform/net",
             "backend_config": {"bucket": "b"},
             "targets": ["aws_vpc.main"],
@@ -164,6 +172,16 @@ def test_plan_script_for_ephemeral_state_and_terraform():
     assert "-var-file" not in script
 
 
+def test_plan_script_for_managed_state():
+    config = TfPlanConfig.model_validate({"state_name": "core", "backend_config": {"x": "y"}})
+    script = build_plan_script(
+        config, workdir="/shared/tf/plan", has_vars=False, has_secret_vars=False
+    )
+    assert f"cp {BACKEND_OVERRIDE_FILE} /shared/tf/plan/" in script
+    assert "tofu init -input=false -no-color\n" in script
+    assert ".terraform/terraform.tfstate" not in script
+
+
 def test_apply_script():
     script = build_apply_script("opentofu", "/shared/tf/plan", "5m")
     assert "cd /shared/tf/plan" in script
@@ -188,7 +206,9 @@ def test_apply_script():
         ({"engine": "terraform", "state_encryption_key": "vault://k/x"}, "opentofu engine"),
         ({"lock_timeout": "soon"}, "lock_timeout"),
         ({"image": "/tmp/x"}, "Invalid image reference"),
-        ({"state": "managed"}, "state"),
+        ({"state": "managed"}, "state_name"),
+        ({"state_name": "-bad"}, "state_name"),
+        ({"state": "cloud"}, "state"),
     ],
 )
 def test_plan_validation_rejects(config, message):
@@ -197,7 +217,8 @@ def test_plan_validation_rejects(config, message):
 
 
 def test_plan_validation_accepts_defaults():
-    assert TfPlanHandler().validate_config({}) == []
+    assert TfPlanHandler().validate_config({"state_name": "core"}) == []
+    assert TfPlanHandler().validate_config({"state": "ephemeral"}) == []
     assert TfApplyHandler().validate_config({"plan_step": "plan"}) == []
 
 
@@ -231,6 +252,27 @@ class _Services:
     async def resolve_secret_ref(self, ref: str | None, *, source: str) -> str | None:
         assert ref is not None
         return "resolved-" + ref.split("/")[-1].split("'")[0] + "-long-enough"
+
+    opened: list[tuple[str, int]] = []
+    closed: list[str] = []
+    state_error: str = ""
+
+    @asynccontextmanager
+    async def open_state_backend(self, name: str, *, ttl_seconds: int):
+        if self.state_error:
+            raise RuntimeError(self.state_error)
+        self.opened = [*self.opened, (name, ttl_seconds)]
+        try:
+            yield StateBackendAccess(
+                address=f"http://api:8000/tf-states/{name}/state",
+                lock_address=f"http://api:8000/tf-states/{name}/lock",
+                unlock_address=f"http://api:8000/tf-states/{name}/lock",
+                username="run",
+                password="hgm_run_token-value",
+                extra_hosts={"api": "172.20.0.5"},
+            )
+        finally:
+            self.closed = [*self.closed, name]
 
 
 def _install_docker(monkeypatch, *, out: dict[str, bytes], exit_code: int = 0) -> dict[str, Any]:
@@ -357,9 +399,49 @@ async def test_plan_step_without_shared_workspace_is_plan_only(monkeypatch):
 @pytest.mark.asyncio
 async def test_plan_step_without_backend_block_fails(monkeypatch):
     _install_docker(monkeypatch, out={}, exit_code=EXIT_NO_BACKEND)
-    result = await TfPlanHandler().execute(_ctx({}, _Services()))
+    result = await TfPlanHandler().execute(_ctx({"state": "backend"}, _Services()))
     assert result.success is False
     assert "no backend block" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_plan_step_with_managed_state(monkeypatch):
+    state = _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    services = _Services()
+    result = await TfPlanHandler().execute(
+        _ctx({"state_name": "core", "timeout_seconds": 900}, services)
+    )
+
+    assert result.success is True, result.error
+    assert result.output["state"] == "managed"
+    assert result.output["state_name"] == "core"
+    assert services.opened == [("core", 900 + STATE_ACCESS_MARGIN_SECONDS)]
+    assert services.closed == ["core"]
+    roots = state["roots"]
+    assert 'backend "http"' in roots[BACKEND_OVERRIDE_FILE]
+    env = roots[SECRET_ENV_FILE]
+    for line in (
+        "export TF_HTTP_ADDRESS=http://api:8000/tf-states/core/state",
+        "export TF_HTTP_LOCK_ADDRESS=http://api:8000/tf-states/core/lock",
+        "export TF_HTTP_LOCK_METHOD=POST",
+        "export TF_HTTP_UNLOCK_METHOD=DELETE",
+        "export TF_HTTP_PASSWORD=hgm_run_token-value",
+    ):
+        assert line in env
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert create[create.index("--add-host") + 1] == "api:172.20.0.5"
+    assert not any("hgm_run_" in part for part in create)
+
+
+@pytest.mark.asyncio
+async def test_plan_step_reports_unavailable_managed_state(monkeypatch):
+    state = _install_docker(monkeypatch, out={})
+    services = _Services()
+    services.state_error = "managed state is not available: no encryption key is configured"
+    result = await TfPlanHandler().execute(_ctx({"state_name": "core"}, services))
+    assert result.success is False
+    assert "no encryption key" in (result.error or "")
+    assert state["calls"] == []
 
 
 @pytest.mark.asyncio
@@ -441,6 +523,30 @@ async def test_apply_step_refusals(monkeypatch, outputs, shared, message):
 
 
 @pytest.mark.asyncio
+async def test_apply_step_reopens_managed_state(monkeypatch):
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"})
+    services = _Services(_plan_output(state="managed", state_name="core"))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+
+    assert result.success is True, result.error
+    assert [name for name, _ttl in services.opened] == ["core"]
+    assert services.closed == ["core"]
+    assert "export TF_HTTP_PASSWORD=hgm_run_token-value" in state["roots"][SECRET_ENV_FILE]
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert "--add-host" in create
+
+
+@pytest.mark.asyncio
+async def test_apply_step_refuses_managed_state_without_a_name(monkeypatch):
+    state = _install_docker(monkeypatch, out={})
+    services = _Services(_plan_output(state="managed"))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.success is False
+    assert "no name" in (result.error or "")
+    assert state["exec"] == 0
+
+
+@pytest.mark.asyncio
 async def test_apply_step_skips_a_plan_without_changes(monkeypatch):
     state = _install_docker(monkeypatch, out={})
     result = await TfApplyHandler().execute(
@@ -462,6 +568,7 @@ async def test_apply_failure_mentions_stale_plans(monkeypatch):
 def test_handler_metadata():
     for handler in (TfPlanHandler, TfApplyHandler):
         assert handler.container_backed is True
+        assert handler.platform_api_access is True
         assert handler.targeting.roles is False
     assert TfPlanHandler.handler_id == "tf.plan"
     assert TfApplyHandler.handler_id == "tf.apply"

@@ -21,7 +21,14 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, HandlerTargeting, StepKind
+from hegemony_step_sdk import (
+    BaseHandler,
+    HandlerContext,
+    HandlerResult,
+    HandlerTargeting,
+    StateBackendAccess,
+    StepKind,
+)
 from hegemony_steps_container.run import RunContainerHandler
 from hegemony_steps_container.runner import (
     OUTPUT_DIR,
@@ -39,6 +46,8 @@ from .common import (
     BACKEND_CONFIG_FILE,
     BACKEND_OVERRIDE_FILE,
     BINARIES,
+    HTTP_BACKEND_OVERRIDE,
+    LOCAL_BACKEND_OVERRIDE,
     MIN_ENCRYPTION_PASSPHRASE,
     PLAN_FILE,
     RUN_SCRIPT,
@@ -51,10 +60,13 @@ from .common import (
     backend_config_file,
     default_image,
     encryption_hcl,
+    managed_state_access,
     relative_path_error,
     script_header,
     secret_env_errors,
     secret_env_file,
+    state_backend_env,
+    state_name_errors,
     tool_env,
     typed_variable,
     variable_map_errors,
@@ -62,7 +74,7 @@ from .common import (
 )
 from .summary import plan_line, summarize_plan
 
-StateMode = Literal["backend", "ephemeral"]
+StateMode = Literal["managed", "backend", "ephemeral"]
 
 PLAN_EXIT_FILE = f"{OUTPUT_DIR}/plan-exitcode"
 PLAN_TEXT_FILE = f"{OUTPUT_DIR}/plan.txt"
@@ -92,13 +104,27 @@ class TfPlanConfig(TfContainerConfig):
         json_schema_extra={"x_placeholder": "terraform/network"},
     )
     state: StateMode = Field(
-        default="backend",
+        default="managed",
         title="State",
         description=(
-            "backend: the configuration's own backend block (S3, Azure, GCS, Consul, "
-            "PostgreSQL, …), required. ephemeral: local state that lives only for this "
-            "run, for tests and demos."
+            "managed: Hegemony stores the state (encrypted, locked, versioned) under the "
+            "state name; any backend block in the configuration is replaced. backend: the "
+            "configuration's own backend block (S3, Azure, GCS, Consul, PostgreSQL, …), "
+            "required. ephemeral: local state that lives only for this run, for tests and "
+            "demos."
         ),
+    )
+    state_name: str = Field(
+        default="",
+        title="State name",
+        description=(
+            "Name of the managed state in this organization, e.g. network-core. Every flow "
+            "and laptop using the same name shares one state (and its lock)."
+        ),
+        json_schema_extra={
+            "x_placeholder": "network-core",
+            "x_show_when": {"field": "state", "value": "managed"},
+        },
     )
     backend_config: dict[str, str] = Field(
         default_factory=dict,
@@ -248,7 +274,7 @@ def build_plan_script(
         f"mkdir -p {quoted_workdir}",
         f"cp -R {shlex.quote(source)}/. {quoted_workdir}/",
     ]
-    if config.state == "ephemeral":
+    if config.state in ("managed", "ephemeral"):
         lines.append(f"cp {BACKEND_OVERRIDE_FILE} {quoted_workdir}/")
     lines += [
         f"cd {quoted_workdir}",
@@ -291,9 +317,10 @@ class TfPlanHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     container_backed = True
+    platform_api_access = True
     default_timeout_seconds = 1800
     config_model = TfPlanConfig
-    default_config = {"engine": "opentofu", "state": "backend", "timeout_seconds": 1800}
+    default_config = {"engine": "opentofu", "state": "managed", "timeout_seconds": 1800}
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         errors = super().validate_config(config)
@@ -310,6 +337,8 @@ class TfPlanHandler(BaseHandler):
         errors += variable_map_errors("secret_vars", config.get("secret_vars"))
         errors += secret_map_errors("secret_vars", config.get("secret_vars"))
         errors += backend_config_errors(config.get("backend_config"))
+        if (config.get("state") or "managed") == "managed":
+            errors += state_name_errors(config.get("state_name"))
         errors += address_list_errors("targets", config.get("targets"))
         errors += address_list_errors("replace", config.get("replace"))
         if config.get("destroy") and config.get("refresh_only"):
@@ -335,39 +364,45 @@ class TfPlanHandler(BaseHandler):
         config = TfPlanConfig.model_validate(ctx.config)
         image = config.image.strip() or default_image(config.engine)
         workdir = workdir_for(ctx.step_id) if ctx.shared_workspace else LOCAL_WORKDIR
+        state_name = config.state_name.strip() if config.state == "managed" else None
 
         try:
-            files, env_files = await self._files(ctx, config, workdir)
-        except ValueError as exc:
+            async with managed_state_access(ctx, state_name, config.timeout_seconds) as access:
+                files, env_files = await self._files(ctx, config, workdir, access)
+                job = ContainerJob(
+                    config=container_config_from(
+                        ctx.config,
+                        image=image,
+                        command=[f"sh {RUN_SCRIPT}"],
+                        entrypoint="/bin/sh",
+                        env=tool_env(),
+                    ),
+                    files=files + env_files,
+                    collect=[OUTPUT_DIR],
+                    handler_id=self.handler_id,
+                    extra_hosts=dict(access.extra_hosts) if access else {},
+                )
+                outcome = await run_container_job(ctx, job)
+        except (ValueError, RuntimeError) as exc:
             return HandlerResult(
                 success=False, error=str(exc), summary="Could not prepare the plan"
             )
-
-        job = ContainerJob(
-            config=container_config_from(
-                ctx.config,
-                image=image,
-                command=[f"sh {RUN_SCRIPT}"],
-                entrypoint="/bin/sh",
-                env=tool_env(),
-            ),
-            files=files + env_files,
-            collect=[OUTPUT_DIR],
-            handler_id=self.handler_id,
-        )
-        outcome = await run_container_job(ctx, job)
         if isinstance(outcome, HandlerResult):
             return outcome
         return self._result(ctx, config, image, workdir, outcome)
 
     async def _files(
-        self, ctx: HandlerContext, config: TfPlanConfig, workdir: str
+        self,
+        ctx: HandlerContext,
+        config: TfPlanConfig,
+        workdir: str,
+        access: StateBackendAccess | None,
     ) -> tuple[list[StagedFile], list[StagedFile]]:
         files: list[StagedFile] = []
+        if config.state == "managed":
+            files.append(StagedFile(BACKEND_OVERRIDE_FILE, HTTP_BACKEND_OVERRIDE))
         if config.state == "ephemeral":
-            files.append(
-                StagedFile(BACKEND_OVERRIDE_FILE, 'terraform {\n  backend "local" {}\n}\n')
-            )
+            files.append(StagedFile(BACKEND_OVERRIDE_FILE, LOCAL_BACKEND_OVERRIDE))
         if config.state == "backend" and config.backend_config:
             files.append(backend_config_file(config.backend_config))
         if config.vars:
@@ -400,7 +435,9 @@ class TfPlanHandler(BaseHandler):
                 mode=0o755,
             )
         )
-        env_files = await secret_environment(ctx, config.secret_env, config.state_encryption_key)
+        env_files = await secret_environment(
+            ctx, config.secret_env, config.state_encryption_key, access
+        )
         return files, env_files
 
     def _result(
@@ -460,6 +497,7 @@ class TfPlanHandler(BaseHandler):
             "engine": config.engine,
             "image": image,
             "state": config.state,
+            "state_name": config.state_name.strip() if config.state == "managed" else "",
             "working_dir": workdir,
             "apply_ready": ctx.shared_workspace,
         }
@@ -481,10 +519,15 @@ class TfPlanHandler(BaseHandler):
 
 
 async def secret_environment(
-    ctx: HandlerContext, secret_env: dict[str, str], encryption_key: str
+    ctx: HandlerContext,
+    secret_env: dict[str, str],
+    encryption_key: str,
+    access: StateBackendAccess | None = None,
 ) -> list[StagedFile]:
-    """The sourced env file: provider credentials and OpenTofu's TF_ENCRYPTION."""
+    """The sourced env file: provider credentials, managed-state access, TF_ENCRYPTION."""
     values = await resolve_secret_values(ctx, secret_env, source="tf.secret_env")
+    if access is not None:
+        values.update(state_backend_env(access))
     if encryption_key.strip():
         resolved = await resolve_secret_values(
             ctx, {"key": encryption_key}, source="tf.state_encryption_key"

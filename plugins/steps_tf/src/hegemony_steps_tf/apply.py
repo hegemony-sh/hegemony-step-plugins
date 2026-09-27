@@ -30,7 +30,15 @@ from hegemony_steps_container.runner import (
     run_container_job,
 )
 
-from .common import BINARIES, PLAN_FILE, RUN_SCRIPT, TfContainerConfig, script_header, tool_env
+from .common import (
+    BINARIES,
+    PLAN_FILE,
+    RUN_SCRIPT,
+    TfContainerConfig,
+    managed_state_access,
+    script_header,
+    tool_env,
+)
 from .plan import common_errors, secret_environment
 
 OUTPUTS_FILE = f"{OUTPUT_DIR}/outputs.json"
@@ -115,6 +123,7 @@ class TfApplyHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     container_backed = True
+    platform_api_access = True
     default_timeout_seconds = 3600
     config_model = TfApplyConfig
     default_config = {"timeout_seconds": 3600}
@@ -163,30 +172,40 @@ class TfApplyHandler(BaseHandler):
                 output={"applied": False, "outputs": {}, "sensitive_outputs": []},
             )
 
-        try:
-            env_files = await secret_environment(
-                ctx, config.secret_env, config.state_encryption_key
-            )
-        except ValueError as exc:
-            return self._refuse(str(exc))
+        state_name: str | None = None
+        if plan_output.get("state") == "managed":
+            state_name = str(plan_output.get("state_name") or "")
+            if not state_name:
+                return self._refuse(f"plan step {plan_step!r} reports managed state with no name")
+
         image = str(plan_output.get("image"))
         workdir = str(plan_output.get("working_dir"))
-        job = ContainerJob(
-            config=container_config_from(
-                ctx.config,
-                image=image,
-                command=[f"sh {RUN_SCRIPT}"],
-                entrypoint="/bin/sh",
-                env=tool_env(),
-            ),
-            files=[
-                *env_files,
-                _script_file(engine, workdir, config.lock_timeout.strip()),
-            ],
-            collect=[OUTPUT_DIR],
-            handler_id=self.handler_id,
-        )
-        outcome = await run_container_job(ctx, job)
+        try:
+            # The saved plan names the backend but not its address or credentials:
+            # managed state access is opened again for this step.
+            async with managed_state_access(ctx, state_name, config.timeout_seconds) as access:
+                env_files = await secret_environment(
+                    ctx, config.secret_env, config.state_encryption_key, access
+                )
+                job = ContainerJob(
+                    config=container_config_from(
+                        ctx.config,
+                        image=image,
+                        command=[f"sh {RUN_SCRIPT}"],
+                        entrypoint="/bin/sh",
+                        env=tool_env(),
+                    ),
+                    files=[
+                        *env_files,
+                        _script_file(engine, workdir, config.lock_timeout.strip()),
+                    ],
+                    collect=[OUTPUT_DIR],
+                    handler_id=self.handler_id,
+                    extra_hosts=dict(access.extra_hosts) if access else {},
+                )
+                outcome = await run_container_job(ctx, job)
+        except (ValueError, RuntimeError) as exc:
+            return self._refuse(str(exc))
         if isinstance(outcome, HandlerResult):
             return outcome
         return self._result(engine, image, plan_output, outcome)

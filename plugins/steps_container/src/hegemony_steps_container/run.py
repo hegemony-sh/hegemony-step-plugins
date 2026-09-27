@@ -7,6 +7,7 @@
 import asyncio
 import codecs
 import contextlib
+import ipaddress
 import json
 import logging
 import os
@@ -550,6 +551,22 @@ def _optional_str(value: Any, default: str = "") -> str:
     reaching here at all means the caller skipped it.
     """
     return value.strip() if isinstance(value, str) and value.strip() else default
+
+
+_HOST_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+
+def _valid_host_name(name: str) -> str:
+    """A host name for ``--add-host``; anything else is a platform bug, not user input."""
+    if not isinstance(name, str) or not _HOST_NAME_RE.match(name):
+        raise ValueError(f"invalid extra host name {name!r}")
+    return name
+
+
+def _valid_ip(address: str) -> str:
+    """An IP address for ``--add-host`` (IPv6 in brackets, as docker expects)."""
+    parsed = ipaddress.ip_address(address)
+    return f"[{parsed}]" if parsed.version == 6 else str(parsed)
 
 
 def _validate_absolute_container_path(field_name: str, value: Any, errors: list[str]) -> None:
@@ -1332,6 +1349,7 @@ class RunContainerHandler(BaseHandler):
         docker_network: str = "",
         docker_mac: str = "",
         handler_id: str = "container.run",
+        extra_hosts: dict[str, str] | None = None,
     ) -> list[str]:
         """Build the docker create command args from config.
 
@@ -1399,6 +1417,11 @@ class RunContainerHandler(BaseHandler):
                 args.append(f"--mac-address={docker_mac}")
         elif network_disabled:
             args.append("--network=none")
+
+        # Platform-supplied /etc/hosts entries (never from step config): names
+        # a sandbox container cannot resolve itself, such as the platform API.
+        for host_name, address in sorted((extra_hosts or {}).items()):
+            args.extend(["--add-host", f"{_valid_host_name(host_name)}:{_valid_ip(address)}"])
 
         args.extend(
             [
@@ -1991,6 +2014,7 @@ class RunContainerHandler(BaseHandler):
                 docker_network=runtime.docker_network,
                 docker_mac=runtime.docker_mac,
                 handler_id=job.handler_id,
+                extra_hosts=job.extra_hosts,
             )
             # 8. Create the container
             create_proc = await self._run_docker(

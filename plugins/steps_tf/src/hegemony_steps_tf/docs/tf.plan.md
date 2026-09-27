@@ -28,11 +28,16 @@ arguments), and redacted from the step's output.
 
 State decides where the state lives:
 
-- `backend` (default): the configuration's own backend block, such as S3,
-  Azure Storage, GCS, Consul, or PostgreSQL. Backend settings fill a partial
-  block (bucket, key, and so on) from a file. A configuration without a
-  backend block is refused, because its state would be lost when the run
-  ends.
+- `managed` (default): the platform stores the state under State name, in
+  the run's organization. It is locked while a plan or apply runs, kept as
+  versions, and encrypted with a key held outside the database. Any backend
+  block in the configuration is replaced, so the configuration needs none.
+  Every flow that uses the same name shares one state and its lock. The step
+  gets short-lived access to that one state, which ends with the step.
+- `backend`: the configuration's own backend block, such as S3, Azure
+  Storage, GCS, Consul, or PostgreSQL. Backend settings fill a partial block
+  (bucket, key, and so on) from a file. A configuration without a backend
+  block is refused, because its state would be lost when the run ends.
 - `ephemeral`: local state that lives only for this run, for tests and
   demos.
 
@@ -66,6 +71,7 @@ message.
 The step succeeds when the plan is made, with or without changes. It fails
 when init, validate, or plan fails (see the container output), when backend
 state has no backend block, or before running anything when the config is
-invalid or a secret resolves to nothing. Provider downloads and remote state
+invalid, a secret resolves to nothing, or the platform cannot serve managed
+state (for example, no state encryption key is configured). Provider downloads and remote state
 need network access to those endpoints under the flow's egress policy. The
 timeout covers the whole run, image pull included.

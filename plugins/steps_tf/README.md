@@ -20,8 +20,10 @@ Handlers:
   stale by a state change.
 
 OpenTofu is the default engine and Terraform is selectable; the engine never
-appears in the handler id (CONVENTIONS.md, rule 3). State lives in the
-configuration's own backend, or in ephemeral per-run state for tests.
+appears in the handler id (CONVENTIONS.md, rule 3). By default the platform
+stores the state (managed state: locked, versioned, encrypted); the
+configuration's own backend, or ephemeral per-run state for tests, are the
+alternatives.
 Provider credentials, secret variables and OpenTofu's state encryption key are
 resolved by the platform, passed as files, and redacted from output.
 

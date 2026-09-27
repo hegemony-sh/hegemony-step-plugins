@@ -90,6 +90,9 @@ class ContainerJob:
     collect: list[str] = field(default_factory=list)
     # Recorded in the container's ``hegemony.handler_id`` label.
     handler_id: str = "container.run"
+    # Host name -> IP address entries for the container's /etc/hosts
+    # (``--add-host``), e.g. the platform API from ``open_state_backend``.
+    extra_hosts: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

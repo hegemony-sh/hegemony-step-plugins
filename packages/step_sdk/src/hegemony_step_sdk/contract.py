@@ -364,6 +364,12 @@ class BaseHandler(ABC):
     # the editor renders the egress policy editor. Worker-side handlers keep
     # False; their own dials go through ``services.enforce_egress``.
     container_backed: bool = False
+    # True for container-backed handlers whose container calls the platform API
+    # itself (tf.* steps use the managed state backend). The host lets such a
+    # step's container reach the API endpoint through the flow's egress policy;
+    # what the container may do there is limited by the short-lived token it
+    # gets from ``services.open_state_backend``.
+    platform_api_access: bool = False
     # Pydantic model describing the handler's config: the single source for UI
     # field rendering (JSON schema + x_widget/x_show_when extensions) and for
     # save/run-time validation. None until a handler declares one.

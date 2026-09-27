@@ -39,6 +39,7 @@ def test_public_surface():
         "PROBE_ENTRY_POINT_GROUP",
         "resolve_target_devices_for_roles",
         "DeviceCredentials",
+        "StateBackendAccess",
     ):
         assert hasattr(sdk, name), name
 
@@ -81,6 +82,27 @@ def test_device_credentials_keep_secrets_out_of_repr():
 
 def test_container_backed_defaults_off():
     assert sdk.BaseHandler.container_backed is False
+    assert sdk.BaseHandler.platform_api_access is False
+
+
+def test_handler_services_declares_open_state_backend():
+    assert list(inspect.signature(sdk.HandlerServices.open_state_backend).parameters) == [
+        "self",
+        "name",
+        "ttl_seconds",
+    ]
+
+
+def test_state_backend_access_keeps_the_token_out_of_repr():
+    access = sdk.StateBackendAccess(
+        address="http://api:8000/tf-states/core/state",
+        lock_address="http://api:8000/tf-states/core/lock",
+        unlock_address="http://api:8000/tf-states/core/lock",
+        username="run",
+        password="hgm_run_secret-value",
+    )
+    assert "secret-value" not in repr(access)
+    assert (access.lock_method, access.unlock_method) == ("POST", "DELETE")
 
 
 def test_handler_services_declares_monitor_methods():

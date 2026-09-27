@@ -19,7 +19,8 @@ explicit) execution affinity so they share the run's workspace and worker.
 
 Provider credentials are never stored in a plan, so give them again in
 Secret environment, as on the plan step. With OpenTofu state encryption, set
-the same State encryption key the plan step used.
+the same State encryption key the plan step used. With managed state, the
+apply gets its own short-lived access to the state the plan step named.
 
 When the plan has no changes, the step succeeds without starting a
 container.
