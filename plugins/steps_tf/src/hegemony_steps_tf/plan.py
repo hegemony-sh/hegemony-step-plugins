@@ -84,6 +84,10 @@ LOCAL_WORKDIR = "/workspace/tf"
 
 #: Exit code the run script uses when "backend" state has no backend block.
 EXIT_NO_BACKEND = 3
+NO_BACKEND_MESSAGE = (
+    "State is set to backend, but the configuration declares no backend block; "
+    "add one, or choose managed or ephemeral state."
+)
 
 
 class TfPlanConfig(TfContainerConfig):
@@ -285,8 +289,7 @@ def build_plan_script(
         # directory, which is deleted when the run ends: refuse instead.
         lines += [
             "if [ ! -f .terraform/terraform.tfstate ]; then",
-            '  echo "State is set to backend, but the configuration declares no backend block;'
-            ' add one or choose ephemeral state." >&2',
+            f'  echo "{NO_BACKEND_MESSAGE}" >&2',
             f"  exit {EXIT_NO_BACKEND}",
             "fi",
         ]

@@ -40,6 +40,7 @@ from hegemony_steps_tf.common import (
 from hegemony_steps_tf.plan import (
     EXIT_NO_BACKEND,
     LOCAL_WORKDIR,
+    NO_BACKEND_MESSAGE,
     TfPlanConfig,
     TfPlanHandler,
     build_plan_script,
@@ -146,6 +147,7 @@ def test_plan_script_for_backend_state():
     assert "cp -R /attachments/terraform/net/. /shared/tf/plan/" in script
     assert f"tofu init -input=false -no-color -backend-config={BACKEND_CONFIG_FILE}" in script
     assert "if [ ! -f .terraform/terraform.tfstate ]" in script
+    assert f'echo "{NO_BACKEND_MESSAGE}" >&2' in script
     assert f"exit {EXIT_NO_BACKEND}" in script
     assert BACKEND_OVERRIDE_FILE not in script
     plan = next(line for line in script.splitlines() if line.startswith("tofu plan"))
