@@ -43,6 +43,15 @@ platforms, transports, and libraries multiply.
    themselves platform-specific: `cisco.iosxe` today; `cisco.nxos`,
    `cisco.iosxr`, `arista.eos` as they appear. Vendor first, platform second.
 
+4. **Tool namespaces** — handlers that drive one external tool whose own
+   concepts shape the config schema (a playbook, a plan file): `ansible`,
+   `tf` (OpenTofu and Terraform share `.tf` files and plan/apply semantics,
+   so the implementation is a config field, not part of the id — rule 3).
+   Tool handlers that run the tool in a container build on `container.run`'s
+   runner (`hegemony_steps_container.runner`), declare `container_backed`,
+   and depend on `hegemony-steps-container`, so omitting container execution
+   omits them too.
+
 Third-party plugins claim their own prefix (e.g. `acme.`) and organize
 below it (`acme.ipam.allocate`).
 

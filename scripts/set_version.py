@@ -43,6 +43,17 @@ def _set_plugin_sdk_pin(pyproject, version: str) -> None:
     pyproject.write_text(text, encoding="utf-8")
 
 
+#: A pin on another wheel of this monorepo (a tool handler built on
+#: hegemony-steps-container, say). They release in lockstep, so every such pin
+#: moves with the version; a pyproject without one is left alone.
+SIBLING_PIN = re.compile(r"(hegemony-(?:steps|probe|transport)-[a-z0-9-]+)==[^\",\]]+")
+
+
+def _set_sibling_pins(pyproject, version: str) -> None:
+    text = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(SIBLING_PIN.sub(rf"\g<1>=={version}", text), encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("version", help="Release version without a leading v, e.g. 0.2.0")
@@ -56,6 +67,7 @@ def main() -> None:
         _set_project_version(package_dir / "pyproject.toml", version)
     for plugin_dir in PLUGIN_DIRS:
         _set_plugin_sdk_pin(plugin_dir / "pyproject.toml", version)
+        _set_sibling_pins(plugin_dir / "pyproject.toml", version)
 
     text = SDK_VERSION_FILE.read_text(encoding="utf-8")
     text = _replace(

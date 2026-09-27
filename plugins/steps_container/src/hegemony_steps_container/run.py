@@ -2025,9 +2025,14 @@ class RunContainerHandler(BaseHandler):
             # their parent directories are created on the way.
             for staged_file in job.files:
                 _write_job_file(root_dirs_staging_dir, staged_file)
-            if job.collect:
-                for collect_root in job.collect:
-                    _stage_container_root_dir(root_dirs_staging_dir, collect_root)
+            for collect_root in job.collect:
+                _stage_container_root_dir(root_dirs_staging_dir, collect_root)
+                # Writable by whatever user the image runs as: docker cp
+                # creates it root-owned, and results are written by the step.
+                os.chmod(
+                    os.path.join(root_dirs_staging_dir, collect_root.strip().lstrip("/")),
+                    0o777,
+                )
 
             if any(os.scandir(root_dirs_staging_dir)):
                 cp_proc = await self._run_docker(

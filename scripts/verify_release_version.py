@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Verify a release tag matches every package version and plugin SDK pin."""
+"""Verify a release tag matches every package version, SDK pin, and sibling-wheel pin."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import re
 import tomllib
 
 from package_paths import PACKAGE_DIRS, PLUGIN_DIRS, SDK_VERSION_FILE
+
+SIBLING_DEPENDENCY = re.compile(r"(hegemony-(?:steps|probe|transport)-[a-z0-9-]+)==(.+)")
 
 
 def _project_metadata(pyproject) -> dict:
@@ -45,6 +47,13 @@ def main() -> None:
         metadata = _project_metadata(plugin_dir / "pyproject.toml")
         if expected_sdk_dependency not in metadata["dependencies"]:
             failures.append(f"{metadata['name']} must depend on {expected_sdk_dependency}")
+        # Pins on sibling wheels of this monorepo release in lockstep too.
+        for dependency in metadata["dependencies"]:
+            match = SIBLING_DEPENDENCY.fullmatch(dependency)
+            if match and match.group(2) != version:
+                failures.append(
+                    f"{metadata['name']} must pin {match.group(1)}=={version}, not {dependency}"
+                )
 
     sdk_version_text = SDK_VERSION_FILE.read_text(encoding="utf-8")
     match = re.search(r'^__version__ = "([^"]+)"$', sdk_version_text, re.MULTILINE)
