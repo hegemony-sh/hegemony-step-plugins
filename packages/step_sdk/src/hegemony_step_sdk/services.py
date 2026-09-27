@@ -24,6 +24,8 @@ from .probes import ProbeResult
 if TYPE_CHECKING:
     import httpx
 
+    from .transports import DeviceCredentials
+
 
 class CommandResult(Protocol):
     """One executed device command (structurally satisfied by the host's SSHResult)."""
@@ -167,6 +169,20 @@ class HandlerServices(Protocol):
 
     async def resolve_secret_ref(self, ref: str | None, *, source: str) -> str | None:
         """Resolve a single ``{{ secret/env/file(...) }}`` reference (or pass ``None`` through)."""
+        ...
+
+    async def resolve_device_credentials(self, device: dict[str, Any]) -> DeviceCredentials:
+        """Resolve ``device.access_config`` into login material for an external tool.
+
+        For handlers that hand credentials to a tool running in a step container
+        (an Ansible inventory, say) instead of dialling the device through
+        :meth:`connect`. The host resolves the references in the run's org and
+        registers every secret value for redaction before returning.
+
+        Raises ``ValueError`` when the device's references are missing or
+        malformed (no username, neither a password nor a private key, a broken
+        jump-host block).
+        """
         ...
 
     def validate_secret_ref(

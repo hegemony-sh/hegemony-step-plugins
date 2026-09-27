@@ -73,6 +73,30 @@ class DeviceConnectionSpec:
     jump_host: JumpHostSpec | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class DeviceCredentials:
+    """A device's resolved login material, for handlers that hand it to a tool.
+
+    Returned by :meth:`HandlerServices.resolve_device_credentials` for handlers
+    that do not dial the device themselves but pass credentials to an external
+    tool (an Ansible inventory, a script's context file). The host resolves the
+    ``device.access_config`` references in the run's org and registers every
+    secret value for redaction from step output before returning — usernames
+    excepted, as for :class:`DeviceConnectionSpec`.
+
+    Empty strings mean "not configured"; ``jump_host`` is None for a direct
+    connection.
+    """
+
+    username: str = ""
+    # Secrets are kept out of repr so a logged/traceback'd value never leaks them.
+    password: str = field(default="", repr=False)
+    # PEM private key for SSH key login (empty = password login).
+    private_key: str = field(default="", repr=False)
+    enable_password: str = field(default="", repr=False)
+    jump_host: JumpHostSpec | None = None
+
+
 class TransportOutputSink(Protocol):
     """Host-owned sink for live session-output streaming (Phase B).
 

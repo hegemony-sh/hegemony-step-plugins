@@ -357,6 +357,13 @@ class BaseHandler(ABC):
     default_timeout_seconds: int | None = None
     # Which target selectors the editor offers for this handler's steps.
     targeting: HandlerTargeting = HandlerTargeting()
+    # True for handlers that launch step containers on the platform's sandbox
+    # (container.run and the tool handlers built on its runner). The host gives
+    # such steps the container treatment: the flow's egress policy is enforced
+    # on the container's network, options must live in the step's params, and
+    # the editor renders the egress policy editor. Worker-side handlers keep
+    # False; their own dials go through ``services.enforce_egress``.
+    container_backed: bool = False
     # Pydantic model describing the handler's config: the single source for UI
     # field rendering (JSON schema + x_widget/x_show_when extensions) and for
     # save/run-time validation. None until a handler declares one.

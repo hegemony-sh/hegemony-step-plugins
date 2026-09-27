@@ -38,6 +38,7 @@ def test_public_surface():
         "STEP_HANDLER_ENTRY_POINT_GROUP",
         "PROBE_ENTRY_POINT_GROUP",
         "resolve_target_devices_for_roles",
+        "DeviceCredentials",
     ):
         assert hasattr(sdk, name), name
 
@@ -55,6 +56,31 @@ def test_handler_services_declares_run_probe():
         "address",
         "options",
     ]
+
+
+def test_handler_services_declares_resolve_device_credentials():
+    assert list(inspect.signature(sdk.HandlerServices.resolve_device_credentials).parameters) == [
+        "self",
+        "device",
+    ]
+
+
+def test_device_credentials_keep_secrets_out_of_repr():
+    creds = sdk.DeviceCredentials(
+        username="admin",
+        password="pw-value",
+        private_key="KEY-VALUE",
+        enable_password="enable-value",
+        jump_host=sdk.JumpHostSpec(host="bastion", password="jump-pw"),
+    )
+    text = repr(creds)
+    assert "admin" in text
+    for secret in ("pw-value", "KEY-VALUE", "enable-value", "jump-pw"):
+        assert secret not in text
+
+
+def test_container_backed_defaults_off():
+    assert sdk.BaseHandler.container_backed is False
 
 
 def test_handler_services_declares_monitor_methods():
