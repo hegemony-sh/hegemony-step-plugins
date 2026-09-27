@@ -17,6 +17,7 @@ members = [
     "hegemony-steps-netcli",
     "hegemony-steps-probe",
     "hegemony-steps-shell",
+    "hegemony-steps-tf",
     "hegemony-transport-asyncssh",
     "hegemony-transport-netmiko",
     "hegemony-transport-scrapli",
@@ -574,6 +575,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
+
+[[package]]
+name = "hegemony-steps-tf"
+version = "0.5.0"
+source = { editable = "plugins/steps_tf" }
+dependencies = [
+    { name = "hegemony-step-sdk" },
+    { name = "hegemony-steps-container" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "hegemony-steps-container", editable = "plugins/steps_container" },
+]
 
 [[package]]
 name = "hegemony-transport-asyncssh"

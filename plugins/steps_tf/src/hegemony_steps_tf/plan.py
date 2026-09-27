@@ -1,0 +1,498 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""``tf.plan``: init, validate, and plan an OpenTofu or Terraform configuration.
+
+The configuration comes from the flow's attachments. The step saves the plan in
+its working directory under the run's shared workspace, keeps the readable plan
+as evidence, and reports what would change — counts and resource addresses,
+never resource values — so a later branch or approval can act on it and
+``tf.apply`` can apply exactly that plan. A scheduled plan-only flow is drift
+detection.
+"""
+
+from __future__ import annotations
+
+import json
+import posixpath
+import shlex
+from typing import Any, Literal
+
+from pydantic import Field
+
+from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, HandlerTargeting, StepKind
+from hegemony_steps_container.run import RunContainerHandler
+from hegemony_steps_container.runner import (
+    OUTPUT_DIR,
+    ContainerJob,
+    ContainerJobResult,
+    StagedFile,
+    container_config_from,
+    resolve_secret_values,
+    run_container_job,
+    secret_map_errors,
+)
+
+from .common import (
+    ATTACHMENTS_ROOT,
+    BACKEND_CONFIG_FILE,
+    BACKEND_OVERRIDE_FILE,
+    BINARIES,
+    MIN_ENCRYPTION_PASSPHRASE,
+    PLAN_FILE,
+    RUN_SCRIPT,
+    SECRET_VARS_FILE,
+    VARS_FILE,
+    Engine,
+    TfContainerConfig,
+    address_list_errors,
+    backend_config_errors,
+    backend_config_file,
+    default_image,
+    encryption_hcl,
+    relative_path_error,
+    script_header,
+    secret_env_errors,
+    secret_env_file,
+    tool_env,
+    typed_variable,
+    variable_map_errors,
+    workdir_for,
+)
+from .summary import plan_line, summarize_plan
+
+StateMode = Literal["backend", "ephemeral"]
+
+PLAN_EXIT_FILE = f"{OUTPUT_DIR}/plan-exitcode"
+PLAN_TEXT_FILE = f"{OUTPUT_DIR}/plan.txt"
+PLAN_JSON_FILE = f"{OUTPUT_DIR}/plan.json"
+#: Local working directory when the step has no shared workspace (plan only).
+LOCAL_WORKDIR = "/workspace/tf"
+
+#: Exit code the run script uses when "backend" state has no backend block.
+EXIT_NO_BACKEND = 3
+
+
+class TfPlanConfig(TfContainerConfig):
+    """Config for ``tf.plan``."""
+
+    engine: Engine = Field(
+        default="opentofu",
+        title="Engine",
+        description="opentofu (default) or terraform. The apply step uses the same one.",
+    )
+    source_dir: str = Field(
+        default="",
+        title="Configuration folder",
+        description=(
+            "Folder among the flow attachments holding the .tf files, e.g. terraform/network. "
+            "Leave empty for the attachments root. Commit its .terraform.lock.hcl."
+        ),
+        json_schema_extra={"x_placeholder": "terraform/network"},
+    )
+    state: StateMode = Field(
+        default="backend",
+        title="State",
+        description=(
+            "backend: the configuration's own backend block (S3, Azure, GCS, Consul, "
+            "PostgreSQL, …), required. ephemeral: local state that lives only for this "
+            "run, for tests and demos."
+        ),
+    )
+    backend_config: dict[str, str] = Field(
+        default_factory=dict,
+        title="Backend settings",
+        description=(
+            "KEY=value, one per line, for a partial backend block (for example "
+            "bucket=…, key=…). Values may use {{ secret('...') }}; they are passed "
+            "from a file, not the command line. Only for backend state."
+        ),
+        json_schema_extra={
+            "x_widget": "env-vars",
+            "x_rows": 2,
+            "x_col_span": 2,
+            "x_show_when": {"field": "state", "value": "backend"},
+        },
+    )
+    vars: dict[str, str] = Field(
+        default_factory=dict,
+        title="Variables",
+        description=(
+            "NAME=value, one per line. Values may use templates such as "
+            '{{ inputs.service_name }}; a JSON list or object (["r1","r2"]) is passed '
+            "as that type."
+        ),
+        json_schema_extra={
+            "x_widget": "env-vars",
+            "x_placeholder": "service_name={{ inputs.service_name }}",
+            "x_rows": 3,
+            "x_col_span": 2,
+        },
+    )
+    secret_vars: dict[str, str] = Field(
+        default_factory=dict,
+        title="Secret variables",
+        description=(
+            "NAME=secret reference, one per line, for sensitive variables. Passed from "
+            "a file and redacted from output; like every variable they are stored in the "
+            "saved plan, which lives only in the run's workspace."
+        ),
+        json_schema_extra={"x_widget": "env-vars", "x_rows": 2, "x_col_span": 2},
+    )
+    var_files: list[str] = Field(
+        default_factory=list,
+        title="Variable files",
+        description="Attachment paths of .tfvars or .tfvars.json files, one per line.",
+        json_schema_extra={"x_widget": "commands", "x_rows": 2, "x_advanced": True},
+    )
+    destroy: bool = Field(
+        default=False,
+        title="Plan a destroy",
+        description="Plan the destruction of every resource the state holds (-destroy).",
+        json_schema_extra={"x_advanced": True},
+    )
+    refresh_only: bool = Field(
+        default=False,
+        title="Refresh only",
+        description="Only reconcile state with the real infrastructure (-refresh-only).",
+        json_schema_extra={"x_advanced": True},
+    )
+    targets: list[str] = Field(
+        default_factory=list,
+        title="Targets",
+        description="Resource addresses to limit the plan to (-target), one per line.",
+        json_schema_extra={"x_widget": "commands", "x_rows": 2, "x_advanced": True},
+    )
+    replace: list[str] = Field(
+        default_factory=list,
+        title="Replace",
+        description="Resource addresses to force-replace (-replace), one per line.",
+        json_schema_extra={"x_widget": "commands", "x_rows": 2, "x_advanced": True},
+    )
+    lock_timeout: str = Field(
+        default="300s",
+        title="Lock timeout",
+        description="How long to wait for the state lock (-lock-timeout), e.g. 300s or 5m.",
+        json_schema_extra={"x_advanced": True},
+    )
+    state_encryption_key: str = Field(
+        default="",
+        title="State encryption key",
+        description=(
+            "OpenTofu only: secret reference of a passphrase (16+ characters). State and "
+            "saved plans are then encrypted by OpenTofu before they are written anywhere."
+        ),
+        json_schema_extra={"x_advanced": True, "x_col_span": 2},
+    )
+    image: str = Field(
+        default="",
+        title="Image",
+        description=(
+            "Container image with the tool. Leave empty for the engine's pinned official image."
+        ),
+        json_schema_extra={"x_placeholder": "ghcr.io/opentofu/opentofu:1.12.6", "x_advanced": True},
+    )
+
+
+def common_errors(config: dict[str, Any]) -> list[str]:
+    """Checks shared by both steps on the container side."""
+    errors = secret_env_errors(config.get("secret_env"))
+    image = config.get("image") or default_image(str(config.get("engine") or "opentofu"))
+    errors.extend(
+        RunContainerHandler().validate_config(
+            container_config_from(config, image=str(image), command=[])
+        )
+    )
+    return errors
+
+
+def build_plan_script(
+    config: TfPlanConfig, *, workdir: str, has_vars: bool, has_secret_vars: bool
+) -> str:
+    """Copy the configuration into the working directory, init, validate, plan."""
+    tf = BINARIES[config.engine]
+    source = posixpath.join(ATTACHMENTS_ROOT, config.source_dir.strip()).rstrip("/")
+    init = [tf, "init", "-input=false", "-no-color"]
+    if config.state == "backend" and config.backend_config:
+        init.append(f"-backend-config={BACKEND_CONFIG_FILE}")
+    plan = [
+        tf,
+        "plan",
+        "-input=false",
+        "-no-color",
+        "-detailed-exitcode",
+        f"-lock-timeout={config.lock_timeout.strip()}",
+        f"-out={PLAN_FILE}",
+    ]
+    if config.destroy:
+        plan.append("-destroy")
+    if config.refresh_only:
+        plan.append("-refresh-only")
+    plan += [f"-target={target.strip()}" for target in config.targets if target.strip()]
+    plan += [f"-replace={address.strip()}" for address in config.replace if address.strip()]
+    plan += [
+        f"-var-file={posixpath.join(ATTACHMENTS_ROOT, path.strip())}"
+        for path in config.var_files
+        if path.strip()
+    ]
+    if has_vars:
+        plan.append(f"-var-file={VARS_FILE}")
+    if has_secret_vars:
+        plan.append(f"-var-file={SECRET_VARS_FILE}")
+
+    quoted_workdir = shlex.quote(workdir)
+    lines = [
+        *script_header(),
+        f"rm -rf {quoted_workdir}",
+        f"mkdir -p {quoted_workdir}",
+        f"cp -R {shlex.quote(source)}/. {quoted_workdir}/",
+    ]
+    if config.state == "ephemeral":
+        lines.append(f"cp {BACKEND_OVERRIDE_FILE} {quoted_workdir}/")
+    lines += [
+        f"cd {quoted_workdir}",
+        " ".join(shlex.quote(part) for part in init),
+    ]
+    if config.state == "backend":
+        # Without a backend block the tool silently keeps state in the working
+        # directory, which is deleted when the run ends: refuse instead.
+        lines += [
+            "if [ ! -f .terraform/terraform.tfstate ]; then",
+            '  echo "State is set to backend, but the configuration declares no backend block;'
+            ' add one or choose ephemeral state." >&2',
+            f"  exit {EXIT_NO_BACKEND}",
+            "fi",
+        ]
+    lines += [
+        f"{tf} validate -no-color",
+        "set +e",
+        " ".join(shlex.quote(part) for part in plan),
+        "code=$?",
+        "set -e",
+        'if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi',
+        f'printf "%s" "$code" > {PLAN_EXIT_FILE}',
+        f"{tf} show -no-color {PLAN_FILE} > {PLAN_TEXT_FILE}",
+        f"{tf} show -json {PLAN_FILE} > {PLAN_JSON_FILE}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+class TfPlanHandler(BaseHandler):
+    """Plan an OpenTofu/Terraform configuration and report what would change."""
+
+    handler_id = "tf.plan"
+    supported_kinds = [StepKind.CHECK, StepKind.ACTION, StepKind.EXECUTE]
+    display_name = "OpenTofu/Terraform Plan"
+    description = (
+        "Plan an OpenTofu or Terraform configuration from the flow's attachments and "
+        "report what would change; tf.apply applies the saved plan."
+    )
+    category = "Actions"
+    targeting = HandlerTargeting(roles=False, ips=False)
+    container_backed = True
+    default_timeout_seconds = 1800
+    config_model = TfPlanConfig
+    default_config = {"engine": "opentofu", "state": "backend", "timeout_seconds": 1800}
+
+    def validate_config(self, config: dict[str, Any]) -> list[str]:
+        errors = super().validate_config(config)
+        if errors:
+            return errors
+        error = relative_path_error("source_dir", config.get("source_dir"), allow_empty=True)
+        if error:
+            errors.append(error)
+        for index, path in enumerate(config.get("var_files") or []):
+            error = relative_path_error(f"var_files[{index}]", path)
+            if error:
+                errors.append(error)
+        errors += variable_map_errors("vars", config.get("vars"))
+        errors += variable_map_errors("secret_vars", config.get("secret_vars"))
+        errors += secret_map_errors("secret_vars", config.get("secret_vars"))
+        errors += backend_config_errors(config.get("backend_config"))
+        errors += address_list_errors("targets", config.get("targets"))
+        errors += address_list_errors("replace", config.get("replace"))
+        if config.get("destroy") and config.get("refresh_only"):
+            errors.append("'destroy' and 'refresh_only' cannot be combined")
+        if config.get("destroy") and config.get("replace"):
+            errors.append("'replace' cannot be combined with 'destroy'")
+        if config.get("state_encryption_key") and config.get("engine") == "terraform":
+            errors.append("'state_encryption_key' needs the opentofu engine")
+        lock_timeout = str(config.get("lock_timeout") or "300s")
+        if not lock_timeout[:-1].isdigit() or lock_timeout[-1] not in "sm":
+            errors.append("'lock_timeout' must look like 300s or 5m")
+        errors += common_errors(config)
+        return errors
+
+    async def execute(self, ctx: HandlerContext) -> HandlerResult:
+        errors = self.validate_config(ctx.config)
+        if errors:
+            return HandlerResult(
+                success=False,
+                error=f"Invalid tf.plan config: {'; '.join(errors)}",
+                summary="Config validation failed",
+            )
+        config = TfPlanConfig.model_validate(ctx.config)
+        image = config.image.strip() or default_image(config.engine)
+        workdir = workdir_for(ctx.step_id) if ctx.shared_workspace else LOCAL_WORKDIR
+
+        try:
+            files, env_files = await self._files(ctx, config, workdir)
+        except ValueError as exc:
+            return HandlerResult(
+                success=False, error=str(exc), summary="Could not prepare the plan"
+            )
+
+        job = ContainerJob(
+            config=container_config_from(
+                ctx.config,
+                image=image,
+                command=[f"sh {RUN_SCRIPT}"],
+                entrypoint="/bin/sh",
+                env=tool_env(),
+            ),
+            files=files + env_files,
+            collect=[OUTPUT_DIR],
+            handler_id=self.handler_id,
+        )
+        outcome = await run_container_job(ctx, job)
+        if isinstance(outcome, HandlerResult):
+            return outcome
+        return self._result(ctx, config, image, workdir, outcome)
+
+    async def _files(
+        self, ctx: HandlerContext, config: TfPlanConfig, workdir: str
+    ) -> tuple[list[StagedFile], list[StagedFile]]:
+        files: list[StagedFile] = []
+        if config.state == "ephemeral":
+            files.append(
+                StagedFile(BACKEND_OVERRIDE_FILE, 'terraform {\n  backend "local" {}\n}\n')
+            )
+        if config.state == "backend" and config.backend_config:
+            files.append(backend_config_file(config.backend_config))
+        if config.vars:
+            files.append(
+                StagedFile(
+                    VARS_FILE,
+                    json.dumps({k: typed_variable(v) for k, v in config.vars.items()}, indent=2)
+                    + "\n",
+                )
+            )
+        secret_vars = await resolve_secret_values(
+            ctx, config.secret_vars, source="tf.plan.secret_vars"
+        )
+        if secret_vars:
+            files.append(
+                StagedFile(
+                    SECRET_VARS_FILE,
+                    json.dumps({k: typed_variable(v) for k, v in secret_vars.items()}) + "\n",
+                )
+            )
+        files.append(
+            StagedFile(
+                RUN_SCRIPT,
+                build_plan_script(
+                    config,
+                    workdir=workdir,
+                    has_vars=bool(config.vars),
+                    has_secret_vars=bool(secret_vars),
+                ),
+                mode=0o755,
+            )
+        )
+        env_files = await secret_environment(ctx, config.secret_env, config.state_encryption_key)
+        return files, env_files
+
+    def _result(
+        self,
+        ctx: HandlerContext,
+        config: TfPlanConfig,
+        image: str,
+        workdir: str,
+        outcome: ContainerJobResult,
+    ) -> HandlerResult:
+        evidence = list(outcome.evidence)
+        exit_code = outcome.exit_code
+        if exit_code != 0:
+            reason = (
+                "the configuration declares no backend block (state: backend)"
+                if exit_code == EXIT_NO_BACKEND
+                else f"exited with code {exit_code}"
+            )
+            return HandlerResult(
+                success=False,
+                summary=f"{BINARIES[config.engine]} plan failed",
+                error=f"{BINARIES[config.engine]} {reason}; see the container output",
+                metrics={"exit_code": exit_code, "duration_seconds": outcome.duration_seconds},
+                evidence=evidence,
+            )
+
+        plan_code = (outcome.collected.get(PLAN_EXIT_FILE) or b"").decode().strip()
+        has_changes = plan_code == "2"
+        plan_text = (outcome.collected.get(PLAN_TEXT_FILE) or b"").decode("utf-8", "replace")
+        summary_data: dict[str, Any] = {}
+        raw_json = outcome.collected.get(PLAN_JSON_FILE)
+        if raw_json:
+            try:
+                summary_data = summarize_plan(json.loads(raw_json))
+            except (ValueError, AttributeError, TypeError):
+                summary_data = {}
+        if plan_text:
+            evidence.append(
+                {
+                    "kind": "step_result",
+                    "name": f"plan_{ctx.step_id}.txt",
+                    "content_text": plan_text,
+                    "content_json": {"has_changes": has_changes, **summary_data},
+                }
+            )
+
+        line = plan_line(summary_data) if summary_data else ("changes" if has_changes else "")
+        summary = (
+            f"Plan: {line}"
+            if has_changes
+            else "No changes: infrastructure matches the configuration"
+        )
+        output: dict[str, Any] = {
+            "has_changes": has_changes,
+            **summary_data,
+            "summary": summary,
+            "engine": config.engine,
+            "image": image,
+            "state": config.state,
+            "working_dir": workdir,
+            "apply_ready": ctx.shared_workspace,
+        }
+        return HandlerResult(
+            success=True,
+            summary=summary,
+            metrics={
+                "exit_code": exit_code,
+                "duration_seconds": outcome.duration_seconds,
+                "image": image,
+                "has_changes": has_changes,
+                "add": summary_data.get("add", 0),
+                "change": summary_data.get("change", 0),
+                "destroy": summary_data.get("destroy", 0),
+            },
+            evidence=evidence,
+            output=output,
+        )
+
+
+async def secret_environment(
+    ctx: HandlerContext, secret_env: dict[str, str], encryption_key: str
+) -> list[StagedFile]:
+    """The sourced env file: provider credentials and OpenTofu's TF_ENCRYPTION."""
+    values = await resolve_secret_values(ctx, secret_env, source="tf.secret_env")
+    if encryption_key.strip():
+        resolved = await resolve_secret_values(
+            ctx, {"key": encryption_key}, source="tf.state_encryption_key"
+        )
+        passphrase = resolved["key"]
+        if len(passphrase) < MIN_ENCRYPTION_PASSPHRASE:
+            raise ValueError(
+                f"the state encryption key must be at least {MIN_ENCRYPTION_PASSPHRASE} characters"
+            )
+        values["TF_ENCRYPTION"] = encryption_hcl(passphrase)
+    return [secret_env_file(values)] if values else []
