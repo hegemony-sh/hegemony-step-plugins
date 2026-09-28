@@ -228,14 +228,17 @@ def test_plan_validation_accepts_defaults():
 
 
 class _Services:
-    def __init__(self, step_outputs: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, step_outputs: dict[str, Any] | None = None, *, shared_workspaces: bool = True
+    ) -> None:
         self.step_outputs = step_outputs or {}
+        self.shared_workspaces = shared_workspaces
         self.shared_root = tempfile.mkdtemp(prefix="hegemony-tf-test-")
 
     def container_runtime(self) -> ContainerRuntime:
         return ContainerRuntime(
             docker_bin="docker",
-            shared_workspaces_enabled=True,
+            shared_workspaces_enabled=self.shared_workspaces,
             # The runner creates the run's folder here, as the worker would.
             shared_workspace_root=self.shared_root,
             shared_workspace_volume="hegemony-shared",
@@ -396,6 +399,28 @@ async def test_plan_step_without_shared_workspace_is_plan_only(monkeypatch):
     assert result.output["apply_ready"] is False
     assert result.output["working_dir"] == LOCAL_WORKDIR
     assert result.summary == "No changes: infrastructure matches the configuration"
+
+
+@pytest.mark.asyncio
+async def test_plan_step_on_a_worker_without_shared_workspaces_is_plan_only(monkeypatch):
+    """Shared affinity alone is not enough: the runner mounts /shared only when the
+    worker has shared workspaces enabled, so the plan would die with its container."""
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    services = _Services(shared_workspaces=False)
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, services))
+    assert result.success is True
+    assert result.output["apply_ready"] is False
+    assert result.output["working_dir"] == LOCAL_WORKDIR
+
+
+@pytest.mark.asyncio
+async def test_apply_step_refuses_on_a_worker_without_shared_workspaces(monkeypatch):
+    state = _install_docker(monkeypatch, out={})
+    services = _Services(_plan_output(), shared_workspaces=False)
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.success is False
+    assert "shared workspaces enabled" in (result.error or "")
+    assert state["exec"] == 0
 
 
 @pytest.mark.asyncio
@@ -574,3 +599,7 @@ def test_handler_metadata():
         assert handler.targeting.roles is False
     assert TfPlanHandler.handler_id == "tf.plan"
     assert TfApplyHandler.handler_id == "tf.apply"
+    # Secret fields reach the handler as written, so a secret whose value looks
+    # like a reference is never resolved twice.
+    assert TfPlanHandler.raw_config_keys == {"secret_vars", "secret_env", "state_encryption_key"}
+    assert TfApplyHandler.raw_config_keys == {"secret_env", "state_encryption_key"}

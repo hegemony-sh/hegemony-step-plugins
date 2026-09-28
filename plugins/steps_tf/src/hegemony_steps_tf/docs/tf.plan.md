@@ -22,9 +22,10 @@ templates such as `{{ inputs.service_name }}`; a value that is a JSON list or
 object is passed as that type. Secret variables, provider credentials in
 Secret environment, and the OpenTofu state encryption key are secret
 references: a `{{ secret('...') }}` template or a bare reference such as
-`vault://orgs/acme/secrets/aws/key`. They are resolved by the platform,
-passed from files inside the container (never environment variables or
-arguments), and redacted from the step's output.
+`vault://orgs/acme/secrets/aws/key`. They are resolved by the platform on
+their own (without step variables) and only once, passed from files inside
+the container (never environment variables or arguments), and redacted from
+the step's output.
 
 State decides where the state lives:
 
@@ -47,10 +48,11 @@ the saved plan before writing them anywhere.
 ## Applying The Plan
 
 For a later `tf.apply`, give both steps shared (or explicit) execution
-affinity: the plan's working directory, with its providers and lock file,
-lives in the run's shared workspace under `/shared/tf/<step id>`, and the
-apply runs there on the same worker. A plan-only flow needs no shared
-affinity. The saved plan contains every variable value, secret ones
+affinity on a worker with shared workspaces enabled: the plan's working
+directory, with its providers and lock file, lives in the run's shared
+workspace under `/shared/tf/<step id>`, and the apply runs there on the same
+worker. Otherwise the plan reports `apply_ready: false`. A plan-only flow
+needs no shared affinity. The saved plan contains every variable value, secret ones
 included; it stays inside the run's workspace, which is deleted when the run
 ends.
 

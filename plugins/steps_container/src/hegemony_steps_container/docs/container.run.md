@@ -61,9 +61,11 @@ instead and never fails the step.
 Put credentials in Secret files rather than environment variables: each
 `NAME=reference` entry is resolved and written to `/run/secrets/NAME` inside
 the container. The value may be a `{{ secret('...') }}` template or a bare
-reference such as `vault://orgs/acme/secrets/db/password`. Secret values are
-redacted from the step's output, and unlike environment variables they never
-appear in the sandbox's container metadata.
+reference such as `vault://orgs/acme/secrets/db/password`; it is resolved on
+its own, without step variables, and only once, so a secret whose value looks
+like a URL (`postgres://…`) is written as is. Secret values are redacted from
+the step's output, and unlike environment variables they never appear in the
+sandbox's container metadata.
 
 Defaults: working directory `/workspace`, 512m memory, 1.0 CPUs, 300 s
 timeout, normal Docker networking. Turn on "Disable network access" for full

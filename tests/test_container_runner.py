@@ -43,6 +43,7 @@ class _FakeServices:
     def __init__(self, secrets: dict[str, str] | None = None) -> None:
         self.secrets = secrets or {}
         self.resolved: list[str] = []
+        self.step_output_fetches = 0
 
     def container_runtime(self) -> ContainerRuntime:
         return ContainerRuntime(
@@ -57,7 +58,10 @@ class _FakeServices:
         return []
 
     async def fetch_run_step_outputs(self, run_id: str) -> dict[str, dict[str, Any]]:
-        raise AssertionError("an empty step-output selection must not fetch")
+        # Counted rather than raised: run_job treats step outputs as best-effort
+        # context and would swallow an exception.
+        self.step_output_fetches += 1
+        return {"upstream": {"success": True, "output": {"k": "v"}}}
 
     async def fetch_run_artifacts(self, run_id: str) -> list[dict]:
         return []
@@ -185,26 +189,39 @@ async def test_container_run_rejected_output_json_is_reported(monkeypatch, paylo
 
 @pytest.mark.asyncio
 async def test_container_run_secrets_are_files_not_environment(monkeypatch):
-    services = _FakeServices(secrets={"db/password": "s3cr3t-value"})
+    services = _FakeServices(
+        secrets={"db/password": "s3cr3t-value", "db/url": "postgres://app:pw@db/app"}
+    )
     state = _install_docker(monkeypatch)
     config = {
         "image": "alpine:3.20",
         "secrets": {
             "db_password": "vault://orgs/acme/secrets/db/password",
-            "api_token": "already-rendered-token",
+            "db_url": "{{ secret('vault://orgs/acme/secrets/db/url') }}",
+            "api_token": "literal-token",
         },
     }
     result = await RunContainerHandler().execute(_ctx(config, services))
 
     assert result.success is True
     assert state["roots"]["/run/secrets/db_password"][0] == b"s3cr3t-value"
-    assert state["roots"]["/run/secrets/api_token"][0] == b"already-rendered-token"
-    # A bare reference is resolved through the host (which registers it for
-    # redaction); a rendered template value is used as is.
-    assert services.resolved == ["{{ secret('vault://orgs/acme/secrets/db/password') }}"]
+    # A secret whose value looks like a reference is not resolved a second time.
+    assert state["roots"]["/run/secrets/db_url"][0] == b"postgres://app:pw@db/app"
+    assert state["roots"]["/run/secrets/api_token"][0] == b"literal-token"
+    # Both reference forms go through the host (which registers the value for
+    # redaction), each exactly once; a literal is used as written.
+    assert services.resolved == [
+        "{{ secret('vault://orgs/acme/secrets/db/password') }}",
+        "{{ secret('vault://orgs/acme/secrets/db/url') }}",
+    ]
     create = " ".join(_create_args(state))
     assert "s3cr3t-value" not in create
-    assert "already-rendered-token" not in create
+    assert "literal-token" not in create
+
+
+def test_container_run_receives_its_secrets_unrendered():
+    """The host leaves the field alone, so the handler sees what the author wrote."""
+    assert RunContainerHandler.raw_config_keys == {"secrets"}
 
 
 @pytest.mark.asyncio
@@ -262,10 +279,14 @@ async def test_run_container_job_stages_files_and_collects(monkeypatch):
         collect=[OUTPUT_DIR],
         handler_id="tool.run",
     )
-    outcome = await run_container_job(_ctx({}), job)
+    services = _FakeServices()
+    outcome = await run_container_job(_ctx({}, services), job)
 
     assert isinstance(outcome, ContainerJobResult)
     assert outcome.exit_code == 2
+    # A tool job mounts no upstream step outputs, so it does not fetch them.
+    assert services.step_output_fetches == 0
+    assert not any(path.startswith("/step_outputs") for path in state["roots"])
     assert outcome.collected == {
         "/hegemony/out/results.json": b'{"ok": true}',
         "/hegemony/out/nested/more.txt": b"x",
@@ -315,3 +336,6 @@ def test_container_config_from_keeps_tool_wiring_over_user_env():
     assert config["cpus"] == "2"
     # Host-access options never pass through from a tool config.
     assert "privileged" not in config
+    # Tool steps mount no upstream step outputs or artifacts.
+    assert config["mounted_step_outputs"] == []
+    assert config["mounted_artifacts"] == []

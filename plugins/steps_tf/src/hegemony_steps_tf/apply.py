@@ -37,6 +37,7 @@ from .common import (
     TfContainerConfig,
     managed_state_access,
     script_header,
+    shared_workspace_mounted,
     tool_env,
 )
 from .plan import common_errors, secret_environment
@@ -124,6 +125,8 @@ class TfApplyHandler(BaseHandler):
     targeting = HandlerTargeting(roles=False, ips=False)
     container_backed = True
     platform_api_access = True
+    # Secret references reach the handler as written (see resolve_secret_values).
+    raw_config_keys = frozenset({"secret_env", "state_encryption_key"})
     default_timeout_seconds = 3600
     config_model = TfApplyConfig
     default_config = {"timeout_seconds": 3600}
@@ -156,11 +159,11 @@ class TfApplyHandler(BaseHandler):
             return self._refuse(
                 f"plan step {plan_step!r} has not completed successfully in this run"
             )
-        if not plan_output.get("apply_ready") or not ctx.shared_workspace:
+        if not plan_output.get("apply_ready") or not shared_workspace_mounted(ctx):
             return self._refuse(
                 "the plan and apply steps must both use shared (or explicit) execution "
-                "affinity, so the apply runs in the plan's working directory on the same "
-                "worker"
+                "affinity on a worker with shared workspaces enabled, so the apply runs "
+                "in the plan's working directory on the same worker"
             )
         engine = str(plan_output.get("engine") or "")
         if engine not in BINARIES:

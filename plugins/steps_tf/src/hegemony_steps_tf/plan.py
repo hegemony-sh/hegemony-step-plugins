@@ -65,6 +65,7 @@ from .common import (
     script_header,
     secret_env_errors,
     secret_env_file,
+    shared_workspace_mounted,
     state_backend_env,
     state_name_errors,
     tool_env,
@@ -321,6 +322,8 @@ class TfPlanHandler(BaseHandler):
     targeting = HandlerTargeting(roles=False, ips=False)
     container_backed = True
     platform_api_access = True
+    # Secret references reach the handler as written (see resolve_secret_values).
+    raw_config_keys = frozenset({"secret_vars", "secret_env", "state_encryption_key"})
     default_timeout_seconds = 1800
     config_model = TfPlanConfig
     default_config = {"engine": "opentofu", "state": "managed", "timeout_seconds": 1800}
@@ -366,7 +369,8 @@ class TfPlanHandler(BaseHandler):
             )
         config = TfPlanConfig.model_validate(ctx.config)
         image = config.image.strip() or default_image(config.engine)
-        workdir = workdir_for(ctx.step_id) if ctx.shared_workspace else LOCAL_WORKDIR
+        shared = shared_workspace_mounted(ctx)
+        workdir = workdir_for(ctx.step_id) if shared else LOCAL_WORKDIR
         state_name = config.state_name.strip() if config.state == "managed" else None
 
         try:
@@ -502,7 +506,7 @@ class TfPlanHandler(BaseHandler):
             "state": config.state,
             "state_name": config.state_name.strip() if config.state == "managed" else "",
             "working_dir": workdir,
-            "apply_ready": ctx.shared_workspace,
+            "apply_ready": workdir != LOCAL_WORKDIR,
         }
         return HandlerResult(
             success=True,

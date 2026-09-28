@@ -498,6 +498,8 @@ class AnsiblePlaybookHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=True, ips=False, multi_role=True)
     container_backed = True
+    # Secret references reach the handler as written (see resolve_secret_values).
+    raw_config_keys = frozenset({"secrets", "group_secrets", "vault_password", "vault_ids"})
     default_timeout_seconds = 1800
     config_model = AnsiblePlaybookConfig
     default_config = {"playbook": "site.yml", "timeout_seconds": 1800}

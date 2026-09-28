@@ -396,6 +396,7 @@ def test_parse_results_tolerates_missing_or_broken_files():
 class _Services:
     def __init__(self) -> None:
         self.resolved: list[str] = []
+        self.step_output_fetches = 0
 
     def container_runtime(self) -> ContainerRuntime:
         return ContainerRuntime(
@@ -410,7 +411,9 @@ class _Services:
         return [{"filename": "ansible/site.yml", "content": "- hosts: all\n"}]
 
     async def fetch_run_step_outputs(self, run_id: str) -> dict[str, Any]:
-        raise AssertionError("tool steps mount no step outputs")
+        # Counted rather than raised: run_job would swallow an exception here.
+        self.step_output_fetches += 1
+        return {}
 
     async def fetch_run_artifacts(self, run_id: str) -> list[dict]:
         return []
@@ -510,8 +513,11 @@ async def test_playbook_step_end_to_end(monkeypatch):
         "extra_vars": {"release": "1.2"},
         "env": {"ANSIBLE_CALLBACKS_ENABLED": "profile_tasks"},
     }
-    result = await AnsiblePlaybookHandler().execute(_ctx(config, [_device("r1"), _device("r2")]))
+    ctx = _ctx(config, [_device("r1"), _device("r2")])
+    result = await AnsiblePlaybookHandler().execute(ctx)
 
+    # A tool step mounts no upstream step outputs, so it never fetches them.
+    assert cast(_Services, ctx.services).step_output_fetches == 0
     # Staged files: inventory without secrets, credentials in host_vars.
     roots = state["roots"]
     inventory = json.loads(roots[INVENTORY_FILE])
@@ -590,4 +596,6 @@ def test_handler_metadata():
     handler = AnsiblePlaybookHandler
     assert handler.handler_id == "ansible.playbook"
     assert handler.container_backed is True
+    # Secret fields reach the handler as written (never resolved twice).
+    assert handler.raw_config_keys == {"secrets", "group_secrets", "vault_password", "vault_ids"}
     assert handler.targeting.roles is True and handler.targeting.ips is False

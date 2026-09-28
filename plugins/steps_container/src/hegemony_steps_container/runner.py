@@ -54,6 +54,9 @@ MAX_COLLECTED_BYTES = 8 * 1024 * 1024
 #: rather than as a ``{{ secret('...') }}`` template.
 _BARE_SECRET_REF_RE = re.compile(r"^[a-z][a-z0-9+.-]*://[^\s'\"{}\\]+$")
 
+#: Template syntax, which the host renders (``{{ secret('…') }}``).
+_TEMPLATE_RE = re.compile(r"\{\{|\{%")
+
 #: Names usable as a staged secret file or a tool variable.
 SECRET_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 
@@ -263,6 +266,10 @@ def container_config_from(
             "command": command,
             "working_dir": working_dir,
             "env": merged_env,
+            # Tool steps work from the files they stage: no upstream step
+            # outputs or artifacts (an explicit empty selection skips the fetch).
+            "mounted_step_outputs": [],
+            "mounted_artifacts": [],
         }
     )
     if entrypoint is not None:
@@ -280,10 +287,17 @@ async def resolve_secret_values(
 ) -> dict[str, str]:
     """Resolve a ``name -> secret`` map into plain values.
 
-    Each value is either already resolved — the host renders ``{{ secret('...') }}``
-    templates in step config before the handler runs, registering the value
-    for redaction — or a bare reference (``vault://orgs/acme/secrets/db/password``)
-    that is resolved here through the host, which registers it the same way.
+    Handlers list their secret fields in ``raw_config_keys``, so each value
+    arrives as the step author wrote it, and is one of:
+
+    - a bare reference (``vault://orgs/acme/secrets/db/password``), resolved
+      through the host as ``{{ secret('<reference>') }}``;
+    - a template (``{{ secret('vault://…') }}``), rendered through the host;
+    - anything else, used as written.
+
+    The written text decides, never the resolved value: a secret whose value
+    looks like a reference (``postgres://user:pw@db/app``) is not resolved a
+    second time. The host registers every value it resolves for redaction.
 
     Raises ``ValueError`` for an invalid name, a non-string value, or a
     reference that resolves to nothing.
@@ -297,12 +311,16 @@ async def resolve_secret_values(
             raise ValueError(f"invalid secret name {name!r}")
         if not isinstance(raw, str):
             raise ValueError(f"secret {name!r} must be a string")
-        value = raw
         if is_bare_secret_ref(raw):
             template = "{{ secret('" + raw.strip() + "') }}"
-            value = await services.resolve_secret_ref(template, source=source) or ""
-            if not value:
-                raise ValueError(f"secret {name!r} resolved to an empty value")
+        elif _TEMPLATE_RE.search(raw):
+            template = raw
+        else:
+            resolved[name] = raw
+            continue
+        value = await services.resolve_secret_ref(template, source=source) or ""
+        if not value:
+            raise ValueError(f"secret {name!r} resolved to an empty value")
         resolved[name] = value
     return resolved
 

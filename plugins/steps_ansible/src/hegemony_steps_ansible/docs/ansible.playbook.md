@@ -52,7 +52,8 @@ brings its own.
 
 Secrets are `NAME=reference` lines; each becomes the Ansible variable NAME.
 A reference is a `{{ secret('...') }}` template or a bare reference such as
-`vault://orgs/acme/secrets/db/password`. Group secrets use `GROUP:NAME` to
+`vault://orgs/acme/secrets/db/password`, resolved on its own (without step
+variables) and only once. Group secrets use `GROUP:NAME` to
 give a variable to one inventory group only. The Ansible Vault password and
 vault IDs let playbooks with ansible-vault encrypted files run unchanged.
 Every value is resolved by the platform, passed to Ansible from a file

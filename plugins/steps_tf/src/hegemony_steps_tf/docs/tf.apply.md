@@ -15,7 +15,8 @@ Pick the plan step in Plan step. Nothing about the configuration is
 repeated: the apply runs in the plan step's working directory with the same
 engine and image, so the lock file, providers, backend settings, and
 variables are the ones that were planned. Give both steps shared (or
-explicit) execution affinity so they share the run's workspace and worker.
+explicit) execution affinity so they share the run's workspace and worker; the
+worker must have shared workspaces enabled.
 
 Provider credentials are never stored in a plan, so give them again in
 Secret environment, as on the plan step. With OpenTofu state encryption, set
@@ -36,7 +37,8 @@ in `sensitive_outputs` but their values are never kept.
 ## When It Fails
 
 The step fails when the plan step did not succeed in this run, when either
-step lacks shared affinity, or when the apply itself fails. The tool refuses
+step lacks shared affinity or the worker has shared workspaces disabled, or
+when the apply itself fails. The tool refuses
 a saved plan made stale by a state change since planning: plan again. The
 state lock is taken for the apply; Lock timeout sets how long to wait for
 it.

@@ -103,6 +103,18 @@ def workdir_for(step_id: str) -> str:
     return f"{SHARED_ROOT}/tf/{safe}"
 
 
+def shared_workspace_mounted(ctx: HandlerContext) -> bool:
+    """Whether the run's shared workspace is mounted into this step's container.
+
+    The runner mounts it only for a step with shared (or explicit) execution
+    affinity on a worker with shared workspaces enabled. Without it, a plan's
+    working directory disappears with its container.
+    """
+    if not ctx.shared_workspace:
+        return False
+    return bool(ctx.require_services().container_runtime().shared_workspaces_enabled)
+
+
 def relative_path_error(field_name: str, value: object, *, allow_empty: bool = False) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return (

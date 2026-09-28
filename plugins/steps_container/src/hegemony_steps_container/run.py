@@ -1052,6 +1052,8 @@ class RunContainerHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     container_backed = True
+    # Secret references reach the handler as written (see resolve_secret_values).
+    raw_config_keys = frozenset({"secrets"})
     config_model = RunContainerConfig
     default_config = {"timeout_seconds": 300}
 
