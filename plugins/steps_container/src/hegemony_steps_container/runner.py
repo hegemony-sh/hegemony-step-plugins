@@ -55,7 +55,10 @@ MAX_COLLECTED_BYTES = 8 * 1024 * 1024
 #: Least time given to copying ``ContainerJob.collect`` out of the exited
 #: container, even when the step's own deadline is (nearly) used up: the
 #: container has finished, and losing its results would misreport the run.
-COLLECT_GRACE_SECONDS = 30
+#: Kept well under the 30 s the host allows an activity past its step timeout,
+#: so the harvest and the container's removal still fit and the activity is
+#: not timed out (and retried) over a slow copy.
+COLLECT_GRACE_SECONDS = 10
 
 #: A secret reference written bare (``vault://orgs/acme/secrets/db/password``)
 #: rather than as a ``{{ secret('...') }}`` template.
