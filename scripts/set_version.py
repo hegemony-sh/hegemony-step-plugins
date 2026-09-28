@@ -51,13 +51,15 @@ def _set_plugin_sdk_pin(pyproject, version: str) -> None:
 #: name (``name = "hegemony-steps-tf"``) and a ``[tool.uv.sources]`` key never
 #: match.
 SIBLING_PIN = re.compile(
-    r'"(hegemony-(?:steps|probe|transport)-[a-z0-9-]+)\s*(?:===|==|>=|<=|~=|!=|>|<)[^";]*'
+    r'"(hegemony[-_.](?:steps|probe|transport)[-_.][a-z0-9._-]+\s*(?:\[[^\]"]*\])?)\s*'
+    r'(?:===|==|>=|<=|~=|!=|>|<)[^";]*',
+    re.IGNORECASE,
 )
 
 
 def set_sibling_pins(text: str, version: str) -> str:
     """``text`` (a pyproject) with every sibling-wheel constraint pinned to ``version``."""
-    return SIBLING_PIN.sub(rf'"\g<1>=={version}', text)
+    return SIBLING_PIN.sub(lambda match: f'"{match.group(1).rstrip()}=={version}', text)
 
 
 def _set_sibling_pins(pyproject, version: str) -> None:

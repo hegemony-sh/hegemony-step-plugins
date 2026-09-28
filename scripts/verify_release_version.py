@@ -13,18 +13,22 @@ import tomllib
 
 from package_paths import PACKAGE_DIRS, PLUGIN_DIRS, SDK_VERSION_FILE
 
-#: A dependency on another wheel of this monorepo, by name, whatever its
-#: version constraint: they release in lockstep, so each must be pinned exactly.
-SIBLING_DEPENDENCY = re.compile(r"(hegemony-(?:steps|probe|transport)-[a-z0-9-]+)(.*)")
+#: A requirement's name, extras and version constraint (markers split off first).
+REQUIREMENT = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*(.*)")
+#: Another wheel of this monorepo, by normalized name: they release in
+#: lockstep, so each must be pinned exactly, whatever its constraint says.
+SIBLING_NAME = re.compile(r"hegemony-(?:steps|probe|transport)-[a-z0-9-]+")
 
 
 def sibling_pin_failure(package: str, dependency: str, version: str) -> str | None:
     """Why ``dependency`` of ``package`` is not an exact pin on ``version``, if it is a sibling."""
-    requirement = dependency.split(";", 1)[0].strip()
-    match = SIBLING_DEPENDENCY.fullmatch(requirement)
-    if match is None or "".join(match.group(2).split()) == f"=={version}":
+    match = REQUIREMENT.fullmatch(dependency.split(";", 1)[0].strip())
+    if match is None:
         return None
-    return f"{package} must pin {match.group(1)}=={version}, not {dependency}"
+    name = re.sub(r"[-_.]+", "-", match.group(1)).lower()
+    if not SIBLING_NAME.fullmatch(name) or "".join(match.group(3).split()) == f"=={version}":
+        return None
+    return f"{package} must pin {name}=={version}, not {dependency}"
 
 
 def _project_metadata(pyproject) -> dict:
