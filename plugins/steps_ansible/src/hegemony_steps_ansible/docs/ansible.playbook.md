@@ -27,7 +27,16 @@ platforms `ansible_network_os` (IOS and IOS-XE, NX-OS, IOS-XR and EOS use
 Each host also carries a `hegemony` variable with its id, platform, site,
 tags, and attributes. A device attribute named `ansible_vars` holding a
 mapping is merged into that host's variables, so inventory owners can tune
-Ansible per device. Groups are derived from:
+Ansible per device: playbook variables of their own, and of Ansible's
+variables only `ansible_python_interpreter`, `ansible_network_os`,
+`ansible_network_cli_ssh_type`, `ansible_connect_timeout`, and
+`ansible_command_timeout`. How and where Ansible connects (`ansible_host`,
+`ansible_port`, `ansible_connection`, the login and become variables, ssh
+arguments, proxy commands, executables) comes from Hegemony only, since
+whoever edits a device's attributes need not be allowed to run commands in
+the step's container; any other `ansible_*` key there, and `hegemony`, is
+ignored and listed in an `ansible_vars_ignored_<step id>` artifact. Groups
+are derived from:
 
 - role: the flow's role names, e.g. `routers`;
 - platform: e.g. `platform_ios_xe`;

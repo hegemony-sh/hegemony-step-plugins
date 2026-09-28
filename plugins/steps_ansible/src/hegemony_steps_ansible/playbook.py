@@ -49,6 +49,7 @@ from hegemony_steps_container.runner import (
 )
 
 from .inventory import (
+    DEVICE_ANSIBLE_VARS_ALLOWED,
     GROUP_DIMENSIONS,
     GroupDimension,
     Inventory,
@@ -772,6 +773,25 @@ class AnsiblePlaybookHandler(BaseHandler):
                     "kind": "step_result",
                     "name": f"ansible_results_missing_{ctx.step_id}",
                     "content_text": f"No structured results: {results.problem}.\n",
+                }
+            )
+        ignored = [
+            f"{host.name}: {', '.join(host.ignored_vars)}"
+            for host in inventory.hosts
+            if host.ignored_vars
+        ]
+        if ignored:
+            evidence.append(
+                {
+                    "kind": "step_result",
+                    "name": f"ansible_vars_ignored_{ctx.step_id}",
+                    "content_text": (
+                        "Warning: these keys of the devices' ansible_vars attribute were "
+                        "ignored. Connection, login, become, ssh-argument, proxy and "
+                        "executable variables come from Hegemony only; of the ansible_* "
+                        f"variables, only {', '.join(sorted(DEVICE_ANSIBLE_VARS_ALLOWED))} "
+                        "may be set there.\n" + "".join(f"- {line}\n" for line in ignored)
+                    ),
                 }
             )
         if results.trimmed:

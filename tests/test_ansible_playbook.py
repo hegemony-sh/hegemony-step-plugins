@@ -128,15 +128,68 @@ def test_inventory_group_by_limits_derived_groups():
     assert set(inventory.document()["all"]["children"]) == {"routers"}
 
 
-def test_device_ansible_vars_attribute_overrides_host_variables():
+def test_device_ansible_vars_attribute_tunes_host_variables():
     device = _device(
         "fw1",
         platform="fortios",
-        attributes={"ansible_vars": {"ansible_connection": "httpapi", "ansible_network_os": "x"}},
+        attributes={
+            "ansible_vars": {
+                "ansible_network_os": "fortinet.fortios.fortios",
+                "ansible_python_interpreter": "/usr/bin/python3",
+                "ntp_server": "10.0.0.1",
+            }
+        },
     )
     host = build_inventory({"fw": [device]}).hosts[0]
-    assert host.variables["ansible_connection"] == "httpapi"
-    assert host.variables["ansible_network_os"] == "x"
+    assert host.variables["ansible_network_os"] == "fortinet.fortios.fortios"
+    assert host.variables["ansible_python_interpreter"] == "/usr/bin/python3"
+    assert host.variables["ntp_server"] == "10.0.0.1"
+    assert host.ignored_vars == []
+
+
+def test_device_ansible_vars_cannot_change_how_or_where_ansible_connects():
+    """Inventory editors are not flow authors: `ansible_connection: local` would
+    run the play in the step container, next to every credential of the run."""
+    device = _device(
+        "r1",
+        attributes={
+            "ansible_vars": {
+                "ansible_connection": "local",
+                "ansible_host": "10.9.9.9",
+                "ansible_port": 2222,
+                "ansible_user": "root",
+                "ansible_password": "x",
+                "ansible_ssh_private_key_file": "/etc/shadow",
+                "ansible_become_exe": "sh -c id",
+                "ansible_ssh_extra_args": "-o ProxyCommand=id",
+                "ansible_ssh_common_args": "-o ProxyCommand=id",
+                "ansible_libssh_proxy_command": "id",
+                "ansible_shell_executable": "/tmp/x",
+                "ANSIBLE_CONNECTION": "local",
+                "hegemony": {"id": "spoofed"},
+            }
+        },
+    )
+    host = build_inventory({"r": [device]}).hosts[0]
+    assert host.variables["ansible_connection"] == "ansible.netcommon.network_cli"
+    assert host.variables["ansible_host"] == device["mgmt_host"]
+    assert host.variables["ansible_port"] == 22
+    assert host.variables["hegemony"]["id"] == "id-r1"
+    for key in (
+        "ansible_user",
+        "ansible_password",
+        "ansible_ssh_private_key_file",
+        "ansible_become_exe",
+        "ansible_ssh_extra_args",
+        "ansible_ssh_common_args",
+        "ansible_libssh_proxy_command",
+        "ansible_shell_executable",
+        "ANSIBLE_CONNECTION",
+    ):
+        assert key not in host.variables
+    assert "ansible_connection" in host.ignored_vars
+    assert "hegemony" in host.ignored_vars
+    assert len(host.ignored_vars) == 13
 
 
 @pytest.mark.parametrize(
@@ -659,6 +712,18 @@ async def test_playbook_step_end_to_end(monkeypatch):
     assert "changed" in per_device["ansible_r1"]["content_text"]
     assert "boom" in per_device["ansible_r2"]["content_text"]
     assert any(e["kind"] == "container_output" for e in result.evidence)
+
+
+@pytest.mark.asyncio
+async def test_ignored_device_ansible_vars_are_reported(monkeypatch):
+    state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
+    device = _device("r1", attributes={"ansible_vars": {"ansible_connection": "local"}})
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [device]))
+
+    inventory = json.loads(state["roots"][INVENTORY_FILE])
+    assert inventory["all"]["hosts"]["r1"]["ansible_connection"] != "local"
+    [note] = [e for e in result.evidence if e["name"] == "ansible_vars_ignored_baseline"]
+    assert "- r1: ansible_connection\n" in note["content_text"]
 
 
 @pytest.mark.asyncio

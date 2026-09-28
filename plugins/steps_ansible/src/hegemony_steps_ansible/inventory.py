@@ -37,8 +37,24 @@ _INVALID_HOST_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 
 #: Device attribute whose mapping is merged into the host's variables, so
 #: inventory owners (NetBox custom fields, Git device files) can tune Ansible
-#: per device — ``ansible_python_interpreter``, a different connection, …
+#: per device — ``ansible_python_interpreter``, the network OS, playbook data.
 ANSIBLE_VARS_ATTRIBUTE = "ansible_vars"
+
+#: The only ``ansible_*`` variables that attribute may set. Inventory editors
+#: are not necessarily flow authors: connection, login, become, ssh-argument,
+#: proxy-command and executable variables would let them run commands in the
+#: step container (``ansible_connection: local``) or at connect time, with
+#: every credential of the run staged beside them. Those come from Hegemony
+#: only; any other ``ansible_*`` key in the attribute is ignored.
+DEVICE_ANSIBLE_VARS_ALLOWED = frozenset(
+    {
+        "ansible_python_interpreter",
+        "ansible_network_os",
+        "ansible_network_cli_ssh_type",
+        "ansible_connect_timeout",
+        "ansible_command_timeout",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +121,8 @@ class InventoryHost:
     device: dict[str, Any]
     groups: set[str] = field(default_factory=set)
     variables: dict[str, Any] = field(default_factory=dict)
+    # Keys of the device's ``ansible_vars`` attribute that were not applied.
+    ignored_vars: list[str] = field(default_factory=list)
 
     @property
     def device_id(self) -> str | None:
@@ -175,7 +193,18 @@ def _site_groups(site: object) -> list[str]:
     return [group_name("site", "_".join(parts[: index + 1])) for index in range(len(parts))]
 
 
-def _host_variables(device: Mapping[str, Any], connection: PlatformConnection) -> dict[str, Any]:
+def _device_var_allowed(key: str) -> bool:
+    if key == "hegemony":
+        return False
+    if key.lower().startswith("ansible_"):
+        return key in DEVICE_ANSIBLE_VARS_ALLOWED
+    return True
+
+
+def _host_variables(
+    device: Mapping[str, Any], connection: PlatformConnection
+) -> tuple[dict[str, Any], list[str]]:
+    """The host's inventory variables, and the attribute keys left out."""
     variables: dict[str, Any] = {}
     if device.get("mgmt_host"):
         variables["ansible_host"] = device["mgmt_host"]
@@ -203,9 +232,14 @@ def _host_variables(device: Mapping[str, Any], connection: PlatformConnection) -
     }
     attributes = device.get("attributes")
     overrides = attributes.get(ANSIBLE_VARS_ATTRIBUTE) if isinstance(attributes, Mapping) else None
+    ignored: list[str] = []
     if isinstance(overrides, Mapping):
-        variables.update({str(key): value for key, value in overrides.items()})
-    return variables
+        for key, value in overrides.items():
+            if _device_var_allowed(str(key)):
+                variables[str(key)] = value
+            else:
+                ignored.append(str(key))
+    return variables, sorted(ignored)
 
 
 def build_inventory(
@@ -239,10 +273,12 @@ def build_inventory(
             host = by_identity.get(identity)
             if host is None:
                 connection = platform_connection(device.get("platform"))
+                variables, ignored_vars = _host_variables(device, connection)
                 host = InventoryHost(
                     name=_host_name(device, used_names),
                     device=dict(device),
-                    variables=_host_variables(device, connection),
+                    variables=variables,
+                    ignored_vars=ignored_vars,
                 )
                 by_identity[identity] = host
                 hosts.append(host)
