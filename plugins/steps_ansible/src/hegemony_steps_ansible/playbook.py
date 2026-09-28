@@ -735,6 +735,14 @@ class AnsiblePlaybookHandler(BaseHandler):
         outcome: Any,
     ) -> HandlerResult:
         results = parse_results(outcome.collected.get(RESULTS_FILE))
+        collect_error = outcome.collect_errors.get(RESULTS_FILE) or outcome.collect_errors.get(
+            OUTPUT_DIR
+        )
+        if collect_error and RESULTS_FILE not in outcome.collected:
+            # Not "the callback wrote nothing": the copy out of the container failed.
+            results.problem = (
+                f"the results could not be copied out of the container ({collect_error})"
+            )
         by_name = inventory.host_by_name()
         evidence: list[dict[str, Any]] = list(outcome.evidence)
         evidence.append(

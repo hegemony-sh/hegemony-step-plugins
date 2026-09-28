@@ -39,6 +39,7 @@ from .pull_progress import (
     stream_pull,
 )
 from .runner import (
+    COLLECT_GRACE_SECONDS,
     CONTEXT_PATH,
     MAX_COLLECTED_BYTES,
     OUTPUT_DIR,
@@ -1019,6 +1020,19 @@ def _container_run_result(ctx: HandlerContext, outcome: ContainerJobResult) -> H
     data, problem = _read_output_data(outcome.collected)
     if data is not None:
         output["data"] = data
+    if outcome.collect_errors:
+        evidence.append(
+            {
+                "kind": "step_result",
+                "name": f"output_not_collected_{ctx.step_id}",
+                "content_text": "Could not copy the step's results out of the container, so "
+                "output.data may be missing:\n"
+                + "".join(
+                    f"- {path}: {reason}\n"
+                    for path, reason in sorted(outcome.collect_errors.items())
+                ),
+            }
+        )
     if problem is not None:
         evidence.append(
             {
@@ -2406,9 +2420,9 @@ class RunContainerHandler(BaseHandler):
             duration = time.monotonic() - start_time
 
             # Structured results the step wrote (step I/O contract). Collected
-            # before the artifact harvest and never fatal: a step that wrote
-            # nothing simply has nothing to report.
-            collected = await self._collect_job_paths(
+            # before the artifact harvest and never fatal here: what could not
+            # be collected is reported in collect_errors for the handler.
+            collected, collect_errors = await self._collect_job_paths(
                 docker_bin,
                 container_name,
                 job.collect,
@@ -2525,6 +2539,7 @@ class RunContainerHandler(BaseHandler):
                 evidence=evidence,
                 skipped_artifacts=len(skipped_generated_artifacts),
                 collected=collected,
+                collect_errors=collect_errors,
             )
 
         except subprocess.TimeoutExpired:
@@ -2612,16 +2627,19 @@ class RunContainerHandler(BaseHandler):
         docker_env: dict[str, str],
         deadline: float,
         ctx: HandlerContext,
-    ) -> dict[str, bytes]:
+    ) -> tuple[dict[str, bytes], dict[str, str]]:
         """Copy ``paths`` (container directories) out of the exited container.
 
-        Returns file contents keyed by absolute container path. Best-effort and
-        bounded by :data:`MAX_COLLECTED_BYTES`; symlinks and anything that
-        resolves outside the copy are skipped for the same reason the artifact
-        harvest skips them (``docker cp`` preserves links, and the worker must
-        never follow one onto its own filesystem).
+        Returns file contents keyed by absolute container path, and what could
+        not be collected (path -> reason). Bounded by
+        :data:`MAX_COLLECTED_BYTES`; symlinks and anything that resolves
+        outside the copy are skipped for the same reason the artifact harvest
+        skips them (``docker cp`` preserves links, and the worker must never
+        follow one onto its own filesystem). The copy gets at least
+        :data:`COLLECT_GRACE_SECONDS`, whatever is left of the step's deadline.
         """
         collected: dict[str, bytes] = {}
+        errors: dict[str, str] = {}
         budget = MAX_COLLECTED_BYTES
         for container_path in paths:
             root = container_path.rstrip("/") or "/"
@@ -2631,16 +2649,20 @@ class RunContainerHandler(BaseHandler):
                     docker_bin,
                     ["cp", f"{container_name}:{root}/.", local_dir],
                     env=docker_env,
-                    timeout=max(deadline - time.monotonic(), 1),
+                    timeout=max(deadline - time.monotonic(), COLLECT_GRACE_SECONDS),
                 )
                 if proc.returncode != 0:
-                    logger.debug(
-                        "Nothing collected from container path",
+                    # The runner staged every collect root, so this is not "the
+                    # step wrote nothing": the copy itself failed.
+                    stderr = proc.stderr.strip()[:500]
+                    errors[root] = f"docker cp failed: {stderr or f'exit code {proc.returncode}'}"
+                    logger.warning(
+                        "Collecting container results failed",
                         extra={
                             "run_id": ctx.run_id,
                             "step_run_id": ctx.step_run_id,
                             "path": root,
-                            "stderr": proc.stderr[:500],
+                            "stderr": stderr,
                         },
                     )
                     continue
@@ -2657,7 +2679,12 @@ class RunContainerHandler(BaseHandler):
                         ):
                             continue
                         size = os.path.getsize(file_path)
+                        relative = os.path.relpath(file_path, local_dir).replace(os.sep, "/")
                         if size > budget:
+                            errors[f"{root.rstrip('/')}/{relative}"] = (
+                                f"{size} bytes, over the {MAX_COLLECTED_BYTES}-byte "
+                                "collection budget"
+                            )
                             logger.warning(
                                 "Collected file skipped: over the collection budget",
                                 extra={
@@ -2671,9 +2698,9 @@ class RunContainerHandler(BaseHandler):
                         with open(file_path, "rb") as fh:
                             data = fh.read()
                         budget -= len(data)
-                        relative = os.path.relpath(file_path, local_dir).replace(os.sep, "/")
                         collected[f"{root.rstrip('/')}/{relative}"] = data
-            except Exception as e:  # noqa: BLE001 - collection is best-effort
+            except Exception as e:  # noqa: BLE001 - reported, never fatal
+                errors[root] = f"{type(e).__name__}: {e}"[:500]
                 logger.warning(
                     "Collecting container results failed",
                     extra={
@@ -2685,7 +2712,7 @@ class RunContainerHandler(BaseHandler):
                 )
             finally:
                 shutil.rmtree(local_dir, ignore_errors=True)
-        return collected
+        return collected, errors
 
     async def _pull_image(
         self,

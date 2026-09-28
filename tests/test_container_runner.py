@@ -26,6 +26,7 @@ from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerResult, H
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
 from hegemony_steps_container.run import MAX_OUTPUT_DATA_BYTES, RunContainerHandler
 from hegemony_steps_container.runner import (
+    COLLECT_GRACE_SECONDS,
     CONTEXT_PATH,
     OUTPUT_DIR,
     ContainerJob,
@@ -129,6 +130,7 @@ def _install_docker(
                             state["roots"][rel] = (fh.read(), os.stat(path).st_mode & 0o777)
             elif src.endswith(f":{OUTPUT_DIR}/."):
                 state["collect_sources"].append(src)
+                state["collect_timeout"] = kwargs.get("timeout")
                 if collect_returncode:
                     return SimpleNamespace(
                         returncode=collect_returncode, stdout="", stderr="daemon hiccup"
@@ -413,6 +415,31 @@ async def test_collect_survives_a_failed_docker_cp(monkeypatch):
     assert isinstance(outcome, ContainerJobResult)
     assert outcome.exit_code == 0
     assert outcome.collected == {}
+    # The handler can tell "not copied" from "not written".
+    assert outcome.collect_errors == {OUTPUT_DIR: "docker cp failed: daemon hiccup"}
+
+
+@pytest.mark.asyncio
+async def test_container_run_notes_results_it_could_not_collect(monkeypatch):
+    _install_docker(monkeypatch, out_files={"output.json": b"{}"}, collect_returncode=1)
+    result = await RunContainerHandler().execute(_ctx({"image": "alpine:3.20"}))
+
+    assert result.success is True
+    assert "data" not in result.output
+    [note] = [e for e in result.evidence if e["name"] == "output_not_collected_step-1"]
+    assert f"{OUTPUT_DIR}: docker cp failed: daemon hiccup" in note["content_text"]
+
+
+@pytest.mark.asyncio
+async def test_collect_gets_a_grace_period_past_the_step_deadline(monkeypatch):
+    state = _install_docker(monkeypatch)
+    # The container exits with (almost) no time left of a 1 s step timeout.
+    job = _tool_job()
+    job.config["timeout_seconds"] = 1
+    outcome = await run_container_job(_ctx({}), job)
+
+    assert isinstance(outcome, ContainerJobResult)
+    assert state["collect_timeout"] >= COLLECT_GRACE_SECONDS
 
 
 @pytest.mark.asyncio
@@ -423,3 +450,5 @@ async def test_collect_enforces_the_byte_budget(monkeypatch):
 
     assert isinstance(outcome, ContainerJobResult)
     assert outcome.collected == {"/hegemony/out/small.json": b"{}"}
+    assert list(outcome.collect_errors) == ["/hegemony/out/big.bin"]
+    assert "over the 100-byte collection budget" in outcome.collect_errors["/hegemony/out/big.bin"]

@@ -50,6 +50,10 @@ SECRET_FILES_DIR = "/run/secrets"
 #: are structured results, not artifacts: anything bigger belongs in the
 #: new-artifacts folder, which uploads to storage instead of worker memory.
 MAX_COLLECTED_BYTES = 8 * 1024 * 1024
+#: Least time given to copying ``ContainerJob.collect`` out of the exited
+#: container, even when the step's own deadline is (nearly) used up: the
+#: container has finished, and losing its results would misreport the run.
+COLLECT_GRACE_SECONDS = 30
 
 #: A secret reference written bare (``vault://orgs/acme/secrets/db/password``)
 #: rather than as a ``{{ secret('...') }}`` template.
@@ -119,6 +123,10 @@ class ContainerJobResult:
     skipped_artifacts: int
     # Files collected from ``ContainerJob.collect``, keyed by absolute container path.
     collected: dict[str, bytes] = field(default_factory=dict)
+    # What could not be collected, keyed by absolute container path (a collect
+    # root whose copy failed, or one file over the budget) -> the reason. A path
+    # in neither map was simply not written by the step.
+    collect_errors: dict[str, str] = field(default_factory=dict)
 
 
 class ContainerExecutionConfig(BaseModel):
@@ -369,6 +377,7 @@ async def run_container_job(
 
 
 __all__ = [
+    "COLLECT_GRACE_SECONDS",
     "CONTAINER_PASSTHROUGH_FIELDS",
     "CONTEXT_PATH",
     "IO_ROOT",

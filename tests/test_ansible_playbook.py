@@ -536,7 +536,12 @@ def _results_json(exit_hosts: dict[str, dict[str, int]]) -> bytes:
 
 
 def _install_docker(
-    monkeypatch, *, collected: bytes | None, exit_code: int, pull_returncode: int = 0
+    monkeypatch,
+    *,
+    collected: bytes | None,
+    exit_code: int,
+    pull_returncode: int = 0,
+    collect_returncode: int = 0,
 ) -> dict[str, Any]:
     state: dict[str, Any] = {"roots": {}, "calls": []}
     monkeypatch.setattr(
@@ -558,6 +563,8 @@ def _install_docker(
                         rel = "/" + os.path.relpath(path, root)
                         with open(path, encoding="utf-8") as fh:
                             state["roots"][rel] = fh.read()
+            elif src.endswith(":/hegemony/out/.") and collect_returncode:
+                return SimpleNamespace(returncode=collect_returncode, stdout="", stderr="cp broke")
             elif src.endswith(":/hegemony/out/.") and collected is not None:
                 with open(os.path.join(dest, "ansible-results.json"), "wb") as fh:
                     fh.write(collected)
@@ -678,6 +685,18 @@ async def test_a_play_without_results_fails_rather_than_report_no_changes(monkey
     assert "Whether any host changed is unknown" in (result.error or "")
     assert result.output["changed"] is None
     assert any(e["name"] == "ansible_results_missing_baseline" for e in result.evidence)
+
+
+@pytest.mark.asyncio
+async def test_results_that_could_not_be_copied_out_say_so(monkeypatch):
+    _install_docker(monkeypatch, collected=_results_json({}), exit_code=0, collect_returncode=1)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+    assert result.success is False
+    assert "could not be copied out of the container (docker cp failed: cp broke)" in (
+        result.error or ""
+    )
+    [note] = [e for e in result.evidence if e["name"] == "ansible_results_missing_baseline"]
+    assert "docker cp failed: cp broke" in note["content_text"]
 
 
 @pytest.mark.asyncio

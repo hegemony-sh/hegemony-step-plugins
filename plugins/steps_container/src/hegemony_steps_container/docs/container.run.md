@@ -60,6 +60,9 @@ To hand structured data to later steps, write a JSON object to
 KiB), so a later step reads `{{ steps.NODE_ID.output.data.KEY }}`. A file
 that is not a JSON object, or is too large, is reported in an
 `output_data_rejected_<step id>` artifact instead and never fails the step.
+When the results cannot be copied out of the container (a failed copy, or a
+file over the 8 MiB collection budget), an `output_not_collected_<step id>`
+artifact names what is missing and why.
 
 Put credentials in Secret files rather than environment variables: each
 `NAME=reference` entry is resolved and written to `/run/secrets/NAME` inside

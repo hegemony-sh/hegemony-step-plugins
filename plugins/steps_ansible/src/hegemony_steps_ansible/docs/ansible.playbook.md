@@ -105,8 +105,9 @@ The step succeeds only when ansible-playbook exits with 0 and its results
 were collected. Exit code 2 means a host failed, 4 means a host was
 unreachable or the playbook did not parse; the error names the code. A play
 that exits with 0 without results (the results callback did not run, for
-example because the playbook's own `ansible.cfg` or image disabled it) fails
-too: whether any host changed is then unknown. The step also fails before running anything when
+example because the playbook's own `ansible.cfg` or image disabled it, or the
+results could not be copied out of the container, which the error then says)
+fails too: whether any host changed is then unknown. The step also fails before running anything when
 the config is invalid, a device has no usable credentials, a jump host has
 only a password or a host, user name or port that is not plain (a host name
 or IP address; a user name of letters, digits and `. _ @ + -`), or a secret
