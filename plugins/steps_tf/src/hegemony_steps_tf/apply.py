@@ -35,6 +35,7 @@ from .common import (
     PLAN_FILE,
     RUN_SCRIPT,
     TfContainerConfig,
+    container_timeout,
     managed_state_access,
     script_header,
     shared_workspace_mounted,
@@ -183,16 +184,17 @@ class TfApplyHandler(BaseHandler):
 
         image = str(plan_output.get("image"))
         workdir = str(plan_output.get("working_dir"))
+        timeout = container_timeout(ctx, config)
         try:
             # The saved plan names the backend but not its address or credentials:
             # managed state access is opened again for this step.
-            async with managed_state_access(ctx, state_name, config.timeout_seconds) as access:
+            async with managed_state_access(ctx, state_name, timeout) as access:
                 env_files = await secret_environment(
                     ctx, config.secret_env, config.state_encryption_key, access
                 )
                 job = ContainerJob(
                     config=container_config_from(
-                        ctx.config,
+                        {**ctx.config, "timeout_seconds": timeout},
                         image=image,
                         command=[f"sh {RUN_SCRIPT}"],
                         entrypoint="/bin/sh",

@@ -58,6 +58,7 @@ from .common import (
     address_list_errors,
     backend_config_errors,
     backend_config_file,
+    container_timeout,
     default_image,
     encryption_hcl,
     managed_state_access,
@@ -372,13 +373,14 @@ class TfPlanHandler(BaseHandler):
         shared = shared_workspace_mounted(ctx)
         workdir = workdir_for(ctx.step_id) if shared else LOCAL_WORKDIR
         state_name = config.state_name.strip() if config.state == "managed" else None
+        timeout = container_timeout(ctx, config)
 
         try:
-            async with managed_state_access(ctx, state_name, config.timeout_seconds) as access:
+            async with managed_state_access(ctx, state_name, timeout) as access:
                 files, env_files = await self._files(ctx, config, workdir, access)
                 job = ContainerJob(
                     config=container_config_from(
-                        ctx.config,
+                        {**ctx.config, "timeout_seconds": timeout},
                         image=image,
                         command=[f"sh {RUN_SCRIPT}"],
                         entrypoint="/bin/sh",
@@ -471,7 +473,25 @@ class TfPlanHandler(BaseHandler):
                 evidence=evidence,
             )
 
-        plan_code = (outcome.collected.get(PLAN_EXIT_FILE) or b"").decode().strip()
+        # The script exits 0 for "no changes" and for "changes" alike: only the
+        # collected detailed exit code tells them apart, and collecting it is
+        # best-effort. Without it, "no changes" would be a guess that makes
+        # tf.apply skip a plan that has changes.
+        plan_code = (
+            (outcome.collected.get(PLAN_EXIT_FILE) or b"").decode("utf-8", "replace").strip()
+        )
+        if plan_code not in ("0", "2"):
+            return HandlerResult(
+                success=False,
+                summary=f"{BINARIES[config.engine]} plan result missing",
+                error=(
+                    f"{BINARIES[config.engine]} plan finished, but its detailed exit code "
+                    f"could not be read back from the container (got {plan_code[:20]!r}), "
+                    "so whether it has changes is unknown; run the step again"
+                ),
+                metrics={"exit_code": exit_code, "duration_seconds": outcome.duration_seconds},
+                evidence=evidence,
+            )
         has_changes = plan_code == "2"
         plan_text = (outcome.collected.get(PLAN_TEXT_FILE) or b"").decode("utf-8", "replace")
         summary_data: dict[str, Any] = {}

@@ -41,4 +41,5 @@ step lacks shared affinity or the worker has shared workspaces disabled, or
 when the apply itself fails. The tool refuses
 a saved plan made stale by a state change since planning: plan again. The
 state lock is taken for the apply; Lock timeout sets how long to wait for
-it.
+it. Managed state access lasts as long as the step's timeout (its own
+Timeout, else the one from its policy or the flow), plus a margin.

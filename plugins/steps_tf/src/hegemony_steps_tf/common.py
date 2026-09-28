@@ -192,11 +192,28 @@ def state_backend_env(access: StateBackendAccess) -> dict[str, str]:
     }
 
 
+def container_timeout(ctx: HandlerContext, config: ContainerExecutionConfig) -> int:
+    """How long the step's container may run, resolved once for the container and its state access.
+
+    The step's own ``timeout_seconds`` when it sets one, else the step timeout the
+    host resolved (the step's policy, the flow's default, the handler's default),
+    which is what the runner falls back to. The config model's own default must
+    not stand in for an absent value: state access granted for that would end
+    while the container still runs.
+    """
+    if "timeout_seconds" in config.model_fields_set:
+        return config.timeout_seconds
+    return ctx.timeout_seconds
+
+
 @asynccontextmanager
 async def managed_state_access(
     ctx: HandlerContext, name: str | None, timeout_seconds: int
 ) -> AsyncIterator[StateBackendAccess | None]:
-    """Access to the platform-managed state ``name`` for one step (None: not managed)."""
+    """Access to the platform-managed state ``name`` for one step (None: not managed).
+
+    ``timeout_seconds`` is the container's own (see :func:`container_timeout`).
+    """
     if not name:
         yield None
         return

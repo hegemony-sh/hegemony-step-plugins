@@ -72,8 +72,12 @@ message.
 
 The step succeeds when the plan is made, with or without changes. It fails
 when init, validate, or plan fails (see the container output), when backend
-state has no backend block, or before running anything when the config is
+state has no backend block, when the plan's result code cannot be read back
+from the container (so whether it has changes is unknown), or before running
+anything when the config is
 invalid, a secret resolves to nothing, or the platform cannot serve managed
 state (for example, no state encryption key is configured). Provider downloads and remote state
 need network access to those endpoints under the flow's egress policy. The
-timeout covers the whole run, image pull included.
+timeout covers the whole run, image pull included. Without a Timeout on the
+step, the step's timeout from its policy or the flow applies; managed state
+access lasts as long as that timeout, plus a margin.

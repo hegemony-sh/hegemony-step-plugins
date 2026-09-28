@@ -19,6 +19,7 @@ import pytest
 from hegemony_step_sdk import (
     ContainerRuntime,
     HandlerContext,
+    HandlerResult,
     HandlerServices,
     StateBackendAccess,
 )
@@ -321,7 +322,9 @@ def _install_docker(monkeypatch, *, out: dict[str, bytes], exit_code: int = 0) -
     return state
 
 
-def _ctx(config: dict[str, Any], services: _Services, *, shared: bool = True) -> HandlerContext:
+def _ctx(
+    config: dict[str, Any], services: _Services, *, shared: bool = True, timeout: int = 300
+) -> HandlerContext:
     return HandlerContext(
         run_id="run-12345678",
         flow_id="flow-1",
@@ -329,6 +332,7 @@ def _ctx(config: dict[str, Any], services: _Services, *, shared: bool = True) ->
         step_id="plan",
         config=config,
         shared_workspace=shared,
+        timeout_seconds=timeout,
         services=cast(HandlerServices, services),
     )
 
@@ -458,6 +462,53 @@ async def test_plan_step_with_managed_state(monkeypatch):
     create = next(call for call in state["calls"] if call[1] == "create")
     assert create[create.index("--add-host") + 1] == "api:172.20.0.5"
     assert not any("hgm_run_" in part for part in create)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [None, b"", b"1", b"garbage"])
+async def test_plan_step_fails_without_a_valid_detailed_exit_code(monkeypatch, code):
+    """The script exits 0 for a plan with changes too, and reading its detailed exit
+    code back is best-effort: without it the step must not report "no changes"."""
+    out = {"plan.txt": b"Plan: 1 to add, 0 to change, 0 to destroy.\n", "plan.json": _PLAN_JSON}
+    if code is not None:
+        out["plan-exitcode"] = code
+    _install_docker(monkeypatch, out=out)
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+    assert result.success is False
+    assert "detailed exit code" in (result.error or "")
+    assert not result.output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "config", "step_timeout", "expected"),
+    [
+        # No timeout in the step config (an imported or API-authored flow): the
+        # runner uses the host's step timeout, and so must the state access.
+        (TfPlanHandler, {"state_name": "core"}, 1800, 1800),
+        (TfApplyHandler, {"plan_step": "plan"}, 3600, 3600),
+        # A step or flow policy timeout reaches the handler as the step timeout.
+        (TfApplyHandler, {"plan_step": "plan"}, 7200, 7200),
+        # The step's own timeout wins, for the container and its state access alike.
+        (TfPlanHandler, {"state_name": "core", "timeout_seconds": 900}, 3600, 900),
+        (TfApplyHandler, {"plan_step": "plan", "timeout_seconds": 900}, 3600, 900),
+    ],
+)
+async def test_state_access_lasts_as_long_as_the_container(
+    monkeypatch, handler, config, step_timeout, expected
+):
+    jobs = []
+
+    async def fake_run_container_job(ctx, job):
+        jobs.append(job)
+        return HandlerResult(success=False, error="stopped before the container")
+
+    monkeypatch.setattr(f"{handler.__module__}.run_container_job", fake_run_container_job)
+    services = _Services(_plan_output(state="managed", state_name="core"))
+    await handler().execute(_ctx(config, services, timeout=step_timeout))
+
+    assert services.opened == [("core", expected + STATE_ACCESS_MARGIN_SECONDS)]
+    assert [job.config["timeout_seconds"] for job in jobs] == [expected]
 
 
 @pytest.mark.asyncio
