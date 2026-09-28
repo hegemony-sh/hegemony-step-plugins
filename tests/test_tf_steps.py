@@ -42,6 +42,7 @@ from hegemony_steps_tf.common import (
     BACKEND_OVERRIDE_FILE,
     DEFAULT_IMAGES,
     KEEP_DIR,
+    MAX_OUTPUT_VALUE_BYTES,
     PLAN_TEXT_MISSING_NOTE,
     RUN_SCRIPT,
     SECRET_ENV_FILE,
@@ -67,7 +68,7 @@ from hegemony_steps_tf.plan import (
     TfPlanHandler,
     build_plan_script,
 )
-from hegemony_steps_tf.summary import plan_line, summarize_plan
+from hegemony_steps_tf.summary import MAX_LISTED_CHANGES, plan_line, summarize_plan
 
 # ── plan summary ─────────────────────────────────────────────────────────────
 
@@ -105,6 +106,26 @@ def test_summary_counts_like_the_cli_and_keeps_no_values():
     assert summary["drift"] == 1
     assert "s3cr3t" not in json.dumps(summary)
     assert plan_line(summary) == "+3 ~1 -3 (2 replaced, 1 imported, 1 moved)"
+
+
+def test_summary_counts_forgotten_resources():
+    summary = summarize_plan(
+        {"resource_changes": [_rc("a.gone", ["forget"]), _rc("a.again", ["forget", "create"])]}
+    )
+    assert (summary["forget"], summary["add"], summary["destroy"]) == (2, 1, 0)
+    assert [item["actions"] for item in summary["resource_changes"]] == [
+        ["forget"],
+        ["forget", "create"],
+    ]
+
+
+def test_summary_lists_at_most_the_cap_but_counts_everything():
+    changes = [_rc(f"a.r{index}", ["create"]) for index in range(MAX_LISTED_CHANGES + 1)]
+    summary = summarize_plan({"resource_changes": changes})
+    assert summary["add"] == MAX_LISTED_CHANGES + 1
+    assert len(summary["resource_changes"]) == MAX_LISTED_CHANGES
+    assert summary["resource_changes_truncated"] is True
+    assert "resource_changes_truncated" not in summarize_plan({"resource_changes": changes[:1]})
 
 
 def test_summary_of_an_empty_plan():
@@ -146,6 +167,21 @@ def test_public_outputs_drop_sensitive_values():
     assert values == {"vpc_id": "vpc-1"}
     assert sensitive == ["db_password"]
     assert public_outputs(None) == ({}, [])
+
+
+@pytest.mark.parametrize("raw", [b"not json", b"[1]", b'"text"', b'{"x": 1}'])
+def test_public_outputs_of_unexpected_documents_are_empty(raw):
+    assert public_outputs(raw) == ({}, [])
+
+
+def test_public_outputs_leave_out_oversized_values_without_calling_them_sensitive():
+    raw = json.dumps(
+        {
+            "big": {"sensitive": False, "value": "x" * (MAX_OUTPUT_VALUE_BYTES + 1)},
+            "small": {"sensitive": False, "value": "y"},
+        }
+    ).encode()
+    assert public_outputs(raw) == ({"small": "y"}, [])
 
 
 # ── scripts ──────────────────────────────────────────────────────────────────
@@ -469,6 +505,21 @@ async def test_plan_step_reports_changes(monkeypatch):
     assert f"sh {RUN_SCRIPT}" in create[-1]
     # The exit code and the readable plan are collected before the JSON plan.
     assert state["collected"][:3] == ["/hegemony/out", PLAN_OUTPUTS_DIR, PLAN_JSON_DIR]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_json_plan_still_reports_changes(monkeypatch):
+    """Changes come from the detailed exit code: a JSON plan that cannot be read
+    costs the counts, never the has_changes a later approval depends on."""
+    _install_docker(
+        monkeypatch,
+        out={"plan-exitcode": b"2", "plan.txt": b"Plan: 1 to add.\n", PLAN_JSON_FILE: b"{broken"},
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+    assert result.success is True, result.error
+    assert result.output["has_changes"] is True
+    assert result.summary == "Plan: changes"
+    assert "add" not in result.output
 
 
 @pytest.mark.asyncio
