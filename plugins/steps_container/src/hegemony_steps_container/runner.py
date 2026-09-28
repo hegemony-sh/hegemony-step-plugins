@@ -306,7 +306,10 @@ async def resolve_secret_values(
 
     The written text decides, never the resolved value: a secret whose value
     looks like a reference (``postgres://user:pw@db/app``) is not resolved a
-    second time. The host registers every value it resolves for redaction.
+    second time. Any ``scheme://…`` text is read as a reference, since only
+    the host knows its backends' schemes, so a literal URL cannot be written
+    directly. The host registers every value it resolves for redaction; a
+    literal is not registered (the SDK has no way to), so it is not redacted.
 
     Raises ``ValueError`` for an invalid name, a non-string value, or a
     reference that resolves to nothing.
@@ -320,7 +323,8 @@ async def resolve_secret_values(
             raise ValueError(f"invalid secret name {name!r}")
         if not isinstance(raw, str):
             raise ValueError(f"secret {name!r} must be a string")
-        if is_bare_secret_ref(raw):
+        bare = is_bare_secret_ref(raw)
+        if bare:
             template = "{{ secret('" + raw.strip() + "') }}"
         elif _TEMPLATE_RE.search(raw):
             template = raw
@@ -328,6 +332,14 @@ async def resolve_secret_values(
             resolved[name] = raw
             continue
         value = await services.resolve_secret_ref(template, source=source) or ""
+        if not value and bare:
+            scheme = raw.strip().split("://", 1)[0]
+            raise ValueError(
+                f"secret {name!r} resolved to an empty value: it is written as a secret "
+                f"reference (scheme {scheme!r}), and no secret backend returned a value for "
+                "it. Check the reference; a literal value shaped like a URL cannot be "
+                "written directly, so store it in a secret backend and reference it"
+            )
         if not value:
             raise ValueError(f"secret {name!r} resolved to an empty value")
         resolved[name] = value

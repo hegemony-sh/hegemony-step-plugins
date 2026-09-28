@@ -69,9 +69,13 @@ Put credentials in Secret files rather than environment variables: each
 the container. The value may be a `{{ secret('...') }}` template or a bare
 reference such as `vault://orgs/acme/secrets/db/password`; it is resolved on
 its own, without step variables, and only once, so a secret whose value looks
-like a URL (`postgres://…`) is written as is. Secret values are redacted from
-the step's output, and unlike environment variables they never appear in the
-sandbox's container metadata.
+like a URL (`postgres://…`) is written as is. Anything written as
+`scheme://…` is read as a reference, so a literal URL cannot be entered
+directly: store it in a secret backend and reference it. Other text is used
+as written. Values resolved from references are redacted from the step's
+output; a literal is not, so keep real secrets in a backend. Unlike
+environment variables, secret files never appear in the sandbox's container
+metadata.
 
 Defaults: working directory `/workspace`, 512m memory, 1.0 CPUs, 300 s
 timeout, normal Docker networking. Turn on "Disable network access" for full

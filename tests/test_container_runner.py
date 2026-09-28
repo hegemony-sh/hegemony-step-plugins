@@ -270,7 +270,31 @@ async def test_container_run_unresolvable_secret_fails_before_docker(monkeypatch
 
     assert result.success is False
     assert "resolved to an empty value" in (result.error or "")
+    assert "scheme 'vault'" in (result.error or "")
     assert state["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_literal_url_secret_is_read_as_a_reference_and_says_so(monkeypatch):
+    state = _install_docker(monkeypatch)
+    config = {"image": "alpine:3.20", "secrets": {"hook": "https://hooks.example.com/T1/x"}}
+    result = await RunContainerHandler().execute(_ctx(config))
+
+    assert result.success is False
+    error = result.error or ""
+    assert "written as a secret reference (scheme 'https')" in error
+    assert "store it in a secret backend" in error
+    assert state["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_template_secret_keeps_the_plain_error(monkeypatch):
+    _install_docker(monkeypatch)
+    config = {"image": "alpine:3.20", "secrets": {"x": "{{ secret('vault://missing/key') }}"}}
+    result = await RunContainerHandler().execute(_ctx(config))
+
+    assert result.success is False
+    assert (result.error or "").endswith("secret 'x' resolved to an empty value")
 
 
 def test_secret_map_validation():
