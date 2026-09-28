@@ -60,6 +60,14 @@ MAX_COLLECTED_BYTES = 8 * 1024 * 1024
 #: not timed out (and retried) over a slow copy.
 COLLECT_GRACE_SECONDS = 10
 
+#: How long a tool run through ``bounded`` (:func:`deadline_shell_lines`) gets
+#: to stop after SIGTERM at the step's deadline before SIGKILL. OpenTofu and
+#: Terraform stop starting new changes on SIGTERM and save the state of those
+#: done; this leaves them time to, and still ends the container well before
+#: the platform frees a managed-state lock held by a step whose worker died
+#: (the step timeout, then 600 s of grace).
+KILL_AFTER_SECONDS = 300
+
 #: A secret reference written bare (``vault://orgs/acme/secrets/db/password``)
 #: rather than as a ``{{ secret('...') }}`` template.
 _BARE_SECRET_REF_RE = re.compile(r"^[a-z][a-z0-9+.-]*://[^\s'\"{}\\]+$")
@@ -393,11 +401,42 @@ async def run_container_job(
     return await runner.run_job(ctx, job)
 
 
+def deadline_shell_lines(deadline: int) -> list[str]:
+    """POSIX shell lines defining ``bounded CMD [ARG...]``: run CMD until ``deadline``.
+
+    The worker stops a step's container at the step's timeout, but a worker
+    that dies stops nothing, and the tool would run on in the sandbox past the
+    access it was given (a managed-state token and lock). ``bounded`` sends the
+    command SIGTERM at ``deadline`` (a Unix time) and SIGKILL
+    :data:`KILL_AFTER_SECONDS` later, through ``timeout`` from BusyBox or
+    coreutils. With a ``timeout`` that has no ``-k`` it sends only SIGTERM, and
+    in an image without ``timeout`` the command runs unbounded, as before.
+    The command's exit status is returned (BusyBox gives 143 when the
+    deadline stopped it, coreutils 124).
+    """
+    kill = f"-k {KILL_AFTER_SECONDS}"
+    return [
+        f"hegemony_deadline={int(deadline)}",
+        "bounded() {",
+        "  left=$((hegemony_deadline - $(date +%s)))",
+        '  if [ "$left" -lt 1 ]; then left=1; fi',
+        "  if ! command -v timeout >/dev/null 2>&1; then",
+        '    "$@"',
+        f"  elif timeout -s TERM {kill} 5 true >/dev/null 2>&1; then",
+        f'    timeout -s TERM {kill} "$left" "$@"',
+        "  else",
+        '    timeout -s TERM "$left" "$@"',
+        "  fi",
+        "}",
+    ]
+
+
 __all__ = [
     "COLLECT_GRACE_SECONDS",
     "CONTAINER_PASSTHROUGH_FIELDS",
     "CONTEXT_PATH",
     "IO_ROOT",
+    "KILL_AFTER_SECONDS",
     "MAX_COLLECTED_BYTES",
     "OUTPUT_DIR",
     "SECRET_FILES_DIR",
@@ -407,6 +446,7 @@ __all__ = [
     "ContainerJobResult",
     "StagedFile",
     "container_config_from",
+    "deadline_shell_lines",
     "is_bare_secret_ref",
     "resolve_secret_values",
     "run_container_job",

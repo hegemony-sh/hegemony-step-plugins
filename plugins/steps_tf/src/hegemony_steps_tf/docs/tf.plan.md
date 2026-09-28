@@ -103,7 +103,10 @@ anything when the config is
 invalid, a secret resolves to nothing, or the platform cannot serve managed
 state (for example, no state encryption key is configured). Provider downloads and remote state
 need network access to those endpoints under the flow's egress policy. The
-timeout covers the whole run, image pull included. Without a Timeout on the
+timeout covers the whole run, image pull included. At the timeout the tool
+is also stopped from inside the container (SIGTERM, then SIGKILL five
+minutes later, with the image's `timeout` command), so it stops even when
+the worker that should stop the container is gone. Without a Timeout on the
 step, the step's timeout from its policy or the flow applies; managed state
 access lasts as long as that timeout, plus a 10-minute margin. The platform
 grants state access for at most 24 hours, so with managed state the step's

@@ -49,6 +49,7 @@ from .common import (
     script_header,
     secret_environment,
     shared_workspace_mounted,
+    step_deadline,
     tool_env,
     workdir_for,
 )
@@ -88,7 +89,9 @@ class TfApplyConfig(TfContainerConfig):
     lock_timeout: LockTimeout = "300s"
 
 
-def build_apply_script(engine: str, workdir: str, lock_timeout: str) -> str:
+def build_apply_script(
+    engine: str, workdir: str, lock_timeout: str, *, deadline: int | None = None
+) -> str:
     """Apply the saved plan in the plan step's working directory.
 
     When the tool changed resources but could not save the resulting state
@@ -96,8 +99,14 @@ def build_apply_script(engine: str, workdir: str, lock_timeout: str) -> str:
     leaves the state in ``errored.tfstate``. That directory is deleted with the
     run, so the script saves the state again (``state push``, retried), and if
     that fails too keeps it as a run artifact instead of losing it.
+
+    With a ``deadline`` (a Unix time), the apply and the output read stop by
+    then. Saving the errored state again is not bounded: it is what a stopped
+    apply leaves to save, its retries are bounded, and the step's state access
+    outlives the deadline for it.
     """
     tf = BINARIES[engine]
+    run = "" if deadline is None else "bounded "
     apply = [tf, "apply", "-input=false", "-no-color", f"-lock-timeout={lock_timeout}", PLAN_FILE]
     # Without the lock: when the apply's own unlock failed too, this step still
     # holds the lock, and the platform lets the holder write without its ID.
@@ -112,14 +121,14 @@ def build_apply_script(engine: str, workdir: str, lock_timeout: str) -> str:
     return (
         "\n".join(
             [
-                *script_header(),
+                *script_header(deadline),
                 f"if [ ! -f {quoted_workdir}/{PLAN_FILE} ]; then",
                 f"  echo {shlex.quote(NO_PLAN_MESSAGE)} >&2",
                 f"  exit {EXIT_NO_PLAN}",
                 "fi",
                 f"cd {quoted_workdir}",
                 "set +e",
-                " ".join(shlex.quote(part) for part in apply),
+                run + " ".join(shlex.quote(part) for part in apply),
                 "code=$?",
                 "set -e",
                 'if [ "$code" -ne 0 ]; then',
@@ -138,7 +147,7 @@ def build_apply_script(engine: str, workdir: str, lock_timeout: str) -> str:
                 "fi",
                 # The apply succeeded: a failure to read the outputs must not
                 # turn it into a failed step (a retry would refuse the plan).
-                f"if ! {tf} output -json > {OUTPUTS_FILE}; then rm -f {OUTPUTS_FILE}; fi",
+                f"if ! {run}{tf} output -json > {OUTPUTS_FILE}; then rm -f {OUTPUTS_FILE}; fi",
             ]
         )
         + "\n"
@@ -299,7 +308,12 @@ class TfApplyHandler(BaseHandler):
                     },
                     files=[
                         *env_files,
-                        _script_file(engine, workdir, config.lock_timeout.strip()),
+                        _script_file(
+                            engine,
+                            workdir,
+                            config.lock_timeout.strip(),
+                            step_deadline(timeout),
+                        ),
                     ],
                     collect=[OUTPUT_DIR],
                     handler_id=self.handler_id,
@@ -392,5 +406,6 @@ def apply_failure(
     return f"{tool} apply exited with code {outcome.exit_code}; see the container output"
 
 
-def _script_file(engine: str, workdir: str, lock_timeout: str) -> StagedFile:
-    return StagedFile(RUN_SCRIPT, build_apply_script(engine, workdir, lock_timeout), mode=0o755)
+def _script_file(engine: str, workdir: str, lock_timeout: str, deadline: int) -> StagedFile:
+    script = build_apply_script(engine, workdir, lock_timeout, deadline=deadline)
+    return StagedFile(RUN_SCRIPT, script, mode=0o755)

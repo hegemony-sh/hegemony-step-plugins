@@ -72,6 +72,7 @@ from .common import (
     secret_environment,
     shared_workspace_mounted,
     state_name_errors,
+    step_deadline,
     tool_env,
     typed_variable,
     variable_map_errors,
@@ -239,10 +240,19 @@ class TfPlanConfig(TfContainerConfig):
 
 
 def build_plan_script(
-    config: TfPlanConfig, *, workdir: str, has_vars: bool, has_secret_vars: bool
+    config: TfPlanConfig,
+    *,
+    workdir: str,
+    has_vars: bool,
+    has_secret_vars: bool,
+    deadline: int | None = None,
 ) -> str:
-    """Copy the configuration into the working directory, init, validate, plan."""
+    """Copy the configuration into the working directory, init, validate, plan.
+
+    With a ``deadline`` (a Unix time), every tool call stops by then.
+    """
     tf = BINARIES[config.engine]
+    run = "" if deadline is None else "bounded "
     source = posixpath.join(ATTACHMENTS_ROOT, config.source_dir.strip()).rstrip("/")
     init = [tf, "init", "-input=false", "-no-color"]
     if config.state == "backend" and config.backend_config:
@@ -274,7 +284,7 @@ def build_plan_script(
 
     quoted_workdir = shlex.quote(workdir)
     lines = [
-        *script_header(),
+        *script_header(deadline),
         f"rm -rf {quoted_workdir}",
         f"mkdir -p {quoted_workdir}",
         f"cp -R {shlex.quote(source)}/. {quoted_workdir}/",
@@ -283,7 +293,7 @@ def build_plan_script(
         lines.append(f"cp {BACKEND_OVERRIDE_FILE} {quoted_workdir}/")
     lines += [
         f"cd {quoted_workdir}",
-        " ".join(shlex.quote(part) for part in init),
+        run + " ".join(shlex.quote(part) for part in init),
     ]
     if config.state == "backend":
         # Without a backend block the tool silently keeps state in the working
@@ -295,18 +305,18 @@ def build_plan_script(
             "fi",
         ]
     lines += [
-        f"{tf} validate -no-color",
+        f"{run}{tf} validate -no-color",
         "set +e",
-        " ".join(shlex.quote(part) for part in plan),
+        run + " ".join(shlex.quote(part) for part in plan),
         "code=$?",
         "set -e",
         'if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi',
         f'printf "%s" "$code" > {PLAN_EXIT_FILE}',
-        f"{tf} show -no-color {PLAN_FILE} > {PLAN_TEXT_FILE}",
+        f"{run}{tf} show -no-color {PLAN_FILE} > {PLAN_TEXT_FILE}",
         f"mkdir -p {PLAN_JSON_DIR} {PLAN_OUTPUTS_DIR}",
-        f"{tf} show -json {PLAN_FILE} > {PLAN_JSON_FILE}",
+        f"{run}{tf} show -json {PLAN_FILE} > {PLAN_JSON_FILE}",
         # For a tf.apply with nothing to apply; the plan is made without them.
-        f"if ! {tf} output -json > {PLAN_OUTPUTS_FILE}; then rm -f {PLAN_OUTPUTS_FILE}; fi",
+        f"if ! {run}{tf} output -json > {PLAN_OUTPUTS_FILE}; then rm -f {PLAN_OUTPUTS_FILE}; fi",
     ]
     return "\n".join(lines) + "\n"
 
@@ -379,7 +389,9 @@ class TfPlanHandler(BaseHandler):
 
         try:
             async with managed_state_access(ctx, state_name, timeout) as access:
-                files, env_files = await self._files(ctx, config, workdir, access)
+                files, env_files = await self._files(
+                    ctx, config, workdir, access, step_deadline(timeout)
+                )
                 job = ContainerJob(
                     config=container_config_from(
                         {**ctx.config, "timeout_seconds": timeout},
@@ -408,6 +420,7 @@ class TfPlanHandler(BaseHandler):
         config: TfPlanConfig,
         workdir: str,
         access: StateBackendAccess | None,
+        deadline: int,
     ) -> tuple[list[StagedFile], list[StagedFile]]:
         files: list[StagedFile] = []
         if config.state == "managed":
@@ -444,6 +457,7 @@ class TfPlanHandler(BaseHandler):
                     workdir=workdir,
                     has_vars=bool(config.vars),
                     has_secret_vars=bool(secret_vars),
+                    deadline=deadline,
                 ),
                 mode=0o755,
             )

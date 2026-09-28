@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, cast
@@ -283,6 +284,30 @@ def test_apply_script():
     _assert_parses(build_apply_script("terraform", "/shared/tf/a b;c'd", "300s"))
 
 
+def test_scripts_stop_the_tool_at_the_step_deadline():
+    """A dead worker stops nothing: the script bounds every tool call itself."""
+    apply = build_apply_script("opentofu", "/shared/tf/plan", "5m", deadline=1_900_000_000)
+    assert "hegemony_deadline=1900000000" in apply
+    assert "\nbounded tofu apply -input=false" in apply
+    assert "bounded tofu output -json" in apply
+    # Saving a stopped apply's state is what the time after the deadline is for.
+    assert "bounded tofu state push" not in apply
+    assert "tofu state push -lock=false errored.tfstate" in apply
+    _assert_parses(apply)
+
+    config = TfPlanConfig.model_validate({"state": "ephemeral"})
+    plan = build_plan_script(
+        config, workdir=LOCAL_WORKDIR, has_vars=False, has_secret_vars=False, deadline=1
+    )
+    for call in ("init", "validate", "plan", "show -no-color", "show -json", "output -json"):
+        assert f"bounded tofu {call}" in plan
+    _assert_parses(plan)
+    unbounded = build_plan_script(
+        config, workdir=LOCAL_WORKDIR, has_vars=False, has_secret_vars=False
+    )
+    assert "bounded" not in unbounded
+
+
 # ── validation ───────────────────────────────────────────────────────────────
 
 
@@ -533,6 +558,7 @@ async def test_plan_step_reports_changes(monkeypatch):
     assert "export AWS_SECRET_ACCESS_KEY=resolved-aws-long-enough" in roots[SECRET_ENV_FILE]
     assert "TF_ENCRYPTION=" in roots[SECRET_ENV_FILE]
     assert 'backend "local"' in roots[BACKEND_OVERRIDE_FILE]
+    assert "\nbounded tofu plan " in roots[RUN_SCRIPT]
     create = next(call for call in state["calls"] if call[1] == "create")
     assert "hegemony.handler_id=tf.plan" in create
     assert not any("resolved-" in part for part in create)
@@ -870,6 +896,7 @@ async def test_apply_step_applies_the_saved_plan(monkeypatch):
     assert "ghcr.io/opentofu/opentofu:1.12.6" in create
     assert "hegemony.handler_id=tf.apply" in create
     assert "cd /shared/tf/plan" in state["roots"][RUN_SCRIPT]
+    assert "\nbounded tofu apply" in state["roots"][RUN_SCRIPT]
 
 
 def _without(key: str) -> dict[str, Any]:
@@ -1156,7 +1183,9 @@ esac
     (bin_dir / "sleep").write_text("#!/bin/sh\nexit 0\n")
     for path in (tool, bin_dir / "sleep"):
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
-    script = build_apply_script("opentofu", "/shared/tf/plan", "300s")
+    script = build_apply_script(
+        "opentofu", "/shared/tf/plan", "300s", deadline=int(time.time()) + 600
+    )
     for prefix in ("/hegemony/", "/shared/"):
         script = script.replace(prefix, f"{root}{prefix}")
     (tmp_path / "run.sh").write_text(script)
@@ -1190,7 +1219,11 @@ esac
     tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
     config = TfPlanConfig.model_validate({"state": "ephemeral"})
     script = build_plan_script(
-        config, workdir="/shared/tf/plan", has_vars=False, has_secret_vars=False
+        config,
+        workdir="/shared/tf/plan",
+        has_vars=False,
+        has_secret_vars=False,
+        deadline=int(time.time()) + 600,
     )
     for prefix in ("/hegemony/", "/shared/", "/attachments"):
         script = script.replace(prefix, f"{root}{prefix}")

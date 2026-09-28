@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -33,6 +36,7 @@ from hegemony_steps_container.runner import (
     ContainerJobResult,
     StagedFile,
     container_config_from,
+    deadline_shell_lines,
     is_bare_secret_ref,
     resolve_secret_values,
     run_container_job,
@@ -485,3 +489,37 @@ async def test_collect_enforces_the_byte_budget(monkeypatch):
     assert outcome.collected == {"/hegemony/out/small.json": b"{}"}
     assert list(outcome.collect_errors) == ["/hegemony/out/big.bin"]
     assert "over the 100-byte collection budget" in outcome.collect_errors["/hegemony/out/big.bin"]
+
+
+def _run_bounded(command: str, deadline: int, path: str | None = None) -> tuple[int, float]:
+    script = "\n".join([*deadline_shell_lines(deadline), command]) + "\n"
+    env = {**os.environ, "PATH": path} if path is not None else None
+    started = time.monotonic()
+    done = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True)
+    return done.returncode, time.monotonic() - started
+
+
+def test_bounded_stops_a_command_at_the_deadline():
+    """A worker that died stops nothing: the step's own script stops the tool."""
+    code, took = _run_bounded("bounded sleep 30", int(time.time()) + 1)
+    assert code in (124, 143)  # coreutils, BusyBox
+    assert took < 10
+
+
+def test_bounded_returns_the_commands_own_status():
+    code, _ = _run_bounded("bounded sh -c 'exit 3'", int(time.time()) + 60)
+    assert code == 3
+
+
+def test_bounded_runs_a_command_past_the_deadline_for_a_second_at_least():
+    code, _ = _run_bounded("bounded true", int(time.time()) - 60)
+    assert code == 0
+
+
+def test_bounded_runs_the_command_unbounded_without_timeout(tmp_path):
+    for tool in ("sh", "date", "true"):
+        found = shutil.which(tool)
+        assert found is not None
+        (tmp_path / tool).symlink_to(found)
+    code, _ = _run_bounded("bounded sh -c 'exit 5'", int(time.time()) + 60, str(tmp_path))
+    assert code == 5

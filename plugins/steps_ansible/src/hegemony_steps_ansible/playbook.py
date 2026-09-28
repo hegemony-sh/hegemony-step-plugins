@@ -23,6 +23,7 @@ import json
 import posixpath
 import re
 import shlex
+import time
 from typing import Any, Literal
 
 from pydantic import Field
@@ -43,6 +44,7 @@ from hegemony_steps_container.runner import (
     ContainerJob,
     StagedFile,
     container_config_from,
+    deadline_shell_lines,
     resolve_secret_values,
     run_container_job,
     secret_map_errors,
@@ -461,8 +463,13 @@ def build_run_script(
     has_extra_vars: bool,
     has_secrets: bool,
     vault_files: dict[str, str],
+    deadline: int | None = None,
 ) -> str:
-    """The container's entry script: key setup, optional Galaxy install, the play."""
+    """The container's entry script: key setup, optional Galaxy install, the play.
+
+    With a ``deadline`` (a Unix time), the Galaxy install and the play stop by
+    then, even when the worker that should stop the container is gone.
+    """
     playbook = config.playbook.strip()
     playbook_dir = posixpath.join(ATTACHMENTS_ROOT, posixpath.dirname(playbook)).rstrip("/")
     args = ["ansible-playbook", "-i", INVENTORY_FILE]
@@ -507,10 +514,15 @@ def build_run_script(
         "done",
         f"cd {shlex.quote(playbook_dir)}",
     ]
+    run = "exec "
+    if deadline is not None:
+        lines += deadline_shell_lines(deadline)
+        run = "bounded "
     if config.requirements_file.strip():
         requirements = posixpath.join(ATTACHMENTS_ROOT, config.requirements_file.strip())
-        lines.append(f"ansible-galaxy install -r {shlex.quote(requirements)}")
-    lines.append("exec " + " ".join(shlex.quote(arg) for arg in args))
+        galaxy = f"ansible-galaxy install -r {shlex.quote(requirements)}"
+        lines.append(galaxy if deadline is None else f"bounded {galaxy}")
+    lines.append(run + " ".join(shlex.quote(arg) for arg in args))
     return "\n".join(lines) + "\n"
 
 
@@ -791,6 +803,9 @@ class AnsiblePlaybookHandler(BaseHandler):
                     has_extra_vars=bool(config.extra_vars),
                     has_secrets=bool(secrets),
                     vault_files=vault_files,
+                    # The runner stops the container at this step's timeout.
+                    deadline=int(time.time())
+                    + int(ctx.config.get("timeout_seconds") or ctx.timeout_seconds),
                 ),
                 mode=0o755,
             )

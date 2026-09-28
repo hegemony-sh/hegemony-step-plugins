@@ -449,9 +449,15 @@ def test_run_script_builds_the_ansible_playbook_command():
     )
 
     assert "cd /attachments/ansible\n" in script
-    assert "ansible-galaxy install -r /attachments/ansible/requirements.yml" in script
+    assert "\nansible-galaxy install -r /attachments/ansible/requirements.yml" in script
     command = script.strip().splitlines()[-1]
     assert command.startswith(f"exec ansible-playbook -i {INVENTORY_FILE}")
+    bounded = build_run_script(
+        config, has_extra_vars=True, has_secrets=True, vault_files={}, deadline=1_900_000_000
+    )
+    assert "hegemony_deadline=1900000000" in bounded
+    assert "\nbounded ansible-galaxy install -r" in bounded
+    assert bounded.strip().splitlines()[-1].startswith("bounded ansible-playbook -i ")
     for part in (
         "-i /attachments/ansible/extra.ini",
         "--limit site_emea",
@@ -981,7 +987,9 @@ async def test_playbook_step_end_to_end(monkeypatch):
     }
     assert roots["/hegemony/ansible/vault/password-0"] == "resolved-vaultpw\n"
     assert "/hegemony/ansible/callback_plugins/hegemony_results.py" in roots
-    assert "exec ansible-playbook" in roots[RUN_SCRIPT]
+    # Bounded by the step's deadline, which the worker stops the container at.
+    assert "\nbounded ansible-playbook" in roots[RUN_SCRIPT]
+    assert "hegemony_deadline=" in roots[RUN_SCRIPT]
     # Only the step's own role is in the inventory by default.
     assert "x9" not in roots[INVENTORY_FILE]
 
