@@ -738,6 +738,42 @@ async def test_run_scope_includes_every_role(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_scope_leaves_out_other_roles_devices_without_credentials(monkeypatch):
+    """A device the step does not target, in the inventory only through run
+    scope, does not block the play when it has no SSH credentials."""
+    state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
+    ctx = _ctx({"playbook": "site.yml", "inventory_scope": "run"}, [_device("r1")])
+    ctx.target_devices_by_role["monitors"] = [
+        _device("broken", site={"id": "s2", "name": "x", "path": "apac/sg"})
+    ]
+    result = await AnsiblePlaybookHandler().execute(ctx)
+
+    assert result.success is True
+    inventory = json.loads(state["roots"][INVENTORY_FILE])
+    assert set(inventory["all"]["hosts"]) == {"r1", "x9"}
+    groups = inventory["all"]["children"]
+    # Groups only the left-out host was in are gone too.
+    assert "monitors" not in groups
+    assert "site_apac" not in groups
+    assert "/hegemony/ansible/inventory/host_vars/broken.json" not in state["roots"]
+    [note] = [e for e in result.evidence if e["name"] == "ansible_hosts_left_out_baseline"]
+    assert "- broken: access_config.ssh.username_ref is required\n" in note["content_text"]
+
+
+@pytest.mark.asyncio
+async def test_run_scope_still_requires_credentials_for_the_steps_own_targets(monkeypatch):
+    state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
+    ctx = _ctx({"playbook": "site.yml", "inventory_scope": "run"}, [_device("broken")])
+    # Also under a role the step does not target: its own role still decides.
+    ctx.target_devices_by_role["monitors"] = [_device("broken")]
+    result = await AnsiblePlaybookHandler().execute(ctx)
+
+    assert result.success is False
+    assert "device broken: access_config.ssh.username_ref is required" in (result.error or "")
+    assert state["calls"] == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("check_mode", [True, False])
 async def test_a_play_without_results_fails_rather_than_report_no_changes(monkeypatch, check_mode):
     """A missing results file (callback not run, file too big to collect) must not

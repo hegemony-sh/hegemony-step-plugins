@@ -634,7 +634,7 @@ class AnsiblePlaybookHandler(BaseHandler):
         )
 
         try:
-            files = await self._staged_files(ctx, config, inventory, services)
+            files, inventory, left_out = await self._staged_files(ctx, config, inventory, services)
         except ValueError as exc:
             return HandlerResult(
                 success=False,
@@ -660,7 +660,7 @@ class AnsiblePlaybookHandler(BaseHandler):
         if isinstance(outcome, HandlerResult):
             return _explain_default_image_pull_failure(config, outcome)
 
-        return self._result(ctx, config, inventory, outcome)
+        return self._result(ctx, config, inventory, outcome, left_out)
 
     async def _staged_files(
         self,
@@ -668,24 +668,41 @@ class AnsiblePlaybookHandler(BaseHandler):
         config: AnsiblePlaybookConfig,
         inventory: Inventory,
         services: Any,
-    ) -> list[StagedFile]:
+    ) -> tuple[list[StagedFile], Inventory, dict[str, str]]:
+        """The files to stage, the inventory they describe, and the hosts left out.
+
+        A device of one of the step's own target roles must have usable
+        credentials. One that is in the inventory only through inventory
+        scope ``run`` is left out when it has none (host name -> reason), so
+        devices that other steps reach some other way do not block the play.
+        """
         files: list[StagedFile] = [
-            _json_file(INVENTORY_FILE, inventory.document()),
             StagedFile(f"{CALLBACK_DIR}/{CALLBACK_NAME}.py", CALLBACK_SOURCE),
         ]
+        targeted_roles = set(ctx.target_roles)
+        left_out: dict[str, str] = {}
         for index, host in enumerate(inventory.hosts):
             credentials: DeviceCredentials | None = None
-            if config.device_credentials:
-                try:
-                    credentials = await services.resolve_device_credentials(host.device)
-                except ValueError as exc:
-                    raise ValueError(f"device {host.name}: {exc}") from exc
-            variables, key_files = credential_host_vars(
-                host, credentials, index, config.host_key_checking
-            )
+            try:
+                if config.device_credentials:
+                    try:
+                        credentials = await services.resolve_device_credentials(host.device)
+                    except ValueError as exc:
+                        raise ValueError(f"device {host.name}: {exc}") from exc
+                variables, key_files = credential_host_vars(
+                    host, credentials, index, config.host_key_checking
+                )
+            except ValueError as exc:
+                if host.roles & targeted_roles:
+                    raise
+                left_out[host.name] = str(exc).removeprefix(f"device {host.name}: ")
+                continue
             files.extend(key_files)
             if variables:
                 files.append(_json_file(f"{INVENTORY_DIR}/host_vars/{host.name}.json", variables))
+        if left_out:
+            inventory = inventory.without(set(left_out))
+        files.insert(0, _json_file(INVENTORY_FILE, inventory.document()))
 
         secrets = await resolve_secret_values(
             ctx, config.secrets, source="ansible.playbook.secrets"
@@ -726,7 +743,7 @@ class AnsiblePlaybookHandler(BaseHandler):
                 mode=0o755,
             )
         )
-        return files
+        return files, inventory, left_out
 
     def _result(
         self,
@@ -734,6 +751,7 @@ class AnsiblePlaybookHandler(BaseHandler):
         config: AnsiblePlaybookConfig,
         inventory: Inventory,
         outcome: Any,
+        left_out: dict[str, str] | None = None,
     ) -> HandlerResult:
         results = parse_results(outcome.collected.get(RESULTS_FILE))
         collect_error = outcome.collect_errors.get(RESULTS_FILE) or outcome.collect_errors.get(
@@ -773,6 +791,18 @@ class AnsiblePlaybookHandler(BaseHandler):
                     "kind": "step_result",
                     "name": f"ansible_results_missing_{ctx.step_id}",
                     "content_text": f"No structured results: {results.problem}.\n",
+                }
+            )
+        if left_out:
+            evidence.append(
+                {
+                    "kind": "step_result",
+                    "name": f"ansible_hosts_left_out_{ctx.step_id}",
+                    "content_text": (
+                        "Left out of the inventory: in it only through inventory scope "
+                        "'run', not a target of this step, and without usable credentials.\n"
+                        + "".join(f"- {name}: {why}\n" for name, why in sorted(left_out.items()))
+                    ),
                 }
             )
         ignored = [

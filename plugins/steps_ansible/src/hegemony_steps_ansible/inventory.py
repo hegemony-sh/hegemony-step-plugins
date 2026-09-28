@@ -123,6 +123,8 @@ class InventoryHost:
     variables: dict[str, Any] = field(default_factory=dict)
     # Keys of the device's ``ansible_vars`` attribute that were not applied.
     ignored_vars: list[str] = field(default_factory=list)
+    # The flow roles the device is in the inventory for (unsanitized).
+    roles: set[str] = field(default_factory=set)
 
     @property
     def device_id(self) -> str | None:
@@ -140,6 +142,22 @@ class Inventory:
 
     def host_by_name(self) -> dict[str, InventoryHost]:
         return {host.name: host for host in self.hosts}
+
+    def without(self, names: set[str]) -> Inventory:
+        """This inventory minus the hosts named, and the groups left empty."""
+        hosts = [host for host in self.hosts if host.name not in names]
+        alive = {group for host in hosts for group in host.groups}
+        changed = True
+        while changed:
+            changed = False
+            for parent, kids in self.children.items():
+                if parent not in alive and kids & alive:
+                    alive.add(parent)
+                    changed = True
+        children = {
+            parent: kids & alive for parent, kids in self.children.items() if parent in alive
+        }
+        return Inventory(hosts=hosts, children=children)
 
     def document(self) -> dict[str, Any]:
         """The inventory in Ansible's YAML-plugin structure (JSON-serializable).
@@ -283,6 +301,7 @@ def build_inventory(
                 by_identity[identity] = host
                 hosts.append(host)
                 _add_derived_groups(host, dimensions, children)
+            host.roles.add(role)
             if "role" in dimensions and role:
                 host.groups.add(group_name("", role))
 
