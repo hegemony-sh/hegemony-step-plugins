@@ -19,7 +19,8 @@ Add the `.tf` files (and their `.terraform.lock.hcl`) to the flow's
 attachments and set Configuration folder to their folder, or leave it empty
 for the attachments root. Variables are `NAME=value` lines that may use
 templates such as `{{ inputs.service_name }}`; a value that is a JSON list or
-object is passed as that type. Secret variables are always passed as
+object, or `true` or `false`, is passed as that type, and anything else,
+numbers included, as a string (the tool converts it to a number variable). Secret variables are always passed as
 strings, so a JSON secret such as a cloud service-account key fits a
 `string` variable; decode it with `jsondecode()` where the configuration
 needs its fields. Secret variables, provider credentials in
@@ -73,9 +74,13 @@ the container share an 8 MiB budget, with the readable plan ahead of the
 JSON plan used for the counts; when a plan with changes is too large to
 keep, the summary ends with "(the readable plan could not be collected)". The step output
 reports `has_changes`, the counts `add`, `change`, `destroy`, `replace`,
-`import`, and `move`, the changed resource addresses with their actions under
-`resource_changes`, changed `output_changes` names, `drift`, and a
-`summary` line such as `Plan: +3 ~1 -0`. Resource values are never kept: the
+`import`, `move`, `read` (data sources read during apply), and `forget`,
+the changed resource addresses with their actions under `resource_changes`
+(the first 200; `resource_changes_truncated` is then true, and the counts
+still cover all), changed `output_changes` names, `drift` (resources changed
+outside the configuration), and a `summary` line such as
+`Plan: +3 ~1 -0`. A refresh-only plan changes no resource, so its summary
+names the drift instead, such as `Plan: +0 ~0 -0 (3 drifted)`. Resource values are never kept: the
 tool's JSON plan carries them in clear. `outputs` holds the configuration's
 non-sensitive output values as the state held them when the plan was made
 (before its changes), and `sensitive_outputs` the names of the others; a

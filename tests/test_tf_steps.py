@@ -144,6 +144,7 @@ def test_typed_variables():
     assert typed_variable('{"a": 1}') == {"a": 1}
     assert typed_variable("true") is True
     assert typed_variable("10.0.0.1") == "10.0.0.1"
+    assert typed_variable("42") == "42"
     assert typed_variable("[not json") == "[not json"
 
 
@@ -538,6 +539,20 @@ async def test_plan_step_reports_changes(monkeypatch):
     assert f"sh {RUN_SCRIPT}" in create[-1]
     # The exit code and the readable plan are collected before the JSON plan.
     assert state["collected"][:3] == ["/hegemony/out", PLAN_OUTPUTS_DIR, PLAN_JSON_DIR]
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_only_plan_names_the_drift(monkeypatch):
+    plan_json = json.dumps({"resource_drift": [{"address": "a.b"}, {"address": "a.c"}]})
+    _install_docker(
+        monkeypatch,
+        out={"plan-exitcode": b"2", "plan.txt": b"drift\n", PLAN_JSON_FILE: plan_json.encode()},
+    )
+    config = {"state": "ephemeral", "refresh_only": True}
+    result = await TfPlanHandler().execute(_ctx(config, _Services()))
+    assert result.success is True, result.error
+    assert result.summary == "Plan: +0 ~0 -0 (2 drifted)"
+    assert result.output["drift"] == 2
 
 
 @pytest.mark.asyncio

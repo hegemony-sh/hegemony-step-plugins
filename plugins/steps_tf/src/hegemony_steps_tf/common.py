@@ -330,10 +330,11 @@ async def secret_environment(
 
 
 def typed_variable(value: str) -> Any:
-    """A variable value as JSON when it is a JSON list/object/number/bool, else the string.
+    """A variable value as JSON when it is a JSON list, object, ``true`` or ``false``.
 
-    Lets a flow pass ``["r1","r2"]`` to a ``list(string)`` variable; the tool
-    converts a number or bool to a string variable on its own.
+    Anything else, numbers included, stays the string: the tool converts a
+    string to a number variable on its own. Lets a flow pass ``["r1","r2"]``
+    to a ``list(string)`` variable.
     """
     stripped = value.strip()
     if stripped[:1] in {"[", "{"} or stripped in {"true", "false"}:

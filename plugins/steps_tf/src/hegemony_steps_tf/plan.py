@@ -535,6 +535,9 @@ class TfPlanHandler(BaseHandler):
             )
 
         line = plan_line(summary_data) if summary_data else ("changes" if has_changes else "")
+        if config.refresh_only and summary_data.get("drift"):
+            # A refresh-only plan changes no resource: its changes are the drift.
+            line += f" ({summary_data['drift']} drifted)"
         summary = (
             f"Plan: {line}"
             if has_changes
