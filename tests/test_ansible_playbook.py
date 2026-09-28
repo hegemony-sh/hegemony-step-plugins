@@ -27,6 +27,8 @@ from hegemony_step_sdk import (
 from hegemony_steps_ansible.inventory import (
     build_inventory,
     group_name,
+    has_template,
+    literal,
     platform_connection,
 )
 from hegemony_steps_ansible.playbook import (
@@ -77,6 +79,54 @@ def _device(name: str, **extra: Any) -> dict[str, Any]:
     }
     device.update(extra)
     return device
+
+
+# ── template safety ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "plain",
+        "pa{{ss",
+        "{{ lookup('pipe', 'cat /hegemony/ansible/secrets.json') }}",
+        "x{%- if true %}y{% endif %}z",
+        "{# comment #}",
+        "{{{",
+        "}}",
+        "a{'b'}c",
+    ],
+)
+def test_literal_renders_back_to_the_same_text_and_runs_nothing(value):
+    """Ansible templates what it reads from inventory and -e files: an escaped value
+    renders as written, so a password with braces works and an injected expression
+    is plain text."""
+    import jinja2
+
+    escaped = literal(value)
+    assert jinja2.Environment().from_string(escaped).render() == value
+    assert literal({"k": [value]}) == {"k": [escaped]}
+    assert has_template(value) == (escaped != value)
+
+
+def test_device_records_never_reach_ansible_as_templates():
+    injected = "{{ lookup('pipe', 'id') }}"
+    device = _device(
+        "r1",
+        mgmt_host=injected,
+        attributes={
+            "note": injected,
+            "ansible_vars": {"ntp_server": injected, "ansible_network_os": "cisco.ios.ios"},
+        },
+    )
+    [host] = build_inventory({"routers": [device]}).hosts
+
+    assert host.variables["ansible_host"] == literal(injected)
+    assert host.variables["hegemony"]["attributes"]["note"] == literal(injected)
+    # A template in an ansible_vars value is not applied at all.
+    assert "ntp_server" not in host.variables
+    assert host.ignored_vars == ["ntp_server"]
+    assert host.variables["ansible_network_os"] == "cisco.ios.ios"
 
 
 # ── inventory ────────────────────────────────────────────────────────────────
@@ -965,6 +1015,20 @@ async def test_ignored_device_ansible_vars_are_reported(monkeypatch):
     assert inventory["all"]["hosts"]["r1"]["ansible_connection"] != "local"
     [note] = [e for e in result.evidence if e["name"] == "ansible_vars_ignored_baseline"]
     assert "- r1: ansible_connection\n" in note["content_text"]
+
+
+@pytest.mark.asyncio
+async def test_secret_values_are_staged_as_data_not_templates(monkeypatch):
+    state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
+    config = {
+        "playbook": "site.yml",
+        "device_credentials": False,
+        "secrets": {"api_token": "vault://orgs/acme/secrets/{{x}}"},
+    }
+    result = await AnsiblePlaybookHandler().execute(_ctx(config, [_device("r1")]))
+    assert result.success is True, result.error
+    staged = json.loads(state["roots"][SECRETS_FILE])
+    assert staged == {"api_token": literal("resolved-{{x}}")}
 
 
 @pytest.mark.asyncio

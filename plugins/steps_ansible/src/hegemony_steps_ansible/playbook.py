@@ -55,6 +55,7 @@ from .inventory import (
     Inventory,
     InventoryHost,
     build_inventory,
+    literal,
 )
 from .results import (
     CALLBACK_NAME,
@@ -746,7 +747,10 @@ class AnsiblePlaybookHandler(BaseHandler):
                 continue
             files.extend(key_files)
             if variables:
-                files.append(_json_file(f"{INVENTORY_DIR}/host_vars/{host.name}.json", variables))
+                # Logins and passwords are data: escaped so Ansible never runs them.
+                files.append(
+                    _json_file(f"{INVENTORY_DIR}/host_vars/{host.name}.json", literal(variables))
+                )
         if left_out:
             inventory = inventory.without(set(left_out))
         files.insert(0, _json_file(INVENTORY_FILE, inventory.document()))
@@ -758,7 +762,7 @@ class AnsiblePlaybookHandler(BaseHandler):
             values = await resolve_secret_values(
                 ctx, names, source="ansible.playbook.group_secrets"
             )
-            files.append(_json_file(f"{INVENTORY_DIR}/group_vars/{group}.json", values))
+            files.append(_json_file(f"{INVENTORY_DIR}/group_vars/{group}.json", literal(values)))
 
         vault_secrets: dict[str, str] = {}
         if config.vault_password.strip():
@@ -777,7 +781,8 @@ class AnsiblePlaybookHandler(BaseHandler):
         if config.extra_vars:
             files.append(_json_file(EXTRA_VARS_FILE, config.extra_vars))
         if secrets:
-            files.append(_json_file(SECRETS_FILE, secrets))
+            # Secret values are data: escaped so Ansible never runs them.
+            files.append(_json_file(SECRETS_FILE, literal(secrets)))
         files.append(
             StagedFile(
                 RUN_SCRIPT,
@@ -867,7 +872,8 @@ class AnsiblePlaybookHandler(BaseHandler):
                         "ignored. Connection, login, become, ssh-argument, proxy and "
                         "executable variables come from Hegemony only; of the ansible_* "
                         f"variables, only {', '.join(sorted(DEVICE_ANSIBLE_VARS_ALLOWED))} "
-                        "may be set there.\n" + "".join(f"- {line}\n" for line in ignored)
+                        "may be set there, and no value may contain template syntax "
+                        "({{, {% or {#).\n" + "".join(f"- {line}\n" for line in ignored)
                     ),
                 }
             )

@@ -57,6 +57,40 @@ DEVICE_ANSIBLE_VARS_ALLOWED = frozenset(
 )
 
 
+#: Where a Jinja expression, statement or comment starts. Ansible templates
+#: every string it reads from inventory, host_vars, group_vars and ``-e @file``
+#: files, so text from device records or secrets that contains one would run.
+_TEMPLATE_START_RE = re.compile(r"\{[{%#]")
+
+
+def has_template(value: Any) -> bool:
+    """Whether ``value`` (strings inside mappings and lists too) holds template syntax."""
+    if isinstance(value, str):
+        return bool(_TEMPLATE_START_RE.search(value))
+    if isinstance(value, Mapping):
+        return any(has_template(key) or has_template(item) for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return any(has_template(item) for item in value)
+    return False
+
+
+def literal(value: Any) -> Any:
+    """``value`` with every template start escaped, so Ansible renders it as written.
+
+    ``{{`` becomes ``{{ '{{' }}`` (and likewise ``{%`` and ``{#``), which Jinja
+    renders back to exactly ``{{``: the value is kept, and nothing in it runs.
+    Text from device records and secrets goes through this before Ansible
+    reads it; a password with braces in it then also works.
+    """
+    if isinstance(value, str):
+        return _TEMPLATE_START_RE.sub(lambda match: "{{ '" + match.group(0) + "' }}", value)
+    if isinstance(value, Mapping):
+        return {literal(key): literal(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [literal(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class PlatformConnection:
     """How Ansible reaches a device of one platform."""
@@ -225,7 +259,7 @@ def _host_variables(
     """The host's inventory variables, and the attribute keys left out."""
     variables: dict[str, Any] = {}
     if device.get("mgmt_host"):
-        variables["ansible_host"] = device["mgmt_host"]
+        variables["ansible_host"] = literal(device["mgmt_host"])
     port = device.get("mgmt_port")
     if isinstance(port, int) and not isinstance(port, bool) and port > 0:
         variables["ansible_port"] = port
@@ -236,24 +270,29 @@ def _host_variables(
         # paramiko is deprecated in ansible-core 2.19 and removed in 2.21.
         variables["ansible_network_cli_ssh_type"] = "libssh"
     site = device.get("site")
-    variables["hegemony"] = {
-        "id": device.get("id"),
-        "name": device.get("name"),
-        "display_name": device.get("display_name"),
-        "platform": device.get("platform"),
-        "provider_id": device.get("provider_id"),
-        "external_id": device.get("external_id"),
-        "site": site.get("path") if isinstance(site, Mapping) else None,
-        "mgmt_ips": device.get("mgmt_ips") or [],
-        "tags": dict(device.get("tags") or {}),
-        "attributes": dict(device.get("attributes") or {}),
-    }
+    # Device records are data, never templates (see literal()).
+    variables["hegemony"] = literal(
+        {
+            "id": device.get("id"),
+            "name": device.get("name"),
+            "display_name": device.get("display_name"),
+            "platform": device.get("platform"),
+            "provider_id": device.get("provider_id"),
+            "external_id": device.get("external_id"),
+            "site": site.get("path") if isinstance(site, Mapping) else None,
+            "mgmt_ips": device.get("mgmt_ips") or [],
+            "tags": dict(device.get("tags") or {}),
+            "attributes": dict(device.get("attributes") or {}),
+        }
+    )
     attributes = device.get("attributes")
     overrides = attributes.get(ANSIBLE_VARS_ATTRIBUTE) if isinstance(attributes, Mapping) else None
     ignored: list[str] = []
     if isinstance(overrides, Mapping):
         for key, value in overrides.items():
-            if _device_var_allowed(str(key)):
+            # A template in a value would run in the step's container when the
+            # play reads the variable, with the run's credentials beside it.
+            if _device_var_allowed(str(key)) and not has_template(value):
                 variables[str(key)] = value
             else:
                 ignored.append(str(key))

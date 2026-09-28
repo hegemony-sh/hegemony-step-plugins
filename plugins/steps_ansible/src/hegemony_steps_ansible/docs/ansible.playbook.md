@@ -34,8 +34,15 @@ variables only `ansible_python_interpreter`, `ansible_network_os`,
 `ansible_port`, `ansible_connection`, the login and become variables, ssh
 arguments, proxy commands, executables) comes from Hegemony only, since
 whoever edits a device's attributes need not be allowed to run commands in
-the step's container; any other `ansible_*` key there, and `hegemony`, is
-ignored and listed in an `ansible_vars_ignored_<step id>` artifact. Groups
+the step's container; any other `ansible_*` key there, `hegemony`, and any
+key whose value contains template syntax (`{{`, `{%` or `{#`) is ignored and
+listed in an `ansible_vars_ignored_<step id>` artifact. Ansible templates what
+it reads from the inventory and from variable files, so everything the step
+takes from device records (the management address, the `hegemony` variable
+with the device's attributes) and from secrets (logins, passwords, Secrets,
+Group secrets) is written escaped: Ansible reads it back exactly as written,
+and nothing in it runs. Extra variables are the flow author's and are
+templated as usual. Groups
 are derived from:
 
 - role: the flow's role names, e.g. `routers`;
