@@ -47,6 +47,7 @@ from .services import (
     HandlerServices,
     ShellResult,
     ShellTransport,
+    StateBackendAccess,
     Transport,
 )
 from .transports import (
@@ -54,6 +55,7 @@ from .transports import (
     TRANSPORT_ENTRY_POINT_GROUP,
     ConnectionCancellationRegistry,
     DeviceConnectionSpec,
+    DeviceCredentials,
     JumpHostSpec,
     TransportOutputSink,
     TransportRegistry,
@@ -82,6 +84,7 @@ __all__ = [
     "ConnectionCancellationRegistry",
     "ContainerRuntime",
     "DeviceConnectionSpec",
+    "DeviceCredentials",
     "HandlerContext",
     "HandlerResult",
     "HandlerServices",
@@ -91,6 +94,7 @@ __all__ = [
     "ProbeResult",
     "ShellResult",
     "ShellTransport",
+    "StateBackendAccess",
     "StepHandlerRegistry",
     "StepKind",
     "Transport",

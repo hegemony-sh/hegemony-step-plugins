@@ -38,6 +38,8 @@ members = [
     "plugins/steps_cisco_iosxe",
     "plugins/steps_shell",
     "plugins/steps_monitor",
+    "plugins/steps_ansible",
+    "plugins/steps_tf",
     "probes/probe_net",
     "transports/transport_netmiko",
     "transports/transport_scrapli",
@@ -55,6 +57,8 @@ hegemony-steps-flow = { workspace = true }
 hegemony-steps-cisco-iosxe = { workspace = true }
 hegemony-steps-shell = { workspace = true }
 hegemony-steps-monitor = { workspace = true }
+hegemony-steps-ansible = { workspace = true }
+hegemony-steps-tf = { workspace = true }
 hegemony-probe-net = { workspace = true }
 hegemony-transport-netmiko = { workspace = true }
 hegemony-transport-scrapli = { workspace = true }
@@ -82,6 +86,8 @@ known-first-party = [
     "hegemony_steps_cisco_iosxe",
     "hegemony_steps_shell",
     "hegemony_steps_monitor",
+    "hegemony_steps_ansible",
+    "hegemony_steps_tf",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
     "hegemony_transport_scrapli",

@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import venv
 from pathlib import Path
 
@@ -32,6 +33,8 @@ EXPECTED_MODULES = (
     "hegemony_steps_cisco_iosxe",
     "hegemony_steps_shell",
     "hegemony_steps_monitor",
+    "hegemony_steps_ansible",
+    "hegemony_steps_tf",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
     "hegemony_transport_scrapli",
@@ -47,7 +50,10 @@ EXPECTED_ENTRY_POINTS = {
     "container",
     "flow",
     "cisco.iosxe",
+    "shell",
     "monitor",
+    "ansible",
+    "tf",
 }
 
 # Entry-point names under hegemony.probes (probe wheels).
@@ -63,11 +69,47 @@ EXPECTED_TRANSPORT_ENTRY_POINTS = {
 }
 
 
+_EXPECTED_BY_GROUP = {
+    "hegemony.step_handlers": EXPECTED_ENTRY_POINTS,
+    "hegemony.probes": EXPECTED_PROBE_ENTRY_POINTS,
+    "hegemony.device_transports": EXPECTED_TRANSPORT_ENTRY_POINTS,
+}
+
+
+def source_gaps() -> list[str]:
+    """Modules and entry points the source packages declare but the lists above lack.
+
+    The lists are written out rather than read from the built wheels, so a
+    wheel that lost its entry point fails the smoke test; this check makes
+    sure a new package cannot be left out of them.
+    """
+    gaps: list[str] = []
+    for package_dir in PACKAGE_DIRS:
+        for module_dir in sorted((package_dir / "src").iterdir()):
+            if (module_dir / "__init__.py").is_file() and module_dir.name not in EXPECTED_MODULES:
+                gaps.append(f"EXPECTED_MODULES lacks {module_dir.name}")
+        with (package_dir / "pyproject.toml").open("rb") as fh:
+            project = tomllib.load(fh).get("project", {})
+        for group, entries in project.get("entry-points", {}).items():
+            expected = _EXPECTED_BY_GROUP.get(group)
+            if expected is None:
+                continue
+            gaps.extend(
+                f"expected entry points of {group} lack {name!r}"
+                for name in sorted(entries)
+                if name not in expected
+            )
+    return gaps
+
+
 def _python_bin(venv_dir: Path) -> Path:
     return venv_dir / ("Scripts" if sys.platform == "win32" else "bin") / "python"
 
 
 def main() -> None:
+    gaps = source_gaps()
+    if gaps:
+        raise SystemExit("Update the smoke test's expectations: " + "; ".join(gaps))
     wheels = sorted((ROOT / "dist").glob("*.whl"))
     if len(wheels) != len(PACKAGE_DIRS):
         raise SystemExit(f"Expected {len(PACKAGE_DIRS)} wheels in dist/, found {len(wheels)}")

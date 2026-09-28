@@ -7,6 +7,7 @@ members = [
     "hegemony-probe-net",
     "hegemony-step-plugins-workspace",
     "hegemony-step-sdk",
+    "hegemony-steps-ansible",
     "hegemony-steps-cisco-iosxe",
     "hegemony-steps-container",
     "hegemony-steps-evidence",
@@ -16,6 +17,7 @@ members = [
     "hegemony-steps-netcli",
     "hegemony-steps-probe",
     "hegemony-steps-shell",
+    "hegemony-steps-tf",
     "hegemony-transport-asyncssh",
     "hegemony-transport-netmiko",
     "hegemony-transport-scrapli",
@@ -431,6 +433,21 @@ dependencies = [
 requires-dist = [{ name = "pydantic", specifier = ">=2.7" }]
 
 [[package]]
+name = "hegemony-steps-ansible"
+version = "0.5.0"
+source = { editable = "plugins/steps_ansible" }
+dependencies = [
+    { name = "hegemony-step-sdk" },
+    { name = "hegemony-steps-container" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "hegemony-steps-container", editable = "plugins/steps_container" },
+]
+
+[[package]]
 name = "hegemony-steps-cisco-iosxe"
 version = "0.5.0"
 source = { editable = "plugins/steps_cisco_iosxe" }
@@ -558,6 +575,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
+
+[[package]]
+name = "hegemony-steps-tf"
+version = "0.5.0"
+source = { editable = "plugins/steps_tf" }
+dependencies = [
+    { name = "hegemony-step-sdk" },
+    { name = "hegemony-steps-container" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "hegemony-steps-container", editable = "plugins/steps_container" },
+]
 
 [[package]]
 name = "hegemony-transport-asyncssh"

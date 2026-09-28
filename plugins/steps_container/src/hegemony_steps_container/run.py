@@ -7,6 +7,7 @@
 import asyncio
 import codecs
 import contextlib
+import ipaddress
 import json
 import logging
 import os
@@ -36,6 +37,18 @@ from .pull_progress import (
     format_size,
     require_docker_host,
     stream_pull,
+)
+from .runner import (
+    COLLECT_GRACE_SECONDS,
+    CONTEXT_PATH,
+    MAX_COLLECTED_BYTES,
+    OUTPUT_DIR,
+    SECRET_FILES_DIR,
+    ContainerJob,
+    ContainerJobResult,
+    StagedFile,
+    resolve_secret_values,
+    secret_map_errors,
 )
 
 logger = logging.getLogger(__name__)
@@ -283,6 +296,24 @@ class RunContainerConfig(BaseModel):
             "x_col_span": 2,
         },
     )
+    secrets: dict[str, str] = Field(
+        default_factory=dict,
+        title="Secret files",
+        description=(
+            "NAME=secret reference, one per line (a {{ secret('...') }} template or a "
+            "bare reference such as vault://orgs/acme/secrets/db/password). Each value "
+            "is written to /run/secrets/NAME inside the container and redacted from "
+            "output; unlike environment variables, it never appears in the sandbox's "
+            "container metadata."
+        ),
+        json_schema_extra={
+            "x_widget": "env-vars",
+            "x_placeholder": "db_password={{ secret('vault://orgs/acme/secrets/db/password') }}",
+            "x_rows": 2,
+            "x_col_span": 2,
+            "x_advanced": True,
+        },
+    )
     mounted_artifacts: list[str] | None = Field(
         default=None,
         title="Artifacts",
@@ -521,6 +552,22 @@ def _optional_str(value: Any, default: str = "") -> str:
     reaching here at all means the caller skipped it.
     """
     return value.strip() if isinstance(value, str) and value.strip() else default
+
+
+_HOST_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+
+def _valid_host_name(name: str) -> str:
+    """A host name for ``--add-host``; anything else is a platform bug, not user input."""
+    if not isinstance(name, str) or not _HOST_NAME_RE.match(name):
+        raise ValueError(f"invalid extra host name {name!r}")
+    return name
+
+
+def _valid_ip(address: str) -> str:
+    """An IP address for ``--add-host`` (IPv6 in brackets, as docker expects)."""
+    parsed = ipaddress.ip_address(address)
+    return f"[{parsed}]" if parsed.version == 6 else str(parsed)
 
 
 def _validate_absolute_container_path(field_name: str, value: Any, errors: list[str]) -> None:
@@ -881,6 +928,135 @@ def _stage_step_output_snapshots(staging_root: str, step_outputs: dict[str, Any]
     return staged_files
 
 
+#: Largest ``output.json`` a container.run step may hand back as ``output.data``.
+#: Step outputs are chained into later steps' templates and snapshots, so they
+#: stay small; bulk results belong in the new-artifacts folder.
+MAX_OUTPUT_DATA_BYTES = 64 * 1024
+
+#: Collected file that becomes a container.run step's ``output.data``.
+OUTPUT_DATA_PATH = f"{OUTPUT_DIR}/output.json"
+
+
+def _context_file(ctx: HandlerContext) -> StagedFile:
+    """The step I/O contract's context file: which run and step this is.
+
+    No flow inputs: ``ctx.params`` holds every input of the run, including
+    values the step never references and plaintext resolved from secret
+    templates, and lacks the defaults ``{{ inputs.NAME }}`` applies. A step
+    that needs an input passes it through its own templated config (``env``).
+    """
+    payload = {
+        "run_id": ctx.run_id,
+        "flow_id": ctx.flow_id,
+        "flow_name": ctx.flow_name,
+        "run_name": ctx.run_name,
+        "step_id": ctx.step_id,
+        "step_run_id": ctx.step_run_id,
+        "attempt": ctx.attempt,
+        "tags": dict(ctx.tags),
+    }
+    return StagedFile(
+        path=CONTEXT_PATH,
+        content=json.dumps(payload, indent=2, sort_keys=True, default=str, ensure_ascii=False)
+        + "\n",
+    )
+
+
+def _write_job_file(staging_root: str, staged_file: StagedFile) -> None:
+    """Write one job file into the root staging tree at its container path."""
+    path = staged_file.path
+    if not isinstance(path, str) or not path.startswith("/") or "\0" in path:
+        raise ValueError(f"Job file path must be absolute: {path!r}")
+    if ".." in path.split("/"):
+        raise ValueError(f"Job file path must not contain '..': {path!r}")
+    local_path = os.path.normpath(os.path.join(staging_root, path.lstrip("/")))
+    if not local_path.startswith(staging_root + os.sep):
+        raise ValueError(f"Invalid job file staging target: {path!r}")
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+    content = staged_file.content
+    if isinstance(content, str):
+        content = content.encode("utf-8")
+    with open(local_path, "wb") as fh:
+        fh.write(content)
+    os.chmod(local_path, staged_file.mode)
+
+
+def _read_output_data(collected: dict[str, bytes]) -> tuple[dict[str, Any] | None, str | None]:
+    """Parse ``/hegemony/out/output.json``; returns ``(data, problem)``."""
+    raw = collected.get(OUTPUT_DATA_PATH)
+    if raw is None:
+        return None, None
+    if len(raw) > MAX_OUTPUT_DATA_BYTES:
+        return None, (
+            f"{OUTPUT_DATA_PATH} is {len(raw)} bytes, over the {MAX_OUTPUT_DATA_BYTES}-byte "
+            "limit for step output; write bulk results to the new-artifacts folder instead."
+        )
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        return None, f"{OUTPUT_DATA_PATH} is not valid UTF-8 JSON: {exc}"
+    if not isinstance(data, dict):
+        return None, f"{OUTPUT_DATA_PATH} must contain a JSON object, not {type(data).__name__}."
+    return data, None
+
+
+def _container_run_result(ctx: HandlerContext, outcome: ContainerJobResult) -> HandlerResult:
+    """Map a completed container run onto ``container.run``'s step result."""
+    exit_code = outcome.exit_code
+    success = exit_code == 0
+    summary = (
+        f"Container exited with code {exit_code}"
+        if success
+        else f"Container failed with exit code {exit_code}"
+    )
+    if outcome.skipped_artifacts:
+        summary += f" ({outcome.skipped_artifacts} artifact(s) skipped)"
+
+    output: dict[str, Any] = {
+        "stdout": outcome.stdout[:MAX_CHAIN_OUTPUT_CHARS],
+        "stderr": outcome.stderr[:MAX_CHAIN_OUTPUT_CHARS],
+    }
+    evidence = list(outcome.evidence)
+    data, problem = _read_output_data(outcome.collected)
+    if data is not None:
+        output["data"] = data
+    if outcome.collect_errors:
+        evidence.append(
+            {
+                "kind": "step_result",
+                "name": f"output_not_collected_{ctx.step_id}",
+                "content_text": "Could not copy the step's results out of the container, so "
+                "output.data may be missing:\n"
+                + "".join(
+                    f"- {path}: {reason}\n"
+                    for path, reason in sorted(outcome.collect_errors.items())
+                ),
+            }
+        )
+    if problem is not None:
+        evidence.append(
+            {
+                "kind": "step_result",
+                "name": f"output_data_rejected_{ctx.step_id}",
+                "content_text": problem + "\n",
+            }
+        )
+
+    return HandlerResult(
+        success=success,
+        summary=summary,
+        error=None if success else f"Exit code {exit_code}",
+        metrics={
+            "exit_code": exit_code,
+            "duration_seconds": outcome.duration_seconds,
+            "image": outcome.image,
+            "skipped_artifacts": outcome.skipped_artifacts,
+        },
+        evidence=evidence,
+        output=output,
+    )
+
+
 class RunContainerHandler(BaseHandler):
     """Handler for running commands inside Docker containers.
 
@@ -894,6 +1070,9 @@ class RunContainerHandler(BaseHandler):
     description = "Run a command inside a Docker container on the Docker-in-Docker sandbox."
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
+    container_backed = True
+    # Secret references reach the handler as written (see resolve_secret_values).
+    raw_config_keys = frozenset({"secrets"})
     config_model = RunContainerConfig
     default_config = {"timeout_seconds": 300}
 
@@ -945,6 +1124,8 @@ class RunContainerHandler(BaseHandler):
         # Inline files are intentionally unsupported (flow attachments only).
         if "files" in config:
             errors.append("'files' is no longer supported; use flow attachments + mounted_files")
+
+        errors.extend(secret_map_errors("secrets", config.get("secrets")))
 
         entrypoint = config.get("entrypoint")
         if entrypoint is not None:
@@ -1188,6 +1369,8 @@ class RunContainerHandler(BaseHandler):
         shared_workspace_volume: str | None = None,
         docker_network: str = "",
         docker_mac: str = "",
+        handler_id: str = "container.run",
+        extra_hosts: dict[str, str] | None = None,
     ) -> list[str]:
         """Build the docker create command args from config.
 
@@ -1256,6 +1439,11 @@ class RunContainerHandler(BaseHandler):
         elif network_disabled:
             args.append("--network=none")
 
+        # Platform-supplied /etc/hosts entries (never from step config): names
+        # a sandbox container cannot resolve itself, such as the platform API.
+        for host_name, address in sorted((extra_hosts or {}).items()):
+            args.extend(["--add-host", f"{_valid_host_name(host_name)}:{_valid_ip(address)}"])
+
         args.extend(
             [
                 "--memory",
@@ -1269,7 +1457,7 @@ class RunContainerHandler(BaseHandler):
                 "--label",
                 f"hegemony.step_run_id={step_run_id}",
                 "--label",
-                "hegemony.handler_id=container.run",
+                f"hegemony.handler_id={handler_id}",
             ]
         )
 
@@ -1389,6 +1577,49 @@ class RunContainerHandler(BaseHandler):
                 summary="Config validation failed",
             )
 
+        try:
+            secrets = await resolve_secret_values(
+                ctx, ctx.config.get("secrets"), source="container.run.secrets"
+            )
+            files = [
+                _context_file(ctx),
+                *(
+                    StagedFile(path=f"{SECRET_FILES_DIR}/{name}", content=value)
+                    for name, value in secrets.items()
+                ),
+            ]
+        except ValueError as e:
+            return HandlerResult(
+                success=False,
+                error=f"Invalid container config: {e}",
+                summary="Config validation failed",
+            )
+        job = ContainerJob(
+            config=ctx.config,
+            files=files,
+            collect=[OUTPUT_DIR],
+            handler_id=self.handler_id,
+        )
+        outcome = await self.run_job(ctx, job)
+        if isinstance(outcome, HandlerResult):
+            return outcome
+        return _container_run_result(ctx, outcome)
+
+    async def run_job(
+        self, ctx: HandlerContext, job: ContainerJob
+    ) -> HandlerResult | ContainerJobResult:
+        """Run ``job`` on the sandbox daemon and return its outcome.
+
+        The machinery behind ``container.run`` and every tool handler built on
+        :mod:`hegemony_steps_container.runner`: preflight cleanup, attachment
+        and step-output staging, the image pull, ``docker create``, staging of
+        ``job.files``, the attached run with live output, collection of
+        ``job.collect``, artifact harvest, and cleanup. Returns a
+        :class:`ContainerJobResult` once the container has run, whatever its
+        exit code; a failure before or around the run is a failed
+        :class:`HandlerResult`. ``job.config`` must already be validated.
+        """
+        config = job.config
         services = ctx.require_services()
         runtime = services.container_runtime()
 
@@ -1408,19 +1639,17 @@ class RunContainerHandler(BaseHandler):
 
         docker_bin = runtime.docker_bin
         docker_env = _docker_env(docker_host)
-        image = ctx.config.get("image", "")
-        timeout = ctx.config.get("timeout_seconds", ctx.timeout_seconds)
-        working_dir = ctx.config.get("working_dir", "/workspace")
+        image = config.get("image", "")
+        timeout = config.get("timeout_seconds", ctx.timeout_seconds)
+        working_dir = config.get("working_dir", "/workspace")
         # Where flow attachments are copied inside the container. Defaults to
         # /attachments; steps may override to any absolute path. Trailing
         # slashes are normalized off so the docker cp target is well-formed.
-        attachments_path = _normalize_container_root(
-            ctx.config.get("attachments_path"), "/attachments"
-        )
-        artifacts_path = _normalize_container_root(ctx.config.get("artifacts_path"), "/artifacts")
-        new_artifacts_path = _resolve_new_artifacts_path(ctx.config, artifacts_path)
+        attachments_path = _normalize_container_root(config.get("attachments_path"), "/attachments")
+        artifacts_path = _normalize_container_root(config.get("artifacts_path"), "/artifacts")
+        new_artifacts_path = _resolve_new_artifacts_path(config, artifacts_path)
         step_outputs_path = _normalize_container_root(
-            ctx.config.get("step_outputs_path"), "/step_outputs"
+            config.get("step_outputs_path"), "/step_outputs"
         )
 
         # Container name with short IDs for uniqueness
@@ -1436,6 +1665,7 @@ class RunContainerHandler(BaseHandler):
         artifact_staging_dir: str | None = None
         generated_artifacts_staging_dir: str | None = None
         step_outputs_staging_dir: str | None = None
+        root_dirs_staging_parent: str | None = None
         root_dirs_staging_dir: str | None = None
 
         async def _safe_emit_progress(message: str, attrs: dict[str, object] | None = None) -> None:
@@ -1529,7 +1759,7 @@ class RunContainerHandler(BaseHandler):
             # 4. Best-effort snapshot of completed step outputs for filesystem access.
             # This is additive context for container commands, so failures here should
             # not turn a previously-working container step into a hard failure.
-            raw_mounted_step_outputs = ctx.config.get("mounted_step_outputs")
+            raw_mounted_step_outputs = config.get("mounted_step_outputs")
             selected_step_output_steps = (
                 None
                 if raw_mounted_step_outputs is None
@@ -1540,7 +1770,12 @@ class RunContainerHandler(BaseHandler):
                 }
             )
             try:
-                fetched_step_outputs = await services.fetch_run_step_outputs(ctx.run_id)
+                # An explicit empty selection mounts nothing; skip the fetch.
+                fetched_step_outputs = (
+                    {}
+                    if selected_step_output_steps is not None and not selected_step_output_steps
+                    else await services.fetch_run_step_outputs(ctx.run_id)
+                )
                 step_outputs = (
                     fetched_step_outputs
                     if selected_step_output_steps is None
@@ -1584,7 +1819,7 @@ class RunContainerHandler(BaseHandler):
             # 5. Provision upstream step artifacts. New flows use
             # mounted_artifacts + artifacts_path; legacy flows may still carry
             # mount_step_artifacts objects with per-entry relative paths.
-            raw_mounted_artifacts = ctx.config.get("mounted_artifacts")
+            raw_mounted_artifacts = config.get("mounted_artifacts")
             selected_artifact_steps = (
                 None
                 if raw_mounted_artifacts is None
@@ -1596,7 +1831,7 @@ class RunContainerHandler(BaseHandler):
             )
             legacy_mount_step_artifacts: list[dict[str, Any]] = []
             if raw_mounted_artifacts is None:
-                raw_legacy_mounts = ctx.config.get("mount_step_artifacts") or []
+                raw_legacy_mounts = config.get("mount_step_artifacts") or []
                 if isinstance(raw_legacy_mounts, list):
                     legacy_mount_step_artifacts = [
                         entry for entry in raw_legacy_mounts if isinstance(entry, dict)
@@ -1792,7 +2027,7 @@ class RunContainerHandler(BaseHandler):
                 else:
                     shared_workspace_path = workspace_dir
             docker_args = self.build_docker_args(
-                config=ctx.config,
+                config=config,
                 container_name=container_name,
                 run_id=ctx.run_id,
                 step_run_id=ctx.step_run_id,
@@ -1800,6 +2035,8 @@ class RunContainerHandler(BaseHandler):
                 shared_workspace_volume=shared_workspace_volume,
                 docker_network=runtime.docker_network,
                 docker_mac=runtime.docker_mac,
+                handler_id=job.handler_id,
+                extra_hosts=job.extra_hosts,
             )
             # 8. Create the container
             create_proc = await self._run_docker(
@@ -1819,8 +2056,14 @@ class RunContainerHandler(BaseHandler):
             # files to copy yet. This keeps /attachments, /artifacts, the
             # dedicated new-artifacts upload subfolder, /step_outputs, and the
             # working directory visible/usable from inside the container.
-            root_dirs_staging_dir = f"{staging_dir}-roots"
-            os.makedirs(root_dirs_staging_dir, exist_ok=True)
+            # The tree holds job files such as secrets at their container mode
+            # (0644), so it lives under a private (0700) parent no other user of
+            # the worker can enter. The tree's own directories keep 0755: they
+            # become directories of the container, the root included.
+            root_dirs_staging_parent = tempfile.mkdtemp(prefix="hegemony-container-roots-")
+            root_dirs_staging_dir = os.path.join(root_dirs_staging_parent, "root")
+            os.mkdir(root_dirs_staging_dir)
+            os.chmod(root_dirs_staging_dir, 0o755)
             for container_root in {
                 attachments_path,
                 artifacts_path,
@@ -1829,6 +2072,19 @@ class RunContainerHandler(BaseHandler):
                 working_dir,
             }:
                 _stage_container_root_dir(root_dirs_staging_dir, container_root)
+            # The job's own files (step I/O contract, tool inventories and
+            # scripts) ride in the same copy as the roots: one docker cp, and
+            # their parent directories are created on the way.
+            for staged_file in job.files:
+                _write_job_file(root_dirs_staging_dir, staged_file)
+            for collect_root in job.collect:
+                _stage_container_root_dir(root_dirs_staging_dir, collect_root)
+                # Writable by whatever user the image runs as: docker cp
+                # creates it root-owned, and results are written by the step.
+                os.chmod(
+                    os.path.join(root_dirs_staging_dir, collect_root.strip().lstrip("/")),
+                    0o777,
+                )
 
             if any(os.scandir(root_dirs_staging_dir)):
                 cp_proc = await self._run_docker(
@@ -2170,6 +2426,18 @@ class RunContainerHandler(BaseHandler):
 
             duration = time.monotonic() - start_time
 
+            # Structured results the step wrote (step I/O contract). Collected
+            # before the artifact harvest and never fatal here: what could not
+            # be collected is reported in collect_errors for the handler.
+            collected, collect_errors = await self._collect_job_paths(
+                docker_bin,
+                container_name,
+                job.collect,
+                docker_env=docker_env,
+                deadline=deadline,
+                ctx=ctx,
+            )
+
             generated_text_artifacts: list[dict[str, Any]] = []
             skipped_generated_artifacts: list[dict[str, Any]] = []
             generated_artifacts_cap: int | None = None
@@ -2268,29 +2536,17 @@ class RunContainerHandler(BaseHandler):
                     )
                 )
 
-            success = exit_code == 0
-            summary = (
-                f"Container exited with code {exit_code}"
-                if success
-                else f"Container failed with exit code {exit_code}"
-            )
-            if skipped_generated_artifacts:
-                summary += f" ({len(skipped_generated_artifacts)} artifact(s) skipped)"
-            return HandlerResult(
-                success=success,
-                summary=summary,
-                error=None if success else f"Exit code {exit_code}",
-                metrics={
-                    "exit_code": exit_code,
-                    "duration_seconds": round(duration, 2),
-                    "image": image,
-                    "skipped_artifacts": len(skipped_generated_artifacts),
-                },
+            return ContainerJobResult(
+                exit_code=exit_code,
+                stdout=stdout_out,
+                stderr=stderr_out,
+                truncated=truncated,
+                duration_seconds=round(duration, 2),
+                image=image,
                 evidence=evidence,
-                output={
-                    "stdout": stdout_out[:MAX_CHAIN_OUTPUT_CHARS],
-                    "stderr": stderr_out[:MAX_CHAIN_OUTPUT_CHARS],
-                },
+                skipped_artifacts=len(skipped_generated_artifacts),
+                collected=collected,
+                collect_errors=collect_errors,
             )
 
         except subprocess.TimeoutExpired:
@@ -2359,8 +2615,8 @@ class RunContainerHandler(BaseHandler):
                 logger.warning(f"Cleanup: step outputs staging removal failed: {e}")
 
             try:
-                if root_dirs_staging_dir and os.path.exists(root_dirs_staging_dir):
-                    shutil.rmtree(root_dirs_staging_dir, ignore_errors=True)
+                if root_dirs_staging_parent and os.path.exists(root_dirs_staging_parent):
+                    shutil.rmtree(root_dirs_staging_parent, ignore_errors=True)
             except Exception as e:
                 logger.warning(f"Cleanup: container root staging removal failed: {e}")
 
@@ -2368,6 +2624,102 @@ class RunContainerHandler(BaseHandler):
                 "Cleanup complete",
                 attrs={"milestone": "cleanup_complete"},
             )
+
+    async def _collect_job_paths(
+        self,
+        docker_bin: str,
+        container_name: str,
+        paths: list[str],
+        *,
+        docker_env: dict[str, str],
+        deadline: float,
+        ctx: HandlerContext,
+    ) -> tuple[dict[str, bytes], dict[str, str]]:
+        """Copy ``paths`` (container directories) out of the exited container.
+
+        Returns file contents keyed by absolute container path, and what could
+        not be collected (path -> reason). Bounded by
+        :data:`MAX_COLLECTED_BYTES`; symlinks and anything that resolves
+        outside the copy are skipped for the same reason the artifact harvest
+        skips them (``docker cp`` preserves links, and the worker must never
+        follow one onto its own filesystem). The copy gets at least
+        :data:`COLLECT_GRACE_SECONDS`, whatever is left of the step's deadline.
+        """
+        collected: dict[str, bytes] = {}
+        errors: dict[str, str] = {}
+        budget = MAX_COLLECTED_BYTES
+        for container_path in paths:
+            root = container_path.rstrip("/") or "/"
+            local_dir = tempfile.mkdtemp(prefix="hegemony-collect-")
+            try:
+                proc = await self._run_docker(
+                    docker_bin,
+                    ["cp", f"{container_name}:{root}/.", local_dir],
+                    env=docker_env,
+                    timeout=max(deadline - time.monotonic(), COLLECT_GRACE_SECONDS),
+                )
+                if proc.returncode != 0:
+                    # The runner staged every collect root, so this is not "the
+                    # step wrote nothing": the copy itself failed.
+                    stderr = proc.stderr.strip()[:500]
+                    errors[root] = f"docker cp failed: {stderr or f'exit code {proc.returncode}'}"
+                    logger.warning(
+                        "Collecting container results failed",
+                        extra={
+                            "run_id": ctx.run_id,
+                            "step_run_id": ctx.step_run_id,
+                            "path": root,
+                            "stderr": stderr,
+                        },
+                    )
+                    continue
+                resolved_root = os.path.realpath(local_dir)
+                for walk_root, dirs, files in os.walk(local_dir):
+                    dirs.sort()
+                    files.sort()
+                    for file_name in files:
+                        file_path = os.path.join(walk_root, file_name)
+                        if (
+                            os.path.islink(file_path)
+                            or not os.path.isfile(file_path)
+                            or not _is_within_directory(resolved_root, os.path.realpath(file_path))
+                        ):
+                            continue
+                        size = os.path.getsize(file_path)
+                        relative = os.path.relpath(file_path, local_dir).replace(os.sep, "/")
+                        if size > budget:
+                            errors[f"{root.rstrip('/')}/{relative}"] = (
+                                f"{size} bytes, over the {MAX_COLLECTED_BYTES}-byte "
+                                "collection budget"
+                            )
+                            logger.warning(
+                                "Collected file skipped: over the collection budget",
+                                extra={
+                                    "run_id": ctx.run_id,
+                                    "step_run_id": ctx.step_run_id,
+                                    "path": file_path,
+                                    "size": size,
+                                },
+                            )
+                            continue
+                        with open(file_path, "rb") as fh:
+                            data = fh.read()
+                        budget -= len(data)
+                        collected[f"{root.rstrip('/')}/{relative}"] = data
+            except Exception as e:  # noqa: BLE001 - reported, never fatal
+                errors[root] = f"{type(e).__name__}: {e}"[:500]
+                logger.warning(
+                    "Collecting container results failed",
+                    extra={
+                        "run_id": ctx.run_id,
+                        "step_run_id": ctx.step_run_id,
+                        "path": root,
+                        "error": str(e),
+                    },
+                )
+            finally:
+                shutil.rmtree(local_dir, ignore_errors=True)
+        return collected, errors
 
     async def _pull_image(
         self,

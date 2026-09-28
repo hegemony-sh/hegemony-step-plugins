@@ -16,13 +16,16 @@ This mirrors ``hegemony_notification_sdk.NotificationServices``.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .probes import ProbeResult
 
 if TYPE_CHECKING:
     import httpx
+
+    from .transports import DeviceCredentials
 
 
 class CommandResult(Protocol):
@@ -140,6 +143,29 @@ class ContainerRuntime:
     docker_mac: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class StateBackendAccess:
+    """How a step container reaches one platform-managed Terraform/OpenTofu state.
+
+    Served by :meth:`HandlerServices.open_state_backend` for the tools' ``http``
+    backend: the addresses and methods map one-to-one onto its ``TF_HTTP_*``
+    settings. ``password`` is a short-lived token limited to this state and this
+    step; the host registers it for redaction and revokes it when the context
+    exits (and again when the run ends). ``extra_hosts`` maps host names in the
+    addresses to IP addresses the container must be given (``--add-host``),
+    because a sandbox container may not resolve the platform's service names.
+    """
+
+    address: str
+    lock_address: str
+    unlock_address: str
+    username: str
+    password: str = field(repr=False)
+    lock_method: str = "POST"
+    unlock_method: str = "DELETE"
+    extra_hosts: dict[str, str] = field(default_factory=dict)
+
+
 @runtime_checkable
 class HandlerServices(Protocol):
     """Host facilities injected into ``HandlerContext.services``.
@@ -167,6 +193,32 @@ class HandlerServices(Protocol):
 
     async def resolve_secret_ref(self, ref: str | None, *, source: str) -> str | None:
         """Resolve a single ``{{ secret/env/file(...) }}`` reference (or pass ``None`` through)."""
+        ...
+
+    async def resolve_device_credentials(self, device: dict[str, Any]) -> DeviceCredentials:
+        """Resolve ``device.access_config`` into login material for an external tool.
+
+        For handlers that hand credentials to a tool running in a step container
+        (an Ansible inventory, say) instead of dialling the device through
+        :meth:`connect`. The host resolves the references in the run's org and
+        registers every secret value for redaction before returning.
+
+        Raises ``ValueError`` when the device's references are missing or
+        malformed (no username, neither a password nor a private key, a broken
+        jump-host block).
+        """
+        ...
+
+    def open_state_backend(
+        self, name: str, *, ttl_seconds: int
+    ) -> AbstractAsyncContextManager[StateBackendAccess]:
+        """Open access to the run org's managed state ``name`` for this step's container.
+
+        Only for handlers declaring ``platform_api_access``. The state is created
+        on first write. Access lasts at most ``ttl_seconds`` and is revoked when
+        the context exits. Raises ``RuntimeError`` when the platform cannot serve
+        managed state (no encryption key configured, API unreachable).
+        """
         ...
 
     def validate_secret_ref(

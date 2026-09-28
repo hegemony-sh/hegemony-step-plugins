@@ -357,6 +357,25 @@ class BaseHandler(ABC):
     default_timeout_seconds: int | None = None
     # Which target selectors the editor offers for this handler's steps.
     targeting: HandlerTargeting = HandlerTargeting()
+    # True for handlers that launch step containers on the platform's sandbox
+    # (container.run and the tool handlers built on its runner). The host gives
+    # such steps the container treatment: the flow's egress policy is enforced
+    # on the container's network, options must live in the step's params, and
+    # the editor renders the egress policy editor. Worker-side handlers keep
+    # False; their own dials go through ``services.enforce_egress``.
+    container_backed: bool = False
+    # True for container-backed handlers whose container calls the platform API
+    # itself (tf.* steps use the managed state backend). The host lets such a
+    # step's container reach the API endpoint through the flow's egress policy;
+    # what the container may do there is limited by the short-lived token it
+    # gets from ``services.open_state_backend``.
+    platform_api_access: bool = False
+    # True for handlers that keep run-scoped state keyed by the step's node id
+    # (tf.plan's working directory under /shared, tf.apply's lookup of the
+    # plan step's output). Two executions of one node at the same time would
+    # share that state, so the host refuses such steps in the body of a loop
+    # with parallel iterations, as it does for set_vars.
+    node_scoped_state: bool = False
     # Pydantic model describing the handler's config: the single source for UI
     # field rendering (JSON schema + x_widget/x_show_when extensions) and for
     # save/run-time validation. None until a handler declares one.

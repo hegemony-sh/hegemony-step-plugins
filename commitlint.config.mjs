@@ -19,8 +19,33 @@ const SEMVER =
 // The @semantic-release/git message template from .releaserc.json, exactly.
 const RELEASE_COMMIT = new RegExp(`^chore\\(release\\): ${SEMVER} \\[skip ci\\]$`);
 
+// Scopes are free-form, so nobody has to look up a list: one or more
+// comma-separated names (sdk, core-transports, sdk,docs), each lower-case
+// letters, digits and single dashes, at most SCOPE_MAX_LENGTH characters. A
+// fixed list kept rejecting new areas and sending authors to reword and
+// force-push. Same rule as the hegemony host repository.
+const SCOPE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SCOPE_MAX_LENGTH = 20;
+
+function scopeFormat({ scope }) {
+  if (!scope) {
+    return [true];
+  }
+  const bad = scope
+    .split(",")
+    .filter((name) => !SCOPE.test(name) || name.length > SCOPE_MAX_LENGTH);
+  return [
+    bad.length === 0,
+    `scope names must be lower-case letters, digits and single dashes, at most ` +
+      `${SCOPE_MAX_LENGTH} characters, comma-separated without spaces ` +
+      `(e.g. sdk, core-transports, sdk,docs); not: ${bad.map((name) => JSON.stringify(name)).join(", ")}`,
+  ];
+}
+
 export default {
   extends: ["@commitlint/config-conventional"],
+
+  plugins: [{ rules: { "scope-format": scopeFormat } }],
 
   // semantic-release commits the generated CHANGELOG entry as the body of its
   // release commit, whose lines run far past body-max-line-length (every
@@ -32,20 +57,7 @@ export default {
   ignores: [(message) => RELEASE_COMMIT.test(message.split("\n")[0])],
 
   rules: {
-    // Allowed scopes for this repository
-    "scope-enum": [
-      2, // error
-      "always",
-      [
-        "sdk",
-        "vault",
-        "1password",
-        "ci",
-        "deps",
-        "docs",
-        "release",
-        "tests",
-      ],
-    ],
+    // Any scope, in one shape: see SCOPE above.
+    "scope-format": [2, "always"],
   },
 };

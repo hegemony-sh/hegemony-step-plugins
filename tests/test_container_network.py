@@ -13,6 +13,8 @@ network — argv byte-identical to before the field existed.
 
 from __future__ import annotations
 
+import pytest
+
 from hegemony_step_sdk import ContainerRuntime
 from hegemony_steps_container.run import RunContainerHandler
 
@@ -176,3 +178,28 @@ def test_runtime_mac_defaults_empty() -> None:
         docker_host="tcp://dind:2375",
     )
     assert runtime.docker_mac == ""
+
+
+def test_extra_hosts_become_add_host_entries() -> None:
+    args = RunContainerHandler().build_docker_args(
+        config=_BASE_CONFIG,
+        container_name="hegemony-test",
+        run_id="run-1",
+        step_run_id="step-1",
+        extra_hosts={"api": "172.20.0.5", "api6": "fd00::5"},
+    )
+    pairs = [args[i + 1] for i, tok in enumerate(args) if tok == "--add-host"]
+    assert pairs == ["api:172.20.0.5", "api6:[fd00::5]"]
+    assert "--add-host" not in _args(_BASE_CONFIG)
+
+
+def test_extra_hosts_refuse_malformed_entries() -> None:
+    for hosts in ({"api host": "172.20.0.5"}, {"api": "not-an-ip"}, {"api": "1.2.3.4:80"}):
+        with pytest.raises(ValueError):
+            RunContainerHandler().build_docker_args(
+                config=_BASE_CONFIG,
+                container_name="hegemony-test",
+                run_id="run-1",
+                step_run_id="step-1",
+                extra_hosts=hosts,
+            )
