@@ -410,6 +410,39 @@ def test_ansible_env_leaves_the_repository_ansible_cfg_alone():
     assert "ANSIBLE_CALLBACKS_ENABLED" not in env
 
 
+@pytest.mark.parametrize(
+    ("mode", "checking", "auto_add"),
+    [("accept_new", "True", "True"), ("strict", "True", "False"), ("off", "False", "False")],
+)
+def test_ansible_env_maps_host_key_checking(mode, checking, auto_add):
+    env = _ansible_env(
+        AnsiblePlaybookConfig.model_validate({"playbook": "p.yml", "host_key_checking": mode}),
+        {},
+    )
+    assert env["ANSIBLE_HOST_KEY_CHECKING"] == checking
+    for name in (
+        "ANSIBLE_HOST_KEY_AUTO_ADD",
+        "ANSIBLE_LIBSSH_HOST_KEY_AUTO_ADD",
+        "ANSIBLE_PARAMIKO_HOST_KEY_AUTO_ADD",
+    ):
+        assert env[name] == auto_add
+
+
+def test_ansible_env_gives_galaxy_a_writable_target_only_with_requirements():
+    """ansible-galaxy runs as the image's unprivileged user."""
+    plain = _ansible_env(AnsiblePlaybookConfig.model_validate({"playbook": "p.yml"}), {})
+    assert "ANSIBLE_COLLECTIONS_PATH" not in plain
+    assert "ANSIBLE_ROLES_PATH" not in plain
+    env = _ansible_env(
+        AnsiblePlaybookConfig.model_validate(
+            {"playbook": "p.yml", "requirements_file": "requirements.yml"}
+        ),
+        {},
+    )
+    assert env["ANSIBLE_COLLECTIONS_PATH"].startswith("/tmp/hegemony-ansible/collections:")
+    assert env["ANSIBLE_ROLES_PATH"].startswith("/tmp/hegemony-ansible/roles:")
+
+
 def test_the_results_callback_survives_a_step_env_callback_path():
     env = _ansible_env(
         AnsiblePlaybookConfig.model_validate({"playbook": "p.yml"}),
