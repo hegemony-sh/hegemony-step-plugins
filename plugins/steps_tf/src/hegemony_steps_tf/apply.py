@@ -35,14 +35,16 @@ from .common import (
     KEEP_DIR,
     PLAN_FILE,
     RUN_SCRIPT,
+    LockTimeout,
     TfContainerConfig,
+    common_errors,
     container_timeout,
     managed_state_access,
     script_header,
+    secret_environment,
     shared_workspace_mounted,
     tool_env,
 )
-from .plan import common_errors, secret_environment
 
 OUTPUTS_FILE = f"{OUTPUT_DIR}/outputs.json"
 #: What became of the state when the tool could not save it: "recovered" (saved
@@ -79,12 +81,7 @@ class TfApplyConfig(TfContainerConfig):
         ),
         json_schema_extra={"x_advanced": True, "x_col_span": 2},
     )
-    lock_timeout: str = Field(
-        default="300s",
-        title="Lock timeout",
-        description="How long to wait for the state lock (-lock-timeout), e.g. 300s or 5m.",
-        json_schema_extra={"x_advanced": True},
-    )
+    lock_timeout: LockTimeout = "300s"
 
 
 def build_apply_script(engine: str, workdir: str, lock_timeout: str) -> str:
@@ -197,11 +194,7 @@ class TfApplyHandler(BaseHandler):
         errors = super().validate_config(config)
         if errors:
             return errors
-        lock_timeout = str(config.get("lock_timeout") or "300s")
-        if not lock_timeout[:-1].isdigit() or lock_timeout[-1] not in "sm":
-            errors.append("'lock_timeout' must look like 300s or 5m")
-        errors += common_errors(config)
-        return errors
+        return common_errors(config)
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         errors = self.validate_config(ctx.config)

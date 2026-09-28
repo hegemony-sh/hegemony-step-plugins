@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import posixpath
 import shlex
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import Field
 
@@ -29,7 +29,6 @@ from hegemony_step_sdk import (
     StateBackendAccess,
     StepKind,
 )
-from hegemony_steps_container.run import RunContainerHandler
 from hegemony_steps_container.runner import (
     OUTPUT_DIR,
     ContainerJob,
@@ -48,26 +47,25 @@ from .common import (
     BINARIES,
     HTTP_BACKEND_OVERRIDE,
     LOCAL_BACKEND_OVERRIDE,
-    MIN_ENCRYPTION_PASSPHRASE,
     PLAN_FILE,
     RUN_SCRIPT,
     SECRET_VARS_FILE,
     VARS_FILE,
     Engine,
+    LockTimeout,
+    StateMode,
     TfContainerConfig,
     address_list_errors,
     backend_config_errors,
     backend_config_file,
+    common_errors,
     container_timeout,
     default_image,
-    encryption_hcl,
     managed_state_access,
     relative_path_error,
     script_header,
-    secret_env_errors,
-    secret_env_file,
+    secret_environment,
     shared_workspace_mounted,
-    state_backend_env,
     state_name_errors,
     tool_env,
     typed_variable,
@@ -75,8 +73,6 @@ from .common import (
     workdir_for,
 )
 from .summary import plan_line, summarize_plan
-
-StateMode = Literal["managed", "backend", "ephemeral"]
 
 PLAN_EXIT_FILE = f"{OUTPUT_DIR}/plan-exitcode"
 PLAN_TEXT_FILE = f"{OUTPUT_DIR}/plan.txt"
@@ -202,12 +198,7 @@ class TfPlanConfig(TfContainerConfig):
         description="Resource addresses to force-replace (-replace), one per line.",
         json_schema_extra={"x_widget": "commands", "x_rows": 2, "x_advanced": True},
     )
-    lock_timeout: str = Field(
-        default="300s",
-        title="Lock timeout",
-        description="How long to wait for the state lock (-lock-timeout), e.g. 300s or 5m.",
-        json_schema_extra={"x_advanced": True},
-    )
+    lock_timeout: LockTimeout = "300s"
     state_encryption_key: str = Field(
         default="",
         title="State encryption key",
@@ -225,18 +216,6 @@ class TfPlanConfig(TfContainerConfig):
         ),
         json_schema_extra={"x_placeholder": "ghcr.io/opentofu/opentofu:1.12.6", "x_advanced": True},
     )
-
-
-def common_errors(config: dict[str, Any]) -> list[str]:
-    """Checks shared by both steps on the container side."""
-    errors = secret_env_errors(config.get("secret_env"))
-    image = config.get("image") or default_image(str(config.get("engine") or "opentofu"))
-    errors.extend(
-        RunContainerHandler().validate_config(
-            container_config_from(config, image=str(image), command=[])
-        )
-    )
-    return errors
 
 
 def build_plan_script(
@@ -356,9 +335,6 @@ class TfPlanHandler(BaseHandler):
             errors.append("'replace' cannot be combined with 'destroy'")
         if config.get("state_encryption_key") and config.get("engine") == "terraform":
             errors.append("'state_encryption_key' needs the opentofu engine")
-        lock_timeout = str(config.get("lock_timeout") or "300s")
-        if not lock_timeout[:-1].isdigit() or lock_timeout[-1] not in "sm":
-            errors.append("'lock_timeout' must look like 300s or 5m")
         errors += common_errors(config)
         return errors
 
@@ -545,26 +521,3 @@ class TfPlanHandler(BaseHandler):
             evidence=evidence,
             output=output,
         )
-
-
-async def secret_environment(
-    ctx: HandlerContext,
-    secret_env: dict[str, str],
-    encryption_key: str,
-    access: StateBackendAccess | None = None,
-) -> list[StagedFile]:
-    """The sourced env file: provider credentials, managed-state access, TF_ENCRYPTION."""
-    values = await resolve_secret_values(ctx, secret_env, source="tf.secret_env")
-    if access is not None:
-        values.update(state_backend_env(access))
-    if encryption_key.strip():
-        resolved = await resolve_secret_values(
-            ctx, {"key": encryption_key}, source="tf.state_encryption_key"
-        )
-        passphrase = resolved["key"]
-        if len(passphrase) < MIN_ENCRYPTION_PASSPHRASE:
-            raise ValueError(
-                f"the state encryption key must be at least {MIN_ENCRYPTION_PASSPHRASE} characters"
-            )
-        values["TF_ENCRYPTION"] = encryption_hcl(passphrase)
-    return [secret_env_file(values)] if values else []

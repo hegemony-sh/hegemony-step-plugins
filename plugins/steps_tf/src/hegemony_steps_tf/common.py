@@ -20,18 +20,32 @@ import re
 import shlex
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field
 
 from hegemony_step_sdk import HandlerContext, StateBackendAccess
+from hegemony_steps_container.run import RunContainerHandler
 from hegemony_steps_container.runner import (
+    OUTPUT_DIR,
     ContainerExecutionConfig,
     StagedFile,
+    container_config_from,
+    resolve_secret_values,
     secret_map_errors,
 )
 
 Engine = Literal["opentofu", "terraform"]
+StateMode = Literal["managed", "backend", "ephemeral"]
+
+LockTimeout = Annotated[
+    str,
+    Field(
+        title="Lock timeout",
+        description="How long to wait for the state lock (-lock-timeout), e.g. 300s or 5m.",
+        json_schema_extra={"x_advanced": True},
+    ),
+]
 
 #: Exact, immutable default images. OpenTofu's image has sh and bash (its docs
 #: prefer copying the binary into your own image — images/opentofu-runner does
@@ -234,6 +248,49 @@ def secret_env_errors(value: object) -> list[str]:
     return secret_map_errors("secret_env", value) + env_map_errors("secret_env", value)
 
 
+def lock_timeout_errors(value: object) -> list[str]:
+    lock_timeout = str(value or "300s")
+    if not lock_timeout[:-1].isdigit() or lock_timeout[-1] not in "sm":
+        return ["'lock_timeout' must look like 300s or 5m"]
+    return []
+
+
+def common_errors(config: dict[str, Any]) -> list[str]:
+    """Checks shared by both steps: lock timeout, credentials, the container half."""
+    errors = lock_timeout_errors(config.get("lock_timeout"))
+    errors += secret_env_errors(config.get("secret_env"))
+    image = config.get("image") or default_image(str(config.get("engine") or "opentofu"))
+    errors.extend(
+        RunContainerHandler().validate_config(
+            container_config_from(config, image=str(image), command=[])
+        )
+    )
+    return errors
+
+
+async def secret_environment(
+    ctx: HandlerContext,
+    secret_env: dict[str, str],
+    encryption_key: str,
+    access: StateBackendAccess | None = None,
+) -> list[StagedFile]:
+    """The sourced env file: provider credentials, managed-state access, TF_ENCRYPTION."""
+    values = await resolve_secret_values(ctx, secret_env, source="tf.secret_env")
+    if access is not None:
+        values.update(state_backend_env(access))
+    if encryption_key.strip():
+        resolved = await resolve_secret_values(
+            ctx, {"key": encryption_key}, source="tf.state_encryption_key"
+        )
+        passphrase = resolved["key"]
+        if len(passphrase) < MIN_ENCRYPTION_PASSPHRASE:
+            raise ValueError(
+                f"the state encryption key must be at least {MIN_ENCRYPTION_PASSPHRASE} characters"
+            )
+        values["TF_ENCRYPTION"] = encryption_hcl(passphrase)
+    return [secret_env_file(values)] if values else []
+
+
 def typed_variable(value: str) -> Any:
     """A variable value as JSON when it is a JSON list/object/number/bool, else the string.
 
@@ -304,5 +361,5 @@ def script_header() -> list[str]:
         "set -eu",
         "umask 077",
         f"if [ -f {SECRET_ENV_FILE} ]; then . {SECRET_ENV_FILE}; fi",
-        "mkdir -p /hegemony/out",
+        f"mkdir -p {OUTPUT_DIR}",
     ]
