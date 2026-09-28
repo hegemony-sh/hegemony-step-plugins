@@ -42,10 +42,13 @@ from hegemony_steps_ansible.playbook import (
 from hegemony_steps_ansible.results import (
     CALLBACK_NAME,
     CALLBACK_SOURCE,
+    MAX_RESULTS_BYTES,
+    MAX_TASK_RECORDS,
     RESULTS_FILE,
     parse_results,
 )
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
+from hegemony_steps_container.runner import MAX_COLLECTED_BYTES
 
 
 def _device(name: str, **extra: Any) -> dict[str, Any]:
@@ -439,8 +442,41 @@ def test_callback_records_tasks_and_recap(monkeypatch, tmp_path):
     assert '"a": 1' in results.tasks[0]["diff"]
 
 
+def test_callback_keeps_its_results_file_within_the_collection_budget(monkeypatch, tmp_path):
+    """The runner skips a collected file over its 8 MiB budget, which would leave
+    the step without results: the callback trims, keeping the recap."""
+    results_path = str(tmp_path / "out" / "results.json")
+    plugin = _load_callback(monkeypatch, results_path)
+    plugin.v2_playbook_on_play_start(_Named("Big"))
+    for index in range(MAX_TASK_RECORDS):
+        plugin.v2_runner_on_ok(
+            SimpleNamespace(
+                host=_Named(f"h{index % 50}"),
+                task=_Named(f"t{index}"),
+                result={"changed": True, "diff": "d" * 20_000, "msg": "m" * 2_000},
+            )
+        )
+
+    class Stats:
+        processed = {f"h{index}": 1 for index in range(50)}
+        custom = {}
+
+        def summarize(self, host):
+            return {"ok": 1, "changed": 1, "failures": 0, "unreachable": 0, "skipped": 0}
+
+    plugin.v2_playbook_on_stats(Stats())
+
+    raw = (tmp_path / "out" / "results.json").read_bytes()
+    assert len(raw) <= MAX_RESULTS_BYTES < MAX_COLLECTED_BYTES
+    results = parse_results(raw)
+    assert results.completed is True
+    assert len(results.hosts_where("changed")) == 50
+    assert results.trimmed[0] == "diffs"
+    assert all("diff" not in task for task in results.tasks)
+
+
 def test_parse_results_tolerates_missing_or_broken_files():
-    assert parse_results(None).problem == "the playbook produced no results file"
+    assert "no results file was collected" in (parse_results(None).problem or "")
     assert "not valid JSON" in (parse_results(b"{").problem or "")
     assert parse_results(b"[]").problem == "the results file is not a JSON object"
 
@@ -615,14 +651,37 @@ async def test_playbook_step_end_to_end(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_scope_includes_every_role(monkeypatch):
-    state = _install_docker(monkeypatch, collected=None, exit_code=0)
+    state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
     result = await AnsiblePlaybookHandler().execute(
         _ctx({"playbook": "site.yml", "inventory_scope": "run"}, [_device("r1")])
     )
     inventory = json.loads(state["roots"][INVENTORY_FILE])
     assert set(inventory["all"]["hosts"]) == {"r1", "x9"}
     assert result.success is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("check_mode", [True, False])
+async def test_a_play_without_results_fails_rather_than_report_no_changes(monkeypatch, check_mode):
+    """A missing results file (callback not run, file too big to collect) must not
+    read as "nothing changed": a check-mode gate would skip its approval."""
+    _install_docker(monkeypatch, collected=None, exit_code=0)
+    result = await AnsiblePlaybookHandler().execute(
+        _ctx({"playbook": "site.yml", "check_mode": check_mode}, [_device("r1")])
+    )
+    assert result.success is False
+    assert "Whether any host changed is unknown" in (result.error or "")
+    assert result.output["changed"] is None
     assert any(e["name"] == "ansible_results_missing_baseline" for e in result.evidence)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_play_without_results_reports_changes_as_unknown(monkeypatch):
+    _install_docker(monkeypatch, collected=None, exit_code=4)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+    assert result.success is False
+    assert "exited with code 4" in (result.error or "")
+    assert result.output["changed"] is None
 
 
 @pytest.mark.asyncio
@@ -638,7 +697,7 @@ async def test_device_without_credentials_fails_before_docker(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_device_credentials_can_be_turned_off(monkeypatch):
-    state = _install_docker(monkeypatch, collected=None, exit_code=0)
+    state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
     result = await AnsiblePlaybookHandler().execute(
         _ctx({"playbook": "site.yml", "device_credentials": False}, [_device("broken")])
     )

@@ -71,12 +71,19 @@ read `steps.NODE_ID.output.changed` (true when any host changed),
 under `hosts`, and `stats`: values the play published with the `set_stats`
 module. Check mode with "Show differences" makes a dry run: branch on
 `steps.NODE_ID.output.changed` to skip an approval when nothing would change.
+`changed` is null (unknown) when the play produced no results, so compare it
+with `== false`, not `not`. Very large results are trimmed to fit (diffs
+first, then long messages, then task records); the play recap and the counts
+are always complete, and `results_trimmed` names what was left out.
 
 ## When It Fails
 
-The step succeeds only when ansible-playbook exits with 0. Exit code 2 means
-a host failed, 4 means a host was unreachable or the playbook did not parse;
-the error names the code. The step also fails before running anything when
+The step succeeds only when ansible-playbook exits with 0 and its results
+were collected. Exit code 2 means a host failed, 4 means a host was
+unreachable or the playbook did not parse; the error names the code. A play
+that exits with 0 without results (the results callback did not run, for
+example because the playbook's own `ansible.cfg` or image disabled it) fails
+too: whether any host changed is then unknown. The step also fails before running anything when
 the config is invalid, a device has no usable credentials, a jump host has
 only a password or a host, user name or port that is not plain (a host name
 or IP address; a user name of letters, digits and `. _ @ + -`), or a secret

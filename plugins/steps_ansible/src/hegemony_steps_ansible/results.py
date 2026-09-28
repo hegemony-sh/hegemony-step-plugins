@@ -30,6 +30,12 @@ RESULTS_FILE = "/hegemony/out/ansible-results.json"
 MAX_TASK_RECORDS = 2000
 MAX_MESSAGE_CHARS = 2000
 MAX_DIFF_CHARS = 20_000
+#: Size bound of the whole results file. The runner collects at most 8 MiB per
+#: step and skips a file that does not fit, so the callback keeps well below it:
+#: an uncollected file would leave the step without results.
+MAX_RESULTS_BYTES = 4 * 1024 * 1024
+#: Message length kept when the file must shrink.
+TRIMMED_MESSAGE_CHARS = 200
 
 CALLBACK_SOURCE = Template('''\
 # SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
@@ -46,6 +52,8 @@ RESULTS_FILE = "$results_file"
 MAX_TASK_RECORDS = $max_tasks
 MAX_MESSAGE_CHARS = $max_message
 MAX_DIFF_CHARS = $max_diff
+MAX_RESULTS_BYTES = $max_bytes
+TRIMMED_MESSAGE_CHARS = $trimmed_message
 
 
 def _clip(value, limit):
@@ -113,15 +121,53 @@ class CallbackModule(CallbackBase):
             "custom": getattr(stats, "custom", {}) or {},
             "tasks": self._tasks,
             "dropped_task_records": self._dropped,
+            "trimmed": [],
         }
+        text = self._fit(payload)
         os.makedirs(os.path.dirname(RESULTS_FILE), exist_ok=True)
         with open(RESULTS_FILE, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, default=str)
+            fh.write(text)
+
+    @staticmethod
+    def _fit(payload):
+        """Serialize, shrinking the least useful parts until it fits the budget.
+
+        The recap always stays: it is what the step's changed/failed hosts come
+        from. Then diffs go, then long messages, then task records, then the
+        set_stats data.
+        """
+        text = json.dumps(payload, default=str)
+        tasks = payload["tasks"]
+        if len(text) > MAX_RESULTS_BYTES:
+            for entry in tasks:
+                entry.pop("diff", None)
+            payload["trimmed"].append("diffs")
+            text = json.dumps(payload, default=str)
+        if len(text) > MAX_RESULTS_BYTES:
+            for entry in tasks:
+                if "msg" in entry:
+                    entry["msg"] = _clip(entry["msg"], TRIMMED_MESSAGE_CHARS)
+            payload["trimmed"].append("messages")
+            text = json.dumps(payload, default=str)
+        while len(text) > MAX_RESULTS_BYTES and tasks:
+            keep = len(tasks) // 2
+            payload["dropped_task_records"] += len(tasks) - keep
+            del tasks[keep:]
+            if "task records" not in payload["trimmed"]:
+                payload["trimmed"].append("task records")
+            text = json.dumps(payload, default=str)
+        if len(text) > MAX_RESULTS_BYTES:
+            payload["custom"] = {}
+            payload["trimmed"].append("set_stats data")
+            text = json.dumps(payload, default=str)
+        return text
 ''').substitute(
     results_file=RESULTS_FILE,
     max_tasks=MAX_TASK_RECORDS,
     max_message=MAX_MESSAGE_CHARS,
     max_diff=MAX_DIFF_CHARS,
+    max_bytes=MAX_RESULTS_BYTES,
+    trimmed_message=TRIMMED_MESSAGE_CHARS,
 )
 
 #: ansible-playbook exit codes worth naming in a summary.
@@ -154,6 +200,8 @@ class PlaybookResults:
     custom: dict[str, Any] = field(default_factory=dict)
     tasks: list[dict[str, Any]] = field(default_factory=list)
     dropped_task_records: int = 0
+    #: What the callback left out to stay within its size budget.
+    trimmed: list[str] = field(default_factory=list)
     problem: str | None = None
 
     def hosts_where(self, key: str) -> list[str]:
@@ -166,7 +214,12 @@ class PlaybookResults:
 def parse_results(raw: bytes | None) -> PlaybookResults:
     """Parse the callback's JSON; a missing or broken file yields an empty result."""
     if raw is None:
-        return PlaybookResults(problem="the playbook produced no results file")
+        return PlaybookResults(
+            problem=(
+                "no results file was collected (the results callback did not run, the "
+                "play stopped before its recap, or the file could not be read back)"
+            )
+        )
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -176,6 +229,7 @@ def parse_results(raw: bytes | None) -> PlaybookResults:
     hosts = data.get("hosts")
     custom = data.get("custom")
     tasks = data.get("tasks")
+    trimmed = data.get("trimmed")
     return PlaybookResults(
         completed=data.get("completed") is True,
         hosts={
@@ -186,6 +240,7 @@ def parse_results(raw: bytes | None) -> PlaybookResults:
         custom=custom if isinstance(custom, dict) else {},
         tasks=[task for task in tasks if isinstance(task, dict)] if isinstance(tasks, list) else [],
         dropped_task_records=int(data.get("dropped_task_records") or 0),
+        trimmed=[str(item) for item in trimmed] if isinstance(trimmed, list) else [],
     )
 
 

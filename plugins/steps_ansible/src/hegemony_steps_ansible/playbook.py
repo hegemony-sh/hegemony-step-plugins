@@ -745,25 +745,50 @@ class AnsiblePlaybookHandler(BaseHandler):
                     "content_text": f"No structured results: {results.problem}.\n",
                 }
             )
+        if results.trimmed:
+            evidence.append(
+                {
+                    "kind": "step_result",
+                    "name": f"ansible_results_trimmed_{ctx.step_id}",
+                    "content_text": (
+                        "The structured results were too large and left out: "
+                        f"{', '.join(results.trimmed)}. The play recap is complete; "
+                        "the full task output is in the container output.\n"
+                    ),
+                }
+            )
 
         changed = results.hosts_where("changed")
         failed = results.hosts_where("failures")
         unreachable = results.hosts_where("unreachable")
         exit_code = outcome.exit_code
-        output = _bounded_output(
-            {
-                "exit_code": exit_code,
-                "check_mode": config.check_mode,
-                "changed": bool(changed),
-                "hosts": results.hosts,
-                "changed_hosts": changed,
-                "failed_hosts": failed,
-                "unreachable_hosts": unreachable,
-                "stats": results.custom,
-            }
-        )
-        success = exit_code == 0
+        raw_output: dict[str, Any] = {
+            "exit_code": exit_code,
+            "check_mode": config.check_mode,
+            # Unknown (null), never a guessed "no changes", without the recap: a
+            # check-mode gate branching on it must not skip an approval.
+            "changed": bool(changed) if results.completed else None,
+            "hosts": results.hosts,
+            "changed_hosts": changed,
+            "failed_hosts": failed,
+            "unreachable_hosts": unreachable,
+            "stats": results.custom,
+        }
+        if results.trimmed:
+            raw_output["results_trimmed"] = results.trimmed
+        output = _bounded_output(raw_output)
         mode = " (check mode)" if config.check_mode else ""
+        meaning = EXIT_CODE_MEANINGS.get(exit_code, "unexpected exit code")
+        error: str | None = None
+        if exit_code != 0:
+            error = f"ansible-playbook exited with code {exit_code} ({meaning})"
+        elif not results.completed:
+            error = (
+                "ansible-playbook exited with code 0, but the step has no results from it: "
+                f"{results.problem or 'the play did not finish'}. Whether any host changed "
+                "is unknown, so the step fails instead of reporting no changes."
+            )
+        success = error is None
         if results.completed:
             summary = (
                 f"{config.playbook}{mode}: {len(results.hosts)} host(s), {len(changed)} changed, "
@@ -771,11 +796,10 @@ class AnsiblePlaybookHandler(BaseHandler):
             )
         else:
             summary = f"{config.playbook}{mode}: ansible-playbook exited with code {exit_code}"
-        meaning = EXIT_CODE_MEANINGS.get(exit_code, "unexpected exit code")
         return HandlerResult(
             success=success,
             summary=summary,
-            error=None if success else f"ansible-playbook exited with code {exit_code} ({meaning})",
+            error=error,
             metrics={
                 "exit_code": exit_code,
                 "duration_seconds": outcome.duration_seconds,
