@@ -65,7 +65,9 @@ from .results import (
 )
 
 #: First-party execution image: ansible-core, libssh, sshpass, and the common
-#: network collections (built from images/ansible-runner in this repository).
+#: network collections. Built from images/ansible-runner in this repository and
+#: not published by the release pipeline: it must be built and pushed to a
+#: registry the sandbox can pull from (see the handler docs).
 DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.5"
 
 ATTACHMENTS_ROOT = "/attachments"
@@ -529,6 +531,25 @@ def _bounded_output(output: dict[str, Any]) -> dict[str, Any]:
     return output
 
 
+def _explain_default_image_pull_failure(
+    config: AnsiblePlaybookConfig, result: HandlerResult
+) -> HandlerResult:
+    """Say how to get the default image when the sandbox could not pull it."""
+    if config.image.strip() != DEFAULT_IMAGE or not (result.summary or "").startswith(
+        "Failed to pull image"
+    ):
+        return result
+    result.error = (
+        f"The default execution image {DEFAULT_IMAGE} could not be pulled. It is not "
+        "published with the release: build it from images/ansible-runner in "
+        "hegemony-step-plugins and push it to a registry the sandbox can pull from "
+        f"(docker build -t {DEFAULT_IMAGE} images/ansible-runner && docker push "
+        f"{DEFAULT_IMAGE}, or a tag in your own registry), or set Execution image to an "
+        f"Ansible image you host. {result.error or ''}"
+    ).strip()
+    return result
+
+
 class AnsiblePlaybookHandler(BaseHandler):
     """Run an Ansible playbook against the step's targets, inventory generated."""
 
@@ -636,7 +657,7 @@ class AnsiblePlaybookHandler(BaseHandler):
         )
         outcome = await run_container_job(ctx, job)
         if isinstance(outcome, HandlerResult):
-            return outcome
+            return _explain_default_image_pull_failure(config, outcome)
 
         return self._result(ctx, config, inventory, outcome)
 

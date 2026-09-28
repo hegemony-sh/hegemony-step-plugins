@@ -76,6 +76,29 @@ with `== false`, not `not`. Very large results are trimmed to fit (diffs
 first, then long messages, then task records); the play recap and the counts
 are always complete, and `results_trimmed` names what was left out.
 
+## Execution Image
+
+The default image, `ghcr.io/hegemony-sh/ansible-runner:0.5`, bundles
+ansible-core, ansible-pylibssh, ncclient, and the network collections the
+platform maps device platforms onto. It is built from `images/ansible-runner/`
+in the hegemony-step-plugins repository and is **not published by the
+release**: before the first Ansible step runs, build it and push it to a
+registry the sandbox can pull from. From a checkout of that repository:
+
+```sh
+docker build -t ghcr.io/hegemony-sh/ansible-runner:0.5 images/ansible-runner
+docker push ghcr.io/hegemony-sh/ansible-runner:0.5
+```
+
+To use your own registry instead, build and push under your own tag
+(`docker build -t registry.example.com/ansible-runner:0.5 images/ansible-runner`,
+then `docker push registry.example.com/ansible-runner:0.5`) and set Execution
+image to it. The sandbox pulls the image on every run, so an image that only
+exists on the sandbox's daemon is not enough. Until the image is reachable,
+a step that keeps the default fails at the pull with an error saying so. Any
+other Ansible execution environment image works too, as long as it has
+`/bin/sh` and the collections the playbook needs.
+
 ## When It Fails
 
 The step succeeds only when ansible-playbook exits with 0 and its results

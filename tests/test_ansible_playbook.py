@@ -30,6 +30,7 @@ from hegemony_steps_ansible.inventory import (
     platform_connection,
 )
 from hegemony_steps_ansible.playbook import (
+    DEFAULT_IMAGE,
     INVENTORY_FILE,
     KEYS_DIR,
     RUN_SCRIPT,
@@ -534,7 +535,9 @@ def _results_json(exit_hosts: dict[str, dict[str, int]]) -> bytes:
     ).encode()
 
 
-def _install_docker(monkeypatch, *, collected: bytes | None, exit_code: int) -> dict[str, Any]:
+def _install_docker(
+    monkeypatch, *, collected: bytes | None, exit_code: int, pull_returncode: int = 0
+) -> dict[str, Any]:
     state: dict[str, Any] = {"roots": {}, "calls": []}
     monkeypatch.setattr(
         "hegemony_steps_container.run.stream_pull",
@@ -543,6 +546,8 @@ def _install_docker(monkeypatch, *, collected: bytes | None, exit_code: int) -> 
 
     def fake_run(cmd, *args, **kwargs):
         state["calls"].append(list(cmd))
+        if cmd[1] == "pull" and pull_returncode:
+            return SimpleNamespace(returncode=pull_returncode, stdout="", stderr="manifest unknown")
         if len(cmd) >= 4 and cmd[1] == "cp":
             src, dest = cmd[2], cmd[3]
             if dest.endswith(":/"):
@@ -682,6 +687,29 @@ async def test_a_failed_play_without_results_reports_changes_as_unknown(monkeypa
     assert result.success is False
     assert "exited with code 4" in (result.error or "")
     assert result.output["changed"] is None
+
+
+@pytest.mark.asyncio
+async def test_default_image_pull_failure_says_how_to_get_the_image(monkeypatch):
+    _install_docker(monkeypatch, collected=None, exit_code=0, pull_returncode=1)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+    assert result.success is False
+    error = result.error or ""
+    assert f"default execution image {DEFAULT_IMAGE} could not be pulled" in error
+    assert f"docker push {DEFAULT_IMAGE}" in error
+    # Docker's own reason is kept.
+    assert "manifest unknown" in error
+
+
+@pytest.mark.asyncio
+async def test_own_image_pull_failure_is_reported_as_is(monkeypatch):
+    _install_docker(monkeypatch, collected=None, exit_code=0, pull_returncode=1)
+    result = await AnsiblePlaybookHandler().execute(
+        _ctx({"playbook": "site.yml", "image": "registry.example.com/ansible:1"}, [_device("r1")])
+    )
+    assert result.success is False
+    assert (result.error or "").startswith("Docker pull failed")
+    assert "default execution image" not in (result.error or "")
 
 
 @pytest.mark.asyncio

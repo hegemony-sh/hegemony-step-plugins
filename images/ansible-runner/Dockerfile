@@ -12,7 +12,15 @@
 # pin an older core. Runs as an unprivileged user; the step stages its files
 # readable by any user and copies private keys to a folder that user owns.
 #
+# Not published by the release: build and push it to a registry the sandbox
+# can pull from (the step pulls on every run), or push it under your own tag
+# and set the step's Execution image:
+#
 #   docker build -t ghcr.io/hegemony-sh/ansible-runner:0.5 images/ansible-runner
+#   docker push ghcr.io/hegemony-sh/ansible-runner:0.5
+#
+# The tag follows the wheels' minor version (DEFAULT_IMAGE in
+# plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py).
 
 FROM python:3.12-slim-bookworm
 
