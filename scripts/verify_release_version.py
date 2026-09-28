@@ -13,7 +13,18 @@ import tomllib
 
 from package_paths import PACKAGE_DIRS, PLUGIN_DIRS, SDK_VERSION_FILE
 
-SIBLING_DEPENDENCY = re.compile(r"(hegemony-(?:steps|probe|transport)-[a-z0-9-]+)==(.+)")
+#: A dependency on another wheel of this monorepo, by name, whatever its
+#: version constraint: they release in lockstep, so each must be pinned exactly.
+SIBLING_DEPENDENCY = re.compile(r"(hegemony-(?:steps|probe|transport)-[a-z0-9-]+)(.*)")
+
+
+def sibling_pin_failure(package: str, dependency: str, version: str) -> str | None:
+    """Why ``dependency`` of ``package`` is not an exact pin on ``version``, if it is a sibling."""
+    requirement = dependency.split(";", 1)[0].strip()
+    match = SIBLING_DEPENDENCY.fullmatch(requirement)
+    if match is None or "".join(match.group(2).split()) == f"=={version}":
+        return None
+    return f"{package} must pin {match.group(1)}=={version}, not {dependency}"
 
 
 def _project_metadata(pyproject) -> dict:
@@ -49,11 +60,9 @@ def main() -> None:
             failures.append(f"{metadata['name']} must depend on {expected_sdk_dependency}")
         # Pins on sibling wheels of this monorepo release in lockstep too.
         for dependency in metadata["dependencies"]:
-            match = SIBLING_DEPENDENCY.fullmatch(dependency)
-            if match and match.group(2) != version:
-                failures.append(
-                    f"{metadata['name']} must pin {match.group(1)}=={version}, not {dependency}"
-                )
+            failure = sibling_pin_failure(metadata["name"], dependency, version)
+            if failure:
+                failures.append(failure)
 
     sdk_version_text = SDK_VERSION_FILE.read_text(encoding="utf-8")
     match = re.search(r'^__version__ = "([^"]+)"$', sdk_version_text, re.MULTILINE)

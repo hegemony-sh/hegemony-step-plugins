@@ -43,15 +43,26 @@ def _set_plugin_sdk_pin(pyproject, version: str) -> None:
     pyproject.write_text(text, encoding="utf-8")
 
 
-#: A pin on another wheel of this monorepo (a tool handler built on
-#: hegemony-steps-container, say). They release in lockstep, so every such pin
-#: moves with the version; a pyproject without one is left alone.
-SIBLING_PIN = re.compile(r"(hegemony-(?:steps|probe|transport)-[a-z0-9-]+)==[^\",\]]+")
+#: A dependency on another wheel of this monorepo (a tool handler built on
+#: hegemony-steps-container, say), in a quoted dependency string. They release
+#: in lockstep, so every such constraint (``==``, ``>=``, a range) becomes an
+#: exact pin on the version; an environment marker after it is kept, and a
+#: pyproject without one is left alone. The constraint is required, so a bare
+#: name (``name = "hegemony-steps-tf"``) and a ``[tool.uv.sources]`` key never
+#: match.
+SIBLING_PIN = re.compile(
+    r'"(hegemony-(?:steps|probe|transport)-[a-z0-9-]+)\s*(?:===|==|>=|<=|~=|!=|>|<)[^";]*'
+)
+
+
+def set_sibling_pins(text: str, version: str) -> str:
+    """``text`` (a pyproject) with every sibling-wheel constraint pinned to ``version``."""
+    return SIBLING_PIN.sub(rf'"\g<1>=={version}', text)
 
 
 def _set_sibling_pins(pyproject, version: str) -> None:
     text = pyproject.read_text(encoding="utf-8")
-    pyproject.write_text(SIBLING_PIN.sub(rf"\g<1>=={version}", text), encoding="utf-8")
+    pyproject.write_text(set_sibling_pins(text, version), encoding="utf-8")
 
 
 def main() -> None:
