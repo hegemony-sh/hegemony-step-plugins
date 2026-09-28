@@ -174,8 +174,9 @@ class TfPlanConfig(TfContainerConfig):
         default_factory=dict,
         title="Secret variables",
         description=(
-            "NAME=secret reference, one per line, for sensitive variables. Passed from "
-            "a file and redacted from output; like every variable they are stored in the "
+            "NAME=secret reference, one per line, for sensitive variables. Always passed "
+            "as strings (decode a JSON secret with jsondecode() in the configuration), from "
+            "a file, and redacted from output; like every variable they are stored in the "
             "saved plan, which lives only in the run's workspace."
         ),
         json_schema_extra={"x_widget": "env-vars", "x_rows": 2, "x_col_span": 2},
@@ -423,7 +424,9 @@ class TfPlanHandler(BaseHandler):
             files.append(
                 StagedFile(
                     SECRET_VARS_FILE,
-                    json.dumps({k: typed_variable(v) for k, v in secret_vars.items()}) + "\n",
+                    # Verbatim: a secret is opaque, and the most common JSON one (a
+                    # cloud credentials document) is bound to a string variable.
+                    json.dumps(secret_vars) + "\n",
                 )
             )
         files.append(

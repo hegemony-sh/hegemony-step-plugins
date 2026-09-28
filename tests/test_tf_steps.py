@@ -465,6 +465,23 @@ async def test_plan_step_says_when_its_readable_plan_was_not_collected(monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("secret", ['{"type": "service_account"}', "[1, 2]", "true"])
+async def test_secret_variables_are_passed_as_written(monkeypatch, secret):
+    """A secret is opaque: one that looks like JSON (a GCP service-account key)
+    must still reach a string variable as a string."""
+    state = _install_docker(monkeypatch, out={"plan-exitcode": b"0"})
+
+    class JsonSecret(_Services):
+        async def resolve_secret_ref(self, ref, *, source):
+            return secret
+
+    config = {"state": "ephemeral", "secret_vars": {"gcp_key": "vault://orgs/acme/secrets/sa"}}
+    result = await TfPlanHandler().execute(_ctx(config, JsonSecret()))
+    assert result.success is True, result.error
+    assert json.loads(state["roots"][SECRET_VARS_FILE]) == {"gcp_key": secret}
+
+
+@pytest.mark.asyncio
 async def test_plan_step_without_shared_workspace_is_plan_only(monkeypatch):
     _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
     result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services(), shared=False))

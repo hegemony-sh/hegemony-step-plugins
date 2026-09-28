@@ -19,7 +19,10 @@ Add the `.tf` files (and their `.terraform.lock.hcl`) to the flow's
 attachments and set Configuration folder to their folder, or leave it empty
 for the attachments root. Variables are `NAME=value` lines that may use
 templates such as `{{ inputs.service_name }}`; a value that is a JSON list or
-object is passed as that type. Secret variables, provider credentials in
+object is passed as that type. Secret variables are always passed as
+strings, so a JSON secret such as a cloud service-account key fits a
+`string` variable; decode it with `jsondecode()` where the configuration
+needs its fields. Secret variables, provider credentials in
 Secret environment, and the OpenTofu state encryption key are secret
 references: a `{{ secret('...') }}` template or a bare reference such as
 `vault://orgs/acme/secrets/aws/key`. They are resolved by the platform on
