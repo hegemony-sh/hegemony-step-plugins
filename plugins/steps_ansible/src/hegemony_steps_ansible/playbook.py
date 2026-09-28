@@ -18,7 +18,6 @@ to any container step.
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import posixpath
 import re
@@ -57,6 +56,7 @@ from .inventory import (
     Inventory,
     InventoryHost,
     build_inventory,
+    is_plain_host,
     literal,
 )
 from .results import (
@@ -100,10 +100,7 @@ _VAULT_LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _ANSIBLE_TAG_RE = re.compile(r"^[^\s,]+$")
 # Jump host fields end up in a ProxyCommand that OpenSSH and libssh run through
 # /bin/sh, and they come from device records (an inventory source can set them):
-# only plain host names, IP addresses and user names are accepted.
-_JUMP_HOST_NAME_RE = re.compile(
-    r"^(?=.{1,253}$)[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62})(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62}))*\.?$"
-)
+# only plain host names, IP addresses (is_plain_host) and user names are accepted.
 _JUMP_USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._@+-]{0,63}$")
 
 HostKeyChecking = Literal["accept_new", "strict", "off"]
@@ -335,13 +332,10 @@ def _host_key_ssh_args(mode: str) -> list[str]:
 def _jump_endpoint(device: str, jump: Any) -> tuple[str, str, int]:
     """The jump host's host, user and port, refused unless each is plain."""
     host = str(jump.host or "").strip()
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        if not _JUMP_HOST_NAME_RE.match(host):
-            raise ValueError(
-                f"device {device}: its jump host {host[:100]!r} is not a host name or IP address"
-            ) from None
+    if not is_plain_host(host):
+        raise ValueError(
+            f"device {device}: its jump host {host[:100]!r} is not a host name or IP address"
+        )
     user = str(jump.username or "").strip()
     if user and not _JUMP_USER_RE.match(user):
         raise ValueError(
@@ -744,6 +738,12 @@ class AnsiblePlaybookHandler(BaseHandler):
         for index, host in enumerate(inventory.hosts):
             credentials: DeviceCredentials | None = None
             try:
+                address = host.device.get("mgmt_host")
+                if address and not is_plain_host(str(address)):
+                    raise ValueError(
+                        f"device {host.name}: its management address {str(address)[:100]!r} "
+                        "is not a host name or IP address"
+                    )
                 if config.device_credentials:
                     try:
                         credentials = await services.resolve_device_credentials(host.device)

@@ -28,11 +28,12 @@ Each host also carries a `hegemony` variable with its id, platform, site,
 tags, and attributes. A device attribute named `ansible_vars` holding a
 mapping is merged into that host's variables, so inventory owners can tune
 Ansible per device: playbook variables of their own, and of Ansible's
-variables only `ansible_python_interpreter`, `ansible_network_os`,
-`ansible_network_cli_ssh_type`, `ansible_connect_timeout`, and
-`ansible_command_timeout`. How and where Ansible connects (`ansible_host`,
-`ansible_port`, `ansible_connection`, the login and become variables, ssh
-arguments, proxy commands, executables) comes from Hegemony only, since
+variables only `ansible_network_os`, `ansible_network_cli_ssh_type`,
+`ansible_connect_timeout`, and `ansible_command_timeout`. How and where
+Ansible connects (`ansible_host`, `ansible_port`, `ansible_connection`, the
+login and become variables, ssh arguments, proxy commands, executables,
+`ansible_python_interpreter`) comes from Hegemony, or from the playbook and
+its group variables, since
 whoever edits a device's attributes need not be allowed to run commands in
 the step's container; any other `ansible_*` key there, `hegemony`, and any
 key whose value contains template syntax (`{{`, `{%` or `{#`) is ignored and
@@ -59,16 +60,16 @@ group being built (`platform_`, `site_`, `tag_`, `provider_`) would merge
 with that group, so the step refuses it; rename the role or leave that
 dimension out of Inventory groups. Host names are the device names made
 file-safe: every run of characters other than letters, digits, `_`, `.`, and
-`-` becomes `_` and leading dots are dropped (`core 1:22` becomes
+`-` becomes `_` and leading dots and dashes are dropped (`core 1:22` becomes
 `core_1_22`), and a repeated name gets `__2`, `__3`, and so on. Use these
 names in Limit, host patterns, and `host_vars`; the stored inventory shows
 them. Avoid device names equal to a group name: Ansible warns about a host
 and a group of the same name. Inventory scope `run` puts every device the
 run targets into the inventory instead of only the step's own targets. A
 device that is there only through `run` scope (none of its roles is a target
-of this step) and has no usable credentials is left out of the inventory
-instead of failing the step, and named with the reason in an
-`ansible_hosts_left_out_<step id>` artifact.
+of this step) and has no usable credentials or management address is left
+out of the inventory instead of failing the step, and named with the reason
+in an `ansible_hosts_left_out_<step id>` artifact.
 
 ## Ansible Configuration
 
@@ -160,9 +161,10 @@ results callback did not run, for example because the image's Ansible could
 not load it, or the results could not be copied out of the container, which
 the error then says) fails too: whether any host changed is then unknown.
 The step also fails before running anything when the config is invalid, a
-device the step targets has no usable credentials, a jump host has only a
-password or a host, user name or port that is not plain (a host name or IP
-address; a user name of letters, digits and `. _ @ + -`), or a secret
+device the step targets has no usable credentials or a management address
+that is not a host name or IP address, a jump host has only a password or a
+host, user name or port that is not plain (a host name or IP address; a user
+name of letters, digits and `. _ @ + -`), or a secret
 resolves to nothing. The timeout covers the whole run, image pull included.
 At the timeout the play is also stopped from inside the container (SIGTERM,
 then SIGKILL five minutes later, with the image's `timeout` command), so it

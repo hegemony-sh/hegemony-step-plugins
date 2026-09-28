@@ -228,16 +228,36 @@ def test_device_ansible_vars_attribute_tunes_host_variables():
         attributes={
             "ansible_vars": {
                 "ansible_network_os": "fortinet.fortios.fortios",
-                "ansible_python_interpreter": "/usr/bin/python3",
+                "ansible_command_timeout": 60,
                 "ntp_server": "10.0.0.1",
             }
         },
     )
     host = build_inventory({"fw": [device]}).hosts[0]
     assert host.variables["ansible_network_os"] == "fortinet.fortios.fortios"
-    assert host.variables["ansible_python_interpreter"] == "/usr/bin/python3"
+    assert host.variables["ansible_command_timeout"] == 60
     assert host.variables["ntp_server"] == "10.0.0.1"
     assert host.ignored_vars == []
+
+
+def test_device_ansible_vars_cannot_choose_the_python_interpreter():
+    """With network_cli and netconf, modules run in the step container, so the
+    interpreter is a program to run there: the playbook may set it, a device
+    record may not."""
+    device = _device("r1", attributes={"ansible_vars": {"ansible_python_interpreter": "/tmp/evil"}})
+    host = build_inventory({"r": [device]}).hosts[0]
+    assert "ansible_python_interpreter" not in host.variables
+    assert host.ignored_vars == ["ansible_python_interpreter"]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"), [("-oProxyCommand=id", "oProxyCommand_id"), ("--", "host")]
+)
+def test_host_names_never_start_with_a_dash(name, expected):
+    """With no management address ssh is given the host name, which it would
+    read as an option."""
+    device = _device(name, mgmt_host=None)
+    assert build_inventory({"r": [device]}).hosts[0].name == expected
 
 
 def test_device_ansible_vars_cannot_change_how_or_where_ansible_connects():
@@ -1077,6 +1097,51 @@ async def test_run_scope_leaves_out_other_roles_devices_without_credentials(monk
     assert "/hegemony/ansible/inventory/host_vars/broken.json" not in state["roots"]
     [note] = [e for e in result.evidence if e["name"] == "ansible_hosts_left_out_baseline"]
     assert "- broken: access_config.ssh.username_ref is required\n" in note["content_text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "address", ["-oProxyCommand=id", "r1 -oProxyCommand=id", "r1;id", "{{ lookup('pipe','id') }}"]
+)
+async def test_a_management_address_that_is_not_a_host_is_refused(monkeypatch, address):
+    """ssh reads an address starting with "-" as an option (-oProxyCommand=…):
+    a device record may give only a host name or an IP address."""
+    state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
+    result = await AnsiblePlaybookHandler().execute(
+        _ctx({"playbook": "site.yml"}, [_device("r1", mgmt_host=address)])
+    )
+
+    assert result.success is False
+    assert "device r1: its management address" in (result.error or "")
+    assert "is not a host name or IP address" in (result.error or "")
+    assert state["calls"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("address", ["10.0.0.9", "fe80::1", "r1.example.net", "core_1"])
+async def test_plain_management_addresses_are_accepted(monkeypatch, address):
+    state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
+    result = await AnsiblePlaybookHandler().execute(
+        _ctx({"playbook": "site.yml"}, [_device("r1", mgmt_host=address)])
+    )
+
+    assert result.success is True, result.error
+    inventory = json.loads(state["roots"][INVENTORY_FILE])
+    assert inventory["all"]["hosts"]["r1"]["ansible_host"] == address
+
+
+@pytest.mark.asyncio
+async def test_run_scope_leaves_out_other_roles_devices_with_a_bad_address(monkeypatch):
+    state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
+    ctx = _ctx({"playbook": "site.yml", "inventory_scope": "run"}, [_device("r1")])
+    ctx.target_devices_by_role["monitors"] = [_device("m1", mgmt_host="-oProxyCommand=id")]
+    result = await AnsiblePlaybookHandler().execute(ctx)
+
+    assert result.success is True, result.error
+    inventory = json.loads(state["roots"][INVENTORY_FILE])
+    assert "m1" not in inventory["all"]["hosts"]
+    [note] = [e for e in result.evidence if e["name"] == "ansible_hosts_left_out_baseline"]
+    assert "- m1: its management address '-oProxyCommand=id'" in note["content_text"]
 
 
 @pytest.mark.asyncio

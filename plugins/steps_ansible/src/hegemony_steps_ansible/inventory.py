@@ -18,6 +18,7 @@ itself never holds a secret.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -34,10 +35,27 @@ _INVALID_GROUP_CHARS = re.compile(r"[^A-Za-z0-9_]")
 #: Host names double as ``host_vars/<name>.json`` file names, so they are kept
 #: to a file-safe set (``:`` would also read as a port to the YAML plugin).
 _INVALID_HOST_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
+#: A plain host name (the address itself, IP addresses aside). Addresses from
+#: device records reach ``ssh``, which reads one starting with ``-`` as an
+#: option (``-oProxyCommand=…``), and a jump host's reach a ProxyCommand run
+#: through ``/bin/sh``: only names and IP addresses are accepted.
+_HOST_NAME_RE = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62})(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62}))*\.?$"
+)
+
+
+def is_plain_host(value: str) -> bool:
+    """Whether ``value`` is a host name or an IP address, and nothing else."""
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return bool(_HOST_NAME_RE.match(value))
+    return True
+
 
 #: Device attribute whose mapping is merged into the host's variables, so
 #: inventory owners (NetBox custom fields, Git device files) can tune Ansible
-#: per device — ``ansible_python_interpreter``, the network OS, playbook data.
+#: per device — the network OS, timeouts, playbook data.
 ANSIBLE_VARS_ATTRIBUTE = "ansible_vars"
 
 #: The only ``ansible_*`` variables that attribute may set. Inventory editors
@@ -45,10 +63,11 @@ ANSIBLE_VARS_ATTRIBUTE = "ansible_vars"
 #: proxy-command and executable variables would let them run commands in the
 #: step container (``ansible_connection: local``) or at connect time, with
 #: every credential of the run staged beside them. Those come from Hegemony
-#: only; any other ``ansible_*`` key in the attribute is ignored.
+#: only; any other ``ansible_*`` key in the attribute is ignored. That includes
+#: ``ansible_python_interpreter``: with ``network_cli`` and ``netconf`` modules
+#: run in the step container, so it names a program to run there.
 DEVICE_ANSIBLE_VARS_ALLOWED = frozenset(
     {
-        "ansible_python_interpreter",
         "ansible_network_os",
         "ansible_network_cli_ssh_type",
         "ansible_connect_timeout",
@@ -224,7 +243,9 @@ class Inventory:
 
 def _host_name(device: Mapping[str, Any], used: set[str]) -> str:
     raw = str(device.get("name") or device.get("hostname") or device.get("mgmt_host") or "host")
-    base = _INVALID_HOST_CHARS.sub("_", raw.strip()).lstrip(".") or "host"
+    # No leading dot (a hidden file) or dash: with no management address,
+    # ssh is given the host name, and would read "-…" as an option.
+    base = _INVALID_HOST_CHARS.sub("_", raw.strip()).lstrip(".-") or "host"
     name = base
     suffix = 2
     while name in used:
