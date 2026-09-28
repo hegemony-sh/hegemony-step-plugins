@@ -18,6 +18,7 @@ to any container step.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import posixpath
 import re
@@ -90,6 +91,13 @@ MAX_OUTPUT_HOST_NAMES = 500
 _GROUP_SECRET_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):([A-Za-z_][A-Za-z0-9_]*)$")
 _VAULT_LABEL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _ANSIBLE_TAG_RE = re.compile(r"^[^\s,]+$")
+# Jump host fields end up in a ProxyCommand that OpenSSH and libssh run through
+# /bin/sh, and they come from device records (an inventory source can set them):
+# only plain host names, IP addresses and user names are accepted.
+_JUMP_HOST_NAME_RE = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62})(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62}))*\.?$"
+)
+_JUMP_USER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._@+-]{0,63}$")
 
 HostKeyChecking = Literal["accept_new", "strict", "off"]
 
@@ -301,14 +309,42 @@ def _relative_path_error(field_name: str, value: object) -> str | None:
 
 
 def _host_key_ssh_args(mode: str) -> list[str]:
+    """OpenSSH options for the host key mode, one argument per item."""
     if mode == "accept_new":
         return [
-            "-o StrictHostKeyChecking=accept-new",
-            f"-o UserKnownHostsFile={KNOWN_HOSTS_FILE}",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            f"UserKnownHostsFile={KNOWN_HOSTS_FILE}",
         ]
     if mode == "off":
-        return ["-o StrictHostKeyChecking=no", "-o UserKnownHostsFile=/dev/null"]
+        return ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
     return []
+
+
+def _jump_endpoint(device: str, jump: Any) -> tuple[str, str, int]:
+    """The jump host's host, user and port, refused unless each is plain."""
+    host = str(jump.host or "").strip()
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if not _JUMP_HOST_NAME_RE.match(host):
+            raise ValueError(
+                f"device {device}: its jump host {host[:100]!r} is not a host name or IP address"
+            ) from None
+    user = str(jump.username or "").strip()
+    if user and not _JUMP_USER_RE.match(user):
+        raise ValueError(
+            f"device {device}: its jump host user name {user[:100]!r} may use only "
+            "letters, digits and . _ @ + - (at most 64 characters)"
+        )
+    try:
+        port = int(jump.port)
+    except (TypeError, ValueError):
+        port = 0
+    if not 1 <= port <= 65535:
+        raise ValueError(f"device {device}: its jump host port {jump.port!r} is not a port")
+    return host, user, port
 
 
 def _pem(key: str) -> str:
@@ -345,28 +381,36 @@ def credential_host_vars(
 
         jump = credentials.jump_host
         if jump is not None:
+            jump_host, jump_user, jump_port = _jump_endpoint(host.name, jump)
             if not jump.private_key:
                 raise ValueError(
-                    f"device {host.name}: its jump host {jump.host} logs in with a password "
+                    f"device {host.name}: its jump host {jump_host} logs in with a password "
                     "only; the Ansible step supports key-based jump hosts"
                 )
             name = f"jump-{index}.pem"
             files.append(StagedFile(f"{KEYS_STAGE_DIR}/{name}", _pem(jump.private_key)))
-            proxy = " ".join(
-                [
-                    "ssh -W %h:%p",
-                    f"-i {KEYS_DIR}/{name}",
-                    f"-p {jump.port}",
-                    *_host_key_ssh_args(host_key_checking),
-                    f"{jump.username}@{jump.host}",
-                ]
-            )
+            argv = [
+                "ssh",
+                "-W",
+                "%h:%p",
+                "-i",
+                f"{KEYS_DIR}/{name}",
+                "-p",
+                str(jump_port),
+                *_host_key_ssh_args(host_key_checking),
+            ]
+            if jump_user:
+                argv += ["-l", jump_user]
+            # Quoted for /bin/sh, which OpenSSH and libssh run it through;
+            # paramiko splits it with shlex.
+            proxy = shlex.join([*argv, jump_host])
             variables["ansible_libssh_proxy_command"] = proxy
             variables["ansible_paramiko_proxy_command"] = proxy
-            ssh_args.append(f'-o ProxyCommand="{proxy}"')
+            ssh_args += ["-o", f"ProxyCommand={proxy}"]
 
     if ssh_args:
-        variables["ansible_ssh_common_args"] = " ".join(ssh_args)
+        # Ansible splits this with shlex before handing it to ssh.
+        variables["ansible_ssh_common_args"] = shlex.join(ssh_args)
     return variables, files
 
 

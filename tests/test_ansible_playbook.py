@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 import types
 from types import SimpleNamespace
@@ -204,10 +205,64 @@ def test_key_based_jump_host_becomes_a_proxy_command():
     variables, files = credential_host_vars(host, creds, 3, "strict")
 
     proxy = variables["ansible_libssh_proxy_command"]
-    assert proxy == f"ssh -W %h:%p -i {KEYS_DIR}/jump-3.pem -p 2222 jump@bastion"
+    assert proxy == f"ssh -W %h:%p -i {KEYS_DIR}/jump-3.pem -p 2222 -l jump bastion"
     assert variables["ansible_paramiko_proxy_command"] == proxy
-    assert variables["ansible_ssh_common_args"] == f'-o ProxyCommand="{proxy}"'
+    # Ansible splits the common args with shlex; the proxy stays one option value.
+    assert shlex.split(variables["ansible_ssh_common_args"]) == ["-o", f"ProxyCommand={proxy}"]
     assert files[0].path.endswith("/jump-3.pem")
+
+
+def test_jump_host_options_survive_both_quoting_layers():
+    host = build_inventory({"r": [_device("r1")]}).hosts[0]
+    creds = DeviceCredentials(
+        username="u",
+        jump_host=JumpHostSpec(host="fd00::1", port=22, username="ops.team+1", private_key="K"),
+    )
+    variables, _ = credential_host_vars(host, creds, 0, "accept_new")
+
+    [flag, option, *known_hosts, proxy_flag, proxy_option] = shlex.split(
+        variables["ansible_ssh_common_args"]
+    )
+    assert (flag, option, proxy_flag) == ("-o", "StrictHostKeyChecking=accept-new", "-o")
+    proxy = proxy_option.removeprefix("ProxyCommand=")
+    # What /bin/sh runs: the argv the step meant, nothing more.
+    assert shlex.split(proxy) == [
+        "ssh",
+        "-W",
+        "%h:%p",
+        "-i",
+        f"{KEYS_DIR}/jump-0.pem",
+        "-p",
+        "22",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        known_hosts[1],
+        "-l",
+        "ops.team+1",
+        "fd00::1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("jump", "message"),
+    [
+        (
+            JumpHostSpec(host="bastion;cat /etc/passwd", username="j", private_key="K"),
+            "not a host name",
+        ),
+        (JumpHostSpec(host="-oProxyCommand=id", username="j", private_key="K"), "not a host name"),
+        (JumpHostSpec(host="b", username="j$(id)", private_key="K"), "user name"),
+        (JumpHostSpec(host="b", username='j" x', private_key="K"), "user name"),
+        (JumpHostSpec(host="b", username="-l", private_key="K"), "user name"),
+        (JumpHostSpec(host="b", port=0, username="j", private_key="K"), "not a port"),
+    ],
+)
+def test_jump_host_fields_from_device_records_are_refused_unless_plain(jump, message):
+    host = build_inventory({"r": [_device("r1")]}).hosts[0]
+    creds = DeviceCredentials(username="u", jump_host=jump)
+    with pytest.raises(ValueError, match=message):
+        credential_host_vars(host, creds, 0, "accept_new")
 
 
 def test_password_only_jump_host_is_refused():
