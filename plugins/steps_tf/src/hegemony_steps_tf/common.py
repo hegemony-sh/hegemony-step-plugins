@@ -25,7 +25,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from hegemony_step_sdk import HandlerContext, StateBackendAccess
 from hegemony_steps_container.run import RunContainerHandler
@@ -44,8 +44,21 @@ logger = logging.getLogger(__name__)
 Engine = Literal["opentofu", "terraform"]
 StateMode = Literal["managed", "backend", "ephemeral"]
 
+DEFAULT_LOCK_TIMEOUT = "300s"
+
+
+def _normal_lock_timeout(value: object) -> object:
+    """Blank means the default, and surrounding spaces are not part of the value."""
+    if value is None:
+        return DEFAULT_LOCK_TIMEOUT
+    if isinstance(value, str):
+        return value.strip() or DEFAULT_LOCK_TIMEOUT
+    return value
+
+
 LockTimeout = Annotated[
     str,
+    BeforeValidator(_normal_lock_timeout),
     Field(
         title="Lock timeout",
         description="How long to wait for the state lock (-lock-timeout), e.g. 300s or 5m.",
@@ -290,7 +303,7 @@ def secret_env_errors(value: object) -> list[str]:
 
 
 def lock_timeout_errors(value: object) -> list[str]:
-    lock_timeout = str(value or "300s")
+    lock_timeout = str(_normal_lock_timeout(value))
     if not lock_timeout[:-1].isdigit() or lock_timeout[-1] not in "sm":
         return ["'lock_timeout' must look like 300s or 5m"]
     return []

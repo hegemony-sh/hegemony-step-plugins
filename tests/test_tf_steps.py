@@ -55,6 +55,7 @@ from hegemony_steps_tf.common import (
     encryption_hcl,
     hcl_string,
     lock_conflict_error,
+    lock_timeout_errors,
     public_outputs,
     typed_variable,
     workdir_for,
@@ -1302,3 +1303,20 @@ def test_handler_metadata():
     # like a reference is never resolved twice.
     assert TfPlanHandler.raw_config_keys == {"secret_vars", "secret_env", "state_encryption_key"}
     assert TfApplyHandler.raw_config_keys == {"secret_env", "state_encryption_key"}
+
+
+@pytest.mark.parametrize(
+    ("value", "normal"), [(None, "300s"), ("", "300s"), ("  ", "300s"), (" 5m ", "5m")]
+)
+def test_lock_timeout_blank_is_the_default_and_spaces_do_not_count(value, normal):
+    """Validation and the scripts read the value the same way."""
+    assert lock_timeout_errors(value) == []
+    config = TfPlanConfig.model_validate({"state": "ephemeral", "lock_timeout": value})
+    assert config.lock_timeout == normal
+    script = build_plan_script(config, workdir=LOCAL_WORKDIR, has_vars=False, has_secret_vars=False)
+    assert f"-lock-timeout={normal} " in script
+
+
+@pytest.mark.parametrize("value", ["s", "5 m", "300", "5h", "-5m"])
+def test_a_malformed_lock_timeout_is_refused(value):
+    assert lock_timeout_errors(value) == ["'lock_timeout' must look like 300s or 5m"]
