@@ -36,9 +36,13 @@ in `sensitive_outputs` but their values are never kept.
 
 ## When It Fails
 
-The step fails when the plan step did not succeed in this run, when either
-step lacks shared affinity or the worker has shared workspaces disabled, or
-when the apply itself fails. The tool refuses
+The step fails before starting a container when Plan step names a step
+that is not a `tf.plan` step or did not succeed in this run, and when a
+step lacks a shared workspace: the error says whether the plan step ran
+without one (its saved plan is gone, so give it shared affinity and plan
+again) or this step has none (shared affinity missing, or the worker has
+shared workspaces disabled). It also fails when the apply itself fails.
+The tool refuses
 a saved plan made stale by a state change since planning: plan again. The
 saved plan lives in the run's shared workspace; when that workspace is gone
 (for example cleaned up after a worker restart while the run waited a long

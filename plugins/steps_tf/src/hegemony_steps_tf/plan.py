@@ -489,6 +489,21 @@ class TfPlanHandler(BaseHandler):
                 }
             )
 
+        apply_ready = workdir != LOCAL_WORKDIR
+        if not apply_ready:
+            evidence.append(
+                {
+                    "kind": "step_result",
+                    "name": f"plan_only_{ctx.step_id}",
+                    "content_text": (
+                        "This plan cannot be applied by tf.apply: the step had no shared "
+                        "workspace, so the saved plan was deleted with its container. To "
+                        "apply it, give this step and the tf.apply step shared (or explicit) "
+                        "execution affinity on a worker with shared workspaces enabled.\n"
+                    ),
+                }
+            )
+
         line = plan_line(summary_data) if summary_data else ("changes" if has_changes else "")
         summary = (
             f"Plan: {line}"
@@ -496,6 +511,8 @@ class TfPlanHandler(BaseHandler):
             else "No changes: infrastructure matches the configuration"
         )
         output: dict[str, Any] = {
+            # tf.apply refuses a plan step output without this marker.
+            "handler": self.handler_id,
             "has_changes": has_changes,
             **summary_data,
             "summary": summary,
@@ -504,7 +521,7 @@ class TfPlanHandler(BaseHandler):
             "state": config.state,
             "state_name": config.state_name.strip() if config.state == "managed" else "",
             "working_dir": workdir,
-            "apply_ready": workdir != LOCAL_WORKDIR,
+            "apply_ready": apply_ready,
         }
         return HandlerResult(
             success=True,

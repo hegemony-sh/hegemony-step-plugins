@@ -18,7 +18,7 @@ import json
 import shlex
 from typing import Any
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, HandlerTargeting, StepKind
 from hegemony_steps_container.runner import (
@@ -35,7 +35,9 @@ from .common import (
     KEEP_DIR,
     PLAN_FILE,
     RUN_SCRIPT,
+    Engine,
     LockTimeout,
+    StateMode,
     TfContainerConfig,
     common_errors,
     container_timeout,
@@ -44,6 +46,7 @@ from .common import (
     secret_environment,
     shared_workspace_mounted,
     tool_env,
+    workdir_for,
 )
 
 OUTPUTS_FILE = f"{OUTPUT_DIR}/outputs.json"
@@ -147,6 +150,49 @@ NO_PLAN_MESSAGE = (
 )
 
 
+class PlanHandoff(BaseModel):
+    """What tf.apply reads from its plan step's output (the rest is ignored)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    engine: Engine
+    image: str = Field(min_length=1)
+    state: StateMode
+    state_name: str = ""
+    working_dir: str
+    apply_ready: bool
+    has_changes: bool
+
+
+def read_plan_handoff(plan_step: str, output: dict[str, Any]) -> PlanHandoff | str:
+    """The plan step's handoff, or why it cannot be applied.
+
+    Any step's output can be named here, so its shape is checked, and the
+    working directory must be the one ``tf.plan`` uses for that step: an
+    output cannot send the apply into another directory.
+    """
+    if output.get("handler") != "tf.plan":
+        return (
+            f"step {plan_step!r} is not a tf.plan step, or its plan was made by an "
+            "older version of tf.plan: point Plan step at a tf.plan step and plan again"
+        )
+    try:
+        handoff = PlanHandoff.model_validate(output)
+    except ValidationError as exc:
+        fields = ", ".join(
+            f"{'.'.join(str(part) for part in error['loc'])} ({error['msg']})"
+            for error in exc.errors()
+        )
+        return f"plan step {plan_step!r} reports an unusable plan: {fields}"
+    expected = workdir_for(plan_step)
+    if handoff.apply_ready and handoff.working_dir != expected:
+        return (
+            f"plan step {plan_step!r} reports the working directory "
+            f"{handoff.working_dir!r}, not {expected!r}"
+        )
+    return handoff
+
+
 def public_outputs(raw: bytes | None) -> tuple[dict[str, Any], list[str]]:
     """Non-sensitive output values, and the names of the sensitive ones.
 
@@ -214,16 +260,22 @@ class TfApplyHandler(BaseHandler):
             return self._refuse(
                 f"plan step {plan_step!r} has not completed successfully in this run"
             )
-        if not plan_output.get("apply_ready") or not shared_workspace_mounted(ctx):
+        handoff = read_plan_handoff(plan_step, plan_output)
+        if isinstance(handoff, str):
+            return self._refuse(handoff)
+        if not handoff.apply_ready:
             return self._refuse(
-                "the plan and apply steps must both use shared (or explicit) execution "
-                "affinity on a worker with shared workspaces enabled, so the apply runs "
+                f"plan step {plan_step!r} ran without a shared workspace, so its saved plan "
+                "is gone: give it shared (or explicit) execution affinity on a worker with "
+                "shared workspaces enabled"
+            )
+        if not shared_workspace_mounted(ctx):
+            return self._refuse(
+                "this apply step has no shared workspace: give it shared (or explicit) "
+                "execution affinity on a worker with shared workspaces enabled, so it runs "
                 "in the plan's working directory on the same worker"
             )
-        engine = str(plan_output.get("engine") or "")
-        if engine not in BINARIES:
-            return self._refuse(f"plan step {plan_step!r} reports an unknown engine {engine!r}")
-        if not plan_output.get("has_changes"):
+        if not handoff.has_changes:
             return HandlerResult(
                 success=True,
                 summary="Nothing to apply: the plan has no changes",
@@ -231,13 +283,14 @@ class TfApplyHandler(BaseHandler):
             )
 
         state_name: str | None = None
-        if plan_output.get("state") == "managed":
-            state_name = str(plan_output.get("state_name") or "")
+        if handoff.state == "managed":
+            state_name = handoff.state_name.strip()
             if not state_name:
                 return self._refuse(f"plan step {plan_step!r} reports managed state with no name")
 
-        image = str(plan_output.get("image"))
-        workdir = str(plan_output.get("working_dir"))
+        engine = handoff.engine
+        image = handoff.image.strip()
+        workdir = handoff.working_dir
         timeout = container_timeout(ctx, config)
         try:
             # The saved plan names the backend but not its address or credentials:

@@ -385,8 +385,10 @@ async def test_plan_step_reports_changes(monkeypatch):
     assert result.success is True, result.error
     assert result.summary == "Plan: +1 ~0 -0"
     assert result.output["has_changes"] is True
+    assert result.output["handler"] == "tf.plan"
     assert result.output["apply_ready"] is True
     assert result.output["working_dir"] == "/shared/tf/plan"
+    assert not any(e["name"] == "plan_only_plan" for e in result.evidence)
     assert result.output["image"] == DEFAULT_IMAGES["opentofu"]
     assert result.output["resource_changes"] == [
         {"address": "terraform_data.svc", "actions": ["create"]}
@@ -417,6 +419,10 @@ async def test_plan_step_without_shared_workspace_is_plan_only(monkeypatch):
     assert result.output["apply_ready"] is False
     assert result.output["working_dir"] == LOCAL_WORKDIR
     assert result.summary == "No changes: infrastructure matches the configuration"
+    # The summary stays as is (plan-only is legitimate); the evidence says why
+    # a tf.apply would refuse this plan.
+    note = next(e for e in result.evidence if e["name"] == "plan_only_plan")
+    assert "cannot be applied by tf.apply" in note["content_text"]
 
 
 @pytest.mark.asyncio
@@ -554,8 +560,11 @@ async def test_plan_step_short_encryption_key_is_refused(monkeypatch):
 
 def _plan_output(**overrides: Any) -> dict[str, Any]:
     output = {
+        "handler": "tf.plan",
         "has_changes": True,
         "summary": "Plan: +1 ~0 -0",
+        "state": "ephemeral",
+        "state_name": "",
         "engine": "opentofu",
         "image": "ghcr.io/opentofu/opentofu:1.12.6",
         "working_dir": "/shared/tf/plan",
@@ -593,15 +602,34 @@ async def test_apply_step_applies_the_saved_plan(monkeypatch):
     assert "cd /shared/tf/plan" in state["roots"][RUN_SCRIPT]
 
 
+def _without(key: str) -> dict[str, Any]:
+    outputs = _plan_output()
+    del outputs["plan"]["output"][key]
+    return outputs
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("outputs", "shared", "message"),
     [
         ({}, True, "has not completed successfully"),
         ({"plan": {"success": False, "output": {"engine": "opentofu"}}}, True, "has not completed"),
-        (_plan_output(apply_ready=False), True, "shared (or explicit)"),
-        (_plan_output(), False, "shared (or explicit)"),
-        (_plan_output(engine="pulumi"), True, "unknown engine"),
+        # Each cause names the step to fix.
+        (
+            _plan_output(apply_ready=False, working_dir=LOCAL_WORKDIR),
+            True,
+            "plan step 'plan' ran without a shared workspace",
+        ),
+        (_plan_output(), False, "this apply step has no shared workspace"),
+        # The output of any other step is refused, whatever it carries.
+        (_without("handler"), True, "is not a tf.plan step"),
+        (_plan_output(handler="container.run"), True, "is not a tf.plan step"),
+        (_plan_output(engine="pulumi"), True, "unusable plan: engine"),
+        (_without("image"), True, "unusable plan: image"),
+        (_plan_output(image=""), True, "unusable plan: image"),
+        (_without("has_changes"), True, "unusable plan: has_changes"),
+        (_plan_output(state="cloud"), True, "unusable plan: state"),
+        (_plan_output(working_dir="/shared/other"), True, "working directory '/shared/other'"),
     ],
 )
 async def test_apply_step_refusals(monkeypatch, outputs, shared, message):
