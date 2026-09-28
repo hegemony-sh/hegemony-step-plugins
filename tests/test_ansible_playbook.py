@@ -1272,7 +1272,8 @@ async def test_default_image_pull_failure_says_how_to_get_the_image(monkeypatch)
     assert result.success is False
     error = result.error or ""
     assert f"default execution image {DEFAULT_IMAGE} could not be pulled" in error
-    assert f"docker push {DEFAULT_IMAGE}" in error
+    assert "can reach ghcr.io" in error
+    assert "images/ansible-runner" in error
     # Docker's own reason is kept.
     assert "manifest unknown" in error
 

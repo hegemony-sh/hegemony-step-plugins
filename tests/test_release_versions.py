@@ -86,3 +86,58 @@ def test_the_verifier_insists_on_an_exact_sibling_pin(dependency, ok):
         "hegemony-steps-tf", dependency, "0.6.0"
     )
     assert (failure is None) is ok, failure
+
+
+def test_set_version_moves_the_runner_image_to_the_release_minor():
+    text = (
+        'DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.6"\n'
+        "docker pull ghcr.io/hegemony-sh/ansible-runner:0.6 # and again\n"
+        "registry.example.com/ansible-runner:0.6 stays\n"
+        "The default is ghcr.io/hegemony-sh/ansible-runner:0.6.\n"
+        "Exact ghcr.io/hegemony-sh/ansible-runner:0.6.2 is not the default's form.\n"
+    )
+    moved = _script("set_version").set_runner_image_tag(text, "0.7.1")
+
+    assert 'DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.7"' in moved
+    assert "docker pull ghcr.io/hegemony-sh/ansible-runner:0.7 # and again" in moved
+    # Only the first-party image moves.
+    assert "registry.example.com/ansible-runner:0.6 stays" in moved
+    # A tag ending a sentence moves; a full version does not.
+    assert "The default is ghcr.io/hegemony-sh/ansible-runner:0.7.\n" in moved
+    assert "ghcr.io/hegemony-sh/ansible-runner:0.6.2 is not" in moved
+
+
+@pytest.mark.parametrize(
+    ("text", "ok"),
+    [
+        ("ghcr.io/hegemony-sh/ansible-runner:0.7 and ghcr.io/hegemony-sh/ansible-runner:0.7", True),
+        ("no image named at all", True),
+        ("ghcr.io/hegemony-sh/ansible-runner:0.6", False),
+        ("ghcr.io/hegemony-sh/ansible-runner:0.7.1", False),
+    ],
+)
+def test_the_verifier_insists_on_the_release_minor_image_tag(text, ok):
+    failures = _script("verify_release_version").runner_image_failures("f", text, "0.7.1")
+
+    assert (failures == []) is ok
+
+
+def test_the_default_runner_image_names_the_current_minor_version():
+    """Between releases too: the release commit moves both together."""
+    import tomllib
+
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads(
+        (root / "plugins" / "steps_ansible" / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+    verifier = _script("verify_release_version")
+    paths = _script("package_paths")
+
+    failures = [
+        failure
+        for path in paths.RUNNER_IMAGE_FILES
+        for failure in verifier.runner_image_failures(
+            path, path.read_text(encoding="utf-8"), project["version"]
+        )
+    ]
+    assert failures == []

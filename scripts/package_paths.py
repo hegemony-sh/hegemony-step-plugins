@@ -30,3 +30,22 @@ PACKAGE_DIRS = (
 # Everything except the SDK (index 0) pins hegemony-step-sdk and is version-locked to it.
 PLUGIN_DIRS = PACKAGE_DIRS[1:]
 SDK_VERSION_FILE = ROOT / "packages" / "step_sdk" / "src" / "hegemony_step_sdk" / "_version.py"
+
+# The ansible.playbook step's default execution image. The Images workflow
+# publishes it from images/ansible-runner for every release tag vX.Y.Z as X.Y.Z
+# and X.Y; the step names X.Y, so these files follow the release's minor version
+# (scripts/set_version.py rewrites them, scripts/verify_release_version.py checks
+# them). The first file holds DEFAULT_IMAGE.
+RUNNER_IMAGE = "ghcr.io/hegemony-sh/ansible-runner"
+RUNNER_IMAGE_FILES = (
+    ROOT / "plugins" / "steps_ansible" / "src" / "hegemony_steps_ansible" / "playbook.py",
+    ROOT
+    / "plugins"
+    / "steps_ansible"
+    / "src"
+    / "hegemony_steps_ansible"
+    / "docs"
+    / "ansible.playbook.md",
+    ROOT / "plugins" / "steps_ansible" / "README.md",
+    ROOT / "images" / "ansible-runner" / "Dockerfile",
+)

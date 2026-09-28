@@ -71,10 +71,10 @@ from .results import (
 )
 
 #: First-party execution image: ansible-core, libssh, sshpass, and the common
-#: network collections. Built from images/ansible-runner in this repository and
-#: not published by the release pipeline: it must be built and pushed to a
-#: registry the sandbox can pull from (see the handler docs).
-DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.5"
+#: network collections. Built from images/ansible-runner in this repository; the
+#: Images workflow publishes it for every release as X.Y.Z and X.Y, and the tag
+#: here names this release's minor version (scripts/set_version.py moves it).
+DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.6"
 
 ATTACHMENTS_ROOT = "/attachments"
 ANSIBLE_ROOT = "/hegemony/ansible"
@@ -597,12 +597,11 @@ def _explain_default_image_pull_failure(
     ):
         return result
     result.error = (
-        f"The default execution image {DEFAULT_IMAGE} could not be pulled. It is not "
-        "published with the release: build it from images/ansible-runner in "
-        "hegemony-step-plugins and push it to a registry the sandbox can pull from "
-        f"(docker build -t {DEFAULT_IMAGE} images/ansible-runner && docker push "
-        f"{DEFAULT_IMAGE}, or a tag in your own registry), or set Execution image to an "
-        f"Ansible image you host. {result.error or ''}"
+        f"The default execution image {DEFAULT_IMAGE} could not be pulled. The release "
+        "publishes it on ghcr.io: check that the sandbox's Docker daemon can reach "
+        "ghcr.io (directly or through its proxy), or build it from images/ansible-runner "
+        "in hegemony-step-plugins, push it to a registry the sandbox can pull from, and "
+        f"set Execution image to that tag. {result.error or ''}"
     ).strip()
     return result
 

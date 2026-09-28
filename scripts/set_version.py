@@ -9,7 +9,13 @@ from __future__ import annotations
 import argparse
 import re
 
-from package_paths import PACKAGE_DIRS, PLUGIN_DIRS, SDK_VERSION_FILE
+from package_paths import (
+    PACKAGE_DIRS,
+    PLUGIN_DIRS,
+    RUNNER_IMAGE,
+    RUNNER_IMAGE_FILES,
+    SDK_VERSION_FILE,
+)
 
 SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[a-zA-Z0-9.+-]+)?$")
 
@@ -67,6 +73,26 @@ def _set_sibling_pins(pyproject, version: str) -> None:
     pyproject.write_text(set_sibling_pins(text, version), encoding="utf-8")
 
 
+#: The default execution image with its tag, which names a minor version.
+#: A sentence may end right after it, but a patch version (``:0.6.0``) is not it.
+RUNNER_IMAGE_TAG = re.compile(re.escape(RUNNER_IMAGE) + r":\d+\.\d+(?!\.?\d)")
+
+
+def set_runner_image_tag(text: str, version: str) -> str:
+    """``text`` with every ``RUNNER_IMAGE:X.Y`` naming the minor version of ``version``."""
+    minor = ".".join(version.split(".")[:2])
+    return RUNNER_IMAGE_TAG.sub(f"{RUNNER_IMAGE}:{minor}", text)
+
+
+def _set_runner_image_tags(version: str) -> None:
+    for index, path in enumerate(RUNNER_IMAGE_FILES):
+        text = path.read_text(encoding="utf-8")
+        # The first file defines DEFAULT_IMAGE: losing that line must not pass silently.
+        if index == 0 and not RUNNER_IMAGE_TAG.search(text):
+            raise SystemExit(f"Could not update {path}: {RUNNER_IMAGE}:X.Y not found")
+        path.write_text(set_runner_image_tag(text, version), encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("version", help="Release version without a leading v, e.g. 0.2.0")
@@ -90,6 +116,8 @@ def main() -> None:
         path=str(SDK_VERSION_FILE),
     )
     SDK_VERSION_FILE.write_text(text, encoding="utf-8")
+
+    _set_runner_image_tags(version)
 
 
 if __name__ == "__main__":

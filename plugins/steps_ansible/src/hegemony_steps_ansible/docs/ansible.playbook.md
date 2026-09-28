@@ -129,26 +129,27 @@ are always complete, and `results_trimmed` names what was left out.
 
 ## Execution Image
 
-The default image, `ghcr.io/hegemony-sh/ansible-runner:0.5`, bundles
+The default image, `ghcr.io/hegemony-sh/ansible-runner:0.6`, bundles
 ansible-core, ansible-pylibssh, ncclient, and the network collections the
 platform maps device platforms onto. It is built from `images/ansible-runner/`
-in the hegemony-step-plugins repository and is **not published by the
-release**: before the first Ansible step runs, build it and push it to a
-registry the sandbox can pull from. From a checkout of that repository:
+in the hegemony-step-plugins repository and published on ghcr.io with every
+release, tagged with the release version and its minor version; the step
+names the minor version of the wheel you run. The sandbox's Docker daemon
+pulls the image on every run, so it must be able to reach ghcr.io (directly
+or through its proxy); otherwise set Execution image to a mirror it can reach.
+
+To add collections or Python packages, or to host the image yourself, build
+it from a checkout of that repository and push it under your own tag, then
+set Execution image to it:
 
 ```sh
-docker build -t ghcr.io/hegemony-sh/ansible-runner:0.5 images/ansible-runner
-docker push ghcr.io/hegemony-sh/ansible-runner:0.5
+docker build -t registry.example.com/ansible-runner:custom images/ansible-runner
+docker push registry.example.com/ansible-runner:custom
 ```
 
-To use your own registry instead, build and push under your own tag
-(`docker build -t registry.example.com/ansible-runner:0.5 images/ansible-runner`,
-then `docker push registry.example.com/ansible-runner:0.5`) and set Execution
-image to it. The sandbox pulls the image on every run, so an image that only
-exists on the sandbox's daemon is not enough. Until the image is reachable,
-a step that keeps the default fails at the pull with an error saying so. Any
-other Ansible execution environment image works too, as long as it has
-`/bin/sh` and the collections the playbook needs.
+When the default image cannot be pulled, the step fails at the pull with an
+error saying so. Any other Ansible execution environment image works too, as
+long as it has `/bin/sh` and the collections the playbook needs.
 
 ## When It Fails
 

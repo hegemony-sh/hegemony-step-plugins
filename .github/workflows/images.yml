@@ -1,0 +1,223 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# Publishes the ansible.playbook step's default execution image,
+# ghcr.io/<owner>/ansible-runner, from images/ansible-runner.
+#
+# A release tag vX.Y.Z (pushed by the Release workflow) publishes X.Y.Z and
+# X.Y. The step's DEFAULT_IMAGE names X.Y, which scripts/set_version.py moves
+# with every release, so the wheels of a release pull the image built from the
+# same tag. A pull request that changes the image only builds and smoke-tests
+# it. workflow_dispatch publishes an existing release tag again, after a failed
+# run or to pick up base-image fixes under the same tags.
+#
+# The image is built once and pushed by digest only; Trivy scans that digest
+# and the smoke test runs it before any tag points at it, so what the tags
+# name is what was checked (the platform repository's docker-publish does the
+# same).
+
+name: Images
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "images/ansible-runner/**"
+      - ".github/workflows/images.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v0.6.0"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: images-${{ github.event.pull_request.number || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ansible-runner:
+    name: ansible-runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/ansible-runner
+    steps:
+      - name: Resolve the release
+        id: release
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+          if ! printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::not a release tag: ${tag}"
+            exit 1
+          fi
+          version="${tag#v}"
+          {
+            echo "publish=true"
+            echo "ref=refs/tags/${tag}"
+            echo "version=${version}"
+            echo "minor=${version%.*}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ steps.release.outputs.ref }}
+          persist-credentials: false
+
+      # The tag's own step must name this minor version, or the release would
+      # publish an image its wheels never pull.
+      - name: Check the step names this release's image
+        if: steps.release.outputs.publish == 'true'
+        env:
+          EXPECTED: ${{ env.IMAGE }}:${{ steps.release.outputs.minor }}
+        run: |
+          set -euo pipefail
+          file=plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py
+          if ! grep -Fqx "DEFAULT_IMAGE = \"${EXPECTED}\"" "$file"; then
+            echo "::error::${file} does not set DEFAULT_IMAGE to ${EXPECTED}"
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+
+      - name: Image labels
+        id: labels
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          {
+            echo "labels<<EOF"
+            echo "org.opencontainers.image.title=ansible-runner"
+            echo "org.opencontainers.image.description=Default execution image of the Hegemony ansible.playbook step"
+            echo "org.opencontainers.image.source=${REPOSITORY}"
+            echo "org.opencontainers.image.revision=$(git rev-parse HEAD)"
+            echo "org.opencontainers.image.version=${VERSION:-dev}"
+            echo "org.opencontainers.image.licenses=AGPL-3.0-or-later"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Pull requests: build into the runner's daemon and stop there.
+      - name: Build
+        if: steps.release.outputs.publish != 'true'
+        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
+        with:
+          context: images/ansible-runner
+          labels: ${{ steps.labels.outputs.labels }}
+          tags: ansible-runner:pr
+          load: true
+          push: false
+
+      - name: Log in to GHCR
+        if: steps.release.outputs.publish == 'true'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Reachable only as IMAGE@sha256:... until the promote step below.
+      - name: Build and push by digest
+        id: build
+        if: steps.release.outputs.publish == 'true'
+        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
+        with:
+          context: images/ansible-runner
+          labels: ${{ steps.labels.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Image reference
+        id: ref
+        env:
+          PUBLISH: ${{ steps.release.outputs.publish }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if [ "$PUBLISH" = "true" ]; then
+            echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=ansible-runner:pr" >> "$GITHUB_OUTPUT"
+          fi
+
+      # What the step relies on: /bin/sh as the entrypoint, an unprivileged
+      # user, ansible-core with libssh, and the collections the platform maps
+      # device platforms onto.
+      - name: Smoke test
+        env:
+          IMAGE_REF: ${{ steps.ref.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker run --rm "$IMAGE_REF" -c '
+            set -e
+            test "$(id -u)" != 0
+            ansible-playbook --version
+            python3 -c "import pylibsshext, ncclient"
+            for c in ansible.netcommon ansible.utils ansible.posix community.general \
+                     cisco.ios cisco.nxos cisco.iosxr arista.eos junipernetworks.junos; do
+              ansible-galaxy collection list "$c" | grep -q "^$c " || { echo "missing $c"; exit 1; }
+            done
+            for b in ssh sshpass git; do command -v "$b" >/dev/null; done
+          '
+
+      # Gates the promotion: a CRITICAL/HIGH finding with a fixed version
+      # upstream fails the job before any tag names the image. Findings with
+      # no fix are reported by the next step instead.
+      - name: Scan with Trivy
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ steps.ref.outputs.image }}
+          format: table
+          exit-code: ${{ steps.release.outputs.publish == 'true' && '1' || '0' }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Report unfixable findings (non-blocking)
+        if: ${{ !cancelled() && steps.ref.outputs.image != '' }}
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ steps.ref.outputs.image }}
+          format: table
+          exit-code: 0
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+
+      - name: Promote the scanned digest to the release tags
+        if: steps.release.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.release.outputs.version }}
+          MINOR: ${{ steps.release.outputs.minor }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${VERSION}" --tag "${IMAGE}:${MINOR}" "${IMAGE}@${DIGEST}"
+          for tag in "${IMAGE}:${VERSION}" "${IMAGE}:${MINOR}"; do
+            resolved="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
+            if [ "$resolved" != "$DIGEST" ]; then
+              echo "::error::${tag} resolves to ${resolved}, expected ${DIGEST}"
+              exit 1
+            fi
+            echo "ok: ${tag} -> ${resolved}"
+          done
