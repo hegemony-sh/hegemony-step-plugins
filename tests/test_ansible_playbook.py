@@ -33,10 +33,13 @@ from hegemony_steps_ansible.playbook import (
     DEFAULT_IMAGE,
     INVENTORY_FILE,
     KEYS_DIR,
+    MAX_OUTPUT_BYTES,
+    MAX_OUTPUT_HOST_NAMES,
     RUN_SCRIPT,
     SECRETS_FILE,
     AnsiblePlaybookConfig,
     AnsiblePlaybookHandler,
+    _bounded_output,
     build_run_script,
     credential_host_vars,
 )
@@ -591,6 +594,65 @@ def test_callback_caps_task_records_and_counts_the_rest(monkeypatch, tmp_path):
     assert len(results.tasks) == MAX_TASK_RECORDS
     assert results.tasks[-1]["task"] == f"t{MAX_TASK_RECORDS - 1}"
     assert results.dropped_task_records == 3
+
+
+def test_host_report_renders_plays_tasks_messages_and_diffs():
+    tasks = [
+        {"play": "Base", "task": "ntp", "status": "changed", "diff": "-a\n+b"},
+        {"play": "Base", "task": "dns", "status": "ok", "msg": "not shown when ok"},
+        {"play": "Verify", "task": "probe", "status": "ignored", "msg": "timeout"},
+        {"play": "Verify", "task": "check", "status": "failed", "msg": "boom"},
+    ]
+    counts = {"ok": 2, "changed": 1, "failures": 1, "unreachable": 0, "skipped": 0}
+    assert render_host_report("r1", counts, tasks) == (
+        "r1: ok=2 changed=1 failed=1 unreachable=0 skipped=0\n"
+        "\n"
+        "PLAY [Base]\n"
+        "  changed           ntp\n"
+        "    diff: -a\n+b\n"
+        "  ok                dns\n"
+        "PLAY [Verify]\n"
+        "  failed (ignored)  probe — timeout\n"
+        "  FAILED            check — boom\n"
+    )
+
+
+def test_bounded_output_caps_host_lists():
+    names = [f"h{index:03d}" for index in range(MAX_OUTPUT_HOST_NAMES + 100)]
+    output = _bounded_output(
+        {"changed_hosts": list(names), "failed_hosts": ["a"], "unreachable_hosts": []}
+    )
+    assert output["changed_hosts"] == names[:MAX_OUTPUT_HOST_NAMES]
+    assert output["changed_hosts_truncated"] is True
+    assert output["failed_hosts"] == ["a"]
+    assert "failed_hosts_truncated" not in output
+
+
+def test_bounded_output_drops_the_host_map_before_the_stats():
+    hosts = {f"host-{index}": {"ok": 1, "changed": 1} for index in range(2000)}
+    output = _bounded_output(
+        {"changed": True, "changed_hosts": ["host-1"], "hosts": hosts, "stats": {"k": "v"}}
+    )
+    assert "hosts" not in output
+    assert output["hosts_truncated"] is True
+    # What fits stays: the host lists and the set_stats data.
+    assert output["changed_hosts"] == ["host-1"]
+    assert output["stats"] == {"k": "v"}
+    assert "stats_truncated" not in output
+    assert len(json.dumps(output)) <= MAX_OUTPUT_BYTES
+
+
+def test_bounded_output_drops_the_stats_last():
+    output = _bounded_output(
+        {
+            "changed_hosts": ["h1"],
+            "hosts": {"h1": {"ok": 1}},
+            "stats": {"blob": "x" * MAX_OUTPUT_BYTES},
+        }
+    )
+    assert "hosts" not in output and output["hosts_truncated"] is True
+    assert "stats" not in output and output["stats_truncated"] is True
+    assert output["changed_hosts"] == ["h1"]
 
 
 def test_parse_results_tolerates_missing_or_broken_files():
