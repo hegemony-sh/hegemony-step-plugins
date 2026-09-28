@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import posixpath
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -187,6 +188,14 @@ def test_public_outputs_leave_out_oversized_values_without_calling_them_sensitiv
 # ── scripts ──────────────────────────────────────────────────────────────────
 
 
+def _assert_parses(script: str) -> None:
+    """The generated script is valid sh (a quoting slip shows only at run time)."""
+    if shutil.which("sh") is None:
+        pytest.skip("no sh")
+    done = subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True)
+    assert done.returncode == 0, done.stderr
+
+
 def test_plan_script_for_backend_state():
     config = TfPlanConfig.model_validate(
         {
@@ -221,6 +230,7 @@ def test_plan_script_for_backend_state():
         assert part in plan
     assert "tofu show -json plan.tfplan > /hegemony/plan-json/plan.json" in script
     assert f". {SECRET_ENV_FILE}" in script
+    _assert_parses(script)
 
 
 def test_plan_script_for_ephemeral_state_and_terraform():
@@ -230,6 +240,7 @@ def test_plan_script_for_ephemeral_state_and_terraform():
     assert "terraform init -input=false -no-color\n" in script
     assert ".terraform/terraform.tfstate" not in script
     assert "-var-file" not in script
+    _assert_parses(script)
 
 
 def test_plan_script_for_managed_state():
@@ -240,6 +251,25 @@ def test_plan_script_for_managed_state():
     assert f"cp {BACKEND_OVERRIDE_FILE} /shared/tf/plan/" in script
     assert "tofu init -input=false -no-color\n" in script
     assert ".terraform/terraform.tfstate" not in script
+    _assert_parses(script)
+
+
+def test_plan_script_quotes_untrusted_values():
+    config = TfPlanConfig.model_validate(
+        {
+            "state": "backend",
+            "source_dir": "it's; rm -rf /",
+            "backend_config": {"bucket": "b"},
+            "var_files": ["a b/$(x).tfvars"],
+            "targets": ['a.b["x\'; y"]'],
+            "lock_timeout": "5m",
+        }
+    )
+    script = build_plan_script(
+        config, workdir="/shared/tf/pl an;x", has_vars=True, has_secret_vars=True
+    )
+    assert "cd '/shared/tf/pl an;x'" in script
+    _assert_parses(script)
 
 
 def test_apply_script():
@@ -247,6 +277,8 @@ def test_apply_script():
     assert "cd /shared/tf/plan" in script
     assert "tofu apply -input=false -no-color -lock-timeout=5m plan.tfplan" in script
     assert "tofu output -json > /hegemony/out/outputs.json" in script
+    _assert_parses(script)
+    _assert_parses(build_apply_script("terraform", "/shared/tf/a b;c'd", "300s"))
 
 
 # ── validation ───────────────────────────────────────────────────────────────
@@ -305,6 +337,7 @@ def test_keyed_resource_instances_can_be_targeted_and_replaced():
     )
     assert """'-target=module.site["prod east"].aws_vpc.main'""" in script
     assert """'-replace=aws_instance.web["blue"]'""" in script
+    _assert_parses(script)
 
 
 def test_plan_validation_accepts_defaults():
