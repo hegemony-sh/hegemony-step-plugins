@@ -33,6 +33,7 @@ from hegemony_steps_ansible.playbook import (
     DEFAULT_IMAGE,
     INVENTORY_FILE,
     KEYS_DIR,
+    MAX_ERROR_MESSAGE_CHARS,
     MAX_OUTPUT_BYTES,
     MAX_OUTPUT_HOST_NAMES,
     RUN_SCRIPT,
@@ -40,6 +41,7 @@ from hegemony_steps_ansible.playbook import (
     AnsiblePlaybookConfig,
     AnsiblePlaybookHandler,
     _bounded_output,
+    _failure_detail,
     build_run_script,
     credential_host_vars,
 )
@@ -827,7 +829,10 @@ async def test_playbook_step_end_to_end(monkeypatch):
     assert not any("pw-r1" in part or "resolved-" in part for part in create)
 
     assert result.success is False
-    assert "exited with code 2 (one or more hosts failed)" in (result.error or "")
+    # The error names the failed host and, with one, its failing task.
+    assert result.error == (
+        "ansible-playbook exited with code 2: 1 host(s) failed (r2); task 'ntp' failed: boom"
+    )
     assert result.summary == "ansible/site.yml: 2 host(s), 1 changed, 1 failed, 0 unreachable"
     assert result.output["changed"] is True
     assert result.output["changed_hosts"] == ["r1"]
@@ -924,6 +929,37 @@ async def test_results_that_could_not_be_copied_out_say_so(monkeypatch):
     )
     [note] = [e for e in result.evidence if e["name"] == "ansible_results_missing_baseline"]
     assert "docker cp failed: cp broke" in note["content_text"]
+
+
+@pytest.mark.asyncio
+async def test_the_error_lists_failed_and_unreachable_hosts(monkeypatch):
+    recap = {f"f{index}": {"ok": 1, "failures": 1} for index in range(7)}
+    recap.update({"u1": {"ok": 0, "unreachable": 1}})
+    _install_docker(monkeypatch, collected=_results_json(recap), exit_code=4)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+    assert result.error == (
+        "ansible-playbook exited with code 4: 7 host(s) failed "
+        "(f0, f1, f2, f3, f4, … 2 more); 1 unreachable (u1)"
+    )
+
+
+def test_failure_detail_clips_the_single_failure_message():
+    results = parse_results(
+        json.dumps(
+            {
+                "completed": True,
+                "hosts": {"r1": {"failures": 1}},
+                "tasks": [
+                    {"host": "r1", "task": "a", "status": "ignored", "msg": "not this"},
+                    {"host": "r1", "task": "b", "status": "failed", "msg": "x\n" * 400},
+                ],
+            }
+        ).encode()
+    )
+    detail = _failure_detail(results, ["r1"], [])
+    assert detail.startswith("1 host(s) failed (r1); task 'b' failed: x x x")
+    assert detail.endswith("…")
+    assert len(detail.split(": ", 1)[1]) == MAX_ERROR_MESSAGE_CHARS
 
 
 @pytest.mark.asyncio

@@ -117,15 +117,17 @@ other Ansible execution environment image works too, as long as it has
 
 The step succeeds only when ansible-playbook exits with 0 and its results
 were collected. Exit code 2 means a host failed, 4 means a host was
-unreachable or the playbook did not parse; the error names the code. A play
-that exits with 0 without results (the results callback did not run, for
-example because the playbook's own `ansible.cfg` or image disabled it, or
-the results could not be copied out of the container, which the error then
-says) fails too: whether any host changed is then unknown. The step also
-fails before running anything when the config is invalid, a device the step
-targets has no usable credentials, a jump host has only a password or a
-host, user name or port that is not plain (a host name or IP address; a user
-name of letters, digits and `. _ @ + -`), or a secret resolves to nothing.
-The timeout covers the whole run, image pull included. Installing a
-requirements file needs network access to the Galaxy server under the flow's
-egress policy.
+unreachable or the playbook did not parse. The error names the failed and
+unreachable hosts (the first five of each) and, when a single host failed,
+its failing task and message; when the play produced no recap it names the
+exit code's meaning instead. A play that exits with 0 without results (the
+results callback did not run, for example because the playbook's own
+`ansible.cfg` or image disabled it, or the results could not be copied out
+of the container, which the error then says) fails too: whether any host
+changed is then unknown. The step also fails before running anything when
+the config is invalid, a device the step targets has no usable credentials,
+a jump host has only a password or a host, user name or port that is not
+plain (a host name or IP address; a user name of letters, digits and `. _ @
++ -`), or a secret resolves to nothing. The timeout covers the whole run,
+image pull included. Installing a requirements file needs network access to
+the Galaxy server under the flow's egress policy.

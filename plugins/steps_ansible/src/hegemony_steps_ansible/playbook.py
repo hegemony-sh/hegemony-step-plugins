@@ -61,6 +61,7 @@ from .results import (
     CALLBACK_SOURCE,
     EXIT_CODE_MEANINGS,
     RESULTS_FILE,
+    PlaybookResults,
     parse_results,
     render_host_report,
 )
@@ -532,6 +533,43 @@ def _bounded_output(output: dict[str, Any]) -> dict[str, Any]:
     return output
 
 
+#: Host names an error lists before it abbreviates; the evidence has them all.
+MAX_ERROR_HOST_NAMES = 5
+MAX_ERROR_MESSAGE_CHARS = 300
+
+
+def _host_list(names: list[str]) -> str:
+    shown = ", ".join(names[:MAX_ERROR_HOST_NAMES])
+    more = len(names) - MAX_ERROR_HOST_NAMES
+    return f"{shown}, … {more} more" if more > 0 else shown
+
+
+def _failure_detail(results: PlaybookResults, failed: list[str], unreachable: list[str]) -> str:
+    """Which hosts failed or were unreachable, from the play recap.
+
+    With a single failed host, its first failed task and message are added,
+    so the run graph shows the cause without opening the evidence.
+    """
+    parts: list[str] = []
+    if failed:
+        part = f"{len(failed)} host(s) failed ({_host_list(failed)})"
+        if len(failed) == 1:
+            first = next(
+                (t for t in results.tasks_for(failed[0]) if t.get("status") == "failed"), None
+            )
+            if first is not None:
+                part += f"; task {str(first.get('task', ''))!r} failed"
+                message = " ".join(str(first.get("msg") or "").split())
+                if message:
+                    if len(message) > MAX_ERROR_MESSAGE_CHARS:
+                        message = message[: MAX_ERROR_MESSAGE_CHARS - 1] + "…"
+                    part += f": {message}"
+        parts.append(part)
+    if unreachable:
+        parts.append(f"{len(unreachable)} unreachable ({_host_list(unreachable)})")
+    return "; ".join(parts)
+
+
 def _explain_default_image_pull_failure(
     config: AnsiblePlaybookConfig, result: HandlerResult
 ) -> HandlerResult:
@@ -860,7 +898,10 @@ class AnsiblePlaybookHandler(BaseHandler):
         meaning = EXIT_CODE_MEANINGS.get(exit_code, "unexpected exit code")
         error: str | None = None
         if exit_code != 0:
-            error = f"ansible-playbook exited with code {exit_code} ({meaning})"
+            detail = _failure_detail(results, failed, unreachable) if results.completed else ""
+            error = f"ansible-playbook exited with code {exit_code}" + (
+                f": {detail}" if detail else f" ({meaning})"
+            )
         elif not results.completed:
             error = (
                 "ansible-playbook exited with code 0, but the step has no results from it: "
