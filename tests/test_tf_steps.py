@@ -531,6 +531,52 @@ async def test_state_access_lasts_as_long_as_the_container(
     assert [job.config["timeout_seconds"] for job in jobs] == [expected]
 
 
+@pytest.mark.parametrize(
+    ("handler", "config", "refused"),
+    [
+        (TfPlanHandler, {"state_name": "core", "timeout_seconds": 85800}, False),
+        (TfPlanHandler, {"state_name": "core", "timeout_seconds": 85801}, True),
+        (TfPlanHandler, {"state_name": "core", "timeout_seconds": "86400"}, True),
+        # Without managed state nothing limits the timeout.
+        (TfPlanHandler, {"state": "backend", "timeout_seconds": 86400}, False),
+        # The plan step decides whether the apply's state is managed.
+        (TfApplyHandler, {"plan_step": "plan", "timeout_seconds": 85800}, False),
+        (TfApplyHandler, {"plan_step": "plan", "timeout_seconds": 86400}, True),
+    ],
+)
+def test_managed_state_limits_the_step_timeout(handler, config, refused):
+    errors = handler().validate_config(config)
+    assert any("must be at most 85800 with managed state" in e for e in errors) is refused, errors
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", [TfPlanHandler, TfApplyHandler])
+async def test_state_access_is_clamped_for_a_long_policy_timeout(monkeypatch, handler):
+    """A policy or flow timeout is not validated with the step: the state access
+    is clamped to what the platform grants, and the step says so."""
+    jobs = []
+
+    async def fake_run_container_job(ctx, job):
+        jobs.append(job)
+        return HandlerResult(success=False, error="stopped before the container")
+
+    monkeypatch.setattr(f"{handler.__module__}.run_container_job", fake_run_container_job)
+    services = _Services(_plan_output(state="managed", state_name="core"))
+    ctx = _ctx({"plan_step": "plan", "state_name": "core"}, services, timeout=90000)
+    progress: list[str] = []
+
+    async def emit(message, device_id=None, attrs=None):
+        progress.append(message)
+        return True
+
+    ctx._emit_progress = emit
+    await handler().execute(ctx)
+
+    assert services.opened == [("core", 86400)]
+    assert [job.config["timeout_seconds"] for job in jobs] == [90000]
+    assert any("limited to 86400 s" in message for message in progress)
+
+
 @pytest.mark.asyncio
 async def test_plan_step_reports_unavailable_managed_state(monkeypatch):
     state = _install_docker(monkeypatch, out={})

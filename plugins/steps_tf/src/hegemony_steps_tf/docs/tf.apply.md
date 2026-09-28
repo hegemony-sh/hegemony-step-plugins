@@ -49,7 +49,11 @@ saved plan lives in the run's shared workspace; when that workspace is gone
 time for approval), the step says so: plan again. The state lock is taken
 for the apply; Lock timeout sets how long to wait for it. Managed state
 access lasts as long as the step's timeout (its own Timeout, else the one
-from its policy or the flow), plus a margin.
+from its policy or the flow), plus a 10-minute margin, and at most 24
+hours: the step's own Timeout is refused above 85800 seconds (whatever the
+plan's state, since the plan step decides it), and a longer timeout from
+the policy or the flow still ends the state access after 24 hours, which
+the step's log says.
 
 When the tool changes resources but cannot save the resulting state (the
 backend is unreachable or refuses the write), it leaves the state in

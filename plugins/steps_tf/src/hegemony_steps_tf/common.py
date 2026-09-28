@@ -16,6 +16,7 @@ and the apply step runs in it with the image the plan used.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shlex
 from collections.abc import AsyncIterator
@@ -34,6 +35,8 @@ from hegemony_steps_container.runner import (
     resolve_secret_values,
     secret_map_errors,
 )
+
+logger = logging.getLogger(__name__)
 
 Engine = Literal["opentofu", "terraform"]
 StateMode = Literal["managed", "backend", "ephemeral"]
@@ -86,6 +89,10 @@ HTTP_BACKEND_OVERRIDE = 'terraform {\n  backend "http" {}\n}\n'
 LOCAL_BACKEND_OVERRIDE = 'terraform {\n  backend "local" {}\n}\n'
 #: How long state access outlives the step's own timeout (image pull, cleanup).
 STATE_ACCESS_MARGIN_SECONDS = 600
+#: The longest state access the platform grants (its run tokens' maximum life).
+MAX_STATE_ACCESS_SECONDS = 86400
+#: The longest step timeout that state access can cover, margin included.
+MAX_MANAGED_STATE_TIMEOUT = MAX_STATE_ACCESS_SECONDS - STATE_ACCESS_MARGIN_SECONDS
 
 
 class TfContainerConfig(ContainerExecutionConfig):
@@ -238,10 +245,34 @@ async def managed_state_access(
     if not name:
         yield None
         return
-    async with ctx.require_services().open_state_backend(
-        name, ttl_seconds=timeout_seconds + STATE_ACCESS_MARGIN_SECONDS
-    ) as access:
+    ttl = timeout_seconds + STATE_ACCESS_MARGIN_SECONDS
+    if ttl > MAX_STATE_ACCESS_SECONDS:
+        # The step's own timeout is validated (managed_timeout_errors); one from its
+        # policy or the flow is not, and the platform refuses a longer grant.
+        ttl = MAX_STATE_ACCESS_SECONDS
+        message = (
+            f"Managed state access for {name!r} is limited to {MAX_STATE_ACCESS_SECONDS} s; "
+            f"the step may run for {timeout_seconds} s, and state access ends first"
+        )
+        logger.warning(message, extra={"run_id": ctx.run_id, "step_run_id": ctx.step_run_id})
+        await ctx.emit_progress(message)
+    async with ctx.require_services().open_state_backend(name, ttl_seconds=ttl) as access:
         yield access
+
+
+def managed_timeout_errors(value: object) -> list[str]:
+    """A step timeout longer than managed state access can last."""
+    try:
+        seconds = int(str(value))
+    except (TypeError, ValueError):
+        return []
+    if seconds > MAX_MANAGED_STATE_TIMEOUT:
+        return [
+            f"'timeout_seconds' must be at most {MAX_MANAGED_STATE_TIMEOUT} with managed "
+            f"state: state access lasts at most {MAX_STATE_ACCESS_SECONDS} s, including a "
+            f"{STATE_ACCESS_MARGIN_SECONDS} s margin"
+        ]
+    return []
 
 
 def secret_env_errors(value: object) -> list[str]:

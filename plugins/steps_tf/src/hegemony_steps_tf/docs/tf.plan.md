@@ -86,4 +86,8 @@ state (for example, no state encryption key is configured). Provider downloads a
 need network access to those endpoints under the flow's egress policy. The
 timeout covers the whole run, image pull included. Without a Timeout on the
 step, the step's timeout from its policy or the flow applies; managed state
-access lasts as long as that timeout, plus a margin.
+access lasts as long as that timeout, plus a 10-minute margin. The platform
+grants state access for at most 24 hours, so with managed state the step's
+own Timeout is refused above 85800 seconds; a longer timeout from the policy
+or the flow is not refused, but the state access still ends after 24 hours,
+and the step's log says so.

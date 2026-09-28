@@ -42,6 +42,7 @@ from .common import (
     common_errors,
     container_timeout,
     managed_state_access,
+    managed_timeout_errors,
     script_header,
     secret_environment,
     shared_workspace_mounted,
@@ -240,7 +241,9 @@ class TfApplyHandler(BaseHandler):
         errors = super().validate_config(config)
         if errors:
             return errors
-        return common_errors(config)
+        # The plan step decides whether the state is managed, so this step's
+        # own timeout must always fit managed state access.
+        return common_errors(config) + managed_timeout_errors(config.get("timeout_seconds"))
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         errors = self.validate_config(ctx.config)

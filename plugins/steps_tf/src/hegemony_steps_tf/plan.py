@@ -62,6 +62,7 @@ from .common import (
     container_timeout,
     default_image,
     managed_state_access,
+    managed_timeout_errors,
     relative_path_error,
     script_header,
     secret_environment,
@@ -327,6 +328,7 @@ class TfPlanHandler(BaseHandler):
         errors += backend_config_errors(config.get("backend_config"))
         if (config.get("state") or "managed") == "managed":
             errors += state_name_errors(config.get("state_name"))
+            errors += managed_timeout_errors(config.get("timeout_seconds"))
         errors += address_list_errors("targets", config.get("targets"))
         errors += address_list_errors("replace", config.get("replace"))
         if config.get("destroy") and config.get("refresh_only"):
