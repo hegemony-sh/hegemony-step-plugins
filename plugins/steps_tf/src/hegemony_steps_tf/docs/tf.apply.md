@@ -40,6 +40,23 @@ The step fails when the plan step did not succeed in this run, when either
 step lacks shared affinity or the worker has shared workspaces disabled, or
 when the apply itself fails. The tool refuses
 a saved plan made stale by a state change since planning: plan again. The
-state lock is taken for the apply; Lock timeout sets how long to wait for
-it. Managed state access lasts as long as the step's timeout (its own
-Timeout, else the one from its policy or the flow), plus a margin.
+saved plan lives in the run's shared workspace; when that workspace is gone
+(for example cleaned up after a worker restart while the run waited a long
+time for approval), the step says so: plan again. The state lock is taken
+for the apply; Lock timeout sets how long to wait for it. Managed state
+access lasts as long as the step's timeout (its own Timeout, else the one
+from its policy or the flow), plus a margin.
+
+When the tool changes resources but cannot save the resulting state (the
+backend is unreachable or refuses the write), it leaves the state in
+`errored.tfstate`. The step saves it again (`state push`), retrying for
+about 40 seconds. If that fails too, the step keeps the state as the run
+artifact `errored.tfstate.gz` and says so: the working directory is deleted
+when the run ends, so this is the only copy. It holds the state in clear,
+secrets included, and anyone who can view the run can download it: save it
+with `tofu state push` (or `terraform state push`), then delete the artifact,
+before planning again. With OpenTofu state encryption the kept file is
+encrypted too.
+
+A failure to read the configuration's outputs after a successful apply does
+not fail the step: the summary says the outputs could not be read.

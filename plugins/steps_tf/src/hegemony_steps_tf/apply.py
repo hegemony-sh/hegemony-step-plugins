@@ -32,6 +32,7 @@ from hegemony_steps_container.runner import (
 
 from .common import (
     BINARIES,
+    KEEP_DIR,
     PLAN_FILE,
     RUN_SCRIPT,
     TfContainerConfig,
@@ -44,6 +45,17 @@ from .common import (
 from .plan import common_errors, secret_environment
 
 OUTPUTS_FILE = f"{OUTPUT_DIR}/outputs.json"
+#: What became of the state when the tool could not save it: "recovered" (saved
+#: again from errored.tfstate) or "kept" (only in the kept artifact).
+ERRORED_STATE_FILE = f"{OUTPUT_DIR}/errored-state"
+#: The artifact an unsaved state is kept as (gzip, so it is uploaded as a file
+#: and never rewritten by redaction).
+ERRORED_STATE_ARTIFACT = "errored.tfstate.gz"
+#: Exit code the run script uses when the saved plan is gone.
+EXIT_NO_PLAN = 4
+#: Waits before each further attempt to save errored.tfstate (the first is immediate).
+SAVE_RETRY_WAITS = (10, 30)
+STALE_PLAN_MARKER = "Saved plan is stale"
 
 #: Non-sensitive outputs larger than this are left out of the step output.
 MAX_OUTPUT_VALUE_BYTES = 16 * 1024
@@ -76,19 +88,66 @@ class TfApplyConfig(TfContainerConfig):
 
 
 def build_apply_script(engine: str, workdir: str, lock_timeout: str) -> str:
+    """Apply the saved plan in the plan step's working directory.
+
+    When the tool changed resources but could not save the resulting state
+    (the backend was unreachable, refused the write, or the token ended), it
+    leaves the state in ``errored.tfstate``. That directory is deleted with the
+    run, so the script saves the state again (``state push``, retried), and if
+    that fails too keeps it as a run artifact instead of losing it.
+    """
     tf = BINARIES[engine]
     apply = [tf, "apply", "-input=false", "-no-color", f"-lock-timeout={lock_timeout}", PLAN_FILE]
+    # Without the lock: when the apply's own unlock failed too, this step still
+    # holds the lock, and the platform lets the holder write without its ID.
+    push = f"{tf} state push -lock=false errored.tfstate"
+    quoted_workdir = shlex.quote(workdir)
+    retry = [
+        f"    for wait in 0 {' '.join(str(wait) for wait in SAVE_RETRY_WAITS)}; do",
+        '      if [ "$wait" -gt 0 ]; then sleep "$wait"; fi',
+        f"      if {push}; then saved=yes; break; fi",
+        "    done",
+    ]
     return (
         "\n".join(
             [
                 *script_header(),
-                f"cd {shlex.quote(workdir)}",
+                f"if [ ! -f {quoted_workdir}/{PLAN_FILE} ]; then",
+                f"  echo {shlex.quote(NO_PLAN_MESSAGE)} >&2",
+                f"  exit {EXIT_NO_PLAN}",
+                "fi",
+                f"cd {quoted_workdir}",
+                "set +e",
                 " ".join(shlex.quote(part) for part in apply),
-                f"{tf} output -json > {OUTPUTS_FILE}",
+                "code=$?",
+                "set -e",
+                'if [ "$code" -ne 0 ]; then',
+                "  if [ -f errored.tfstate ]; then",
+                "    saved=no",
+                *retry,
+                '    if [ "$saved" = yes ]; then',
+                f"      printf recovered > {ERRORED_STATE_FILE}",
+                "    else",
+                f"      mkdir -p {KEEP_DIR}",
+                f"      gzip -c errored.tfstate > {KEEP_DIR}/{ERRORED_STATE_ARTIFACT}",
+                f"      printf kept > {ERRORED_STATE_FILE}",
+                "    fi",
+                "  fi",
+                '  exit "$code"',
+                "fi",
+                # The apply succeeded: a failure to read the outputs must not
+                # turn it into a failed step (a retry would refuse the plan).
+                f"if ! {tf} output -json > {OUTPUTS_FILE}; then rm -f {OUTPUTS_FILE}; fi",
             ]
         )
         + "\n"
     )
+
+
+NO_PLAN_MESSAGE = (
+    "The saved plan is gone: the run's shared workspace was removed (for example "
+    "cleaned up after a worker restart while the run waited). Plan again."
+)
 
 
 def public_outputs(raw: bytes | None) -> tuple[dict[str, Any], list[str]]:
@@ -193,13 +252,17 @@ class TfApplyHandler(BaseHandler):
                     ctx, config.secret_env, config.state_encryption_key, access
                 )
                 job = ContainerJob(
-                    config=container_config_from(
-                        {**ctx.config, "timeout_seconds": timeout},
-                        image=image,
-                        command=[f"sh {RUN_SCRIPT}"],
-                        entrypoint="/bin/sh",
-                        env=tool_env(),
-                    ),
+                    config={
+                        **container_config_from(
+                            {**ctx.config, "timeout_seconds": timeout},
+                            image=image,
+                            command=[f"sh {RUN_SCRIPT}"],
+                            entrypoint="/bin/sh",
+                            env=tool_env(),
+                        ),
+                        # An unsaved state is kept here and harvested as an artifact.
+                        "new_artifacts_path": KEEP_DIR,
+                    },
                     files=[
                         *env_files,
                         _script_file(engine, workdir, config.lock_timeout.strip()),
@@ -213,7 +276,7 @@ class TfApplyHandler(BaseHandler):
             return self._refuse(str(exc))
         if isinstance(outcome, HandlerResult):
             return outcome
-        return self._result(engine, image, plan_output, outcome)
+        return self._result(engine, image, plan_output, outcome, state_name)
 
     @staticmethod
     def _refuse(message: str) -> HandlerResult:
@@ -225,6 +288,7 @@ class TfApplyHandler(BaseHandler):
         image: str,
         plan_output: dict[str, Any],
         outcome: ContainerJobResult,
+        state_name: str | None = None,
     ) -> HandlerResult:
         tool = BINARIES[engine]
         metrics = {
@@ -236,22 +300,49 @@ class TfApplyHandler(BaseHandler):
             return HandlerResult(
                 success=False,
                 summary=f"{tool} apply failed",
-                error=(
-                    f"{tool} apply exited with code {outcome.exit_code}; see the container "
-                    "output (a stale plan means the state changed since planning: plan again)"
-                ),
+                error=apply_failure(tool, outcome, state_name),
                 metrics=metrics,
                 evidence=list(outcome.evidence),
             )
-        values, sensitive = public_outputs(outcome.collected.get(OUTPUTS_FILE))
         planned = plan_output.get("summary") or "the saved plan"
+        summary = f"Applied: {planned.removeprefix('Plan: ')}"
+        raw_outputs = outcome.collected.get(OUTPUTS_FILE)
+        if raw_outputs is None:
+            summary += " (its outputs could not be read)"
+        values, sensitive = public_outputs(raw_outputs)
         return HandlerResult(
             success=True,
-            summary=f"Applied: {planned.removeprefix('Plan: ')}",
+            summary=summary,
             metrics=metrics,
             evidence=list(outcome.evidence),
             output={"applied": True, "outputs": values, "sensitive_outputs": sensitive},
         )
+
+
+def apply_failure(tool: str, outcome: ContainerJobResult, state_name: str | None) -> str:
+    """The step error for a failed apply, naming what happened to the state."""
+    where = f"managed state {state_name!r}" if state_name else "the state backend"
+    errored = (outcome.collected.get(ERRORED_STATE_FILE) or b"").decode("utf-8", "replace")
+    if outcome.exit_code == EXIT_NO_PLAN:
+        return NO_PLAN_MESSAGE
+    if errored.strip() == "kept":
+        return (
+            f"{tool} apply changed resources but could not save the resulting state to "
+            f"{where}, and saving it again failed too. The state is kept as the run "
+            f"artifact {ERRORED_STATE_ARTIFACT}: it holds the state in clear (secrets "
+            f"included), so download it, save it with `{tool} "
+            "state push`, then delete the artifact. Plan again only after that; see the "
+            "container output for the original error."
+        )
+    if errored.strip() == "recovered":
+        return (
+            f"{tool} apply failed, and the tool could not save the resulting state at "
+            f"first; the step saved it to {where} afterwards. See the container output "
+            "for the error, then plan again."
+        )
+    if STALE_PLAN_MARKER in outcome.stdout or STALE_PLAN_MARKER in outcome.stderr:
+        return f"{tool} refused the saved plan: the state changed since it was made. Plan again."
+    return f"{tool} apply exited with code {outcome.exit_code}; see the container output"
 
 
 def _script_file(engine: str, workdir: str, lock_timeout: str) -> StagedFile:

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import subprocess
 import tempfile
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -24,11 +26,22 @@ from hegemony_step_sdk import (
     StateBackendAccess,
 )
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
-from hegemony_steps_tf.apply import TfApplyHandler, build_apply_script, public_outputs
+from hegemony_steps_container.runner import ContainerJobResult
+from hegemony_steps_tf.apply import (
+    ERRORED_STATE_FILE,
+    EXIT_NO_PLAN,
+    NO_PLAN_MESSAGE,
+    OUTPUTS_FILE,
+    TfApplyHandler,
+    apply_failure,
+    build_apply_script,
+    public_outputs,
+)
 from hegemony_steps_tf.common import (
     BACKEND_CONFIG_FILE,
     BACKEND_OVERRIDE_FILE,
     DEFAULT_IMAGES,
+    KEEP_DIR,
     RUN_SCRIPT,
     SECRET_ENV_FILE,
     SECRET_VARS_FILE,
@@ -37,6 +50,7 @@ from hegemony_steps_tf.common import (
     encryption_hcl,
     hcl_string,
     typed_variable,
+    workdir_for,
 )
 from hegemony_steps_tf.plan import (
     EXIT_NO_BACKEND,
@@ -636,11 +650,151 @@ async def test_apply_step_skips_a_plan_without_changes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_apply_failure_mentions_stale_plans(monkeypatch):
+async def test_apply_failure_names_no_cause_it_cannot_see(monkeypatch):
+    """A generic failure no longer blames a stale plan."""
     _install_docker(monkeypatch, out={}, exit_code=1)
     result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _Services(_plan_output())))
     assert result.success is False
-    assert "stale plan" in (result.error or "")
+    assert result.error == "tofu apply exited with code 1; see the container output"
+
+
+def _job_result(exit_code: int, *, errored: bytes | None = None, stderr: str = "") -> Any:
+    collected = {ERRORED_STATE_FILE: errored} if errored is not None else {}
+    return ContainerJobResult(
+        exit_code=exit_code,
+        stdout="",
+        stderr=stderr,
+        truncated=False,
+        duration_seconds=1.0,
+        image="img",
+        evidence=[],
+        skipped_artifacts=0,
+        collected=collected,
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (_job_result(EXIT_NO_PLAN), NO_PLAN_MESSAGE),
+        (_job_result(1, errored=b"kept"), "kept as the run artifact errored.tfstate.gz"),
+        (_job_result(1, errored=b"recovered"), "saved it to managed state 'core' afterwards"),
+        (_job_result(1, stderr="Error: Saved plan is stale\n"), "state changed since it was made"),
+        (_job_result(1), "exited with code 1"),
+    ],
+)
+def test_apply_failure_says_what_happened_to_the_state(result, expected):
+    assert expected in apply_failure("tofu", result, "core")
+
+
+@pytest.mark.asyncio
+async def test_apply_keeps_an_unsaved_state_as_an_artifact(monkeypatch):
+    state = _install_docker(monkeypatch, out={"errored-state": b"kept"}, exit_code=1)
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _Services(_plan_output())))
+    assert result.success is False
+    assert "errored.tfstate.gz" in (result.error or "")
+    # The runner harvests the kept state from this folder after the container exits.
+    assert any(f"{KEEP_DIR}/." in " ".join(call) for call in state["calls"] if call[1] == "cp")
+
+
+@pytest.mark.asyncio
+async def test_apply_succeeds_when_only_its_outputs_cannot_be_read(monkeypatch):
+    _install_docker(monkeypatch, out={}, exit_code=0)
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _Services(_plan_output())))
+    assert result.success is True
+    assert result.output["applied"] is True
+    assert result.output["outputs"] == {}
+    assert "outputs could not be read" in (result.summary or "")
+
+
+def _run_apply_script(tmp_path, *, apply_code: int, push_fails: int, output_code: int = 0):
+    """Run the generated apply script under sh with a fake tool and no real waits."""
+    root = tmp_path / "root"
+    workdir = root / "shared" / "tf" / "plan"
+    workdir.mkdir(parents=True)
+    (workdir / "plan.tfplan").write_text("plan")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pushes = tmp_path / "pushes"
+    tool = bin_dir / "tofu"
+    tool.write_text(
+        f"""#!/bin/sh
+case "$1" in
+  apply)
+    if [ {apply_code} -ne 0 ]; then echo '{{"serial": 7}}' > errored.tfstate; fi
+    exit {apply_code} ;;
+  state)
+    n=$(cat {pushes} 2>/dev/null || echo 0); n=$((n + 1)); echo $n > {pushes}
+    if [ $n -le {push_fails} ]; then exit 1; fi
+    exit 0 ;;
+  output)
+    echo '{{}}'; exit {output_code} ;;
+esac
+"""
+    )
+    (bin_dir / "sleep").write_text("#!/bin/sh\nexit 0\n")
+    for path in (tool, bin_dir / "sleep"):
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    script = build_apply_script("opentofu", "/shared/tf/plan", "300s")
+    for prefix in ("/hegemony/", "/shared/"):
+        script = script.replace(prefix, f"{root}{prefix}")
+    (tmp_path / "run.sh").write_text(script)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    done = subprocess.run(["sh", str(tmp_path / "run.sh")], env=env, capture_output=True, text=True)
+    out = root / "hegemony" / "out"
+    return done, out, root / KEEP_DIR.lstrip("/"), pushes
+
+
+def test_apply_script_saves_the_errored_state_again(tmp_path):
+    done, out, keep, pushes = _run_apply_script(tmp_path, apply_code=1, push_fails=1)
+    assert done.returncode == 1, done.stderr
+    assert (out / "errored-state").read_text() == "recovered"
+    assert pushes.read_text().strip() == "2"
+    assert not (keep / "errored.tfstate.gz").exists()
+
+
+def test_apply_script_keeps_the_errored_state_when_it_cannot_be_saved(tmp_path):
+    done, out, keep, pushes = _run_apply_script(tmp_path, apply_code=1, push_fails=99)
+    assert done.returncode == 1, done.stderr
+    assert (out / "errored-state").read_text() == "kept"
+    assert pushes.read_text().strip() == "3"
+    import gzip
+
+    assert json.loads(gzip.decompress((keep / "errored.tfstate.gz").read_bytes())) == {"serial": 7}
+
+
+def test_apply_script_ignores_a_failed_outputs_read(tmp_path):
+    done, out, _keep, _pushes = _run_apply_script(
+        tmp_path, apply_code=0, push_fails=0, output_code=1
+    )
+    assert done.returncode == 0, done.stderr
+    assert not (out / OUTPUTS_FILE.rsplit("/", 1)[-1]).exists()
+
+
+def test_apply_script_refuses_a_missing_plan(tmp_path):
+    done, out, _keep, _pushes = _run_apply_script(tmp_path, apply_code=0, push_fails=0)
+    assert done.returncode == 0
+    (tmp_path / "root" / "shared" / "tf" / "plan" / "plan.tfplan").unlink()
+    env = {**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}"}
+    again = subprocess.run(
+        ["sh", str(tmp_path / "run.sh")], env=env, capture_output=True, text=True
+    )
+    assert again.returncode == EXIT_NO_PLAN
+    assert "saved plan is gone" in again.stderr
+
+
+@pytest.mark.parametrize(
+    ("step_id", "expected"),
+    [
+        (".", "/shared/tf/_."),
+        ("..", "/shared/tf/_.."),
+        ("", "/shared/tf/plan"),
+        ("a/b", "/shared/tf/a_b"),
+        ("plan.v2", "/shared/tf/plan.v2"),
+    ],
+)
+def test_workdir_never_names_the_shared_root(step_id, expected):
+    assert workdir_for(step_id) == expected
 
 
 def test_handler_metadata():

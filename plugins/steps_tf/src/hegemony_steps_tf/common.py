@@ -52,6 +52,9 @@ BACKEND_CONFIG_FILE = f"{TF_ROOT}/backend.hcl"
 VARS_FILE = f"{TF_ROOT}/vars.tfvars.json"
 SECRET_VARS_FILE = f"{TF_ROOT}/secret-vars.tfvars.json"
 PLAN_FILE = "plan.tfplan"
+#: Harvested as downloadable run artifacts after the container exits (the
+#: runner's new-artifacts folder), for files that must outlive the run workspace.
+KEEP_DIR = "/hegemony/keep"
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
@@ -100,6 +103,10 @@ def default_image(engine: str) -> str:
 def workdir_for(step_id: str) -> str:
     """The plan step's working directory inside the run's shared workspace."""
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", step_id) or "plan"
+    if not safe.strip("."):
+        # "." and ".." would name /shared/tf or /shared itself, which the plan
+        # script empties first.
+        safe = "_" + safe
     return f"{SHARED_ROOT}/tf/{safe}"
 
 
