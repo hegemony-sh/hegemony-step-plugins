@@ -58,6 +58,7 @@ from .inventory import (
     build_inventory,
     is_plain_host,
     literal,
+    management_address,
 )
 from .results import (
     CALLBACK_NAME,
@@ -726,8 +727,9 @@ class AnsiblePlaybookHandler(BaseHandler):
         """The files to stage, the inventory they describe, and the hosts left out.
 
         A device of one of the step's own target roles must have usable
-        credentials. One that is in the inventory only through inventory
-        scope ``run`` is left out when it has none (host name -> reason), so
+        credentials, and a management address (when it has one) that is a
+        host name or IP address. One that is in the inventory only through
+        inventory scope ``run`` is left out instead (host name -> reason), so
         devices that other steps reach some other way do not block the play.
         """
         files: list[StagedFile] = [
@@ -738,10 +740,10 @@ class AnsiblePlaybookHandler(BaseHandler):
         for index, host in enumerate(inventory.hosts):
             credentials: DeviceCredentials | None = None
             try:
-                address = host.device.get("mgmt_host")
-                if address and not is_plain_host(str(address)):
+                address = management_address(host.device)
+                if address and not is_plain_host(address):
                     raise ValueError(
-                        f"device {host.name}: its management address {str(address)[:100]!r} "
+                        f"device {host.name}: its management address {address[:100]!r} "
                         "is not a host name or IP address"
                     )
                 if config.device_credentials:
@@ -867,7 +869,9 @@ class AnsiblePlaybookHandler(BaseHandler):
                     "name": f"ansible_hosts_left_out_{ctx.step_id}",
                     "content_text": (
                         "Left out of the inventory: in it only through inventory scope "
-                        "'run', not a target of this step, and without usable credentials.\n"
+                        "'run', not a target of this step, and without usable credentials "
+                        "or with a management address that is not a host name or IP "
+                        "address.\n"
                         + "".join(f"- {name}: {why}\n" for name, why in sorted(left_out.items()))
                     ),
                 }

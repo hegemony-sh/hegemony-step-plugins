@@ -37,20 +37,25 @@ _INVALID_GROUP_CHARS = re.compile(r"[^A-Za-z0-9_]")
 _INVALID_HOST_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 #: A plain host name (the address itself, IP addresses aside). Addresses from
 #: device records reach ``ssh``, which reads one starting with ``-`` as an
-#: option (``-oProxyCommand=…``), and a jump host's reach a ProxyCommand run
-#: through ``/bin/sh``: only names and IP addresses are accepted.
+#: option (``-oProxyCommand=…``), and a ProxyCommand run through ``/bin/sh``
+#: (a jump host's, and the target's own as ``%h``): only names and IP
+#: addresses are accepted.
 _HOST_NAME_RE = re.compile(
-    r"^(?=.{1,253}$)[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62})(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62}))*\.?$"
+    r"(?=.{1,253}\Z)[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62})(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62}))*\.?"
 )
+#: An IPv6 zone (``fe80::1%eth0``) that is an interface name. Python accepts any
+#: text after ``%`` as the zone, shell syntax and spaces included.
+_IPV6_ZONE_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 
 
 def is_plain_host(value: str) -> bool:
     """Whether ``value`` is a host name or an IP address, and nothing else."""
     try:
-        ipaddress.ip_address(value)
+        address = ipaddress.ip_address(value)
     except ValueError:
-        return bool(_HOST_NAME_RE.match(value))
-    return True
+        return bool(_HOST_NAME_RE.fullmatch(value))
+    zone = getattr(address, "scope_id", None)
+    return zone is None or bool(_IPV6_ZONE_RE.fullmatch(zone))
 
 
 #: Device attribute whose mapping is merged into the host's variables, so
@@ -266,6 +271,11 @@ def _site_groups(site: object) -> list[str]:
     return [group_name("site", "_".join(parts[: index + 1])) for index in range(len(parts))]
 
 
+def management_address(device: Mapping[str, Any]) -> str:
+    """The device's management address, without surrounding spaces ("" for none)."""
+    return str(device.get("mgmt_host") or "").strip()
+
+
 def _device_var_allowed(key: str) -> bool:
     if key == "hegemony":
         return False
@@ -279,8 +289,9 @@ def _host_variables(
 ) -> tuple[dict[str, Any], list[str]]:
     """The host's inventory variables, and the attribute keys left out."""
     variables: dict[str, Any] = {}
-    if device.get("mgmt_host"):
-        variables["ansible_host"] = literal(device["mgmt_host"])
+    address = management_address(device)
+    if address:
+        variables["ansible_host"] = literal(address)
     port = device.get("mgmt_port")
     if isinstance(port, int) and not isinstance(port, bool) and port > 0:
         variables["ansible_port"] = port
@@ -335,7 +346,8 @@ def build_inventory(
     being built would silently merge with it, so it is refused.
 
     Host names are the device name made file-safe (runs of anything but
-    letters, digits, ``_ . -`` become ``_``, leading dots are dropped), with
+    letters, digits, ``_ . -`` become ``_``, leading dots and dashes are
+    dropped), with
     ``__2``, ``__3`` … appended to repeats.
 
     Raises ``ValueError`` for a role whose group name is reserved.

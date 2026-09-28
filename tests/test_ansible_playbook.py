@@ -28,6 +28,7 @@ from hegemony_steps_ansible.inventory import (
     build_inventory,
     group_name,
     has_template,
+    is_plain_host,
     literal,
     platform_connection,
 )
@@ -1101,7 +1102,18 @@ async def test_run_scope_leaves_out_other_roles_devices_without_credentials(monk
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "address", ["-oProxyCommand=id", "r1 -oProxyCommand=id", "r1;id", "{{ lookup('pipe','id') }}"]
+    "address",
+    [
+        "-oProxyCommand=id",
+        "r1 -oProxyCommand=id",
+        "r1;id",
+        "{{ lookup('pipe','id') }}",
+        # Python takes any text after "%" as an IPv6 zone; with a jump host the
+        # address reaches a shell as the ProxyCommand's %h.
+        "fe80::1%$(id)",
+        "fe80::1%x -oProxyCommand=id",
+        "fe80::1%;id",
+    ],
 )
 async def test_a_management_address_that_is_not_a_host_is_refused(monkeypatch, address):
     """ssh reads an address starting with "-" as an option (-oProxyCommand=…):
@@ -1118,8 +1130,18 @@ async def test_a_management_address_that_is_not_a_host_is_refused(monkeypatch, a
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("address", ["10.0.0.9", "fe80::1", "r1.example.net", "core_1"])
-async def test_plain_management_addresses_are_accepted(monkeypatch, address):
+@pytest.mark.parametrize(
+    ("address", "host"),
+    [
+        ("10.0.0.9", "10.0.0.9"),
+        ("fe80::1", "fe80::1"),
+        ("fe80::1%eth0.100", "fe80::1%eth0.100"),
+        ("r1.example.net.", "r1.example.net."),
+        ("core_1", "core_1"),
+        (" 10.0.0.9\n", "10.0.0.9"),
+    ],
+)
+async def test_plain_management_addresses_are_accepted(monkeypatch, address, host):
     state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
     result = await AnsiblePlaybookHandler().execute(
         _ctx({"playbook": "site.yml"}, [_device("r1", mgmt_host=address)])
@@ -1127,7 +1149,25 @@ async def test_plain_management_addresses_are_accepted(monkeypatch, address):
 
     assert result.success is True, result.error
     inventory = json.loads(state["roots"][INVENTORY_FILE])
-    assert inventory["all"]["hosts"]["r1"]["ansible_host"] == address
+    assert inventory["all"]["hosts"]["r1"]["ansible_host"] == host
+
+
+@pytest.mark.parametrize(
+    ("value", "plain"),
+    [
+        ("r1", True),
+        ("10.0.0.1", True),
+        ("fe80::1%eth0", True),
+        ("r1\n", False),
+        ("10.0.0.1\n", False),
+        ("fe80::1%eth0 x", False),
+        ("fe80::1%`id`", False),
+        ("-r1", False),
+        ("", False),
+    ],
+)
+def test_is_plain_host_takes_names_and_addresses_only(value, plain):
+    assert is_plain_host(value) is plain
 
 
 @pytest.mark.asyncio
@@ -1141,6 +1181,7 @@ async def test_run_scope_leaves_out_other_roles_devices_with_a_bad_address(monke
     inventory = json.loads(state["roots"][INVENTORY_FILE])
     assert "m1" not in inventory["all"]["hosts"]
     [note] = [e for e in result.evidence if e["name"] == "ansible_hosts_left_out_baseline"]
+    assert "or with a management address that is not a host name" in note["content_text"]
     assert "- m1: its management address '-oProxyCommand=id'" in note["content_text"]
 
 
