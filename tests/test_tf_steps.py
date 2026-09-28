@@ -271,6 +271,8 @@ class _Services:
         self.step_outputs = step_outputs or {}
         self.shared_workspaces = shared_workspaces
         self.shared_root = tempfile.mkdtemp(prefix="hegemony-tf-test-")
+        # State access and container milestones in order (see _install_docker).
+        self.events: list[Any] = []
 
     def container_runtime(self) -> ContainerRuntime:
         return ContainerRuntime(
@@ -304,6 +306,7 @@ class _Services:
         if self.state_error:
             raise RuntimeError(self.state_error)
         self.opened = [*self.opened, (name, ttl_seconds)]
+        self.events.append(("open", name))
         try:
             yield StateBackendAccess(
                 address=f"http://api:8000/tf-states/{name}/state",
@@ -315,10 +318,20 @@ class _Services:
             )
         finally:
             self.closed = [*self.closed, name]
+            self.events.append(("close", name))
 
 
-def _install_docker(monkeypatch, *, out: dict[str, bytes], exit_code: int = 0) -> dict[str, Any]:
+def _install_docker(
+    monkeypatch,
+    *,
+    out: dict[str, bytes],
+    exit_code: int = 0,
+    events: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Fake docker. ``events`` (a _Services' log) records the staging of the
+    container's files and the container start among the state access events."""
     state: dict[str, Any] = {"roots": {}, "calls": [], "exec": 0, "collected": []}
+    events = events if events is not None else []
     monkeypatch.setattr(
         "hegemony_steps_container.run.stream_pull",
         AsyncMock(side_effect=EnginePullUnsupported("off")),
@@ -329,6 +342,7 @@ def _install_docker(monkeypatch, *, out: dict[str, bytes], exit_code: int = 0) -
         if len(cmd) >= 4 and cmd[1] == "cp":
             src, dest = cmd[2], cmd[3]
             if dest.endswith(":/"):
+                events.append("stage")
                 root = src[: -len("/.")]
                 for walk_root, _dirs, files in os.walk(root):
                     for name in files:
@@ -351,6 +365,7 @@ def _install_docker(monkeypatch, *, out: dict[str, bytes], exit_code: int = 0) -
 
     async def fake_exec(*argv, **kwargs):
         state["exec"] += 1
+        events.append(argv[1])
         proc = AsyncMock()
         proc.stdout = AsyncMock()
         proc.stdout.readline = AsyncMock(return_value=b"")
@@ -543,8 +558,12 @@ async def test_plan_step_without_backend_block_fails(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_plan_step_with_managed_state(monkeypatch):
-    state = _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
     services = _Services()
+    state = _install_docker(
+        monkeypatch,
+        out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"},
+        events=services.events,
+    )
     result = await TfPlanHandler().execute(
         _ctx({"state_name": "core", "timeout_seconds": 900}, services)
     )
@@ -554,6 +573,9 @@ async def test_plan_step_with_managed_state(monkeypatch):
     assert result.output["state_name"] == "core"
     assert services.opened == [("core", 900 + STATE_ACCESS_MARGIN_SECONDS)]
     assert services.closed == ["core"]
+    # The run token is revoked when the access closes: the env file carrying it
+    # is staged, and the container runs, while it is open.
+    assert services.events == [("open", "core"), "stage", "start", ("close", "core")]
     roots = state["roots"]
     assert 'backend "http"' in roots[BACKEND_OVERRIDE_FILE]
     env = roots[SECRET_ENV_FILE]
@@ -784,13 +806,14 @@ async def test_apply_summary_leaves_out_the_plan_collection_note(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_apply_step_reopens_managed_state(monkeypatch):
-    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"})
     services = _Services(_plan_output(state="managed", state_name="core"))
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"}, events=services.events)
     result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
 
     assert result.success is True, result.error
     assert [name for name, _ttl in services.opened] == ["core"]
     assert services.closed == ["core"]
+    assert services.events == [("open", "core"), "stage", "start", ("close", "core")]
     assert "export TF_HTTP_PASSWORD=hgm_run_token-value" in state["roots"][SECRET_ENV_FILE]
     create = next(call for call in state["calls"] if call[1] == "create")
     assert "--add-host" in create
