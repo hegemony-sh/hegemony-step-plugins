@@ -47,7 +47,9 @@ a saved plan made stale by a state change since planning: plan again. The
 saved plan lives in the run's shared workspace; when that workspace is gone
 (for example cleaned up after a worker restart while the run waited a long
 time for approval), the step says so: plan again. The state lock is taken
-for the apply; Lock timeout sets how long to wait for it. Managed state
+for the apply; Lock timeout sets how long to wait for it, and when another
+plan or apply holds it longer, the error names the holder from the lock's
+Who and Info lines. Managed state
 access lasts as long as the step's timeout (its own Timeout, else the one
 from its policy or the flow), plus a 10-minute margin, and at most 24
 hours: the step's own Timeout is refused above 85800 seconds (whatever the

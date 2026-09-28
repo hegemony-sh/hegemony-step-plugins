@@ -49,6 +49,7 @@ from hegemony_steps_tf.common import (
     VARS_FILE,
     encryption_hcl,
     hcl_string,
+    lock_conflict_error,
     typed_variable,
     workdir_for,
 )
@@ -747,10 +748,54 @@ def _job_result(exit_code: int, *, errored: bytes | None = None, stderr: str = "
     )
 
 
+_LOCKED = """
+Error: Error acquiring the state lock
+
+Error message: HTTP remote state already locked: ID=5c0e
+Lock Info:
+  ID:        5c0e
+  Path:      
+  Operation: OperationTypeApply
+  Who:       root@9c1f2a3b4c5d
+  Version:   1.12.6
+  Created:   2026-09-28 10:00:00 +0000 UTC
+  Info:      held by run:run-1/apply since 2026-09-28 10:00:00Z
+
+OpenTofu acquires a state lock to protect the state from being written
+by multiple users at the same time.
+"""
+
+
+def test_a_lock_conflict_names_the_holder():
+    error = lock_conflict_error("tofu", "5m", "", _LOCKED)
+    assert error == (
+        "tofu could not acquire the state lock within 5m; it is held by "
+        "Info: held by run:run-1/apply since 2026-09-28 10:00:00Z, Who: root@9c1f2a3b4c5d; "
+        "see the container output"
+    )
+    # An empty Info line (a laptop's lock) is not a holder.
+    laptop = _LOCKED.replace("held by run:run-1/apply since 2026-09-28 10:00:00Z", "")
+    assert "held by Who: root@9c1f2a3b4c5d;" in (
+        lock_conflict_error("tofu", "5m", laptop, "") or ""
+    )
+    assert lock_conflict_error("tofu", "5m", "Error: Invalid reference", "") is None
+
+
+def test_a_plan_that_cannot_take_the_lock_says_who_holds_it():
+    config = TfPlanConfig.model_validate({"state_name": "core", "lock_timeout": "60s"})
+    result = TfPlanHandler()._result(
+        _ctx({}, _Services()), config, "img", "/shared/tf/plan", _job_result(1, stderr=_LOCKED)
+    )
+    assert result.success is False
+    assert (result.error or "").startswith("tofu could not acquire the state lock within 60s")
+    assert "run:run-1/apply" in (result.error or "")
+
+
 @pytest.mark.parametrize(
     ("result", "expected"),
     [
         (_job_result(EXIT_NO_PLAN), NO_PLAN_MESSAGE),
+        (_job_result(1, stderr=_LOCKED), "it is held by Info: held by run:run-1/apply"),
         (_job_result(1, errored=b"kept"), "kept as the run artifact errored.tfstate.gz"),
         (_job_result(1, errored=b"recovered"), "saved it to managed state 'core' afterwards"),
         (_job_result(1, stderr="Error: Saved plan is stale\n"), "state changed since it was made"),

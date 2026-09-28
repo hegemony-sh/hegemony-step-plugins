@@ -79,7 +79,9 @@ message.
 The step succeeds when the plan is made, with or without changes. It fails
 when init, validate, or plan fails (see the container output), when backend
 state has no backend block, when the plan's result code cannot be read back
-from the container (so whether it has changes is unknown), or before running
+from the container (so whether it has changes is unknown), when another
+plan or apply holds the state lock for longer than Lock timeout (the error
+names the holder from the lock's Who and Info lines), or before running
 anything when the config is
 invalid, a secret resolves to nothing, or the platform cannot serve managed
 state (for example, no state encryption key is configured). Provider downloads and remote state

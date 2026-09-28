@@ -376,6 +376,35 @@ def secret_env_file(values: dict[str, str]) -> StagedFile:
     return StagedFile(SECRET_ENV_FILE, "\n".join(lines) + "\n")
 
 
+#: How both tools start the error for a state lock they could not take.
+LOCK_ERROR_MARKER = "Error acquiring the state lock"
+#: A holder line of the "Lock Info:" block the tools print after it.
+_LOCK_INFO_LINE_RE = re.compile(r"^[\s│|]*(Who|Info):[ \t]*(\S.*?)\s*$", re.MULTILINE)
+
+
+def lock_conflict_error(tool: str, lock_timeout: str, stdout: str, stderr: str) -> str | None:
+    """The step error for a state lock held by someone else, naming the holder.
+
+    The holder is whatever the tool printed from the lock: ``Who`` (user and
+    host of the holding process) and ``Info`` (the platform fills it with the
+    holding run and step for managed state).
+    """
+    for text in (stderr, stdout):
+        start = text.find(LOCK_ERROR_MARKER)
+        if start < 0:
+            continue
+        holder: dict[str, str] = {}
+        for key, value in _LOCK_INFO_LINE_RE.findall(text[start : start + 4000]):
+            holder.setdefault(key, value[:200])
+        details = ", ".join(f"{key}: {holder[key]}" for key in ("Info", "Who") if key in holder)
+        return (
+            f"{tool} could not acquire the state lock within {lock_timeout or '300s'}"
+            + (f"; it is held by {details}" if details else "")
+            + "; see the container output"
+        )
+    return None
+
+
 def tool_env() -> dict[str, str]:
     """Environment for either tool: non-interactive, no telemetry, no color."""
     return {

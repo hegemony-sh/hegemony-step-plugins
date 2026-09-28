@@ -41,6 +41,7 @@ from .common import (
     TfContainerConfig,
     common_errors,
     container_timeout,
+    lock_conflict_error,
     managed_state_access,
     managed_timeout_errors,
     script_header,
@@ -327,7 +328,9 @@ class TfApplyHandler(BaseHandler):
             return self._refuse(str(exc))
         if isinstance(outcome, HandlerResult):
             return outcome
-        return self._result(engine, image, plan_output, outcome, state_name)
+        return self._result(
+            engine, image, plan_output, outcome, state_name, config.lock_timeout.strip()
+        )
 
     @staticmethod
     def _refuse(message: str) -> HandlerResult:
@@ -340,6 +343,7 @@ class TfApplyHandler(BaseHandler):
         plan_output: dict[str, Any],
         outcome: ContainerJobResult,
         state_name: str | None = None,
+        lock_timeout: str = "",
     ) -> HandlerResult:
         tool = BINARIES[engine]
         metrics = {
@@ -351,7 +355,7 @@ class TfApplyHandler(BaseHandler):
             return HandlerResult(
                 success=False,
                 summary=f"{tool} apply failed",
-                error=apply_failure(tool, outcome, state_name),
+                error=apply_failure(tool, outcome, state_name, lock_timeout),
                 metrics=metrics,
                 evidence=list(outcome.evidence),
             )
@@ -370,7 +374,9 @@ class TfApplyHandler(BaseHandler):
         )
 
 
-def apply_failure(tool: str, outcome: ContainerJobResult, state_name: str | None) -> str:
+def apply_failure(
+    tool: str, outcome: ContainerJobResult, state_name: str | None, lock_timeout: str = ""
+) -> str:
     """The step error for a failed apply, naming what happened to the state."""
     where = f"managed state {state_name!r}" if state_name else "the state backend"
     errored = (outcome.collected.get(ERRORED_STATE_FILE) or b"").decode("utf-8", "replace")
@@ -391,6 +397,9 @@ def apply_failure(tool: str, outcome: ContainerJobResult, state_name: str | None
             f"first; the step saved it to {where} afterwards. See the container output "
             "for the error, then plan again."
         )
+    locked = lock_conflict_error(tool, lock_timeout, outcome.stdout, outcome.stderr)
+    if locked:
+        return locked
     if STALE_PLAN_MARKER in outcome.stdout or STALE_PLAN_MARKER in outcome.stderr:
         return f"{tool} refused the saved plan: the state changed since it was made. Plan again."
     return f"{tool} apply exited with code {outcome.exit_code}; see the container output"

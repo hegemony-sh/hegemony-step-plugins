@@ -61,6 +61,7 @@ from .common import (
     common_errors,
     container_timeout,
     default_image,
+    lock_conflict_error,
     managed_state_access,
     managed_timeout_errors,
     relative_path_error,
@@ -440,15 +441,19 @@ class TfPlanHandler(BaseHandler):
         evidence = list(outcome.evidence)
         exit_code = outcome.exit_code
         if exit_code != 0:
+            tool = BINARIES[config.engine]
             reason = (
                 "the configuration declares no backend block (state: backend)"
                 if exit_code == EXIT_NO_BACKEND
                 else f"exited with code {exit_code}"
             )
+            error = lock_conflict_error(
+                tool, config.lock_timeout.strip(), outcome.stdout, outcome.stderr
+            )
             return HandlerResult(
                 success=False,
-                summary=f"{BINARIES[config.engine]} plan failed",
-                error=f"{BINARIES[config.engine]} {reason}; see the container output",
+                summary=f"{tool} plan failed",
+                error=error or f"{tool} {reason}; see the container output",
                 metrics={"exit_code": exit_code, "duration_seconds": outcome.duration_seconds},
                 evidence=evidence,
             )
