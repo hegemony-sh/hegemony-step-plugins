@@ -25,7 +25,8 @@ stores the state (managed state: locked, versioned, encrypted); the
 configuration's own backend, or ephemeral per-run state for tests, are the
 alternatives.
 Provider credentials, secret variables and OpenTofu's state encryption key are
-resolved by the platform, passed as files, and redacted from output.
+secret references, resolved by the platform, passed as files, and redacted
+from output.
 
 Both steps run on the platform's Docker-in-Docker sandbox through
 `container.run`'s runner (this wheel depends on `hegemony-steps-container`),

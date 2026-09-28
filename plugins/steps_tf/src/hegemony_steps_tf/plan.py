@@ -59,6 +59,7 @@ from .common import (
     address_list_errors,
     backend_config_errors,
     backend_config_file,
+    collect_failure,
     common_errors,
     container_timeout,
     default_image,
@@ -488,12 +489,18 @@ class TfPlanHandler(BaseHandler):
             (outcome.collected.get(PLAN_EXIT_FILE) or b"").decode("utf-8", "replace").strip()
         )
         if plan_code not in ("0", "2"):
+            copy_failure = collect_failure(outcome, PLAN_EXIT_FILE)
+            cause = (
+                f"the copy out of the container failed ({copy_failure})"
+                if copy_failure
+                else f"got {plan_code[:20]!r}"
+            )
             return HandlerResult(
                 success=False,
                 summary=f"{BINARIES[config.engine]} plan result missing",
                 error=(
                     f"{BINARIES[config.engine]} plan finished, but its detailed exit code "
-                    f"could not be read back from the container (got {plan_code[:20]!r}), "
+                    f"could not be read back from the container ({cause}), "
                     "so whether it has changes is unknown; run the step again"
                 ),
                 metrics={"exit_code": exit_code, "duration_seconds": outcome.duration_seconds},

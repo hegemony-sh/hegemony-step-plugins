@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import posixpath
 import re
 import shlex
 from collections.abc import AsyncIterator
@@ -434,6 +435,22 @@ def lock_conflict_error(tool: str, lock_timeout: str, stdout: str, stderr: str) 
             + (f"; it is held by {details}" if details else "")
             + "; see the container output"
         )
+    return None
+
+
+def collect_failure(outcome: Any, path: str) -> str | None:
+    """Why ``path`` was not copied out of the container, when the copy failed.
+
+    None means the copy worked (or was not tried) and the step simply did not
+    write the file. The runner reports a failed collect root or a file over
+    its budget in ``collect_errors``.
+    """
+    errors: dict[str, str] = getattr(outcome, "collect_errors", None) or {}
+    probe = path
+    while probe and probe != "/":
+        if probe in errors:
+            return errors[probe]
+        probe = posixpath.dirname(probe)
     return None
 
 

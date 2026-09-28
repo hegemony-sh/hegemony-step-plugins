@@ -39,6 +39,7 @@ from .common import (
     LockTimeout,
     StateMode,
     TfContainerConfig,
+    collect_failure,
     common_errors,
     container_timeout,
     lock_conflict_error,
@@ -344,7 +345,12 @@ class TfApplyHandler(BaseHandler):
         summary = f"Applied: {planned.removeprefix('Plan: ').removesuffix(PLAN_TEXT_MISSING_NOTE)}"
         raw_outputs = outcome.collected.get(OUTPUTS_FILE)
         if raw_outputs is None:
-            summary += " (its outputs could not be read)"
+            copy_failure = collect_failure(outcome, OUTPUTS_FILE)
+            summary += (
+                f" (its outputs could not be copied out of the container: {copy_failure})"
+                if copy_failure
+                else " (its outputs could not be read)"
+            )
         values, sensitive = public_outputs(raw_outputs)
         return HandlerResult(
             success=True,

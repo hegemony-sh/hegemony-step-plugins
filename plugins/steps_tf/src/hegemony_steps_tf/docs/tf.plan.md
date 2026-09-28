@@ -27,9 +27,10 @@ needs its fields. Secret variables, provider credentials in
 Secret environment, and the OpenTofu state encryption key are secret
 references: a `{{ secret('...') }}` template or a bare reference such as
 `vault://orgs/acme/secrets/aws/key`. They are resolved by the platform on
-their own (without step variables) and only once, passed from files inside
-the container (never environment variables or arguments), and redacted from
-the step's output.
+their own (without step variables) and only once, and passed from files
+inside the container (never environment variables or arguments). Values
+resolved from references are redacted from the step's output; text that is
+not a reference is used as written and is not redacted.
 
 State decides where the state lives:
 
@@ -85,7 +86,8 @@ tool's JSON plan carries them in clear. `outputs` holds the configuration's
 non-sensitive output values as the state held them when the plan was made
 (before its changes), and `sensitive_outputs` the names of the others; a
 `tf.apply` of a plan without changes returns these. Failing to read them does
-not fail the plan: they are then empty. Branch on
+not fail the plan: they are then empty. `handler` (`tf.plan`) marks the
+output for `tf.apply`, which refuses a step output without it. Branch on
 `steps.NODE_ID.output.has_changes`, or show the summary in an approval
 message.
 

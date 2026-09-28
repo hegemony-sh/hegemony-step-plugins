@@ -12,9 +12,9 @@ Handlers: `ansible.playbook` — run a playbook from the flow's attachments
 against the step's target devices. The inventory is generated from
 Hegemony's inventory (local devices and external providers such as NetBox or
 Git alike), grouped by flow role, platform, site, tag, and provider, so a
-playbook needs no hand-kept hosts file. Device credentials, secrets, and
-Ansible Vault passwords are resolved by the platform, handed to Ansible as
-files inside the step's container, and redacted from output. Results are
+playbook needs no hand-kept hosts file. Device credentials, secret
+references, and Ansible Vault passwords are resolved by the platform, handed
+to Ansible as files inside the step's container, and redacted from output. Results are
 recorded per device, and check mode with diff gives a dry run to review
 before an approval.
 

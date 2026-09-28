@@ -50,6 +50,7 @@ from hegemony_steps_tf.common import (
     SECRET_VARS_FILE,
     STATE_ACCESS_MARGIN_SECONDS,
     VARS_FILE,
+    collect_failure,
     encryption_hcl,
     hcl_string,
     lock_conflict_error,
@@ -1012,6 +1013,41 @@ def _job_result(exit_code: int, *, errored: bytes | None = None, stderr: str = "
         skipped_artifacts=0,
         collected=collected,
     )
+
+
+def test_a_failed_copy_out_is_named_instead_of_a_missing_file():
+    """The runner reports a collect root it could not copy; the tf steps say so
+    rather than blame the step for not writing the file."""
+    failed = ContainerJobResult(
+        exit_code=0,
+        stdout="",
+        stderr="",
+        truncated=False,
+        duration_seconds=1.0,
+        image="img",
+        evidence=[],
+        skipped_artifacts=0,
+        collected={},
+        collect_errors={"/hegemony/out": "docker cp timed out"},
+    )
+    assert collect_failure(failed, "/hegemony/out/outputs.json") == "docker cp timed out"
+    assert collect_failure(_job_result(0), "/hegemony/out/outputs.json") is None
+
+    applied = TfApplyHandler()._result("opentofu", "img", _plan_output()["plan"]["output"], failed)
+    assert applied.success is True
+    assert "could not be copied out of the container: docker cp timed out" in (
+        applied.summary or ""
+    )
+
+    plan = TfPlanHandler()._result(
+        _ctx({"state": "ephemeral"}, _Services()),
+        TfPlanConfig.model_validate({"state": "ephemeral"}),
+        "img",
+        LOCAL_WORKDIR,
+        failed,
+    )
+    assert plan.success is False
+    assert "the copy out of the container failed (docker cp timed out)" in (plan.error or "")
 
 
 _LOCKED = """
