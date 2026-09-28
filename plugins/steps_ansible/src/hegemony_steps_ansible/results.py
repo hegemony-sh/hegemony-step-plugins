@@ -265,5 +265,8 @@ def render_host_report(host: str, counts: dict[str, int], tasks: list[dict[str, 
             line += f" — {task['msg']}"
         lines.append(line)
         if task.get("diff"):
-            lines.append(f"    diff: {task['diff']}")
+            diff_lines = str(task["diff"]).splitlines() or [""]
+            lines.append(f"    diff: {diff_lines[0]}")
+            # A multi-line diff stays indented under its task.
+            lines.extend(f"          {line}" for line in diff_lines[1:])
     return "\n".join(lines) + "\n"

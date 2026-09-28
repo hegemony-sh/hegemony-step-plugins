@@ -474,6 +474,11 @@ def test_forks_are_passed_only_when_the_step_sets_them():
     unset = AnsiblePlaybookConfig.model_validate({"playbook": "p.yml"})
     script = build_run_script(unset, has_extra_vars=False, has_secrets=False, vault_files={})
     assert "--forks" not in script
+    # A saved default (a form or an export writing every field) keeps it unset.
+    saved = AnsiblePlaybookConfig.model_validate({"playbook": "p.yml", "forks": None})
+    assert "--forks" not in build_run_script(
+        saved, has_extra_vars=False, has_secrets=False, vault_files={}
+    )
     explicit = AnsiblePlaybookConfig.model_validate({"playbook": "p.yml", "forks": 20})
     script = build_run_script(explicit, has_extra_vars=False, has_secrets=False, vault_files={})
     assert "--forks 20" in script
@@ -769,7 +774,8 @@ def test_host_report_renders_plays_tasks_messages_and_diffs():
         "\n"
         "PLAY [Base]\n"
         "  changed           ntp\n"
-        "    diff: -a\n+b\n"
+        "    diff: -a\n"
+        "          +b\n"
         "  ok                dns\n"
         "PLAY [Verify]\n"
         "  failed (ignored)  probe — timeout\n"

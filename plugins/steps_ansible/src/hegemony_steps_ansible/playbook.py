@@ -274,8 +274,8 @@ class AnsiblePlaybookConfig(ContainerExecutionConfig):
         ),
         json_schema_extra={"x_placeholder": "requirements.yml", "x_advanced": True},
     )
-    forks: int = Field(
-        default=5,
+    forks: int | None = Field(
+        default=None,
         ge=1,
         le=100,
         title="Forks",
@@ -283,7 +283,7 @@ class AnsiblePlaybookConfig(ContainerExecutionConfig):
             "How many hosts Ansible works on in parallel (--forks). Unset, the "
             "playbook's ansible.cfg decides (Ansible's default is 5)."
         ),
-        json_schema_extra={"x_advanced": True},
+        json_schema_extra={"x_placeholder": "5", "x_advanced": True},
     )
     verbosity: int = Field(
         default=0,
@@ -478,7 +478,7 @@ def build_run_script(
         args.append("--check")
     if config.diff:
         args.append("--diff")
-    if "forks" in config.model_fields_set:
+    if config.forks is not None:
         # Only when the step sets it: otherwise ansible.cfg's forks applies.
         args += ["--forks", str(config.forks)]
     if config.verbosity:
