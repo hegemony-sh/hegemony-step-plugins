@@ -50,19 +50,22 @@ workspace is also mounted (default `/shared`) so files persist across the
 steps of one run. The workspace is deleted when the run ends, so it is no
 place for anything that must outlive the run, such as Terraform state.
 
-Every container also gets `/hegemony/context.json`: the run and step ids,
-flow and run names, the attempt number, and the step's tags. It holds no
-flow inputs: pass the ones the script needs as environment variables such as
-`REGION={{ inputs.region }}`, which also applies the input's default when
-the run left it unset (a sensitive value belongs in Secret files instead).
-To hand structured data to later steps, write a JSON object to
-`/hegemony/out/output.json`; it becomes the step's `output.data` (at most 64
-KiB), so a later step reads `{{ steps.NODE_ID.output.data.KEY }}`. A file
-that is not a JSON object, or is too large, is reported in an
-`output_data_rejected_<step id>` artifact instead and never fails the step.
-When the results cannot be copied out of the container (a failed copy, or a
-file over the 8 MiB collection budget), an `output_not_collected_<step id>`
-artifact names what is missing and why.
+The `/hegemony` folder is reserved for the platform's step I/O files (since
+0.6.0): the step stages them there before the container starts and copies
+`/hegemony/out` back out after it exits, so an image should keep nothing of
+its own there. Every container also gets `/hegemony/context.json`: the run
+and step ids, flow and run names, the attempt number, and the step's tags.
+It holds no flow inputs: pass the ones the script needs as environment
+variables such as `REGION={{ inputs.region }}`, which also applies the
+input's default when the run left it unset (a sensitive value belongs in
+Secret files instead). To hand structured data to later steps, write a JSON
+object to `/hegemony/out/output.json`; it becomes the step's `output.data`
+(at most 64 KiB), so a later step reads
+`{{ steps.NODE_ID.output.data.KEY }}`. A file that is not a JSON object, or
+is too large, is reported in an `output_data_rejected_<step id>` artifact
+instead and never fails the step. When the results cannot be copied out of
+the container (a failed copy, or a file over the 8 MiB collection budget),
+an `output_not_collected_<step id>` artifact names what is missing and why.
 
 Put credentials in Secret files rather than environment variables: each
 `NAME=reference` entry is resolved and written to `/run/secrets/NAME` inside
@@ -105,11 +108,14 @@ The step succeeds only when the container exits with code 0; any non-zero
 exit code fails it with that code in the error. It also fails when config
 validation rejects the step, the image cannot be pulled, attachments or
 selected artifacts cannot be provisioned, a secret file resolves to nothing,
-the Docker binary is missing on the
-worker, or the worker has no Docker-in-Docker sandbox configured: the step
-never runs on the worker's own Docker daemon instead. The timeout covers the
-whole step — image pull included — and on
-expiry the container is killed and the step fails as timed out. Step-output
-snapshots and post-run artifact harvesting are best-effort: problems there
-are logged but do not fail the step. The container is force-removed after
-every attempt, success or failure.
+the Docker binary is missing on the worker, or the worker has no
+Docker-in-Docker sandbox configured: the step never runs on the worker's own
+Docker daemon instead. The timeout covers the whole step — image pull
+included — and on expiry the container is killed and the step fails as timed
+out. Step-output snapshots and post-run artifact harvesting are best-effort:
+problems there are logged but do not fail the step. The container is
+force-removed after every attempt, success or failure. Step containers carry
+the Docker labels `hegemony.run_id`, `hegemony.step_run_id`, and
+`hegemony.handler_id`; the last one names the step type that started the
+container, so tool steps built on this runner (`ansible.playbook`,
+`tf.plan`, `tf.apply`) carry their own id there, not `container.run`.

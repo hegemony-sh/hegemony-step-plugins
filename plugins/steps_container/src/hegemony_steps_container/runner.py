@@ -17,7 +17,9 @@ this wheel, so a hardened deployment that omits container execution omits every
 tool handler with it. The wheels release in lockstep, so this module is a
 monorepo API rather than third-party ABI.
 
-Step I/O contract shared by every container-backed step:
+Step I/O contract shared by every container-backed step. :data:`IO_ROOT`
+(``/hegemony``) is reserved for it in every step container, ``container.run``
+included:
 
 - :data:`CONTEXT_PATH` (read): run and step identity and the step's tags.
   Never flow inputs: a step gets those through its own templated config.
