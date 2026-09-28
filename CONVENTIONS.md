@@ -50,10 +50,53 @@ platforms, transports, and libraries multiply.
    Tool handlers that run the tool in a container build on `container.run`'s
    runner (`hegemony_steps_container.runner`), declare `container_backed`,
    and depend on `hegemony-steps-container`, so omitting container execution
-   omits them too.
+   omits them too (see [Building a tool handler](#building-a-tool-handler)).
 
 Third-party plugins claim their own prefix (e.g. `acme.`) and organize
 below it (`acme.ipam.allocate`).
+
+## Building a tool handler
+
+A tool handler (`ansible.playbook`, `tf.plan`, `tf.apply`, the next
+containerlab or NETCONF tool) runs its tool in a container on the sandbox
+through `hegemony_steps_container.runner` instead of copying
+`container.run`'s execution. The contract:
+
+- **Config.** Subclass `ContainerExecutionConfig`, which carries the shared
+  container fields (timeout, memory, CPUs, env, egress policy, attachments).
+  Expose no host-access options (network mode, privileged, Docker socket,
+  extra mounts): tool steps always run isolated and need no admin gate.
+  Build the job's config with `container_config_from`, which forwards only
+  the shared fields and applies the tool's own env after the step's.
+- **Validation.** `validate_config` checks the tool's fields and also runs
+  `RunContainerHandler().validate_config(container_config_from(...))`, so
+  the image reference, env keys, and egress rules are refused before a run.
+- **Declaration.** Set `container_backed = True`, so the host applies the
+  egress policy and admission rules of `container.run`, and depend on
+  `hegemony-steps-container` at the same version, so a deployment without
+  container execution has no tool handlers either. Set
+  `platform_api_access = True` only when the container itself calls the
+  platform API (the tf steps' managed state through
+  `services.open_state_backend`).
+- **Secrets.** List secret fields in `raw_config_keys` so they arrive as
+  written, resolve them with `resolve_secret_values` (checked with
+  `secret_map_errors`), and hand them to the tool as staged files
+  (`StagedFile`), never as environment variables or arguments, which are
+  visible in the sandbox's container metadata.
+- **Running.** Describe a `ContainerJob` (config, staged files, collect
+  roots, the handler's id for the `hegemony.handler_id` label) and call
+  `run_container_job`. A failed `HandlerResult` is a failure before or
+  around the run; return it. A `ContainerJobResult` means the container
+  ran, whatever its exit code.
+- **Step I/O.** `/hegemony` is reserved in every step container. Write
+  structured results under `/hegemony/out` (collected after exit, at most
+  8 MiB per job) and read them from `collected`; `collect_errors` tells a
+  result that could not be copied out from one the tool never wrote. Bulky
+  output belongs in the new-artifacts folder, which uploads to storage
+  rather than worker memory. Never guess a result that is missing: fail
+  the step or report it as unknown.
+- **Docs.** Each handler has its page under `docs/` in the wheel, and the
+  wheel README names its handlers and links there.
 
 ## Decision rules for a new handler
 
