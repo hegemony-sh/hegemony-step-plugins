@@ -278,7 +278,10 @@ class AnsiblePlaybookConfig(ContainerExecutionConfig):
         ge=1,
         le=100,
         title="Forks",
-        description="How many hosts Ansible works on in parallel (--forks).",
+        description=(
+            "How many hosts Ansible works on in parallel (--forks). Unset, the "
+            "playbook's ansible.cfg decides (Ansible's default is 5)."
+        ),
         json_schema_extra={"x_advanced": True},
     )
     verbosity: int = Field(
@@ -419,15 +422,20 @@ def credential_host_vars(
 
 
 def _ansible_env(config: AnsiblePlaybookConfig, user_env: dict[str, str]) -> dict[str, str]:
-    callbacks = [CALLBACK_NAME]
-    user_callbacks = user_env.get("ANSIBLE_CALLBACKS_ENABLED", "")
-    callbacks.extend(item.strip() for item in user_callbacks.split(",") if item.strip())
+    """The ANSIBLE_* variables the step needs, and nothing more.
+
+    Environment variables beat the repository's ``ansible.cfg``, so the step
+    sets only what it cannot work without: where its results callback lives
+    (added in front of any path the step's own env gives; the callback needs
+    no ``callbacks_enabled`` entry, so the repository's list stands), a
+    private local temp folder, the step's host key checking option, and, with
+    a requirements file, writable collection and role paths.
+    """
+    callback_paths = [CALLBACK_DIR]
+    user_paths = user_env.get("ANSIBLE_CALLBACK_PLUGINS", "")
+    callback_paths.extend(item.strip() for item in user_paths.split(":") if item.strip())
     env = {
-        "ANSIBLE_CALLBACK_PLUGINS": CALLBACK_DIR,
-        "ANSIBLE_CALLBACKS_ENABLED": ",".join(dict.fromkeys(callbacks)),
-        "ANSIBLE_NOCOLOR": "1",
-        "ANSIBLE_FORCE_COLOR": "0",
-        "ANSIBLE_RETRY_FILES_ENABLED": "0",
+        "ANSIBLE_CALLBACK_PLUGINS": ":".join(dict.fromkeys(callback_paths)),
         "ANSIBLE_LOCAL_TEMP": f"{PRIVATE_DIR}/tmp",
     }
     checking = config.host_key_checking
@@ -469,7 +477,9 @@ def build_run_script(
         args.append("--check")
     if config.diff:
         args.append("--diff")
-    args += ["--forks", str(config.forks)]
+    if "forks" in config.model_fields_set:
+        # Only when the step sets it: otherwise ansible.cfg's forks applies.
+        args += ["--forks", str(config.forks)]
     if config.verbosity:
         args.append("-" + "v" * config.verbosity)
     if has_extra_vars:

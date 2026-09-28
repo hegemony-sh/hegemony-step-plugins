@@ -52,6 +52,23 @@ through `run` scope (none of its roles is a target of this step) and has no
 usable credentials is left out of the inventory instead of failing the step,
 and named with the reason in an `ansible_hosts_left_out_<step id>` artifact.
 
+## Ansible Configuration
+
+An `ansible.cfg` next to the playbook applies as usual, except where the
+step sets an `ANSIBLE_*` environment variable, which Ansible ranks above
+`ansible.cfg` (and a command-line option above both). The step sets only
+what it needs: `ANSIBLE_CALLBACK_PLUGINS` (its results callback's folder,
+followed by any path the step's own environment gives), `ANSIBLE_LOCAL_TEMP`
+(a private folder), the host key checking variables for the step's Host key
+checking option, and, with a requirements file, `ANSIBLE_COLLECTIONS_PATH`
+and `ANSIBLE_ROLES_PATH`. So a `callback_plugins` path in `ansible.cfg` is
+replaced (plugins in `callback_plugins/` next to the playbook, in roles and
+in collections still load; add another path through the step's
+`ANSIBLE_CALLBACK_PLUGINS` environment variable), while `callbacks_enabled`,
+`forks`, and every other setting keep their `ansible.cfg` values. The
+results callback loads without a `callbacks_enabled` entry. `--forks` is
+passed only when the step sets Forks.
+
 ## Credentials And Secrets
 
 Each device's login comes from its access configuration: the username,
@@ -121,13 +138,13 @@ unreachable or the playbook did not parse. The error names the failed and
 unreachable hosts (the first five of each) and, when a single host failed,
 its failing task and message; when the play produced no recap it names the
 exit code's meaning instead. A play that exits with 0 without results (the
-results callback did not run, for example because the playbook's own
-`ansible.cfg` or image disabled it, or the results could not be copied out
-of the container, which the error then says) fails too: whether any host
-changed is then unknown. The step also fails before running anything when
-the config is invalid, a device the step targets has no usable credentials,
-a jump host has only a password or a host, user name or port that is not
-plain (a host name or IP address; a user name of letters, digits and `. _ @
-+ -`), or a secret resolves to nothing. The timeout covers the whole run,
-image pull included. Installing a requirements file needs network access to
-the Galaxy server under the flow's egress policy.
+results callback did not run, for example because the image's Ansible could
+not load it, or the results could not be copied out of the container, which
+the error then says) fails too: whether any host changed is then unknown.
+The step also fails before running anything when the config is invalid, a
+device the step targets has no usable credentials, a jump host has only a
+password or a host, user name or port that is not plain (a host name or IP
+address; a user name of letters, digits and `. _ @ + -`), or a secret
+resolves to nothing. The timeout covers the whole run, image pull included.
+Installing a requirements file needs network access to the Galaxy server
+under the flow's egress policy.

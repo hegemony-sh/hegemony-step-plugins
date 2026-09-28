@@ -30,6 +30,7 @@ from hegemony_steps_ansible.inventory import (
     platform_connection,
 )
 from hegemony_steps_ansible.playbook import (
+    CALLBACK_DIR,
     DEFAULT_IMAGE,
     INVENTORY_FILE,
     KEYS_DIR,
@@ -40,6 +41,7 @@ from hegemony_steps_ansible.playbook import (
     SECRETS_FILE,
     AnsiblePlaybookConfig,
     AnsiblePlaybookHandler,
+    _ansible_env,
     _bounded_output,
     _failure_detail,
     build_run_script,
@@ -382,6 +384,46 @@ def test_run_script_builds_the_ansible_playbook_command():
     ):
         assert part in command
     assert command.endswith(" site.yml")
+
+
+def test_forks_are_passed_only_when_the_step_sets_them():
+    """Unset, the repository's ansible.cfg decides (the CLI would override it)."""
+    unset = AnsiblePlaybookConfig.model_validate({"playbook": "p.yml"})
+    script = build_run_script(unset, has_extra_vars=False, has_secrets=False, vault_files={})
+    assert "--forks" not in script
+    explicit = AnsiblePlaybookConfig.model_validate({"playbook": "p.yml", "forks": 20})
+    script = build_run_script(explicit, has_extra_vars=False, has_secrets=False, vault_files={})
+    assert "--forks 20" in script
+
+
+def test_ansible_env_leaves_the_repository_ansible_cfg_alone():
+    env = _ansible_env(AnsiblePlaybookConfig.model_validate({"playbook": "p.yml"}), {})
+    # Environment beats ansible.cfg: only what the step needs is set.
+    assert set(env) == {
+        "ANSIBLE_CALLBACK_PLUGINS",
+        "ANSIBLE_LOCAL_TEMP",
+        "ANSIBLE_HOST_KEY_CHECKING",
+        "ANSIBLE_HOST_KEY_AUTO_ADD",
+        "ANSIBLE_LIBSSH_HOST_KEY_AUTO_ADD",
+        "ANSIBLE_PARAMIKO_HOST_KEY_AUTO_ADD",
+    }
+    assert "ANSIBLE_CALLBACKS_ENABLED" not in env
+
+
+def test_the_results_callback_survives_a_step_env_callback_path():
+    env = _ansible_env(
+        AnsiblePlaybookConfig.model_validate({"playbook": "p.yml"}),
+        {"ANSIBLE_CALLBACK_PLUGINS": "/attachments/cb: /opt/cb"},
+    )
+    assert env["ANSIBLE_CALLBACK_PLUGINS"] == f"{CALLBACK_DIR}:/attachments/cb:/opt/cb"
+
+
+def test_the_results_callback_loads_without_callbacks_enabled(monkeypatch, tmp_path):
+    """Ansible loads a callback on a plugin path that does not need enabling, so a
+    repository's callbacks_enabled (or none) cannot switch it off."""
+    plugin = _load_callback(monkeypatch, str(tmp_path / "results.json"))
+    assert plugin.CALLBACK_NEEDS_ENABLED is False
+    assert plugin.CALLBACK_TYPE == "aggregate"
 
 
 def test_run_script_quotes_untrusted_values():
@@ -823,7 +865,9 @@ async def test_playbook_step_end_to_end(monkeypatch):
 
     create = next(call for call in state["calls"] if call[1] == "create")
     assert "hegemony.handler_id=ansible.playbook" in create
-    assert "ANSIBLE_CALLBACKS_ENABLED=hegemony_results,profile_tasks" in create
+    # The step's env passes through; the results callback needs no entry in it.
+    assert "ANSIBLE_CALLBACKS_ENABLED=profile_tasks" in create
+    assert "ANSIBLE_CALLBACK_PLUGINS=/hegemony/ansible/callback_plugins" in create
     assert "ANSIBLE_HOST_KEY_CHECKING=True" in create
     assert create[create.index("--entrypoint") + 1] == "/bin/sh"
     assert not any("pw-r1" in part or "resolved-" in part for part in create)

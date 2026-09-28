@@ -21,7 +21,9 @@ from dataclasses import dataclass, field
 from string import Template
 from typing import Any
 
-#: File name the callback is enabled by (Ansible matches the file's base name).
+#: File name of the callback plugin. It needs no ``callbacks_enabled`` entry:
+#: a callback with ``CALLBACK_NEEDS_ENABLED = False`` on a callback plugin path
+#: always loads, so the repository's own ``callbacks_enabled`` list stands.
 CALLBACK_NAME = "hegemony_results"
 #: Where the callback writes its results inside the container.
 RESULTS_FILE = "/hegemony/out/ansible-results.json"
@@ -65,7 +67,7 @@ class CallbackModule(CallbackBase):
     CALLBACK_VERSION = 2.0
     CALLBACK_TYPE = "aggregate"
     CALLBACK_NAME = "hegemony_results"
-    CALLBACK_NEEDS_ENABLED = True
+    CALLBACK_NEEDS_ENABLED = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
