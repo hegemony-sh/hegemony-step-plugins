@@ -48,6 +48,7 @@ from .common import (
     HTTP_BACKEND_OVERRIDE,
     LOCAL_BACKEND_OVERRIDE,
     PLAN_FILE,
+    PLAN_TEXT_MISSING_NOTE,
     RUN_SCRIPT,
     SECRET_VARS_FILE,
     VARS_FILE,
@@ -78,7 +79,11 @@ from .summary import plan_line, summarize_plan
 
 PLAN_EXIT_FILE = f"{OUTPUT_DIR}/plan-exitcode"
 PLAN_TEXT_FILE = f"{OUTPUT_DIR}/plan.txt"
-PLAN_JSON_FILE = f"{OUTPUT_DIR}/plan.json"
+#: The JSON plan is by far the largest file, and collection shares one byte
+#: budget in the order of ``collect``: it comes from its own folder, last, so
+#: it can never crowd out the exit code or the readable plan.
+PLAN_JSON_DIR = "/hegemony/plan-json"
+PLAN_JSON_FILE = f"{PLAN_JSON_DIR}/plan.json"
 #: Local working directory when the step has no shared workspace (plan only).
 LOCAL_WORKDIR = "/workspace/tf"
 
@@ -285,6 +290,7 @@ def build_plan_script(
         'if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi',
         f'printf "%s" "$code" > {PLAN_EXIT_FILE}',
         f"{tf} show -no-color {PLAN_FILE} > {PLAN_TEXT_FILE}",
+        f"mkdir -p {PLAN_JSON_DIR}",
         f"{tf} show -json {PLAN_FILE} > {PLAN_JSON_FILE}",
     ]
     return "\n".join(lines) + "\n"
@@ -368,7 +374,7 @@ class TfPlanHandler(BaseHandler):
                         env=tool_env(),
                     ),
                     files=files + env_files,
-                    collect=[OUTPUT_DIR],
+                    collect=[OUTPUT_DIR, PLAN_JSON_DIR],
                     handler_id=self.handler_id,
                     extra_hosts=dict(access.extra_hosts) if access else {},
                 )
@@ -517,6 +523,10 @@ class TfPlanHandler(BaseHandler):
             if has_changes
             else "No changes: infrastructure matches the configuration"
         )
+        if has_changes and not plan_text:
+            # Collection is best-effort: an approver must not look for a plan
+            # artifact that is not there.
+            summary += PLAN_TEXT_MISSING_NOTE
         output: dict[str, Any] = {
             # tf.apply refuses a plan step output without this marker.
             "handler": self.handler_id,

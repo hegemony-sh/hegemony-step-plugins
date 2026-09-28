@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import stat
 import subprocess
 import tempfile
@@ -42,6 +43,7 @@ from hegemony_steps_tf.common import (
     BACKEND_OVERRIDE_FILE,
     DEFAULT_IMAGES,
     KEEP_DIR,
+    PLAN_TEXT_MISSING_NOTE,
     RUN_SCRIPT,
     SECRET_ENV_FILE,
     SECRET_VARS_FILE,
@@ -57,6 +59,8 @@ from hegemony_steps_tf.plan import (
     EXIT_NO_BACKEND,
     LOCAL_WORKDIR,
     NO_BACKEND_MESSAGE,
+    PLAN_JSON_DIR,
+    PLAN_JSON_FILE,
     TfPlanConfig,
     TfPlanHandler,
     build_plan_script,
@@ -177,7 +181,7 @@ def test_plan_script_for_backend_state():
         f"-var-file={SECRET_VARS_FILE}",
     ):
         assert part in plan
-    assert "tofu show -json plan.tfplan > /hegemony/out/plan.json" in script
+    assert "tofu show -json plan.tfplan > /hegemony/plan-json/plan.json" in script
     assert f". {SECRET_ENV_FILE}" in script
 
 
@@ -297,7 +301,7 @@ class _Services:
 
 
 def _install_docker(monkeypatch, *, out: dict[str, bytes], exit_code: int = 0) -> dict[str, Any]:
-    state: dict[str, Any] = {"roots": {}, "calls": [], "exec": 0}
+    state: dict[str, Any] = {"roots": {}, "calls": [], "exec": 0, "collected": []}
     monkeypatch.setattr(
         "hegemony_steps_container.run.stream_pull",
         AsyncMock(side_effect=EnginePullUnsupported("off")),
@@ -314,10 +318,16 @@ def _install_docker(monkeypatch, *, out: dict[str, bytes], exit_code: int = 0) -
                         path = os.path.join(walk_root, name)
                         with open(path, encoding="utf-8") as fh:
                             state["roots"]["/" + os.path.relpath(path, root)] = fh.read()
-            elif src.endswith(":/hegemony/out/."):
+            elif ":/" in src and src.endswith("/."):
+                # A collected folder: ``out`` names files in /hegemony/out, or
+                # anywhere by absolute path.
+                folder = src.split(":", 1)[1][: -len("/.")]
+                state["collected"].append(folder)
                 for name, data in out.items():
-                    with open(os.path.join(dest, name), "wb") as fh:
-                        fh.write(data)
+                    path = name if name.startswith("/") else f"/hegemony/out/{name}"
+                    if posixpath.dirname(path) == folder:
+                        with open(os.path.join(dest, posixpath.basename(path)), "wb") as fh:
+                            fh.write(data)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("subprocess.run", fake_run)
@@ -371,7 +381,7 @@ async def test_plan_step_reports_changes(monkeypatch):
         out={
             "plan-exitcode": b"2",
             "plan.txt": b"Plan: 1 to add, 0 to change, 0 to destroy.\n",
-            "plan.json": _PLAN_JSON,
+            PLAN_JSON_FILE: _PLAN_JSON,
         },
     )
     config = {
@@ -409,6 +419,20 @@ async def test_plan_step_reports_changes(monkeypatch):
     assert not any("resolved-" in part for part in create)
     assert "TF_IN_AUTOMATION=1" in create
     assert f"sh {RUN_SCRIPT}" in create[-1]
+    # The exit code and the readable plan are collected before the JSON plan.
+    assert state["collected"][:2] == ["/hegemony/out", PLAN_JSON_DIR]
+
+
+@pytest.mark.asyncio
+async def test_plan_step_says_when_its_readable_plan_was_not_collected(monkeypatch):
+    """Collection skips a file over the remaining budget: the approver must learn
+    that there is no plan artifact to review."""
+    _install_docker(monkeypatch, out={"plan-exitcode": b"2", PLAN_JSON_FILE: _PLAN_JSON})
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+    assert result.success is True, result.error
+    assert result.summary == "Plan: +1 ~0 -0 (the readable plan could not be collected)"
+    assert result.output["summary"] == result.summary
+    assert not any(e["name"] == "plan_plan.txt" for e in result.evidence)
 
 
 @pytest.mark.asyncio
@@ -490,7 +514,7 @@ async def test_plan_step_with_managed_state(monkeypatch):
 async def test_plan_step_fails_without_a_valid_detailed_exit_code(monkeypatch, code):
     """The script exits 0 for a plan with changes too, and reading its detailed exit
     code back is best-effort: without it the step must not report "no changes"."""
-    out = {"plan.txt": b"Plan: 1 to add, 0 to change, 0 to destroy.\n", "plan.json": _PLAN_JSON}
+    out = {"plan.txt": b"Plan: 1 to add, 0 to change, 0 to destroy.\n", PLAN_JSON_FILE: _PLAN_JSON}
     if code is not None:
         out["plan-exitcode"] = code
     _install_docker(monkeypatch, out=out)
@@ -687,6 +711,14 @@ async def test_apply_step_refusals(monkeypatch, outputs, shared, message):
     assert result.success is False
     assert message in (result.error or "")
     assert state["exec"] == 0
+
+
+@pytest.mark.asyncio
+async def test_apply_summary_leaves_out_the_plan_collection_note(monkeypatch):
+    _install_docker(monkeypatch, out={"outputs.json": b"{}"})
+    services = _Services(_plan_output(summary="Plan: +1 ~0 -0" + PLAN_TEXT_MISSING_NOTE))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.summary == "Applied: +1 ~0 -0"
 
 
 @pytest.mark.asyncio

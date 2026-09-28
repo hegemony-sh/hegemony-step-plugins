@@ -65,7 +65,10 @@ works: each iteration plans and applies before the next one plans.
 ## Output
 
 The readable plan is kept as a `plan_<step id>.txt` artifact; values the
-configuration marks sensitive are masked by the tool. The step output
+configuration marks sensitive are masked by the tool. Results read back from
+the container share an 8 MiB budget, with the readable plan ahead of the
+JSON plan used for the counts; when a plan with changes is too large to
+keep, the summary ends with "(the readable plan could not be collected)". The step output
 reports `has_changes`, the counts `add`, `change`, `destroy`, `replace`,
 `import`, and `move`, the changed resource addresses with their actions under
 `resource_changes`, changed `output_changes` names, `drift`, and a

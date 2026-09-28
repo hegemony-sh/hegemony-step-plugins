@@ -34,6 +34,7 @@ from .common import (
     BINARIES,
     KEEP_DIR,
     PLAN_FILE,
+    PLAN_TEXT_MISSING_NOTE,
     RUN_SCRIPT,
     Engine,
     LockTimeout,
@@ -360,7 +361,7 @@ class TfApplyHandler(BaseHandler):
                 evidence=list(outcome.evidence),
             )
         planned = plan_output.get("summary") or "the saved plan"
-        summary = f"Applied: {planned.removeprefix('Plan: ')}"
+        summary = f"Applied: {planned.removeprefix('Plan: ').removesuffix(PLAN_TEXT_MISSING_NOTE)}"
         raw_outputs = outcome.collected.get(OUTPUTS_FILE)
         if raw_outputs is None:
             summary += " (its outputs could not be read)"
