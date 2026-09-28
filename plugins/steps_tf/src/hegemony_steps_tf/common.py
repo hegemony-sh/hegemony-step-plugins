@@ -78,7 +78,9 @@ KEEP_DIR = "/hegemony/keep"
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 _BACKEND_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_ADDRESS_RE = re.compile(r"^[^\s'\"]+$")
+#: One address per line. Keyed instances need quotes and may hold spaces
+#: (aws_instance.web["blue"]); every argument is shell-quoted anyway.
+_ADDRESS_RE = re.compile(r"^[^\x00-\x1f\x7f]+$")
 
 #: Non-sensitive outputs larger than this are left out of the step output.
 MAX_OUTPUT_VALUE_BYTES = 16 * 1024
@@ -197,7 +199,7 @@ def address_list_errors(field_name: str, value: object) -> list[str]:
     if not isinstance(value, list):
         return [f"'{field_name}' must be a list of resource addresses"]
     return [
-        f"'{field_name}[{index}]' must be one resource address without spaces or quotes"
+        f"'{field_name}[{index}]' must be one resource address on one line"
         for index, item in enumerate(value)
         if not isinstance(item, str) or not _ADDRESS_RE.match(item.strip())
     ]

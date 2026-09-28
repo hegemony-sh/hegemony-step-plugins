@@ -225,7 +225,8 @@ def test_apply_script():
         ({"secret_env": {"HEGEMONY_X": "vault://a/b"}}, "reserved"),
         ({"secret_env": {"TF_HTTP_PASSWORD": "vault://a/b"}}, "reserved"),
         ({"backend_config": {"bad-key": "x"}}, "backend setting name"),
-        ({"targets": ["a b"]}, "one resource address"),
+        ({"targets": ["a\nb"]}, "one resource address"),
+        ({"replace": ["aws_instance.web\tx"]}, "one resource address"),
         ({"destroy": True, "refresh_only": True}, "cannot be combined"),
         ({"engine": "terraform", "state_encryption_key": "vault://k/x"}, "opentofu engine"),
         ({"lock_timeout": "soon"}, "lock_timeout"),
@@ -238,6 +239,20 @@ def test_apply_script():
 def test_plan_validation_rejects(config, message):
     errors = TfPlanHandler().validate_config(config)
     assert any(message in error for error in errors), errors
+
+
+def test_keyed_resource_instances_can_be_targeted_and_replaced():
+    addresses = ['aws_instance.web["blue"]', 'module.site["prod east"].aws_vpc.main']
+    config = {"state_name": "core", "targets": addresses, "replace": addresses[:1]}
+    assert TfPlanHandler().validate_config(config) == []
+    script = build_plan_script(
+        TfPlanConfig.model_validate(config),
+        workdir="/shared/tf/plan",
+        has_vars=False,
+        has_secret_vars=False,
+    )
+    assert """'-target=module.site["prod east"].aws_vpc.main'""" in script
+    assert """'-replace=aws_instance.web["blue"]'""" in script
 
 
 def test_plan_validation_accepts_defaults():

@@ -202,13 +202,19 @@ class TfPlanConfig(TfContainerConfig):
     targets: list[str] = Field(
         default_factory=list,
         title="Targets",
-        description="Resource addresses to limit the plan to (-target), one per line.",
+        description=(
+            "Resource addresses to limit the plan to (-target), one per line, e.g. "
+            'aws_vpc.main or aws_instance.web["blue"].'
+        ),
         json_schema_extra={"x_widget": "commands", "x_rows": 2, "x_advanced": True},
     )
     replace: list[str] = Field(
         default_factory=list,
         title="Replace",
-        description="Resource addresses to force-replace (-replace), one per line.",
+        description=(
+            "Resource addresses to force-replace (-replace), one per line, e.g. "
+            'aws_instance.web["blue"].'
+        ),
         json_schema_extra={"x_widget": "commands", "x_rows": 2, "x_advanced": True},
     )
     lock_timeout: LockTimeout = "300s"
