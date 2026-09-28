@@ -43,10 +43,13 @@ from hegemony_steps_ansible.playbook import (
 from hegemony_steps_ansible.results import (
     CALLBACK_NAME,
     CALLBACK_SOURCE,
+    MAX_DIFF_CHARS,
+    MAX_MESSAGE_CHARS,
     MAX_RESULTS_BYTES,
     MAX_TASK_RECORDS,
     RESULTS_FILE,
     parse_results,
+    render_host_report,
 )
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
 from hegemony_steps_container.runner import MAX_COLLECTED_BYTES
@@ -527,6 +530,67 @@ def test_callback_keeps_its_results_file_within_the_collection_budget(monkeypatc
     assert len(results.hosts_where("changed")) == 50
     assert results.trimmed[0] == "diffs"
     assert all("diff" not in task for task in results.tasks)
+
+
+class _QuietStats:
+    processed = {"r1": 1}
+    custom: dict[str, Any] = {}
+
+    def summarize(self, host):
+        return {"ok": 1, "changed": 0, "failures": 0, "unreachable": 0, "skipped": 0}
+
+
+def test_callback_records_an_ignored_failure_as_ignored(monkeypatch, tmp_path):
+    results_path = str(tmp_path / "out" / "results.json")
+    plugin = _load_callback(monkeypatch, results_path)
+    plugin.v2_playbook_on_play_start(_Named("Rollout"))
+    plugin.v2_runner_on_failed(
+        SimpleNamespace(host=_Named("r1"), task=_Named("probe"), result={"msg": "no such"}),
+        ignore_errors=True,
+    )
+    plugin.v2_playbook_on_stats(_QuietStats())
+
+    results = parse_results((tmp_path / "out" / "results.json").read_bytes())
+    assert [task["status"] for task in results.tasks] == ["ignored"]
+    # The recap, not the task records, decides failed_hosts.
+    assert results.hosts_where("failures") == []
+    report = render_host_report("r1", results.hosts["r1"], results.tasks_for("r1"))
+    assert "  failed (ignored)  probe — no such\n" in report
+
+
+def test_callback_clips_long_messages_and_diffs(monkeypatch, tmp_path):
+    results_path = str(tmp_path / "out" / "results.json")
+    plugin = _load_callback(monkeypatch, results_path)
+    plugin.v2_runner_on_failed(
+        SimpleNamespace(
+            host=_Named("r1"),
+            task=_Named("t"),
+            result={"msg": "m" * (MAX_MESSAGE_CHARS + 100), "diff": "d" * (MAX_DIFF_CHARS + 5)},
+        )
+    )
+    plugin.v2_playbook_on_stats(_QuietStats())
+
+    [task] = parse_results((tmp_path / "out" / "results.json").read_bytes()).tasks
+    # The ellipsis survives the plugin source's template substitution as one character.
+    assert len(task["msg"]) == MAX_MESSAGE_CHARS
+    assert task["msg"].endswith("m\u2026")
+    assert len(task["diff"]) == MAX_DIFF_CHARS
+    assert task["diff"].endswith("d\u2026")
+
+
+def test_callback_caps_task_records_and_counts_the_rest(monkeypatch, tmp_path):
+    results_path = str(tmp_path / "out" / "results.json")
+    plugin = _load_callback(monkeypatch, results_path)
+    for index in range(MAX_TASK_RECORDS + 3):
+        plugin.v2_runner_on_ok(
+            SimpleNamespace(host=_Named("r1"), task=_Named(f"t{index}"), result={})
+        )
+    plugin.v2_playbook_on_stats(_QuietStats())
+
+    results = parse_results((tmp_path / "out" / "results.json").read_bytes())
+    assert len(results.tasks) == MAX_TASK_RECORDS
+    assert results.tasks[-1]["task"] == f"t{MAX_TASK_RECORDS - 1}"
+    assert results.dropped_task_records == 3
 
 
 def test_parse_results_tolerates_missing_or_broken_files():
