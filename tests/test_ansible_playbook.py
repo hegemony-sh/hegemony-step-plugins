@@ -133,6 +133,39 @@ def test_inventory_host_names_are_file_safe_and_unique():
     assert names == ["_etc_passwd", "core_1_22", "core_1_22__2"]
 
 
+@pytest.mark.parametrize(
+    ("role", "message"),
+    [
+        ("all", "which Ansible reserves"),
+        ("Ungrouped", "which Ansible reserves"),
+        ("site-emea", "which the site groups use"),
+        ("platform_linux", "which the platform groups use"),
+        ("tag_env_prod", "which the tag groups use"),
+        ("provider", "which the provider groups use"),
+    ],
+)
+def test_role_groups_that_would_merge_with_other_groups_are_refused(role, message):
+    with pytest.raises(ValueError, match=message):
+        build_inventory({role: [_device("r1")]})
+
+
+def test_a_prefixed_role_is_fine_when_that_dimension_is_off():
+    inventory = build_inventory({"site_emea": [_device("r1")]}, group_by=["role", "tag"])
+    assert "site_emea" in inventory.document()["all"]["children"]
+
+
+@pytest.mark.asyncio
+async def test_a_reserved_role_group_fails_before_docker(monkeypatch):
+    state = _install_docker(monkeypatch, collected=None, exit_code=0)
+    ctx = _ctx({"playbook": "site.yml"}, [])
+    ctx.target_devices_by_role = {"all": [_device("r1")]}
+    ctx.target_roles = ["all"]
+    result = await AnsiblePlaybookHandler().execute(ctx)
+    assert result.success is False
+    assert "role 'all' would be the inventory group 'all'" in (result.error or "")
+    assert state["calls"] == []
+
+
 def test_inventory_group_by_limits_derived_groups():
     inventory = build_inventory({"routers": [_device("r1")]}, group_by=["role"])
     assert set(inventory.document()["all"]["children"]) == {"routers"}

@@ -677,11 +677,10 @@ class AnsiblePlaybookHandler(BaseHandler):
         config = AnsiblePlaybookConfig.model_validate(ctx.config)
         services = ctx.require_services()
 
-        inventory = build_inventory(
-            self._devices_by_role(ctx, config.inventory_scope), group_by=config.group_by
-        )
-
         try:
+            inventory = build_inventory(
+                self._devices_by_role(ctx, config.inventory_scope), group_by=config.group_by
+            )
             files, inventory, left_out = await self._staged_files(ctx, config, inventory, services)
         except ValueError as exc:
             return HandlerResult(

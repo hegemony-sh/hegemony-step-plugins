@@ -270,9 +270,21 @@ def build_inventory(
     A device targeted under several roles is one host in several role groups.
     Role groups keep the flow author's own names (sanitized); every other
     derived group carries a prefix — ``platform_``, ``site_``, ``tag_``,
-    ``provider_`` — so derived names cannot collide with role names.
+    ``provider_``. A role whose group name would be one of Ansible's own
+    groups (``all``, ``ungrouped``) or carry the prefix of a derived group
+    being built would silently merge with it, so it is refused.
+
+    Host names are the device name made file-safe (runs of anything but
+    letters, digits, ``_ . -`` become ``_``, leading dots are dropped), with
+    ``__2``, ``__3`` … appended to repeats.
+
+    Raises ``ValueError`` for a role whose group name is reserved.
     """
     dimensions = set(group_by)
+    if "role" in dimensions:
+        for role in devices_by_role:
+            if role:
+                _check_role_group(role, dimensions)
     hosts: list[InventoryHost] = []
     by_identity: dict[str, InventoryHost] = {}
     used_names: set[str] = set()
@@ -306,6 +318,26 @@ def build_inventory(
                 host.groups.add(group_name("", role))
 
     return Inventory(hosts=hosts, children=children)
+
+
+#: Groups Ansible defines itself.
+RESERVED_GROUPS = frozenset({"all", "ungrouped"})
+
+
+def _check_role_group(role: str, dimensions: set[str]) -> None:
+    name = group_name("", role)
+    if name in RESERVED_GROUPS:
+        raise ValueError(
+            f"role {role!r} would be the inventory group {name!r}, which Ansible "
+            "reserves; rename the role"
+        )
+    for dimension in ("platform", "site", "tag", "provider"):
+        if dimension in dimensions and (name == dimension or name.startswith(f"{dimension}_")):
+            raise ValueError(
+                f"role {role!r} would be the inventory group {name!r}, which the "
+                f"{dimension} groups use; rename the role or leave {dimension} out of "
+                "Inventory groups"
+            )
 
 
 def _add_derived_groups(

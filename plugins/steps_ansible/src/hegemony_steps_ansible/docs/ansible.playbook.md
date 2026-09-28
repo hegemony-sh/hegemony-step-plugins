@@ -46,11 +46,22 @@ are derived from:
 - provider: e.g. `provider_netbox_main`.
 
 Group names use only letters, digits, and underscores; anything else becomes
-`_`. Inventory scope `run` puts every device the run targets into the
-inventory instead of only the step's own targets. A device that is there only
-through `run` scope (none of its roles is a target of this step) and has no
-usable credentials is left out of the inventory instead of failing the step,
-and named with the reason in an `ansible_hosts_left_out_<step id>` artifact.
+`_`, and names are lowercased. A role whose group name would be `all` or
+`ungrouped` (Ansible's own groups) or start with the prefix of a derived
+group being built (`platform_`, `site_`, `tag_`, `provider_`) would merge
+with that group, so the step refuses it; rename the role or leave that
+dimension out of Inventory groups. Host names are the device names made
+file-safe: every run of characters other than letters, digits, `_`, `.`, and
+`-` becomes `_` and leading dots are dropped (`core 1:22` becomes
+`core_1_22`), and a repeated name gets `__2`, `__3`, and so on. Use these
+names in Limit, host patterns, and `host_vars`; the stored inventory shows
+them. Avoid device names equal to a group name: Ansible warns about a host
+and a group of the same name. Inventory scope `run` puts every device the
+run targets into the inventory instead of only the step's own targets. A
+device that is there only through `run` scope (none of its roles is a target
+of this step) and has no usable credentials is left out of the inventory
+instead of failing the step, and named with the reason in an
+`ansible_hosts_left_out_<step id>` artifact.
 
 ## Ansible Configuration
 
