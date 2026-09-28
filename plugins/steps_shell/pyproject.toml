@@ -4,13 +4,13 @@
 
 [project]
 name = "hegemony-steps-shell"
-version = "0.5.0"
+version = "0.6.0"
 description = "Remote shell execution step handlers for Hegemony (Linux/Unix hosts; WinRM planned)"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.5.0",
+    "hegemony-step-sdk==0.6.0",
 ]
 
 [project.entry-points."hegemony.step_handlers"]
