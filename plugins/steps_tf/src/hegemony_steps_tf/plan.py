@@ -65,6 +65,7 @@ from .common import (
     lock_conflict_error,
     managed_state_access,
     managed_timeout_errors,
+    public_outputs,
     relative_path_error,
     script_header,
     secret_environment,
@@ -84,6 +85,10 @@ PLAN_TEXT_FILE = f"{OUTPUT_DIR}/plan.txt"
 #: it can never crowd out the exit code or the readable plan.
 PLAN_JSON_DIR = "/hegemony/plan-json"
 PLAN_JSON_FILE = f"{PLAN_JSON_DIR}/plan.json"
+#: ``output -json`` of the state the plan was made against, collected before
+#: the JSON plan and after the plan itself.
+PLAN_OUTPUTS_DIR = "/hegemony/plan-outputs"
+PLAN_OUTPUTS_FILE = f"{PLAN_OUTPUTS_DIR}/outputs.json"
 #: Local working directory when the step has no shared workspace (plan only).
 LOCAL_WORKDIR = "/workspace/tf"
 
@@ -290,8 +295,10 @@ def build_plan_script(
         'if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi',
         f'printf "%s" "$code" > {PLAN_EXIT_FILE}',
         f"{tf} show -no-color {PLAN_FILE} > {PLAN_TEXT_FILE}",
-        f"mkdir -p {PLAN_JSON_DIR}",
+        f"mkdir -p {PLAN_JSON_DIR} {PLAN_OUTPUTS_DIR}",
         f"{tf} show -json {PLAN_FILE} > {PLAN_JSON_FILE}",
+        # For a tf.apply with nothing to apply; the plan is made without them.
+        f"if ! {tf} output -json > {PLAN_OUTPUTS_FILE}; then rm -f {PLAN_OUTPUTS_FILE}; fi",
     ]
     return "\n".join(lines) + "\n"
 
@@ -374,7 +381,7 @@ class TfPlanHandler(BaseHandler):
                         env=tool_env(),
                     ),
                     files=files + env_files,
-                    collect=[OUTPUT_DIR, PLAN_JSON_DIR],
+                    collect=[OUTPUT_DIR, PLAN_OUTPUTS_DIR, PLAN_JSON_DIR],
                     handler_id=self.handler_id,
                     extra_hosts=dict(access.extra_hosts) if access else {},
                 )
@@ -502,6 +509,7 @@ class TfPlanHandler(BaseHandler):
                 }
             )
 
+        outputs, sensitive_outputs = public_outputs(outcome.collected.get(PLAN_OUTPUTS_FILE))
         apply_ready = workdir != LOCAL_WORKDIR
         if not apply_ready:
             evidence.append(
@@ -539,6 +547,8 @@ class TfPlanHandler(BaseHandler):
             "state_name": config.state_name.strip() if config.state == "managed" else "",
             "working_dir": workdir,
             "apply_ready": apply_ready,
+            "outputs": outputs,
+            "sensitive_outputs": sensitive_outputs,
         }
         return HandlerResult(
             success=True,

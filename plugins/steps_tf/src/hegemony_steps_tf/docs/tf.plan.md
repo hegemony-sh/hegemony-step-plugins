@@ -73,7 +73,11 @@ reports `has_changes`, the counts `add`, `change`, `destroy`, `replace`,
 `import`, and `move`, the changed resource addresses with their actions under
 `resource_changes`, changed `output_changes` names, `drift`, and a
 `summary` line such as `Plan: +3 ~1 -0`. Resource values are never kept: the
-tool's JSON plan carries them in clear. Branch on
+tool's JSON plan carries them in clear. `outputs` holds the configuration's
+non-sensitive output values as the state held them when the plan was made
+(before its changes), and `sensitive_outputs` the names of the others; a
+`tf.apply` of a plan without changes returns these. Failing to read them does
+not fail the plan: they are then empty. Branch on
 `steps.NODE_ID.output.has_changes`, or show the summary in an approval
 message.
 

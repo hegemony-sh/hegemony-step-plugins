@@ -24,7 +24,8 @@ the same State encryption key the plan step used. With managed state, the
 apply gets its own short-lived access to the state the plan step named.
 
 When the plan has no changes, the step succeeds without starting a
-container.
+container, and its outputs are the ones the plan step read from the
+state, which nothing changed since.
 
 ## Output
 

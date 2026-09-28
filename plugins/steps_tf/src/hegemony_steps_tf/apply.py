@@ -14,7 +14,6 @@ given again.
 
 from __future__ import annotations
 
-import json
 import shlex
 from typing import Any
 
@@ -45,6 +44,7 @@ from .common import (
     lock_conflict_error,
     managed_state_access,
     managed_timeout_errors,
+    public_outputs,
     script_header,
     secret_environment,
     shared_workspace_mounted,
@@ -64,9 +64,6 @@ EXIT_NO_PLAN = 4
 #: Waits before each further attempt to save errored.tfstate (the first is immediate).
 SAVE_RETRY_WAITS = (10, 30)
 STALE_PLAN_MARKER = "Saved plan is stale"
-
-#: Non-sensitive outputs larger than this are left out of the step output.
-MAX_OUTPUT_VALUE_BYTES = 16 * 1024
 
 
 class TfApplyConfig(TfContainerConfig):
@@ -165,6 +162,8 @@ class PlanHandoff(BaseModel):
     working_dir: str
     apply_ready: bool
     has_changes: bool
+    outputs: dict[str, Any] = Field(default_factory=dict)
+    sensitive_outputs: list[str] = Field(default_factory=list)
 
 
 def read_plan_handoff(plan_step: str, output: dict[str, Any]) -> PlanHandoff | str:
@@ -194,30 +193,6 @@ def read_plan_handoff(plan_step: str, output: dict[str, Any]) -> PlanHandoff | s
             f"{handoff.working_dir!r}, not {expected!r}"
         )
     return handoff
-
-
-def public_outputs(raw: bytes | None) -> tuple[dict[str, Any], list[str]]:
-    """Non-sensitive output values, and the names of the sensitive ones.
-
-    ``output -json`` prints sensitive values in clear, so they are dropped here
-    and never leave the worker.
-    """
-    if not raw:
-        return {}, []
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return {}, []
-    values: dict[str, Any] = {}
-    sensitive: list[str] = []
-    for name, item in data.items() if isinstance(data, dict) else []:
-        if not isinstance(item, dict):
-            continue
-        if item.get("sensitive"):
-            sensitive.append(name)
-        elif len(json.dumps(item.get("value"), default=str)) <= MAX_OUTPUT_VALUE_BYTES:
-            values[name] = item.get("value")
-    return values, sorted(sensitive)
 
 
 class TfApplyHandler(BaseHandler):
@@ -284,7 +259,12 @@ class TfApplyHandler(BaseHandler):
             return HandlerResult(
                 success=True,
                 summary="Nothing to apply: the plan has no changes",
-                output={"applied": False, "outputs": {}, "sensitive_outputs": []},
+                # The state is as the plan found it, and so are its outputs.
+                output={
+                    "applied": False,
+                    "outputs": handoff.outputs,
+                    "sensitive_outputs": handoff.sensitive_outputs,
+                },
             )
 
         state_name: str | None = None

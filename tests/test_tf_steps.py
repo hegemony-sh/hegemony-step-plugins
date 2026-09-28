@@ -36,7 +36,6 @@ from hegemony_steps_tf.apply import (
     TfApplyHandler,
     apply_failure,
     build_apply_script,
-    public_outputs,
 )
 from hegemony_steps_tf.common import (
     BACKEND_CONFIG_FILE,
@@ -52,6 +51,7 @@ from hegemony_steps_tf.common import (
     encryption_hcl,
     hcl_string,
     lock_conflict_error,
+    public_outputs,
     typed_variable,
     workdir_for,
 )
@@ -61,6 +61,8 @@ from hegemony_steps_tf.plan import (
     NO_BACKEND_MESSAGE,
     PLAN_JSON_DIR,
     PLAN_JSON_FILE,
+    PLAN_OUTPUTS_DIR,
+    PLAN_OUTPUTS_FILE,
     TfPlanConfig,
     TfPlanHandler,
     build_plan_script,
@@ -420,7 +422,34 @@ async def test_plan_step_reports_changes(monkeypatch):
     assert "TF_IN_AUTOMATION=1" in create
     assert f"sh {RUN_SCRIPT}" in create[-1]
     # The exit code and the readable plan are collected before the JSON plan.
-    assert state["collected"][:2] == ["/hegemony/out", PLAN_JSON_DIR]
+    assert state["collected"][:3] == ["/hegemony/out", PLAN_OUTPUTS_DIR, PLAN_JSON_DIR]
+
+
+@pytest.mark.asyncio
+async def test_plan_step_records_the_outputs_it_found(monkeypatch):
+    outputs = json.dumps(
+        {
+            "vpc_id": {"sensitive": False, "value": "vpc-1"},
+            "db_password": {"sensitive": True, "value": "hunter2"},
+        }
+    ).encode()
+    _install_docker(
+        monkeypatch,
+        out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n", PLAN_OUTPUTS_FILE: outputs},
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+    assert result.success is True, result.error
+    assert result.output["outputs"] == {"vpc_id": "vpc-1"}
+    assert result.output["sensitive_outputs"] == ["db_password"]
+    assert "hunter2" not in json.dumps(result.output)
+
+
+@pytest.mark.asyncio
+async def test_plan_step_succeeds_without_its_outputs(monkeypatch):
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+    assert result.success is True, result.error
+    assert (result.output["outputs"], result.output["sensitive_outputs"]) == ({}, [])
 
 
 @pytest.mark.asyncio
@@ -748,11 +777,18 @@ async def test_apply_step_refuses_managed_state_without_a_name(monkeypatch):
 @pytest.mark.asyncio
 async def test_apply_step_skips_a_plan_without_changes(monkeypatch):
     state = _install_docker(monkeypatch, out={})
-    result = await TfApplyHandler().execute(
-        _ctx({"plan_step": "plan"}, _Services(_plan_output(has_changes=False)))
+    plan = _plan_output(
+        has_changes=False, outputs={"vpc_id": "vpc-1"}, sensitive_outputs=["db_password"]
     )
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _Services(plan)))
     assert result.success is True
-    assert result.output["applied"] is False
+    # A flow reading steps.apply.output.outputs works on every run, not only
+    # on the one that changed something.
+    assert result.output == {
+        "applied": False,
+        "outputs": {"vpc_id": "vpc-1"},
+        "sensitive_outputs": ["db_password"],
+    }
     assert state["calls"] == []
 
 
@@ -894,6 +930,44 @@ esac
     done = subprocess.run(["sh", str(tmp_path / "run.sh")], env=env, capture_output=True, text=True)
     out = root / "hegemony" / "out"
     return done, out, root / KEEP_DIR.lstrip("/"), pushes
+
+
+@pytest.mark.parametrize("output_code", [0, 1])
+def test_plan_script_does_not_fail_on_its_outputs(tmp_path, output_code):
+    """Run the generated plan script under sh with a fake tool: the outputs are
+    written when the tool can read them, and their failure never fails the plan."""
+    root = tmp_path / "root"
+    (root / "attachments").mkdir(parents=True)
+    (root / "attachments" / "main.tf").write_text("")
+    (root / "hegemony" / "tf").mkdir(parents=True)
+    (root / "hegemony" / "tf" / "zz_hegemony_backend_override.tf").write_text("")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    tool = bin_dir / "tofu"
+    tool.write_text(
+        f"""#!/bin/sh
+case "$1" in
+  plan) exit 2 ;;
+  show) echo '{{}}' ;;
+  output) echo '{{"a": {{"value": 1}}}}'; exit {output_code} ;;
+esac
+"""
+    )
+    tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+    config = TfPlanConfig.model_validate({"state": "ephemeral"})
+    script = build_plan_script(
+        config, workdir="/shared/tf/plan", has_vars=False, has_secret_vars=False
+    )
+    for prefix in ("/hegemony/", "/shared/", "/attachments"):
+        script = script.replace(prefix, f"{root}{prefix}")
+    (tmp_path / "run.sh").write_text(script)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    done = subprocess.run(["sh", str(tmp_path / "run.sh")], env=env, capture_output=True, text=True)
+
+    assert done.returncode == 0, done.stderr
+    assert (root / "hegemony" / "out" / "plan-exitcode").read_text() == "2"
+    outputs = root / PLAN_OUTPUTS_FILE.lstrip("/")
+    assert outputs.exists() is (output_code == 0)
 
 
 def test_apply_script_saves_the_errored_state_again(tmp_path):

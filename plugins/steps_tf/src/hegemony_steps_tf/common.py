@@ -80,6 +80,9 @@ _VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 _BACKEND_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ADDRESS_RE = re.compile(r"^[^\s'\"]+$")
 
+#: Non-sensitive outputs larger than this are left out of the step output.
+MAX_OUTPUT_VALUE_BYTES = 16 * 1024
+
 #: pbkdf2 key provider minimum (OpenTofu refuses shorter passphrases).
 MIN_ENCRYPTION_PASSPHRASE = 16
 
@@ -337,6 +340,30 @@ def typed_variable(value: str) -> Any:
         except ValueError:
             return value
     return value
+
+
+def public_outputs(raw: bytes | None) -> tuple[dict[str, Any], list[str]]:
+    """Non-sensitive output values, and the names of the sensitive ones.
+
+    ``output -json`` prints sensitive values in clear, so they are dropped here
+    and never leave the worker.
+    """
+    if not raw:
+        return {}, []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}, []
+    values: dict[str, Any] = {}
+    sensitive: list[str] = []
+    for name, item in data.items() if isinstance(data, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("sensitive"):
+            sensitive.append(name)
+        elif len(json.dumps(item.get("value"), default=str)) <= MAX_OUTPUT_VALUE_BYTES:
+            values[name] = item.get("value")
+    return values, sorted(sensitive)
 
 
 def hcl_string(value: str) -> str:
