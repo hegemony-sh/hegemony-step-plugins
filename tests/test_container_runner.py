@@ -91,10 +91,21 @@ def _ctx(config: dict[str, Any], services: _FakeServices | None = None) -> Handl
 
 
 def _install_docker(
-    monkeypatch, *, out_files: dict[str, bytes] | None = None, exit_code: int = 0
+    monkeypatch,
+    *,
+    out_files: dict[str, bytes] | None = None,
+    out_links: dict[str, str] | None = None,
+    collect_returncode: int = 0,
+    exit_code: int = 0,
 ) -> dict[str, Any]:
-    """Fake the docker CLI: record staged roots, serve collected files."""
-    state: dict[str, Any] = {"roots": {}, "calls": [], "collect_sources": []}
+    """Fake the docker CLI: record staged roots, serve collected files.
+
+    ``state["roots"]`` maps each staged file to ``(content, mode)`` and
+    ``state["dirs"]`` each staged directory to its mode. ``out_links`` adds
+    symlinks (name -> target) to the collected copy, as ``docker cp`` would
+    preserve them; ``collect_returncode`` makes the copy-out fail.
+    """
+    state: dict[str, Any] = {"roots": {}, "dirs": {}, "calls": [], "collect_sources": []}
     monkeypatch.setattr(
         "hegemony_steps_container.run.stream_pull",
         AsyncMock(side_effect=EnginePullUnsupported("disabled in tests")),
@@ -106,7 +117,11 @@ def _install_docker(
             src, dest = cmd[2], cmd[3]
             if dest.endswith(":/"):
                 root = src[: -len("/.")]
-                for walk_root, _dirs, files in os.walk(root):
+                for walk_root, dirs, files in os.walk(root):
+                    for name in dirs:
+                        path = os.path.join(walk_root, name)
+                        rel = "/" + os.path.relpath(path, root).replace(os.sep, "/")
+                        state["dirs"][rel] = os.stat(path).st_mode & 0o777
                     for name in files:
                         path = os.path.join(walk_root, name)
                         rel = "/" + os.path.relpath(path, root).replace(os.sep, "/")
@@ -114,11 +129,17 @@ def _install_docker(
                             state["roots"][rel] = (fh.read(), os.stat(path).st_mode & 0o777)
             elif src.endswith(f":{OUTPUT_DIR}/."):
                 state["collect_sources"].append(src)
+                if collect_returncode:
+                    return SimpleNamespace(
+                        returncode=collect_returncode, stdout="", stderr="daemon hiccup"
+                    )
                 for rel, data in (out_files or {}).items():
                     target = os.path.join(dest, rel)
                     os.makedirs(os.path.dirname(target), exist_ok=True)
                     with open(target, "wb") as fh:
                         fh.write(data)
+                for rel, link_target in (out_links or {}).items():
+                    os.symlink(link_target, os.path.join(dest, rel))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("subprocess.run", fake_run)
@@ -208,6 +229,9 @@ async def test_container_run_secrets_are_files_not_environment(monkeypatch):
     # A secret whose value looks like a reference is not resolved a second time.
     assert state["roots"]["/run/secrets/db_url"][0] == b"postgres://app:pw@db/app"
     assert state["roots"]["/run/secrets/api_token"][0] == b"literal-token"
+    # Readable by an image that runs as another user than root (docker cp
+    # stages files root-owned); tighten only deliberately.
+    assert state["roots"]["/run/secrets/db_password"][1] == 0o644
     # Both reference forms go through the host (which registers the value for
     # redaction), each exactly once; a literal is used as written.
     assert services.resolved == [
@@ -293,6 +317,9 @@ async def test_run_container_job_stages_files_and_collects(monkeypatch):
     }
     assert state["roots"]["/hegemony/run.sh"] == (b"echo run\n", 0o755)
     assert state["roots"]["/hegemony/in/data.bin"][0] == b"\x00\x01"
+    # docker cp creates the collect root owned by root; results are written by
+    # whatever user the image runs as (the ansible image runs as `runner`).
+    assert state["dirs"][OUTPUT_DIR] == 0o777
     create = _create_args(state)
     assert "hegemony.handler_id=tool.run" in create
     assert create[create.index("--memory") + 1] == "1g"
@@ -339,3 +366,57 @@ def test_container_config_from_keeps_tool_wiring_over_user_env():
     # Tool steps mount no upstream step outputs or artifacts.
     assert config["mounted_step_outputs"] == []
     assert config["mounted_artifacts"] == []
+
+
+def _tool_job(*, files: list[StagedFile] | None = None) -> ContainerJob:
+    return ContainerJob(
+        config=container_config_from({}, image="tool:1", command=["true"]),
+        files=files or [],
+        collect=[OUTPUT_DIR],
+        handler_id="tool.run",
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_root_is_staged_writable_without_job_files(monkeypatch):
+    state = _install_docker(monkeypatch)
+    outcome = await run_container_job(_ctx({}), _tool_job())
+
+    assert isinstance(outcome, ContainerJobResult)
+    assert state["dirs"][OUTPUT_DIR] == 0o777
+
+
+@pytest.mark.asyncio
+async def test_collect_skips_symlinks_out_of_the_copy(monkeypatch, tmp_path):
+    worker_secret = tmp_path / "worker_secret"
+    worker_secret.write_text("worker-only")
+    _install_docker(
+        monkeypatch,
+        out_files={"ok.json": b"{}"},
+        out_links={"leak.json": str(worker_secret), "inner.json": "ok.json"},
+    )
+    outcome = await run_container_job(_ctx({}), _tool_job())
+
+    assert isinstance(outcome, ContainerJobResult)
+    # Neither a link out of the copy nor one inside it is followed.
+    assert outcome.collected == {"/hegemony/out/ok.json": b"{}"}
+
+
+@pytest.mark.asyncio
+async def test_collect_survives_a_failed_docker_cp(monkeypatch):
+    _install_docker(monkeypatch, out_files={"ok.json": b"{}"}, collect_returncode=1)
+    outcome = await run_container_job(_ctx({}), _tool_job())
+
+    assert isinstance(outcome, ContainerJobResult)
+    assert outcome.exit_code == 0
+    assert outcome.collected == {}
+
+
+@pytest.mark.asyncio
+async def test_collect_enforces_the_byte_budget(monkeypatch):
+    monkeypatch.setattr("hegemony_steps_container.run.MAX_COLLECTED_BYTES", 100)
+    _install_docker(monkeypatch, out_files={"big.bin": b"x" * 101, "small.json": b"{}"})
+    outcome = await run_container_job(_ctx({}), _tool_job())
+
+    assert isinstance(outcome, ContainerJobResult)
+    assert outcome.collected == {"/hegemony/out/small.json": b"{}"}
