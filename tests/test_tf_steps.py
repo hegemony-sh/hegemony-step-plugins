@@ -241,6 +241,22 @@ def test_plan_validation_rejects(config, message):
     assert any(message in error for error in errors), errors
 
 
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"secret_env": {"HEGEMONY_X": "vault://a/b"}}, "reserved"),
+        ({"secret_env": {"TF_HTTP_PASSWORD": "vault://a/b"}}, "reserved"),
+        ({"secret_env": {"bad name": "vault://a/b"}}, "valid environment variable"),
+        ({"lock_timeout": "soon"}, "lock_timeout"),
+        ({"image": "/tmp/x"}, "Invalid image reference"),
+        ({"plan_step": ""}, "plan_step"),
+    ],
+)
+def test_apply_validation_rejects(config, message):
+    errors = TfApplyHandler().validate_config({"plan_step": "plan", **config})
+    assert any(message in error for error in errors), errors
+
+
 def test_keyed_resource_instances_can_be_targeted_and_replaced():
     addresses = ['aws_instance.web["blue"]', 'module.site["prod east"].aws_vpc.main']
     config = {"state_name": "core", "targets": addresses, "replace": addresses[:1]}
@@ -802,6 +818,34 @@ async def test_apply_summary_leaves_out_the_plan_collection_note(monkeypatch):
     services = _Services(_plan_output(summary="Plan: +1 ~0 -0" + PLAN_TEXT_MISSING_NOTE))
     result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
     assert result.summary == "Applied: +1 ~0 -0"
+
+
+@pytest.mark.asyncio
+async def test_apply_step_passes_the_state_encryption_key(monkeypatch):
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"})
+    config = {"plan_step": "plan", "state_encryption_key": "vault://orgs/acme/secrets/enc"}
+    result = await TfApplyHandler().execute(_ctx(config, _Services(_plan_output())))
+    assert result.success is True, result.error
+    env = state["roots"][SECRET_ENV_FILE]
+    assert "TF_ENCRYPTION=" in env
+    assert "resolved-enc-long-enough" in env
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert not any("resolved-" in part for part in create)
+
+
+@pytest.mark.asyncio
+async def test_apply_step_short_encryption_key_is_refused(monkeypatch):
+    state = _install_docker(monkeypatch, out={})
+
+    class ShortKey(_Services):
+        async def resolve_secret_ref(self, ref, *, source):
+            return "short"
+
+    config = {"plan_step": "plan", "state_encryption_key": "vault://k/enc"}
+    result = await TfApplyHandler().execute(_ctx(config, ShortKey(_plan_output())))
+    assert result.success is False
+    assert "at least 16 characters" in (result.error or "")
+    assert state["calls"] == []
 
 
 @pytest.mark.asyncio
