@@ -1665,6 +1665,7 @@ class RunContainerHandler(BaseHandler):
         artifact_staging_dir: str | None = None
         generated_artifacts_staging_dir: str | None = None
         step_outputs_staging_dir: str | None = None
+        root_dirs_staging_parent: str | None = None
         root_dirs_staging_dir: str | None = None
 
         async def _safe_emit_progress(message: str, attrs: dict[str, object] | None = None) -> None:
@@ -2055,8 +2056,14 @@ class RunContainerHandler(BaseHandler):
             # files to copy yet. This keeps /attachments, /artifacts, the
             # dedicated new-artifacts upload subfolder, /step_outputs, and the
             # working directory visible/usable from inside the container.
-            root_dirs_staging_dir = f"{staging_dir}-roots"
-            os.makedirs(root_dirs_staging_dir, exist_ok=True)
+            # The tree holds job files such as secrets at their container mode
+            # (0644), so it lives under a private (0700) parent no other user of
+            # the worker can enter. The tree's own directories keep 0755: they
+            # become directories of the container, the root included.
+            root_dirs_staging_parent = tempfile.mkdtemp(prefix="hegemony-container-roots-")
+            root_dirs_staging_dir = os.path.join(root_dirs_staging_parent, "root")
+            os.mkdir(root_dirs_staging_dir)
+            os.chmod(root_dirs_staging_dir, 0o755)
             for container_root in {
                 attachments_path,
                 artifacts_path,
@@ -2608,8 +2615,8 @@ class RunContainerHandler(BaseHandler):
                 logger.warning(f"Cleanup: step outputs staging removal failed: {e}")
 
             try:
-                if root_dirs_staging_dir and os.path.exists(root_dirs_staging_dir):
-                    shutil.rmtree(root_dirs_staging_dir, ignore_errors=True)
+                if root_dirs_staging_parent and os.path.exists(root_dirs_staging_parent):
+                    shutil.rmtree(root_dirs_staging_parent, ignore_errors=True)
             except Exception as e:
                 logger.warning(f"Cleanup: container root staging removal failed: {e}")
 

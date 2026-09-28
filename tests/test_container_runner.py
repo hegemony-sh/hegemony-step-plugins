@@ -118,6 +118,9 @@ def _install_docker(
             src, dest = cmd[2], cmd[3]
             if dest.endswith(":/"):
                 root = src[: -len("/.")]
+                state["roots_staging"] = root
+                state["roots_staging_parent_mode"] = os.stat(os.path.dirname(root)).st_mode & 0o777
+                state["roots_staging_mode"] = os.stat(root).st_mode & 0o777
                 for walk_root, dirs, files in os.walk(root):
                     for name in dirs:
                         path = os.path.join(walk_root, name)
@@ -237,6 +240,12 @@ async def test_container_run_secrets_are_files_not_environment(monkeypatch):
     # Readable by an image that runs as another user than root (docker cp
     # stages files root-owned); tighten only deliberately.
     assert state["roots"]["/run/secrets/db_password"][1] == 0o644
+    # On the worker they sit under a directory only the worker's user can
+    # enter, while the tree's root (the container's /) stays 0755.
+    assert state["roots_staging_parent_mode"] == 0o700
+    assert state["roots_staging_mode"] == 0o755
+    # Removed after the run.
+    assert not os.path.exists(os.path.dirname(state["roots_staging"]))
     # Both reference forms go through the host (which registers the value for
     # redaction), each exactly once; a literal is used as written.
     assert services.resolved == [
