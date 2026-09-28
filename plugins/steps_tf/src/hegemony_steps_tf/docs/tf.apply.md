@@ -56,11 +56,20 @@ from its policy or the flow), plus a 10-minute margin, and at most 24
 hours: the step's own Timeout is refused above 85800 seconds (whatever the
 plan's state, since the plan step decides it), and a longer timeout from
 the policy or the flow still ends the state access after 24 hours, which
-the step's log says. At the timeout the apply is also stopped from inside
-the container (SIGTERM, on which the tool starts no new changes and saves
-the state of those done, then SIGKILL five minutes later, with the image's
-`timeout` command), so an apply stops even when the worker that should stop
-the container is gone, before the platform can free its lock.
+the step's log says.
+
+A cancelled step does not kill the apply: the tool receives SIGTERM, on
+which it starts no new changes, lets those in progress finish, saves the
+state and releases the lock, and it is killed only if it still runs after
+Stop grace period (120 seconds by default). The same happens at the
+timeout: the tool receives SIGTERM that long before the step's timeout (at
+most half of it), so it can stop cleanly within the step's time. That
+SIGTERM comes from inside the container (the image's `timeout` command,
+with SIGKILL five minutes later), so an apply stops even when the worker
+that should stop the container is gone, before the platform can free its
+lock. A change the kill cuts off can be missing from the state; give
+providers whose changes take long (a database instance) a longer grace
+period. 0 stops the tool at once.
 
 When the tool changes resources but cannot save the resulting state (the
 backend is unreachable or refuses the write), it leaves the state in

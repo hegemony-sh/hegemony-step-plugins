@@ -88,6 +88,15 @@ through `hegemony_steps_container.runner` instead of copying
   `run_container_job`. A failed `HandlerResult` is a failure before or
   around the run; return it. A `ContainerJobResult` means the container
   ran, whatever its exit code.
+- **Stopping.** Start the run script with `exec` (`exec sh /hegemony/run.sh`)
+  so it is the container's PID 1, which `docker stop` signals, and run the
+  tool through `bounded` (`deadline_shell_lines`): it stops the tool at the
+  step's deadline even when the worker is gone, and passes a SIGTERM the
+  script receives on to the tool. A tool that must not be cut off mid-change
+  (it writes state, holds a lock) sets `ContainerJob.stop_grace_seconds`: a
+  cancelled step's container then gets SIGTERM and that long before it is
+  removed, instead of `docker rm -f`. Give the in-script deadline the same
+  margin before the step's timeout (`tool_deadline` in the tf wheel).
 - **Step I/O.** `/hegemony` is reserved in every step container. Write
   structured results under `/hegemony/out` (collected after exit, at most
   8 MiB per job) and read them from `collected`; `collect_errors` tells a

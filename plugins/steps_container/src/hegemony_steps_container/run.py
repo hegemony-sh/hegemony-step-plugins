@@ -42,6 +42,7 @@ from .runner import (
     COLLECT_GRACE_SECONDS,
     CONTEXT_PATH,
     MAX_COLLECTED_BYTES,
+    MAX_STOP_GRACE_SECONDS,
     OUTPUT_DIR,
     SECRET_FILES_DIR,
     ContainerJob,
@@ -1371,6 +1372,7 @@ class RunContainerHandler(BaseHandler):
         docker_mac: str = "",
         handler_id: str = "container.run",
         extra_hosts: dict[str, str] | None = None,
+        stop_grace_seconds: int = 0,
     ) -> list[str]:
         """Build the docker create command args from config.
 
@@ -1443,6 +1445,11 @@ class RunContainerHandler(BaseHandler):
         # a sandbox container cannot resolve itself, such as the platform API.
         for host_name, address in sorted((extra_hosts or {}).items()):
             args.extend(["--add-host", f"{_valid_host_name(host_name)}:{_valid_ip(address)}"])
+
+        # A job that stops gracefully gets SIGTERM whatever STOPSIGNAL its image
+        # declares, and the same grace from any `docker stop` without -t.
+        if stop_grace_seconds > 0:
+            args.extend(["--stop-signal", "SIGTERM", "--stop-timeout", str(stop_grace_seconds)])
 
         args.extend(
             [
@@ -1659,6 +1666,10 @@ class RunContainerHandler(BaseHandler):
 
         start_time = time.monotonic()
         deadline = start_time + timeout
+        # A step cancelled while its container runs gives the container
+        # stop_grace seconds after SIGTERM before removing it (see `finally`).
+        stop_grace = max(0, min(int(job.stop_grace_seconds or 0), MAX_STOP_GRACE_SECONDS))
+        cancelled_while_running = False
         output_lines: list[str] = []
         exit_code = -1
         staging_dir: str | None = None
@@ -2037,6 +2048,7 @@ class RunContainerHandler(BaseHandler):
                 docker_mac=runtime.docker_mac,
                 handler_id=job.handler_id,
                 extra_hosts=job.extra_hosts,
+                stop_grace_seconds=stop_grace,
             )
             # 8. Create the container
             create_proc = await self._run_docker(
@@ -2408,6 +2420,7 @@ class RunContainerHandler(BaseHandler):
                 # whether or not anyone waits on it.
                 with contextlib.suppress(ProcessLookupError):
                     proc.kill()
+                cancelled_while_running = True
                 raise
 
             raw_stdout = stdout_out
@@ -2580,6 +2593,20 @@ class RunContainerHandler(BaseHandler):
                 summary=f"Container execution error: {type(e).__name__}",
             )
         finally:
+            # A cancelled step's container may be mid-change (a tf apply): with a
+            # stop grace it gets SIGTERM and that long to finish in-flight work,
+            # save its state and release its locks before it is removed. Shielded:
+            # a second cancellation (the worker shutting down) leaves the stop
+            # running and goes straight on to the removal.
+            if cancelled_while_running and stop_grace:
+                try:
+                    await asyncio.shield(
+                        self._stop_container(
+                            docker_bin, container_name, stop_grace, docker_host=docker_host
+                        )
+                    )
+                except (Exception, asyncio.CancelledError) as e:
+                    logger.warning(f"Cleanup: graceful stop of {container_name} failed: {e!r}")
             # Best-effort cleanup
             try:
                 await self._force_remove_container(
@@ -2931,6 +2958,23 @@ class RunContainerHandler(BaseHandler):
                     )
         except Exception as e:
             logger.warning(f"Preflight cleanup failed: {e}")
+
+    @classmethod
+    async def _stop_container(
+        cls, docker_bin: str, container_name: str, grace_seconds: int, *, docker_host: str
+    ) -> None:
+        """``docker stop``: SIGTERM, then SIGKILL after ``grace_seconds`` if it still runs."""
+        logger.info(f"Stopping container {container_name}: SIGTERM, up to {grace_seconds}s to exit")
+        start = time.monotonic()
+        result = await cls._run_docker(
+            docker_bin,
+            ["stop", "-t", str(grace_seconds), container_name],
+            env=_docker_env(docker_host),
+            timeout=grace_seconds + 30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(str(result.stderr or "").strip()[:200] or "docker stop failed")
+        logger.info(f"Container {container_name} stopped after {time.monotonic() - start:.0f}s")
 
     @classmethod
     async def _force_remove_container(

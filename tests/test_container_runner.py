@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 from types import SimpleNamespace
@@ -523,3 +524,42 @@ def test_bounded_runs_the_command_unbounded_without_timeout(tmp_path):
         (tmp_path / tool).symlink_to(found)
     code, _ = _run_bounded("bounded sh -c 'exit 5'", int(time.time()) + 60, str(tmp_path))
     assert code == 5
+
+
+def test_bounded_passes_a_stop_request_on_to_the_command(tmp_path):
+    """``docker stop`` signals the script (PID 1); the tool must get it, not wait for SIGKILL.
+
+    A shell waiting for a foreground command would run its trap only after the
+    command ends. The tool here saves and exits 7 on SIGTERM; after the stop
+    request the script starts nothing new and keeps the tool's status.
+    """
+    ready = tmp_path / "ready"
+    tool = (
+        'sh -c \'trap "echo tool: saved; exit 7" TERM; '
+        f": > {ready}; i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done; exit 0'"
+    )
+    script = "\n".join(
+        [
+            "set -eu",
+            *deadline_shell_lines(int(time.time()) + 600),
+            "set +e",
+            f"bounded {tool}",
+            "code=$?",
+            "bounded echo 'started after the stop request'",
+            'echo "second: $?"',
+            'exit "$code"',
+        ]
+    )
+    proc = subprocess.Popen(["sh", "-c", script], stdout=subprocess.PIPE, text=True)
+    started = time.monotonic()
+    while not ready.exists():
+        assert time.monotonic() - started < 10, "the tool never started"
+        time.sleep(0.05)
+    proc.send_signal(signal.SIGTERM)
+    out, _ = proc.communicate(timeout=10)
+
+    assert proc.returncode == 7
+    assert "tool: saved" in out
+    assert "started after the stop request" not in out
+    assert "second: 143" in out
+    assert time.monotonic() - started < 10

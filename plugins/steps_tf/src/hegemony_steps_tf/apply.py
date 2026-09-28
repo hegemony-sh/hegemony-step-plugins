@@ -49,7 +49,7 @@ from .common import (
     script_header,
     secret_environment,
     shared_workspace_mounted,
-    step_deadline,
+    tool_deadline,
     tool_env,
     workdir_for,
 )
@@ -299,7 +299,7 @@ class TfApplyHandler(BaseHandler):
                         **container_config_from(
                             {**ctx.config, "timeout_seconds": timeout},
                             image=image,
-                            command=[f"sh {RUN_SCRIPT}"],
+                            command=[f"exec sh {RUN_SCRIPT}"],
                             entrypoint="/bin/sh",
                             env=tool_env(),
                         ),
@@ -312,12 +312,13 @@ class TfApplyHandler(BaseHandler):
                             engine,
                             workdir,
                             config.lock_timeout.strip(),
-                            step_deadline(timeout),
+                            tool_deadline(timeout, config.stop_grace_seconds),
                         ),
                     ],
                     collect=[OUTPUT_DIR],
                     handler_id=self.handler_id,
                     extra_hosts=dict(access.extra_hosts) if access else {},
+                    stop_grace_seconds=config.stop_grace_seconds,
                 )
                 outcome = await run_container_job(ctx, job)
         except (ValueError, RuntimeError) as exc:

@@ -30,6 +30,7 @@ from pydantic import BeforeValidator, Field
 from hegemony_step_sdk import HandlerContext, StateBackendAccess
 from hegemony_steps_container.run import RunContainerHandler
 from hegemony_steps_container.runner import (
+    MAX_STOP_GRACE_SECONDS,
     OUTPUT_DIR,
     ContainerExecutionConfig,
     StagedFile,
@@ -118,8 +119,27 @@ MAX_STATE_ACCESS_SECONDS = 86400
 MAX_MANAGED_STATE_TIMEOUT = MAX_STATE_ACCESS_SECONDS - STATE_ACCESS_MARGIN_SECONDS
 
 
+#: Default time a tool gets to stop cleanly after SIGTERM (see ``stop_grace_seconds``).
+DEFAULT_STOP_GRACE_SECONDS = 120
+
+
 class TfContainerConfig(ContainerExecutionConfig):
-    """Fields both steps share: provider credentials and the image override."""
+    """Fields both steps share: provider credentials, the image override, stopping."""
+
+    stop_grace_seconds: int = Field(
+        default=DEFAULT_STOP_GRACE_SECONDS,
+        ge=0,
+        le=MAX_STOP_GRACE_SECONDS,
+        title="Stop grace period (seconds)",
+        description=(
+            "How long the tool gets to stop cleanly when the step is cancelled or reaches "
+            "its timeout: it receives SIGTERM, lets the changes in progress finish, saves "
+            "the state and releases the lock, and is killed only after this time. At a "
+            "timeout the time comes out of the step's timeout (at most half of it). 0 "
+            "stops the tool at once."
+        ),
+        json_schema_extra={"x_advanced": True},
+    )
 
     secret_env: dict[str, str] = Field(
         default_factory=dict,
@@ -491,6 +511,16 @@ def script_header(deadline: int | None = None) -> list[str]:
     if deadline is not None:
         lines += deadline_shell_lines(deadline)
     return lines
+
+
+def tool_deadline(timeout: int, stop_grace_seconds: int) -> int:
+    """The Unix time the run script sends the tool SIGTERM (see ``deadline_shell_lines``).
+
+    The step's timeout less the stop grace period, capped at half the timeout,
+    so a tool that stops cleanly in its grace period still ends within the step's
+    time, and its container is not killed by the worker's own timeout.
+    """
+    return step_deadline(timeout - min(max(stop_grace_seconds, 0), timeout // 2))
 
 
 def step_deadline(timeout: int) -> int:

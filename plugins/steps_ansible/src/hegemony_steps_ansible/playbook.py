@@ -701,7 +701,7 @@ class AnsiblePlaybookHandler(BaseHandler):
             config=container_config_from(
                 ctx.config,
                 image=config.image,
-                command=[f"sh {RUN_SCRIPT}"],
+                command=[f"exec sh {RUN_SCRIPT}"],
                 entrypoint="/bin/sh",
                 env=_ansible_env(config, user_env),
                 working_dir="/workspace",

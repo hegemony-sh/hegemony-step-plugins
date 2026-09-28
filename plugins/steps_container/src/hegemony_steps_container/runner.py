@@ -68,6 +68,13 @@ COLLECT_GRACE_SECONDS = 10
 #: (the step timeout, then 600 s of grace).
 KILL_AFTER_SECONDS = 300
 
+#: The exit status ``bounded`` returns for a command it refused to start
+#: because the container was asked to stop (128 + SIGTERM).
+STOPPED_EXIT_STATUS = 143
+
+#: Longest stop grace period a job may ask for (see ``ContainerJob``).
+MAX_STOP_GRACE_SECONDS = 3600
+
 #: A secret reference written bare (``vault://orgs/acme/secrets/db/password``)
 #: rather than as a ``{{ secret('...') }}`` template.
 _BARE_SECRET_REF_RE = re.compile(r"^[a-z][a-z0-9+.-]*://[^\s'\"{}\\]+$")
@@ -114,6 +121,12 @@ class ContainerJob:
     # Host name -> IP address entries for the container's /etc/hosts
     # (``--add-host``), e.g. the platform API from ``open_state_backend``.
     extra_hosts: dict[str, str] = field(default_factory=dict)
+    # Seconds the container gets to stop after SIGTERM when the step is
+    # cancelled or times out, before it is removed; 0 removes it at once. A
+    # tool run through ``bounded`` (see :func:`deadline_shell_lines`) receives
+    # the SIGTERM when the run script is the container's PID 1 (start it with
+    # ``exec``), and can finish in-flight work, save state and release locks.
+    stop_grace_seconds: int = 0
 
 
 @dataclass
@@ -413,20 +426,46 @@ def deadline_shell_lines(deadline: int) -> list[str]:
     in an image without ``timeout`` the command runs unbounded, as before.
     The command's exit status is returned (BusyBox gives 143 when the
     deadline stopped it, coreutils 124).
+
+    The lines also pass a stop request on: a shell waiting for a foreground
+    command runs its traps only after the command ends, so ``bounded`` runs
+    the command in the background and waits for it, and SIGTERM or SIGINT to
+    the script (``docker stop`` signals PID 1) is sent on to the command as
+    SIGTERM. After a stop request, ``bounded`` starts nothing new and returns
+    :data:`STOPPED_EXIT_STATUS`. Works under ``set -eu``.
     """
     kill = f"-k {KILL_AFTER_SECONDS}"
     return [
         f"hegemony_deadline={int(deadline)}",
+        "hegemony_child=",
+        "hegemony_stopping=",
+        "hegemony_stop() {",
+        "  hegemony_stopping=yes",
+        '  if [ -n "$hegemony_child" ]; then kill -TERM "$hegemony_child" 2>/dev/null || :; fi',
+        "}",
+        "trap hegemony_stop TERM INT",
         "bounded() {",
+        f'  if [ -n "$hegemony_stopping" ]; then return {STOPPED_EXIT_STATUS}; fi',
         "  left=$((hegemony_deadline - $(date +%s)))",
         '  if [ "$left" -lt 1 ]; then left=1; fi',
         "  if ! command -v timeout >/dev/null 2>&1; then",
-        '    "$@"',
+        '    "$@" &',
         f"  elif timeout -s TERM {kill} 5 true >/dev/null 2>&1; then",
-        f'    timeout -s TERM {kill} "$left" "$@"',
+        f'    timeout -s TERM {kill} "$left" "$@" &',
         "  else",
-        '    timeout -s TERM "$left" "$@"',
+        '    timeout -s TERM "$left" "$@" &',
         "  fi",
+        "  hegemony_child=$!",
+        # A trapped signal ends wait early (status > 128) while the command
+        # still runs: wait again until it has exited and been reaped.
+        "  hegemony_status=0",
+        '  wait "$hegemony_child" || hegemony_status=$?',
+        '  while kill -0 "$hegemony_child" 2>/dev/null; do',
+        "    hegemony_status=0",
+        '    wait "$hegemony_child" || hegemony_status=$?',
+        "  done",
+        "  hegemony_child=",
+        '  return "$hegemony_status"',
         "}",
     ]
 
@@ -438,9 +477,11 @@ __all__ = [
     "IO_ROOT",
     "KILL_AFTER_SECONDS",
     "MAX_COLLECTED_BYTES",
+    "MAX_STOP_GRACE_SECONDS",
     "OUTPUT_DIR",
     "SECRET_FILES_DIR",
     "SECRET_NAME_RE",
+    "STOPPED_EXIT_STATUS",
     "ContainerExecutionConfig",
     "ContainerJob",
     "ContainerJobResult",

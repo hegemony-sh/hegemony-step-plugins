@@ -43,6 +43,7 @@ from hegemony_steps_tf.common import (
     BACKEND_CONFIG_FILE,
     BACKEND_OVERRIDE_FILE,
     DEFAULT_IMAGES,
+    DEFAULT_STOP_GRACE_SECONDS,
     KEEP_DIR,
     MAX_OUTPUT_VALUE_BYTES,
     PLAN_TEXT_MISSING_NOTE,
@@ -57,6 +58,7 @@ from hegemony_steps_tf.common import (
     lock_conflict_error,
     lock_timeout_errors,
     public_outputs,
+    tool_deadline,
     typed_variable,
     workdir_for,
 )
@@ -564,7 +566,8 @@ async def test_plan_step_reports_changes(monkeypatch):
     assert "hegemony.handler_id=tf.plan" in create
     assert not any("resolved-" in part for part in create)
     assert "TF_IN_AUTOMATION=1" in create
-    assert f"sh {RUN_SCRIPT}" in create[-1]
+    assert create[-1].endswith(f"exec sh {RUN_SCRIPT}")
+    assert create[create.index("--stop-timeout") + 1] == str(DEFAULT_STOP_GRACE_SECONDS)
     # The exit code and the readable plan are collected before the JSON plan.
     assert state["collected"][:3] == ["/hegemony/out", PLAN_OUTPUTS_DIR, PLAN_JSON_DIR]
 
@@ -780,6 +783,55 @@ async def test_state_access_lasts_as_long_as_the_container(
 
     assert services.opened == [("core", expected + STATE_ACCESS_MARGIN_SECONDS)]
     assert [job.config["timeout_seconds"] for job in jobs] == [expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "config", "grace"),
+    [
+        (TfPlanHandler, {"state": "ephemeral"}, DEFAULT_STOP_GRACE_SECONDS),
+        (TfApplyHandler, {"plan_step": "plan"}, DEFAULT_STOP_GRACE_SECONDS),
+        (TfApplyHandler, {"plan_step": "plan", "stop_grace_seconds": 600}, 600),
+        (TfPlanHandler, {"state": "ephemeral", "stop_grace_seconds": 0}, 0),
+    ],
+)
+async def test_tool_steps_stop_gracefully_as_pid_1(monkeypatch, handler, config, grace):
+    """Cancelled mid-apply, the tool gets SIGTERM and the grace period (not docker rm -f)
+    to save its state and unlock; exec makes the run script the PID 1 docker stop signals."""
+    jobs = []
+
+    async def fake_run_container_job(ctx, job):
+        jobs.append(job)
+        return HandlerResult(success=False, error="stopped before the container")
+
+    monkeypatch.setattr(f"{handler.__module__}.run_container_job", fake_run_container_job)
+    await handler().execute(_ctx(config, _Services(_plan_output(state="ephemeral"))))
+
+    assert [job.stop_grace_seconds for job in jobs] == [grace]
+    assert jobs[0].config["command"] == [f"exec sh {RUN_SCRIPT}"]
+
+
+@pytest.mark.parametrize(
+    ("timeout", "grace", "interrupt_after"),
+    [
+        (3600, 120, 3480),
+        (3600, 0, 3600),
+        # At most half the timeout goes to stopping.
+        (600, 3600, 300),
+        (1, 120, 1),
+    ],
+)
+def test_the_tool_is_interrupted_a_grace_period_before_the_step_timeout(
+    monkeypatch, timeout, grace, interrupt_after
+):
+    monkeypatch.setattr("hegemony_steps_tf.common.time.time", lambda: 1_000_000.0)
+    assert tool_deadline(timeout, grace) == 1_000_000 + interrupt_after
+
+
+@pytest.mark.parametrize("value", [-1, 3601])
+def test_stop_grace_is_bounded(value):
+    errors = TfPlanHandler().validate_config({"state": "ephemeral", "stop_grace_seconds": value})
+    assert any("stop_grace_seconds" in error for error in errors), errors
 
 
 @pytest.mark.parametrize(
