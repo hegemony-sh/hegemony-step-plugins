@@ -19,7 +19,8 @@ monorepo API rather than third-party ABI.
 
 Step I/O contract shared by every container-backed step:
 
-- :data:`CONTEXT_PATH` (read): run and step identity, flow inputs, tags.
+- :data:`CONTEXT_PATH` (read): run and step identity and the step's tags.
+  Never flow inputs: a step gets those through its own templated config.
 - :data:`OUTPUT_DIR` (write): collected after the container exits; for
   ``container.run`` an ``output.json`` object here becomes the step's
   ``output.data``.

@@ -937,7 +937,13 @@ OUTPUT_DATA_PATH = f"{OUTPUT_DIR}/output.json"
 
 
 def _context_file(ctx: HandlerContext) -> StagedFile:
-    """The step I/O contract's context file: who is running, with which inputs."""
+    """The step I/O contract's context file: which run and step this is.
+
+    No flow inputs: ``ctx.params`` holds every input of the run, including
+    values the step never references and plaintext resolved from secret
+    templates, and lacks the defaults ``{{ inputs.NAME }}`` applies. A step
+    that needs an input passes it through its own templated config (``env``).
+    """
     payload = {
         "run_id": ctx.run_id,
         "flow_id": ctx.flow_id,
@@ -947,7 +953,6 @@ def _context_file(ctx: HandlerContext) -> StagedFile:
         "step_run_id": ctx.step_run_id,
         "attempt": ctx.attempt,
         "tags": dict(ctx.tags),
-        "inputs": ctx.params,
     }
     return StagedFile(
         path=CONTEXT_PATH,

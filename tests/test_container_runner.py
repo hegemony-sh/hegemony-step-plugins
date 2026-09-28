@@ -173,7 +173,10 @@ async def test_container_run_stages_the_context_file(monkeypatch):
     context = json.loads(content)
     assert context["run_id"] == "run-12345678"
     assert context["step_id"] == "step-1"
-    assert context["inputs"] == {"service": "telemetry"}
+    # Flow inputs stay out: the run's params carry every input (secret
+    # templates resolved to plaintext) and none of the defaults.
+    assert "inputs" not in context
+    assert "telemetry" not in content.decode()
     assert context["tags"] == {"phase": "VERIFY"}
     # The output directory exists even when the step writes nothing into it.
     assert state["collect_sources"] == ["hegemony-run-1234-step-123-a1:/hegemony/out/."]

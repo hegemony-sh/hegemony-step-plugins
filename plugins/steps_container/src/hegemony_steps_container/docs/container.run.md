@@ -51,12 +51,15 @@ steps of one run. The workspace is deleted when the run ends, so it is no
 place for anything that must outlive the run, such as Terraform state.
 
 Every container also gets `/hegemony/context.json`: the run and step ids,
-flow and run names, the step's tags, and the flow inputs. To hand structured
-data to later steps, write a JSON object to `/hegemony/out/output.json`; it
-becomes the step's `output.data` (at most 64 KiB), so a later step reads
-`{{ steps.NODE_ID.output.data.KEY }}`. A file that is not a JSON object, or
-is too large, is reported in an `output_data_rejected_<step id>` artifact
-instead and never fails the step.
+flow and run names, the attempt number, and the step's tags. It holds no
+flow inputs: pass the ones the script needs as environment variables such as
+`REGION={{ inputs.region }}`, which also applies the input's default when
+the run left it unset (a sensitive value belongs in Secret files instead).
+To hand structured data to later steps, write a JSON object to
+`/hegemony/out/output.json`; it becomes the step's `output.data` (at most 64
+KiB), so a later step reads `{{ steps.NODE_ID.output.data.KEY }}`. A file
+that is not a JSON object, or is too large, is reported in an
+`output_data_rejected_<step id>` artifact instead and never fails the step.
 
 Put credentials in Secret files rather than environment variables: each
 `NAME=reference` entry is resolved and written to `/run/secrets/NAME` inside
