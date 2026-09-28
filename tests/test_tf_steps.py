@@ -801,6 +801,8 @@ def test_handler_metadata():
     for handler in (TfPlanHandler, TfApplyHandler):
         assert handler.container_backed is True
         assert handler.platform_api_access is True
+        # Refused in parallel loop bodies: state is keyed by node id.
+        assert handler.node_scoped_state is True
         assert handler.targeting.roles is False
     assert TfPlanHandler.handler_id == "tf.plan"
     assert TfApplyHandler.handler_id == "tf.apply"

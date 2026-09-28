@@ -83,6 +83,7 @@ def test_device_credentials_keep_secrets_out_of_repr():
 def test_container_backed_defaults_off():
     assert sdk.BaseHandler.container_backed is False
     assert sdk.BaseHandler.platform_api_access is False
+    assert sdk.BaseHandler.node_scoped_state is False
 
 
 def test_handler_services_declares_open_state_backend():

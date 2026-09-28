@@ -56,6 +56,11 @@ needs no shared affinity. The saved plan contains every variable value, secret o
 included; it stays inside the run's workspace, which is deleted when the run
 ends.
 
+The working directory and the apply's lookup of the plan are per step, not
+per execution, so `tf.plan` and `tf.apply` cannot be in the body of a loop
+with parallel iterations (the flow is refused when saved). A sequential loop
+works: each iteration plans and applies before the next one plans.
+
 ## Output
 
 The readable plan is kept as a `plan_<step id>.txt` artifact; values the

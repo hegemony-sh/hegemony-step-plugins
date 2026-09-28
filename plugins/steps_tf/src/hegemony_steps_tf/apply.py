@@ -185,6 +185,8 @@ class TfApplyHandler(BaseHandler):
     targeting = HandlerTargeting(roles=False, ips=False)
     container_backed = True
     platform_api_access = True
+    # The plan lives in /shared/tf/<node id>; apply finds it by node id.
+    node_scoped_state = True
     # Secret references reach the handler as written (see resolve_secret_values).
     raw_config_keys = frozenset({"secret_env", "state_encryption_key"})
     default_timeout_seconds = 3600
