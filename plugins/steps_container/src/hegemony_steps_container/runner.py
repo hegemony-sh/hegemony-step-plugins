@@ -431,7 +431,9 @@ def deadline_shell_lines(deadline: int) -> list[str]:
     command runs its traps only after the command ends, so ``bounded`` runs
     the command in the background and waits for it, and SIGTERM or SIGINT to
     the script (``docker stop`` signals PID 1) is sent on to the command as
-    SIGTERM. After a stop request, ``bounded`` starts nothing new and returns
+    SIGTERM, once: a later request is not passed on, since OpenTofu and
+    Terraform exit at once, without saving, on a second interrupt. After a
+    stop request, ``bounded`` starts nothing new and returns
     :data:`STOPPED_EXIT_STATUS`. Works under ``set -eu``.
     """
     kill = f"-k {KILL_AFTER_SECONDS}"
@@ -439,7 +441,11 @@ def deadline_shell_lines(deadline: int) -> list[str]:
         f"hegemony_deadline={int(deadline)}",
         "hegemony_child=",
         "hegemony_stopping=",
+        # Only the first request is passed on: OpenTofu and Terraform take a
+        # second interrupt as "exit now", and two stoppers (the step's worker
+        # and the platform's container sweep) can each send one.
         "hegemony_stop() {",
+        '  if [ -n "$hegemony_stopping" ]; then return 0; fi',
         "  hegemony_stopping=yes",
         '  if [ -n "$hegemony_child" ]; then kill -TERM "$hegemony_child" 2>/dev/null || :; fi',
         "}",

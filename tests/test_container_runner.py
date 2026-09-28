@@ -563,3 +563,32 @@ def test_bounded_passes_a_stop_request_on_to_the_command(tmp_path):
     assert "started after the stop request" not in out
     assert "second: 143" in out
     assert time.monotonic() - started < 10
+
+
+def test_bounded_passes_on_only_the_first_stop_request(tmp_path):
+    """A second interrupt makes OpenTofu and Terraform exit without saving.
+
+    The step's worker and the platform's container sweep may both stop the
+    same container: the tool must see one SIGTERM, whatever the script gets.
+    """
+    ready = tmp_path / "ready"
+    terms = tmp_path / "terms"
+    tool = (
+        f'sh -c \'trap "echo TERM >> {terms}" TERM; : > {ready}; '
+        "i=0; while [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; exit 9'"
+    )
+    script = "\n".join(
+        ["set -eu", *deadline_shell_lines(int(time.time()) + 600), f"bounded {tool}"]
+    )
+    proc = subprocess.Popen(["sh", "-c", script])
+    started = time.monotonic()
+    while not ready.exists():
+        assert time.monotonic() - started < 10, "the tool never started"
+        time.sleep(0.05)
+    proc.send_signal(signal.SIGTERM)
+    time.sleep(0.3)
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=10)
+
+    assert proc.returncode == 9
+    assert terms.read_text().splitlines() == ["TERM"]
