@@ -2595,16 +2595,21 @@ class RunContainerHandler(BaseHandler):
         finally:
             # A cancelled step's container may be mid-change (a tf apply): with a
             # stop grace it gets SIGTERM and that long to finish in-flight work,
-            # save its state and release its locks before it is removed. Shielded:
-            # a second cancellation (the worker shutting down) leaves the stop
-            # running and goes straight on to the removal.
+            # save its state and release its locks before it is removed. A second
+            # cancellation (the worker shutting down) does not cut the wait short:
+            # removing the container then would kill the tool mid-save. The wait
+            # is bounded by docker stop's own timeout (the grace plus 30 s).
             if cancelled_while_running and stop_grace:
-                try:
-                    await asyncio.shield(
-                        self._stop_container(
-                            docker_bin, container_name, stop_grace, docker_host=docker_host
-                        )
+                stop = asyncio.ensure_future(
+                    self._stop_container(
+                        docker_bin, container_name, stop_grace, docker_host=docker_host
                     )
+                )
+                try:
+                    while not stop.done():
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await asyncio.shield(stop)
+                    stop.result()
                 except (Exception, asyncio.CancelledError) as e:
                     logger.warning(f"Cleanup: graceful stop of {container_name} failed: {e!r}")
             # Best-effort cleanup
