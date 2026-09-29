@@ -108,8 +108,9 @@ SIGTERM Stop grace period (120 seconds by default, at most half the
 timeout) before the timeout, and when the step is cancelled, so it can
 release the state lock and exit cleanly; it is killed only if it still runs
 after that. The SIGTERM at the timeout comes from inside the container (the
-image's `timeout` command, with SIGKILL five minutes later), so the tool
-stops even when the worker that should stop the container is gone. Without a Timeout on the
+image's `timeout` command, with SIGKILL once the grace period has passed,
+and not before five minutes), so the tool stops even when the worker that
+should stop the container is gone. Without a Timeout on the
 step, the step's timeout from its policy or the flow applies; managed state
 access lasts as long as that timeout, plus a 10-minute margin. The platform
 grants state access for at most 24 hours, so with managed state the step's

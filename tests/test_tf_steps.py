@@ -59,6 +59,7 @@ from hegemony_steps_tf.common import (
     lock_timeout_errors,
     public_outputs,
     tool_deadline,
+    tool_kill_after,
     typed_variable,
     workdir_for,
 )
@@ -805,10 +806,12 @@ async def test_tool_steps_stop_gracefully_as_pid_1(monkeypatch, handler, config,
         return HandlerResult(success=False, error="stopped before the container")
 
     monkeypatch.setattr(f"{handler.__module__}.run_container_job", fake_run_container_job)
-    await handler().execute(_ctx(config, _Services(_plan_output(state="ephemeral"))))
+    await handler().execute(_ctx(config, _Services(_plan_output(state="ephemeral")), timeout=3600))
 
     assert [job.stop_grace_seconds for job in jobs] == [grace]
     assert jobs[0].config["command"] == [f"exec sh {RUN_SCRIPT}"]
+    script = next(str(file.content) for file in jobs[0].files if file.path == RUN_SCRIPT)
+    assert f"-k {max(300, grace)} " in script
 
 
 @pytest.mark.parametrize(
@@ -826,6 +829,22 @@ def test_the_tool_is_interrupted_a_grace_period_before_the_step_timeout(
 ):
     monkeypatch.setattr("hegemony_steps_tf.common.time.time", lambda: 1_000_000.0)
     assert tool_deadline(timeout, grace) == 1_000_000 + interrupt_after
+
+
+@pytest.mark.parametrize(
+    ("timeout", "grace", "kill_after"),
+    [
+        (3600, 120, 300),
+        (3600, 0, 300),
+        (3600, 600, 600),
+        # The grace is capped at half the timeout, and so is the wait for the kill.
+        (1200, 3600, 600),
+        (400, 3600, 300),
+    ],
+)
+def test_the_tool_is_killed_only_once_its_grace_period_has_passed(timeout, grace, kill_after):
+    """SIGKILL must not cut a long stop grace short: the kill waits for all of it."""
+    assert tool_kill_after(timeout, grace) == kill_after
 
 
 @pytest.mark.parametrize("value", [-1, 3601])

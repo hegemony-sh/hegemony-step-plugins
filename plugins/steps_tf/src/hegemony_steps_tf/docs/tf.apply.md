@@ -65,7 +65,8 @@ Stop grace period (120 seconds by default). The same happens at the
 timeout: the tool receives SIGTERM that long before the step's timeout (at
 most half of it), so it can stop cleanly within the step's time. That
 SIGTERM comes from inside the container (the image's `timeout` command,
-with SIGKILL five minutes later), so an apply stops even when the worker
+with SIGKILL once the grace period has passed, and not before five
+minutes), so an apply stops even when the worker
 that should stop the container is gone, before the platform can free its
 lock. A change the kill cuts off can be missing from the state; give
 providers whose changes take long (a database instance) a longer grace

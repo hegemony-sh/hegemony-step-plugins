@@ -30,6 +30,7 @@ from hegemony_step_sdk import (
     StepKind,
 )
 from hegemony_steps_container.runner import (
+    KILL_AFTER_SECONDS,
     OUTPUT_DIR,
     ContainerJob,
     ContainerJobResult,
@@ -74,6 +75,7 @@ from .common import (
     state_name_errors,
     tool_deadline,
     tool_env,
+    tool_kill_after,
     typed_variable,
     variable_map_errors,
     workdir_for,
@@ -246,10 +248,12 @@ def build_plan_script(
     has_vars: bool,
     has_secret_vars: bool,
     deadline: int | None = None,
+    kill_after: int = KILL_AFTER_SECONDS,
 ) -> str:
     """Copy the configuration into the working directory, init, validate, plan.
 
-    With a ``deadline`` (a Unix time), every tool call stops by then.
+    With a ``deadline`` (a Unix time), every tool call gets SIGTERM then, and
+    SIGKILL ``kill_after`` seconds later.
     """
     tf = BINARIES[config.engine]
     run = "" if deadline is None else "bounded "
@@ -284,7 +288,7 @@ def build_plan_script(
 
     quoted_workdir = shlex.quote(workdir)
     lines = [
-        *script_header(deadline),
+        *script_header(deadline, kill_after),
         f"rm -rf {quoted_workdir}",
         f"mkdir -p {quoted_workdir}",
         f"cp -R {shlex.quote(source)}/. {quoted_workdir}/",
@@ -390,7 +394,12 @@ class TfPlanHandler(BaseHandler):
         try:
             async with managed_state_access(ctx, state_name, timeout) as access:
                 files, env_files = await self._files(
-                    ctx, config, workdir, access, tool_deadline(timeout, config.stop_grace_seconds)
+                    ctx,
+                    config,
+                    workdir,
+                    access,
+                    tool_deadline(timeout, config.stop_grace_seconds),
+                    tool_kill_after(timeout, config.stop_grace_seconds),
                 )
                 job = ContainerJob(
                     config=container_config_from(
@@ -422,6 +431,7 @@ class TfPlanHandler(BaseHandler):
         workdir: str,
         access: StateBackendAccess | None,
         deadline: int,
+        kill_after: int,
     ) -> tuple[list[StagedFile], list[StagedFile]]:
         files: list[StagedFile] = []
         if config.state == "managed":
@@ -459,6 +469,7 @@ class TfPlanHandler(BaseHandler):
                     has_vars=bool(config.vars),
                     has_secret_vars=bool(secret_vars),
                     deadline=deadline,
+                    kill_after=kill_after,
                 ),
                 mode=0o755,
             )

@@ -96,7 +96,8 @@ through `hegemony_steps_container.runner` instead of copying
   (it writes state, holds a lock) sets `ContainerJob.stop_grace_seconds`: a
   cancelled step's container then gets SIGTERM and that long before it is
   removed, instead of `docker rm -f`. Give the in-script deadline the same
-  margin before the step's timeout (`tool_deadline` in the tf wheel).
+  margin before the step's timeout (`tool_deadline` in the tf wheel), and
+  let its kill wait out that whole margin (`tool_kill_after`).
 - **Step I/O.** `/hegemony` is reserved in every step container. Write
   structured results under `/hegemony/out` (collected after exit, at most
   8 MiB per job) and read them from `collected`; `collect_errors` tells a
