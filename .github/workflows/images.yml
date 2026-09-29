@@ -11,7 +11,7 @@
 # same tag. A pull request that changes the image builds, smoke-tests and scans
 # it the same way, without pushing. workflow_dispatch publishes an existing
 # release tag again, after a failed run or to pick up base-image fixes under
-# the same tags.
+# the same tags (X.Y only while that tag is the newest X.Y release).
 #
 # The image is built once and pushed by digest only; Trivy scans that digest
 # and the smoke test runs it before any tag points at it, so what the tags
@@ -37,8 +37,9 @@ on:
 
 permissions: {}
 
+# One run per release tag at a time, whether a tag push or a re-publish of it.
 concurrency:
-  group: images-${{ github.event.pull_request.number || inputs.tag || github.ref }}
+  group: images-${{ github.event.pull_request.number || inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -205,17 +206,44 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: false
 
+      # X.Y names the newest X.Y.Z release: re-publishing an older one (a
+      # workflow_dispatch of v0.6.0 after v0.6.1) updates only its own X.Y.Z.
+      # Checked just before writing the tags. A newer release's tag exists
+      # before its own run starts, and that run needs minutes to get here, so
+      # an older run that passed this check has written its tags long before.
       - name: Promote the scanned digest to the release tags
         if: steps.release.outputs.publish == 'true'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           VERSION: ${{ steps.release.outputs.version }}
           MINOR: ${{ steps.release.outputs.minor }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          docker buildx imagetools create \
-            --tag "${IMAGE}:${VERSION}" --tag "${IMAGE}:${MINOR}" "${IMAGE}@${DIGEST}"
-          for tag in "${IMAGE}:${VERSION}" "${IMAGE}:${MINOR}"; do
+          latest="$(
+            gh api --paginate "repos/${REPOSITORY}/git/matching-refs/tags/v${MINOR}." --jq '.[].ref' \
+              | python3 -c '
+          import re, sys
+          minor = sys.argv[1]
+          release = re.compile(r"refs/tags/v" + re.escape(minor) + r"\.(\d+)$")
+          patches = [int(m.group(1)) for line in sys.stdin if (m := release.match(line.strip()))]
+          print(f"{minor}.{max(patches)}" if patches else "")
+          ' "$MINOR"
+          )"
+          tags=("${IMAGE}:${VERSION}")
+          if [ "$latest" = "$VERSION" ]; then
+            tags+=("${IMAGE}:${MINOR}")
+          elif [ -z "$latest" ]; then
+            echo "::error::found no release tag v${MINOR}.N"
+            exit 1
+          else
+            echo "::notice::${VERSION} is not the newest ${MINOR} release (${latest}): ${IMAGE}:${MINOR} stays"
+          fi
+          args=()
+          for tag in "${tags[@]}"; do args+=(--tag "$tag"); done
+          docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
+          for tag in "${tags[@]}"; do
             resolved="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
             if [ "$resolved" != "$DIGEST" ]; then
               echo "::error::${tag} resolves to ${resolved}, expected ${DIGEST}"
