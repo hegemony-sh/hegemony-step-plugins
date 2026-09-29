@@ -565,6 +565,48 @@ def test_bounded_passes_a_stop_request_on_to_the_command(tmp_path):
     assert time.monotonic() - started < 10
 
 
+def test_bounded_starts_nothing_when_stopped_while_it_prepares(tmp_path):
+    """A stop request that comes while ``bounded`` works out the time left
+    (the trap runs only after ``date`` returns) must still keep the command
+    from starting."""
+    started = tmp_path / "started"
+    script = "\n".join(
+        [
+            "set -eu",
+            # Stand-in for a SIGTERM that lands while bounded runs date.
+            'date() { kill -TERM "$$"; command date "$@"; }',
+            *deadline_shell_lines(int(time.time()) + 600),
+            "set +e",
+            f"bounded touch {started}",
+            'echo "status: $?"',
+        ]
+    )
+    done = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
+
+    assert "status: 143" in done.stdout
+    assert not started.exists()
+
+
+def test_bounded_passes_on_a_stop_request_that_came_as_the_command_started(tmp_path):
+    """The command asks for the stop itself, right as it starts, before or
+    after ``bounded`` has noted its process id: it must get one SIGTERM."""
+    for tool in ("sh", "date", "true", "sleep"):
+        found = shutil.which(tool)
+        assert found is not None
+        (tmp_path / tool).symlink_to(found)
+    terms = tmp_path / "terms"
+    # Without a timeout command, the command is the script's own child.
+    tool = (
+        f'sh -c \'trap "echo TERM >> {terms}; exit 7" TERM; kill -TERM "$PPID"; '
+        "i=0; while [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; exit 0'"
+    )
+    code, took = _run_bounded(f"bounded {tool}", int(time.time()) + 600, str(tmp_path))
+
+    assert code == 7
+    assert terms.read_text().splitlines() == ["TERM"]
+    assert took < 8
+
+
 def test_bounded_passes_on_only_the_first_stop_request(tmp_path):
     """A second interrupt makes OpenTofu and Terraform exit without saving.
 

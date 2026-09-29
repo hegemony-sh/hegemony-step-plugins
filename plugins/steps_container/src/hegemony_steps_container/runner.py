@@ -61,7 +61,8 @@ MAX_COLLECTED_BYTES = 8 * 1024 * 1024
 COLLECT_GRACE_SECONDS = 10
 
 #: How long a tool run through ``bounded`` (:func:`deadline_shell_lines`) gets
-#: to stop after SIGTERM at the step's deadline before SIGKILL. OpenTofu and
+#: by default to stop after SIGTERM at the step's deadline before SIGKILL (the
+#: tf steps give a longer stop grace period in full). OpenTofu and
 #: Terraform stop starting new changes on SIGTERM and save the state of those
 #: done; this leaves them time to, and still ends the container well before
 #: the platform frees a managed-state lock held by a step whose worker died
@@ -414,18 +415,18 @@ async def run_container_job(
     return await runner.run_job(ctx, job)
 
 
-def deadline_shell_lines(deadline: int) -> list[str]:
+def deadline_shell_lines(deadline: int, kill_after: int = KILL_AFTER_SECONDS) -> list[str]:
     """POSIX shell lines defining ``bounded CMD [ARG...]``: run CMD until ``deadline``.
 
     The worker stops a step's container at the step's timeout, but a worker
     that dies stops nothing, and the tool would run on in the sandbox past the
     access it was given (a managed-state token and lock). ``bounded`` sends the
-    command SIGTERM at ``deadline`` (a Unix time) and SIGKILL
-    :data:`KILL_AFTER_SECONDS` later, through ``timeout`` from BusyBox or
-    coreutils. With a ``timeout`` that has no ``-k`` it sends only SIGTERM, and
-    in an image without ``timeout`` the command runs unbounded, as before.
-    The command's exit status is returned (BusyBox gives 143 when the
-    deadline stopped it, coreutils 124).
+    command SIGTERM at ``deadline`` (a Unix time) and SIGKILL ``kill_after``
+    seconds later (:data:`KILL_AFTER_SECONDS` by default), through ``timeout``
+    from BusyBox or coreutils. With a ``timeout`` that has no ``-k`` it sends
+    only SIGTERM, and in an image without ``timeout`` the command runs
+    unbounded, as before. The command's exit status is returned (BusyBox
+    gives 143 when the deadline stopped it, coreutils 124).
 
     The lines also pass a stop request on: a shell waiting for a foreground
     command runs its traps only after the command ends, so ``bounded`` runs
@@ -434,34 +435,52 @@ def deadline_shell_lines(deadline: int) -> list[str]:
     SIGTERM, once: a later request is not passed on, since OpenTofu and
     Terraform exit at once, without saving, on a second interrupt. After a
     stop request, ``bounded`` starts nothing new and returns
-    :data:`STOPPED_EXIT_STATUS`. Works under ``set -eu``.
+    :data:`STOPPED_EXIT_STATUS`, also when the request came while it was
+    about to start the command. Works under ``set -eu``.
     """
-    kill = f"-k {KILL_AFTER_SECONDS}"
+    kill = f"-k {int(kill_after)}"
+    stopped = f'if [ -n "$hegemony_stopping" ]; then return {STOPPED_EXIT_STATUS}; fi'
     return [
         f"hegemony_deadline={int(deadline)}",
         "hegemony_child=",
         "hegemony_stopping=",
+        "hegemony_forwarded=",
         # Only the first request is passed on: OpenTofu and Terraform take a
         # second interrupt as "exit now", and two stoppers (the step's worker
         # and the platform's container sweep) can each send one.
+        "hegemony_forward() {",
+        '  if [ -n "$hegemony_child" ] && [ -z "$hegemony_forwarded" ]; then',
+        "    hegemony_forwarded=yes",
+        '    kill -TERM "$hegemony_child" 2>/dev/null || :',
+        "  fi",
+        "}",
         "hegemony_stop() {",
         '  if [ -n "$hegemony_stopping" ]; then return 0; fi',
         "  hegemony_stopping=yes",
-        '  if [ -n "$hegemony_child" ]; then kill -TERM "$hegemony_child" 2>/dev/null || :; fi',
+        "  hegemony_forward",
         "}",
         "trap hegemony_stop TERM INT",
         "bounded() {",
-        f'  if [ -n "$hegemony_stopping" ]; then return {STOPPED_EXIT_STATUS}; fi',
+        f"  {stopped}",
         "  left=$((hegemony_deadline - $(date +%s)))",
         '  if [ "$left" -lt 1 ]; then left=1; fi',
         "  if ! command -v timeout >/dev/null 2>&1; then",
-        '    "$@" &',
+        "    hegemony_how=none",
         f"  elif timeout -s TERM {kill} 5 true >/dev/null 2>&1; then",
-        f'    timeout -s TERM {kill} "$left" "$@" &',
+        "    hegemony_how=kill",
         "  else",
-        '    timeout -s TERM "$left" "$@" &',
+        "    hegemony_how=term",
         "  fi",
+        # A request that came while the lines above ran found nothing to stop.
+        f"  {stopped}",
+        '  case "$hegemony_how" in',
+        '    none) "$@" & ;;',
+        f'    kill) timeout -s TERM {kill} "$left" "$@" & ;;',
+        '    *) timeout -s TERM "$left" "$@" & ;;',
+        "  esac",
         "  hegemony_child=$!",
+        # Nor did one that came between the launch and the line above.
+        '  if [ -n "$hegemony_stopping" ]; then hegemony_forward; fi',
         # A trapped signal ends wait early (status > 128) while the command
         # still runs: wait again until it has exited and been reaped.
         "  hegemony_status=0",
