@@ -87,11 +87,11 @@ def test_container_backed_defaults_off():
 
 
 def test_handler_services_declares_open_state_backend():
-    assert list(inspect.signature(sdk.HandlerServices.open_state_backend).parameters) == [
-        "self",
-        "name",
-        "ttl_seconds",
-    ]
+    parameters = inspect.signature(sdk.HandlerServices.open_state_backend).parameters
+    assert list(parameters) == ["self", "name", "ttl_seconds", "hold_until_apply"]
+    # Added later: optional, so a host implementing only the first three still fits.
+    assert parameters["hold_until_apply"].default is False
+    assert parameters["hold_until_apply"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_state_backend_access_keeps_the_token_out_of_repr():

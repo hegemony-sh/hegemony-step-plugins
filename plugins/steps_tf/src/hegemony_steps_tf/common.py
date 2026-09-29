@@ -280,11 +280,17 @@ def container_timeout(ctx: HandlerContext, config: ContainerExecutionConfig) -> 
 
 @asynccontextmanager
 async def managed_state_access(
-    ctx: HandlerContext, name: str | None, timeout_seconds: int
+    ctx: HandlerContext,
+    name: str | None,
+    timeout_seconds: int,
+    *,
+    hold_until_apply: bool = False,
 ) -> AsyncIterator[StateBackendAccess | None]:
     """Access to the platform-managed state ``name`` for one step (None: not managed).
 
     ``timeout_seconds`` is the container's own (see :func:`container_timeout`).
+    ``hold_until_apply``: the step's lock also holds the state for the run
+    until the run applies or ends (tf.plan's "Hold the state until apply").
     """
     if not name:
         yield None
@@ -300,8 +306,24 @@ async def managed_state_access(
         )
         logger.warning(message, extra={"run_id": ctx.run_id, "step_run_id": ctx.step_run_id})
         await ctx.emit_progress(message)
-    async with ctx.require_services().open_state_backend(name, ttl_seconds=ttl) as access:
+    services = ctx.require_services()
+    if hold_until_apply:
+        try:
+            manager = services.open_state_backend(name, ttl_seconds=ttl, hold_until_apply=True)
+        except TypeError as exc:
+            raise RuntimeError(HOLD_UNSUPPORTED_MESSAGE) from exc
+    else:
+        # Without the keyword, so a platform that predates the hold still works.
+        manager = services.open_state_backend(name, ttl_seconds=ttl)
+    async with manager as access:
         yield access
+
+
+#: The step's error on a platform too old to hold a state until apply.
+HOLD_UNSUPPORTED_MESSAGE = (
+    "This platform cannot hold a managed state until apply; upgrade Hegemony, or turn off "
+    "'Hold the state until apply'"
+)
 
 
 def managed_timeout_errors(value: object) -> list[str]:

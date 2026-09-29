@@ -44,6 +44,7 @@ from hegemony_steps_tf.common import (
     BACKEND_OVERRIDE_FILE,
     DEFAULT_IMAGES,
     DEFAULT_STOP_GRACE_SECONDS,
+    HOLD_UNSUPPORTED_MESSAGE,
     KEEP_DIR,
     MAX_OUTPUT_VALUE_BYTES,
     PLAN_TEXT_MISSING_NOTE,
@@ -414,14 +415,19 @@ class _Services:
         return "resolved-" + ref.split("/")[-1].split("'")[0] + "-long-enough"
 
     opened: list[tuple[str, int]] = []
+    held: list[str] = []
     closed: list[str] = []
     state_error: str = ""
 
     @asynccontextmanager
-    async def open_state_backend(self, name: str, *, ttl_seconds: int):
+    async def open_state_backend(
+        self, name: str, *, ttl_seconds: int, hold_until_apply: bool = False
+    ):
         if self.state_error:
             raise RuntimeError(self.state_error)
         self.opened = [*self.opened, (name, ttl_seconds)]
+        if hold_until_apply:
+            self.held = [*self.held, name]
         self.events.append(("open", name))
         try:
             yield StateBackendAccess(
@@ -897,6 +903,49 @@ async def test_state_access_is_clamped_for_a_long_policy_timeout(monkeypatch, ha
     assert services.opened == [("core", 86400)]
     assert [job.config["timeout_seconds"] for job in jobs] == [90000]
     assert any("limited to 86400 s" in message for message in progress)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "held"),
+    [
+        ({"state_name": "core"}, False),
+        ({"state_name": "core", "hold_until_apply": True}, True),
+        # Hidden (and ignored) without managed state: no hold, and no error either.
+        ({"state": "ephemeral", "hold_until_apply": True}, False),
+    ],
+)
+async def test_plan_step_holds_the_state_until_apply_only_when_asked(monkeypatch, config, held):
+    services = _Services()
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+
+    result = await TfPlanHandler().execute(_ctx(config, services))
+
+    assert result.success is True, result.error
+    assert services.held == (["core"] if held else [])
+    assert result.output["state_held"] is held
+
+
+@pytest.mark.asyncio
+async def test_a_hold_on_a_platform_that_predates_it_fails_with_the_reason(monkeypatch):
+    state = _install_docker(monkeypatch, out={})
+
+    class OldPlatform(_Services):
+        @asynccontextmanager
+        async def open_state_backend(self, name: str, *, ttl_seconds: int):  # type: ignore[override]
+            yield None
+
+    old = OldPlatform()
+    result = await TfPlanHandler().execute(
+        _ctx({"state_name": "core", "hold_until_apply": True}, old)
+    )
+    assert result.success is False
+    assert result.error == HOLD_UNSUPPORTED_MESSAGE
+    assert state["calls"] == []
+    # Without the hold, the same platform works as before.
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    old_result = await TfPlanHandler().execute(_ctx({"state_name": "core"}, _Services()))
+    assert old_result.success is True, old_result.error
 
 
 @pytest.mark.asyncio

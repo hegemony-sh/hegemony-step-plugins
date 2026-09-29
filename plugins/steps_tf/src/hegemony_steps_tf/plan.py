@@ -144,6 +144,17 @@ class TfPlanConfig(TfContainerConfig):
             "x_show_when": {"field": "state", "value": "managed"},
         },
     )
+    hold_until_apply: bool = Field(
+        default=False,
+        title="Hold the state until apply",
+        description=(
+            "Keep the managed state for this run from this plan until the run applies or "
+            "ends: meanwhile other runs and people cannot lock or change it, so the plan "
+            "stays valid while the run waits (for an approval, say). Every other flow using "
+            "the state waits that long."
+        ),
+        json_schema_extra={"x_show_when": {"field": "state", "value": "managed"}},
+    )
     backend_config: dict[str, str] = Field(
         default_factory=dict,
         title="Backend settings",
@@ -392,7 +403,9 @@ class TfPlanHandler(BaseHandler):
         timeout = container_timeout(ctx, config)
 
         try:
-            async with managed_state_access(ctx, state_name, timeout) as access:
+            async with managed_state_access(
+                ctx, state_name, timeout, hold_until_apply=config.hold_until_apply
+            ) as access:
                 files, env_files = await self._files(
                     ctx,
                     config,
@@ -590,6 +603,8 @@ class TfPlanHandler(BaseHandler):
             "image": image,
             "state": config.state,
             "state_name": config.state_name.strip() if config.state == "managed" else "",
+            # The run holds the state until it applies or ends (managed state only).
+            "state_held": config.state == "managed" and config.hold_until_apply,
             "working_dir": workdir,
             "apply_ready": apply_ready,
             "outputs": outputs,

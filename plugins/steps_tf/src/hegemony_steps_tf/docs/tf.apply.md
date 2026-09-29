@@ -44,7 +44,9 @@ without one (its saved plan is gone, so give it shared affinity and plan
 again) or this step has none (shared affinity missing, or the worker has
 shared workspaces disabled). It also fails when the apply itself fails.
 The tool refuses
-a saved plan made stale by a state change since planning: plan again. The
+a saved plan made stale by a state change since planning: plan again (a
+`tf.plan` with Hold the state until apply keeps others from changing a
+managed state meanwhile; this step's apply ends that hold). The
 saved plan lives in the run's shared workspace; when that workspace is gone
 (for example cleaned up after a worker restart while the run waited a long
 time for approval), the step says so: plan again. The state lock is taken
