@@ -24,7 +24,7 @@
 
 FROM python:3.12-slim-bookworm
 
-ARG ANSIBLE_CORE_VERSION=2.19.2
+ARG ANSIBLE_CORE_VERSION=2.19.13
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openssh-client sshpass git ca-certificates \

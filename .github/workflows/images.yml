@@ -8,9 +8,10 @@
 # A release tag vX.Y.Z (pushed by the Release workflow) publishes X.Y.Z and
 # X.Y. The step's DEFAULT_IMAGE names X.Y, which scripts/set_version.py moves
 # with every release, so the wheels of a release pull the image built from the
-# same tag. A pull request that changes the image only builds and smoke-tests
-# it. workflow_dispatch publishes an existing release tag again, after a failed
-# run or to pick up base-image fixes under the same tags.
+# same tag. A pull request that changes the image builds, smoke-tests and scans
+# it the same way, without pushing. workflow_dispatch publishes an existing
+# release tag again, after a failed run or to pick up base-image fixes under
+# the same tags.
 #
 # The image is built once and pushed by digest only; Trivy scans that digest
 # and the smoke test runs it before any tag points at it, so what the tags
@@ -182,14 +183,15 @@ jobs:
           '
 
       # Gates the promotion: a CRITICAL/HIGH finding with a fixed version
-      # upstream fails the job before any tag names the image. Findings with
-      # no fix are reported by the next step instead.
+      # upstream fails the job before any tag names the image. It fails a pull
+      # request the same way, so an image the release would refuse is caught
+      # before it merges. Findings with no fix are reported by the next step.
       - name: Scan with Trivy
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
           image-ref: ${{ steps.ref.outputs.image }}
           format: table
-          exit-code: ${{ steps.release.outputs.publish == 'true' && '1' || '0' }}
+          exit-code: 1
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
