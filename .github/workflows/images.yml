@@ -61,12 +61,15 @@ jobs:
         include:
           - image: ansible-runner
             description: Default execution image of the Hegemony ansible.playbook step
+            # What the image contains (no Hegemony code); its notices list each component.
+            licenses: GPL-3.0-or-later AND GPL-2.0-only AND GPL-2.0-or-later AND LGPL-2.1-or-later AND Python-2.0 AND Apache-2.0 AND MIT AND BSD-3-Clause AND MPL-2.0 AND SSH-OpenSSH
             # The line that makes it the step's default, {image} standing for
             # IMAGE:X.Y.
             default_file: plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py
             default_line: 'DEFAULT_IMAGE = "{image}"'
           - image: opentofu-runner
             description: Default OpenTofu image of the Hegemony tf.plan and tf.apply steps
+            licenses: MPL-2.0 AND BSD-3-Clause AND Apache-2.0 AND MIT AND GPL-2.0-only AND GPL-2.0-or-later AND SSH-OpenSSH
             default_file: plugins/steps_tf/src/hegemony_steps_tf/common.py
             default_line: '    "opentofu": "{image}",'
     env:
@@ -132,6 +135,7 @@ jobs:
           REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
           TITLE: ${{ matrix.image }}
           DESCRIPTION: ${{ matrix.description }}
+          LICENSES: ${{ matrix.licenses }}
         run: |
           set -euo pipefail
           {
@@ -141,7 +145,7 @@ jobs:
             echo "org.opencontainers.image.source=${REPOSITORY}"
             echo "org.opencontainers.image.revision=$(git rev-parse HEAD)"
             echo "org.opencontainers.image.version=${VERSION:-dev}"
-            echo "org.opencontainers.image.licenses=AGPL-3.0-or-later"
+            echo "org.opencontainers.image.licenses=${LICENSES}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 

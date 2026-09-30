@@ -21,6 +21,9 @@ grep -q "^OpenTofu v" /usr/share/doc/hegemony/opentofu-version.txt
 test -s /usr/share/doc/hegemony/opentofu/modules.txt
 test -f /usr/share/doc/hegemony/opentofu/source.diff
 grep -q "google.golang.org/grpc" /usr/share/doc/hegemony/opentofu/modules.txt
+test -s /usr/share/doc/hegemony/opentofu/licenses/go/LICENSE
+test -s /usr/share/doc/hegemony/opentofu/licenses/github.com/opentofu/opentofu/LICENSE
+ls /usr/share/doc/hegemony/opentofu/licenses/google.golang.org/grpc/LICENSE* > /dev/null
 grep -q "^git-" /usr/share/doc/hegemony/alpine-packages.txt
 grep -q "Written offer" /usr/share/doc/hegemony/THIRD-PARTY-NOTICES.md
 

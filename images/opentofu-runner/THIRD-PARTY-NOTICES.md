@@ -29,7 +29,11 @@ the image is built:
   module compiled into `tofu`, with its version and checksum
   (`go version -m`);
 - `/usr/share/doc/hegemony/opentofu/source.diff`: the change made to
-  OpenTofu's source, against the upstream release.
+  OpenTofu's source, against the upstream release;
+- `/usr/share/doc/hegemony/opentofu/licenses/`: the licence files of the Go
+  standard library (`go/LICENSE`) and of every Go module compiled into `tofu`,
+  OpenTofu's own included, as each module ships them (`MISSING.txt` names any
+  module without one at its root).
 
 ## How the steps use these components
 
@@ -51,7 +55,8 @@ upstream release commit (the Dockerfile's `OPENTOFU_VERSION` and
 `OPENTOFU_COMMIT`; the build refuses any other commit), with the release's own
 build flags. It is a statically linked Go program: the Go standard library
 (BSD-3-Clause) and the Go modules OpenTofu depends on (among them MPL-2.0,
-Apache-2.0, BSD and MIT modules) are compiled into it.
+Apache-2.0, BSD and MIT modules) are compiled into it. Their copyright notices
+and licence texts are in `/usr/share/doc/hegemony/opentofu/licenses/`.
 
 **The one change.** The OpenTofu release pins some Go modules at versions with
 known HIGH vulnerabilities, and no OpenTofu release fixes them yet. The build

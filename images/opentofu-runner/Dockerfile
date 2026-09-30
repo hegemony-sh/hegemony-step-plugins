@@ -20,8 +20,10 @@
 # file's comment asks for every SDK upgrade. OpenTofu's tests for the code those
 # modules serve (tracing, the provider plugin protocol, provider and module
 # installation, registries) run on the result before it is used. The image
-# carries the change as a diff (/usr/share/doc/hegemony/opentofu/source.diff)
-# and every module compiled in (modules.txt next to it). When an OpenTofu
+# carries the change as a diff (/usr/share/doc/hegemony/opentofu/source.diff),
+# every module compiled in (modules.txt next to it), and the licence files of
+# the Go standard library and of each of those modules (licenses/), which their
+# BSD, MIT and Apache licences ask a binary distribution to include. When an OpenTofu
 # release carries fixed versions, move OPENTOFU_VERSION and OPENTOFU_COMMIT to
 # it and drop the raises it makes unnecessary.
 #
@@ -73,9 +75,23 @@ RUN if [ -n "${GO_MODULE_RAISES}" ]; then \
     && go build -mod=readonly -trimpath \
         -ldflags "-s -w -X 'github.com/opentofu/opentofu/version.dev=no'" \
         -o /out/tofu ./cmd/tofu \
-    && mkdir -p /out/doc \
+    && mkdir -p /out/doc/licenses/go \
     && git diff > /out/doc/source.diff \
-    && go version -m /out/tofu > /out/doc/modules.txt
+    && go version -m /out/tofu > /out/doc/modules.txt \
+    && cp /usr/local/go/LICENSE /out/doc/licenses/go/LICENSE \
+    && go list -deps -f '{{with .Module}}{{.Path}} {{.Dir}}{{end}}' ./cmd/tofu | sort -u \
+        | while read -r module dir; do \
+            [ -n "${module}" ] || continue; \
+            files="$(find "${dir}" -maxdepth 1 -type f \( -iname 'LICEN[CS]E*' \
+                -o -iname 'COPYING*' -o -iname 'NOTICE*' \))"; \
+            if [ -n "${files}" ]; then \
+                mkdir -p "/out/doc/licenses/${module}" \
+                && printf '%s\n' "${files}" | xargs -I{} cp {} "/out/doc/licenses/${module}/"; \
+            else \
+                echo "${module}" >> /out/doc/licenses/MISSING.txt; \
+            fi; \
+        done \
+    && test -s /out/doc/licenses/github.com/opentofu/opentofu/LICENSE
 
 FROM alpine:3.22
 
