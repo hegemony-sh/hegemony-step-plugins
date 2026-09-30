@@ -14,7 +14,8 @@ same run. The usual shape is plan, then an approval step, then apply.
 Pick the plan step in Plan step. Nothing about the configuration is
 repeated: the apply runs in the plan step's working directory with the same
 engine and image, so the lock file, providers, backend settings, and
-variables are the ones that were planned. Give both steps shared (or
+variables are the ones that were planned. The image is run by the digest the
+plan recorded, so a tag moved since the plan does not change the tool. Give both steps shared (or
 explicit) execution affinity so they share the run's workspace and worker; the
 worker must have shared workspaces enabled.
 

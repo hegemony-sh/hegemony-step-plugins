@@ -246,9 +246,14 @@ class TfPlanConfig(TfContainerConfig):
         default="",
         title="Image",
         description=(
-            "Container image with the tool. Leave empty for the engine's pinned official image."
+            "Container image with the tool, run as root with a POSIX sh. Leave empty for "
+            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.6 for OpenTofu, "
+            "hashicorp/terraform at a pinned version for Terraform."
         ),
-        json_schema_extra={"x_placeholder": "ghcr.io/opentofu/opentofu:1.12.6", "x_advanced": True},
+        json_schema_extra={
+            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.6",
+            "x_advanced": True,
+        },
     )
 
 
@@ -427,6 +432,9 @@ class TfPlanHandler(BaseHandler):
                     handler_id=self.handler_id,
                     extra_hosts=dict(access.extra_hosts) if access else {},
                     stop_grace_seconds=config.stop_grace_seconds,
+                    # tf.apply must run the same tool version: a saved plan is
+                    # refused by any other, and the image's tag may move.
+                    pin_image=True,
                 )
                 outcome = await run_container_job(ctx, job)
         except (ValueError, RuntimeError) as exc:
@@ -601,6 +609,9 @@ class TfPlanHandler(BaseHandler):
             "summary": summary,
             "engine": config.engine,
             "image": image,
+            # The image by digest, which tf.apply runs; empty for an image the
+            # registry never saw (built on the sandbox daemon).
+            "image_digest": outcome.image_digest,
             "state": config.state,
             "state_name": config.state_name.strip() if config.state == "managed" else "",
             # The run holds the state until it applies or ends (managed state only).

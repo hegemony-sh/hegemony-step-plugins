@@ -166,6 +166,29 @@ def test_a_published_image_needs_notices_naming_what_it_installs(tmp_path, capsy
     assert gate.main(["--root", str(root)]) == 0
 
 
+def test_published_images_are_read_from_a_literal_context_or_a_matrix(tmp_path):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "images.yml").write_text(
+        "jobs:\n"
+        "  image:\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        include:\n"
+        "          - image: first-runner\n"
+        "            description: The first\n"
+        "          - image: second-runner\n"
+        "    steps:\n"
+        "      - with:\n"
+        "          context: images/${{ matrix.image }}\n"
+        "          image-ref: ${{ steps.ref.outputs.image }}\n"
+        "      - with:\n"
+        "          context: images/third\n"
+    )
+    assert gate.published_images(tmp_path) == ["first-runner", "second-runner", "third"]
+    assert gate.published_images(REPO_ROOT) == ["ansible-runner", "opentofu-runner"]
+
+
 @pytest.mark.parametrize(
     ("reference", "repository"),
     [

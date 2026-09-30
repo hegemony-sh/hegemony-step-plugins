@@ -68,18 +68,23 @@ repository reviews its own:
   licences (AGPL, SSPL, BUSL and the like) are warnings until accepted;
   `--strict` fails on them. The platform's licence process runs this script
   against the release it pins.
-- **Published images.** `ghcr.io/hegemony-sh/ansible-runner` contains no
-  Hegemony code, but Hegemony conveys everything in it. Its
-  [`THIRD-PARTY-NOTICES.md`](images/ansible-runner/THIRD-PARTY-NOTICES.md)
+- **Published images.** `ghcr.io/hegemony-sh/ansible-runner` and
+  `ghcr.io/hegemony-sh/opentofu-runner` contain no Hegemony code, but
+  Hegemony conveys everything in them. Each one's `THIRD-PARTY-NOTICES.md`
+  ([ansible-runner](images/ansible-runner/THIRD-PARTY-NOTICES.md),
+  [opentofu-runner](images/opentofu-runner/THIRD-PARTY-NOTICES.md))
   names every component with its licence, says where to get the source, and
-  makes the written offer GPL-2.0 section 3(b) requires. The image carries it
-  at `/usr/share/doc/hegemony/`, with inventories of the Python distributions
-  and collections that build installed. The build refuses a Python
-  distribution under a review-tier licence.
+  makes the written offer GPL-2.0 section 3(b) requires. Each image carries
+  it at `/usr/share/doc/hegemony/`, with inventories of what that build
+  installed (Python distributions and collections; Alpine packages and the
+  OpenTofu version). The ansible-runner build refuses a Python distribution
+  under a review-tier licence. OpenTofu's binary is MPL-2.0 and copied
+  unmodified, so its notice says where its source is.
 - **Images a step pulls by default** are pulled by the operator's Docker from
   their own registries; Hegemony conveys none of their bytes, and their
   licences bind whoever runs them. One needs attention:
   `hashicorp/terraform` is BUSL-1.1, which excludes offering it as part of a
   product that competes with HashiCorp's. It is pulled only when a `tf.plan`
-  step selects the `terraform` engine; OpenTofu (MPL-2.0) is the default.
+  step selects the `terraform` engine; OpenTofu (MPL-2.0), in
+  opentofu-runner, is the default.
 

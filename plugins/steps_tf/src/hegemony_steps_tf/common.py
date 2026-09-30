@@ -68,11 +68,15 @@ LockTimeout = Annotated[
     ),
 ]
 
-#: Exact, immutable default images. OpenTofu's image has sh and bash (its docs
-#: prefer copying the binary into your own image — images/opentofu-runner does
-#: that); HashiCorp's has busybox sh. Both run as root.
+#: Default images. OpenTofu's docs ask for the binary to be copied into your own
+#: image rather than their image run directly: ours is built from
+#: images/opentofu-runner, pins the OpenTofu version there, and names this
+#: release's minor version (scripts/set_version.py moves it). HashiCorp's image
+#: is used as published, at an exact version. Both run as root, so they can
+#: write the run's shared workspace, and have a POSIX sh with ``timeout``.
+#: tf.plan records the image's digest and tf.apply runs that.
 DEFAULT_IMAGES: dict[str, str] = {
-    "opentofu": "ghcr.io/opentofu/opentofu:1.12.6",
+    "opentofu": "ghcr.io/hegemony-sh/opentofu-runner:0.6",
     "terraform": "hashicorp/terraform:1.16.4",
 }
 BINARIES: dict[str, str] = {"opentofu": "tofu", "terraform": "terraform"}

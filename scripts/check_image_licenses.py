@@ -104,7 +104,12 @@ _SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
 _STAGE_ALIAS = re.compile(r"\s+AS\s+(\S+)\s*$", re.IGNORECASE)
 _ARG = re.compile(r"^ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(\S*))?", re.IGNORECASE)
 _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
-_PUBLISHED = re.compile(r"context:\s*images/([A-Za-z0-9._-]+)")
+#: How the Images workflow names an image it publishes: a literal build
+#: context, or a matrix entry (``- image: <name>``) for ``images/${{ matrix.image }}``.
+_PUBLISHED = re.compile(
+    r"context:\s*images/([A-Za-z0-9._-]+)|^\s*(?:-\s+)?image:\s*([A-Za-z0-9._-]+)\s*$",
+    re.MULTILINE,
+)
 _NOTICES_PATH = "/usr/share/doc/hegemony/"
 
 
@@ -290,7 +295,8 @@ def published_images(root: Path) -> list[str]:
     workflow = root / ".github" / "workflows" / "images.yml"
     if not workflow.exists():
         return []
-    return sorted(set(_PUBLISHED.findall(workflow.read_text(encoding="utf-8"))))
+    text = workflow.read_text(encoding="utf-8")
+    return sorted({context or entry for context, entry in _PUBLISHED.findall(text)})
 
 
 def check_notices(root: Path, name: str, components: list[Found]) -> list[str]:

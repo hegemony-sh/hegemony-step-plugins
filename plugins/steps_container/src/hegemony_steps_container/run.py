@@ -35,6 +35,7 @@ from .pull_progress import (
     EnginePullError,
     PullOutcome,
     format_size,
+    parse_image_reference,
     require_docker_host,
     stream_pull,
 )
@@ -57,6 +58,30 @@ logger = logging.getLogger(__name__)
 # The image-size lookup is a caption, not a step operation: bounded well below
 # any step deadline so a wedged daemon costs a missing number, not the step.
 _IMAGE_INSPECT_TIMEOUT = 15.0
+
+
+def _familiar_repository(name: str) -> str:
+    """``name`` as the daemon writes Docker Hub repositories: ``python``, ``me/app``."""
+    for prefix in ("docker.io/", "index.docker.io/"):
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            return name.removeprefix("library/")
+    return name
+
+
+def repo_digest_for(image: str, repo_digests: list[str]) -> str:
+    """The ``repository@sha256:...`` entry of ``repo_digests`` for ``image``'s repository.
+
+    ``repo_digests`` is ``docker image inspect``'s RepoDigests. The result
+    keeps ``image``'s spelling of the repository; "" when no entry matches.
+    """
+    repository = parse_image_reference(image)[0]
+    wanted = _familiar_repository(repository)
+    for entry in repo_digests:
+        name, sep, digest = entry.partition("@")
+        if sep and digest.startswith("sha256:") and _familiar_repository(name) == wanted:
+            return f"{repository}@{digest}"
+    return ""
 
 
 def _docker_env(docker_host: str) -> dict[str, str]:
@@ -2021,6 +2046,14 @@ class RunContainerHandler(BaseHandler):
             )
             if pull_failure is not None:
                 return pull_failure
+            image_digest = ""
+            if job.pin_image:
+                image_digest = await self._image_repo_digest(
+                    docker_bin=docker_bin, image=image, docker_env=docker_env, deadline=deadline
+                )
+                if image_digest:
+                    # The tag can move (another step pulls it) before `docker create`.
+                    config = {**config, "image": image_digest}
 
             # 7. Build docker create command (container is created but not started)
             shared_workspace_path: str | None = None
@@ -2560,6 +2593,7 @@ class RunContainerHandler(BaseHandler):
                 skipped_artifacts=len(skipped_generated_artifacts),
                 collected=collected,
                 collect_errors=collect_errors,
+                image_digest=image_digest,
             )
 
         except subprocess.TimeoutExpired:
@@ -2900,6 +2934,46 @@ class RunContainerHandler(BaseHandler):
             return int(proc.stdout.strip())
         except ValueError:
             return None
+
+    async def _image_repo_digest(
+        self,
+        *,
+        docker_bin: str,
+        image: str,
+        docker_env: dict[str, str],
+        deadline: float,
+    ) -> str:
+        """``repository@sha256:...`` of the pulled ``image``, or "" when unknown.
+
+        Read from the image's RepoDigests, the digests the daemon pulled it by,
+        for the repository ``image`` names (in ``image``'s own spelling). An
+        image built on the daemon and never pushed has none; the step then
+        runs, and reports, the tag. Never fails the step.
+        """
+        if "@" in image:
+            return image
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return ""
+        try:
+            proc = await self._run_docker(
+                docker_bin,
+                ["image", "inspect", "--format", "{{json .RepoDigests}}", image],
+                env=docker_env,
+                timeout=min(remaining, _IMAGE_INSPECT_TIMEOUT),
+            )
+        except (subprocess.SubprocessError, OSError):
+            return ""
+        if proc.returncode != 0:
+            return ""
+        try:
+            repo_digests = json.loads(proc.stdout.strip() or "null") or []
+        except ValueError:
+            return ""
+        digest = repo_digest_for(image, [str(entry) for entry in repo_digests])
+        if not digest:
+            logger.info("No registry digest for image %s; running it by tag", image)
+        return digest
 
     @staticmethod
     async def _run_docker(

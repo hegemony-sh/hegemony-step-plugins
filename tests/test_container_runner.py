@@ -103,6 +103,7 @@ def _install_docker(
     out_links: dict[str, str] | None = None,
     collect_returncode: int = 0,
     exit_code: int = 0,
+    repo_digests: list[str] | None = None,
 ) -> dict[str, Any]:
     """Fake the docker CLI: record staged roots, serve collected files.
 
@@ -110,6 +111,7 @@ def _install_docker(
     ``state["dirs"]`` each staged directory to its mode. ``out_links`` adds
     symlinks (name -> target) to the collected copy, as ``docker cp`` would
     preserve them; ``collect_returncode`` makes the copy-out fail.
+    ``repo_digests`` is the pulled image's RepoDigests (none by default).
     """
     state: dict[str, Any] = {"roots": {}, "dirs": {}, "calls": [], "collect_sources": []}
     monkeypatch.setattr(
@@ -119,6 +121,8 @@ def _install_docker(
 
     def fake_run(cmd, *args, **kwargs):
         state["calls"].append(list(cmd))
+        if cmd[1:3] == ["image", "inspect"] and "{{json .RepoDigests}}" in cmd:
+            return SimpleNamespace(returncode=0, stdout=json.dumps(repo_digests or []), stderr="")
         if len(cmd) >= 4 and cmd[1] == "cp":
             src, dest = cmd[2], cmd[3]
             if dest.endswith(":/"):
@@ -368,6 +372,56 @@ async def test_run_container_job_stages_files_and_collects(monkeypatch):
     assert create[create.index("--memory") + 1] == "1g"
     assert "A=1" in create and "TOOL=yes" in create
     assert outcome.evidence[0]["kind"] == "container_output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("image", "repo_digests", "pinned"),
+    [
+        (
+            "ghcr.io/x/tool:1",
+            ["registry.example.com/x/tool@sha256:aaa", "ghcr.io/x/tool@sha256:bbb"],
+            "ghcr.io/x/tool@sha256:bbb",
+        ),
+        # The daemon writes Docker Hub names short; the image keeps its spelling.
+        (
+            "docker.io/library/python:3.12",
+            ["python@sha256:ccc"],
+            "docker.io/library/python@sha256:ccc",
+        ),
+        ("python", ["python@sha256:ccc"], "python@sha256:ccc"),
+        # Built on the daemon, never pushed: no digest, the tag runs.
+        ("tool:local", [], ""),
+        # Already pinned: nothing to look up.
+        ("ghcr.io/x/tool@sha256:ddd", [], "ghcr.io/x/tool@sha256:ddd"),
+    ],
+)
+async def test_a_pinned_job_runs_and_reports_the_image_digest(
+    monkeypatch, image, repo_digests, pinned
+):
+    state = _install_docker(monkeypatch, repo_digests=repo_digests)
+    job = ContainerJob(
+        config=container_config_from({}, image=image, command=["true"]), pin_image=True
+    )
+    outcome = await run_container_job(_ctx({}), job)
+
+    assert isinstance(outcome, ContainerJobResult)
+    assert outcome.image_digest == pinned
+    assert outcome.image == image
+    # The container is created from the digest, which a later pull cannot move.
+    assert (pinned or image) in _create_args(state)
+
+
+@pytest.mark.asyncio
+async def test_an_unpinned_job_does_not_look_up_the_digest(monkeypatch):
+    state = _install_docker(monkeypatch, repo_digests=["ghcr.io/x/tool@sha256:bbb"])
+    job = ContainerJob(config=container_config_from({}, image="ghcr.io/x/tool:1", command=["true"]))
+    outcome = await run_container_job(_ctx({}), job)
+
+    assert isinstance(outcome, ContainerJobResult)
+    assert outcome.image_digest == ""
+    assert not any("{{json .RepoDigests}}" in call for call in state["calls"])
+    assert "ghcr.io/x/tool:1" in _create_args(state)
 
 
 @pytest.mark.asyncio

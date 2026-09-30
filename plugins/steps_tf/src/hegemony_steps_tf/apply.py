@@ -5,7 +5,7 @@
 """``tf.apply``: apply exactly the plan a ``tf.plan`` step saved in this run.
 
 Nothing about the configuration is repeated: the apply runs in the plan step's
-working directory with the same image, so the lock file, providers, backend
+working directory with the same image (by digest), so the lock file, providers, backend
 settings, and variables are the ones that were planned (and, typically,
 approved). The tool itself refuses the saved plan if the state changed since it
 was made. Only provider credentials, which are never stored in a plan, are
@@ -175,6 +175,7 @@ class PlanHandoff(BaseModel):
 
     engine: Engine
     image: str = Field(min_length=1)
+    image_digest: str = ""
     state: StateMode
     state_name: str = ""
     working_dir: str
@@ -292,7 +293,9 @@ class TfApplyHandler(BaseHandler):
                 return self._refuse(f"plan step {plan_step!r} reports managed state with no name")
 
         engine = handoff.engine
-        image = handoff.image.strip()
+        # The plan's image by digest: the same tool version, which a saved
+        # plan requires, even if the image's tag moved since.
+        image = handoff.image_digest.strip() or handoff.image.strip()
         workdir = handoff.working_dir
         timeout = container_timeout(ctx, config)
         try:

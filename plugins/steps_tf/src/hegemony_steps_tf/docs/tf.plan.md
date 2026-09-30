@@ -56,6 +56,23 @@ State decides where the state lives:
 With a State encryption key (OpenTofu only), OpenTofu encrypts the state and
 the saved plan before writing them anywhere.
 
+## The Image
+
+OpenTofu runs in `ghcr.io/hegemony-sh/opentofu-runner:0.6` by default: the
+OpenTofu binary at an exact version on Alpine Linux, with git and an SSH
+client for module sources, built from `images/opentofu-runner` in the plugin
+repository. That tag names a minor version of the plugins and follows its
+newest patch release.
+Terraform runs in HashiCorp's `hashicorp/terraform` image at an exact
+version. Image replaces either; it needs a POSIX `sh` with `timeout` (as
+BusyBox and coreutils have) and must run as root, since the step writes the
+run's shared workspace.
+
+The plan records the image's registry digest, and `tf.apply` runs that
+digest: a saved plan is refused by any other tool version, and the tag may
+move between the plan and an approved apply. An image built on the sandbox
+and never pushed has no digest, so the apply runs its tag.
+
 ## Applying The Plan
 
 For a later `tf.apply`, give both steps shared (or explicit) execution
@@ -96,7 +113,8 @@ not fail the plan: they are then empty. `handler` (`tf.plan`) marks the
 output for `tf.apply`, which refuses a step output without it. Branch on
 `steps.NODE_ID.output.has_changes`, or show the summary in an approval
 message. `state_held` is true when the step holds a managed state for the
-run until it applies.
+run until it applies. `image` is the image the plan ran, and `image_digest`
+the same image by digest (empty when it has none).
 
 ## When It Fails
 

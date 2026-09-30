@@ -2,14 +2,16 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-# Publishes the ansible.playbook step's default execution image,
-# ghcr.io/<owner>/ansible-runner, from images/ansible-runner.
+# Publishes the steps' default execution images, ghcr.io/<owner>/<name>, from
+# images/<name>: ansible-runner (ansible.playbook) and opentofu-runner (tf.plan
+# and tf.apply with OpenTofu). scripts/package_paths.py lists the same images.
 #
 # A release tag vX.Y.Z (pushed by the Release workflow) publishes X.Y.Z and
-# X.Y. The step's DEFAULT_IMAGE names X.Y, which scripts/set_version.py moves
-# with every release, so the wheels of a release pull the image built from the
-# same tag. A pull request that changes the image builds, smoke-tests and scans
-# it the same way, without pushing. workflow_dispatch publishes an existing
+# X.Y. The steps' defaults name X.Y, which scripts/set_version.py moves with
+# every release, so the wheels of a release pull the images built from the
+# same tag. A pull request that changes an image builds, smoke-tests and scans
+# both the same way, without pushing. Each image's smoke-test.sh runs inside
+# it. workflow_dispatch publishes an existing
 # release tag again, after a failed run or to pick up base-image fixes under
 # the same tags (X.Y only while that tag is the newest X.Y release).
 #
@@ -27,6 +29,7 @@ on:
     branches: [main, develop]
     paths:
       - "images/ansible-runner/**"
+      - "images/opentofu-runner/**"
       - ".github/workflows/images.yml"
   workflow_dispatch:
     inputs:
@@ -43,15 +46,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  ansible-runner:
-    name: ansible-runner
+  image:
+    name: ${{ matrix.image }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
       packages: write
+    strategy:
+      # A release publishes each image on its own: one image's failure must
+      # not cancel the other's promotion half-way.
+      fail-fast: false
+      matrix:
+        include:
+          - image: ansible-runner
+            description: Default execution image of the Hegemony ansible.playbook step
+            # The line that makes it the step's default, {image} standing for
+            # IMAGE:X.Y.
+            default_file: plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py
+            default_line: 'DEFAULT_IMAGE = "{image}"'
+          - image: opentofu-runner
+            description: Default OpenTofu image of the Hegemony tf.plan and tf.apply steps
+            default_file: plugins/steps_tf/src/hegemony_steps_tf/common.py
+            default_line: '    "opentofu": "{image}",'
     env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/ansible-runner
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
     steps:
       - name: Resolve the release
         id: release
@@ -93,11 +112,13 @@ jobs:
         if: steps.release.outputs.publish == 'true'
         env:
           EXPECTED: ${{ env.IMAGE }}:${{ steps.release.outputs.minor }}
+          DEFAULT_FILE: ${{ matrix.default_file }}
+          DEFAULT_LINE: ${{ matrix.default_line }}
         run: |
           set -euo pipefail
-          file=plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py
-          if ! grep -Fqx "DEFAULT_IMAGE = \"${EXPECTED}\"" "$file"; then
-            echo "::error::${file} does not set DEFAULT_IMAGE to ${EXPECTED}"
+          line="${DEFAULT_LINE//\{image\}/$EXPECTED}"
+          if ! grep -Fqx -- "$line" "$DEFAULT_FILE"; then
+            echo "::error::${DEFAULT_FILE} has no line: ${line}"
             exit 1
           fi
 
@@ -109,12 +130,14 @@ jobs:
         env:
           VERSION: ${{ steps.release.outputs.version }}
           REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+          TITLE: ${{ matrix.image }}
+          DESCRIPTION: ${{ matrix.description }}
         run: |
           set -euo pipefail
           {
             echo "labels<<EOF"
-            echo "org.opencontainers.image.title=ansible-runner"
-            echo "org.opencontainers.image.description=Default execution image of the Hegemony ansible.playbook step"
+            echo "org.opencontainers.image.title=${TITLE}"
+            echo "org.opencontainers.image.description=${DESCRIPTION}"
             echo "org.opencontainers.image.source=${REPOSITORY}"
             echo "org.opencontainers.image.revision=$(git rev-parse HEAD)"
             echo "org.opencontainers.image.version=${VERSION:-dev}"
@@ -127,9 +150,9 @@ jobs:
         if: steps.release.outputs.publish != 'true'
         uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
         with:
-          context: images/ansible-runner
+          context: images/${{ matrix.image }}
           labels: ${{ steps.labels.outputs.labels }}
-          tags: ansible-runner:pr
+          tags: ${{ matrix.image }}:pr
           load: true
           push: false
 
@@ -147,7 +170,7 @@ jobs:
         if: steps.release.outputs.publish == 'true'
         uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
         with:
-          context: images/ansible-runner
+          context: images/${{ matrix.image }}
           labels: ${{ steps.labels.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
@@ -156,37 +179,21 @@ jobs:
         env:
           PUBLISH: ${{ steps.release.outputs.publish }}
           DIGEST: ${{ steps.build.outputs.digest }}
+          NAME: ${{ matrix.image }}
         run: |
           if [ "$PUBLISH" = "true" ]; then
             echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
           else
-            echo "image=ansible-runner:pr" >> "$GITHUB_OUTPUT"
+            echo "image=${NAME}:pr" >> "$GITHUB_OUTPUT"
           fi
 
-      # What the step relies on: /bin/sh as the entrypoint, an unprivileged
-      # user, ansible-core with libssh, and the collections the platform maps
-      # device platforms onto.
+      # What the steps rely on, checked inside the image before any tag names
+      # it: images/<name>/smoke-test.sh, run by the image's /bin/sh.
       - name: Smoke test
         env:
           IMAGE_REF: ${{ steps.ref.outputs.image }}
-        run: |
-          set -euo pipefail
-          docker run --rm "$IMAGE_REF" -c '
-            set -e
-            test "$(id -u)" != 0
-            ansible-playbook --version
-            python3 -c "import pylibsshext, ncclient"
-            for c in ansible.netcommon ansible.utils ansible.posix community.general \
-                     cisco.ios cisco.nxos cisco.iosxr arista.eos junipernetworks.junos; do
-              ansible-galaxy collection list "$c" | grep -q "^$c " || { echo "missing $c"; exit 1; }
-            done
-            for b in ssh sshpass git; do command -v "$b" >/dev/null; done
-            for f in THIRD-PARTY-NOTICES.md python-packages.txt ansible-collections.txt; do
-              test -s "/usr/share/doc/hegemony/$f" || { echo "missing notices file $f"; exit 1; }
-            done
-            grep -q "^ansible-core | " /usr/share/doc/hegemony/python-packages.txt
-            grep -q "Written offer" /usr/share/doc/hegemony/THIRD-PARTY-NOTICES.md
-          '
+          NAME: ${{ matrix.image }}
+        run: docker run --rm -i "$IMAGE_REF" -s < "images/${NAME}/smoke-test.sh"
 
       # Gates the promotion: a CRITICAL/HIGH finding with a fixed version
       # upstream fails the job before any tag names the image. It fails a pull

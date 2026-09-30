@@ -12,8 +12,7 @@ import re
 from package_paths import (
     PACKAGE_DIRS,
     PLUGIN_DIRS,
-    RUNNER_IMAGE,
-    RUNNER_IMAGE_FILES,
+    RUNNER_IMAGES,
     SDK_VERSION_FILE,
 )
 
@@ -73,24 +72,28 @@ def _set_sibling_pins(pyproject, version: str) -> None:
     pyproject.write_text(set_sibling_pins(text, version), encoding="utf-8")
 
 
-#: The default execution image with its tag, which names a minor version.
-#: A sentence may end right after it, but a patch version (``:0.6.0``) is not it.
-RUNNER_IMAGE_TAG = re.compile(re.escape(RUNNER_IMAGE) + r":\d+\.\d+(?!\.?\d)")
+def _runner_image_tag(repository: str) -> re.Pattern[str]:
+    """``repository:X.Y``, the tag that names a minor version.
+
+    A sentence may end right after it, but a patch version (``:0.6.0``) is not it.
+    """
+    return re.compile(re.escape(repository) + r":\d+\.\d+(?!\.?\d)")
 
 
-def set_runner_image_tag(text: str, version: str) -> str:
-    """``text`` with every ``RUNNER_IMAGE:X.Y`` naming the minor version of ``version``."""
+def set_runner_image_tag(text: str, version: str, repository: str) -> str:
+    """``text`` with every ``repository:X.Y`` naming the minor version of ``version``."""
     minor = ".".join(version.split(".")[:2])
-    return RUNNER_IMAGE_TAG.sub(f"{RUNNER_IMAGE}:{minor}", text)
+    return _runner_image_tag(repository).sub(f"{repository}:{minor}", text)
 
 
 def _set_runner_image_tags(version: str) -> None:
-    for index, path in enumerate(RUNNER_IMAGE_FILES):
-        text = path.read_text(encoding="utf-8")
-        # The first file defines DEFAULT_IMAGE: losing that line must not pass silently.
-        if index == 0 and not RUNNER_IMAGE_TAG.search(text):
-            raise SystemExit(f"Could not update {path}: {RUNNER_IMAGE}:X.Y not found")
-        path.write_text(set_runner_image_tag(text, version), encoding="utf-8")
+    for image in RUNNER_IMAGES:
+        for index, path in enumerate(image.files):
+            text = path.read_text(encoding="utf-8")
+            # The first file holds the step's default: losing it must not pass silently.
+            if index == 0 and not _runner_image_tag(image.repository).search(text):
+                raise SystemExit(f"Could not update {path}: {image.repository}:X.Y not found")
+            path.write_text(set_runner_image_tag(text, version, image.repository), encoding="utf-8")
 
 
 def main() -> None:

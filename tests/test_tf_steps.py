@@ -449,9 +449,11 @@ def _install_docker(
     out: dict[str, bytes],
     exit_code: int = 0,
     events: list[Any] | None = None,
+    repo_digests: list[str] | None = None,
 ) -> dict[str, Any]:
     """Fake docker. ``events`` (a _Services' log) records the staging of the
-    container's files and the container start among the state access events."""
+    container's files and the container start among the state access events.
+    ``repo_digests`` is the pulled image's RepoDigests (none by default)."""
     state: dict[str, Any] = {"roots": {}, "calls": [], "exec": 0, "collected": []}
     events = events if events is not None else []
     monkeypatch.setattr(
@@ -461,6 +463,8 @@ def _install_docker(
 
     def fake_run(cmd, *args, **kwargs):
         state["calls"].append(list(cmd))
+        if cmd[1:3] == ["image", "inspect"] and "{{json .RepoDigests}}" in cmd:
+            return SimpleNamespace(returncode=0, stdout=json.dumps(repo_digests or []), stderr="")
         if len(cmd) >= 4 and cmd[1] == "cp":
             src, dest = cmd[2], cmd[3]
             if dest.endswith(":/"):
@@ -975,6 +979,25 @@ async def test_plan_step_short_encryption_key_is_refused(monkeypatch):
     assert state["calls"] == []
 
 
+@pytest.mark.asyncio
+async def test_plan_step_records_its_image_by_digest(monkeypatch):
+    image = DEFAULT_IMAGES["opentofu"]
+    repository = image.rsplit(":", 1)[0]
+    state = _install_docker(
+        monkeypatch,
+        out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"},
+        repo_digests=[f"{repository}@sha256:{'a' * 64}"],
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+
+    assert result.success is True, result.error
+    assert result.output["image"] == image
+    assert result.output["image_digest"] == f"{repository}@sha256:{'a' * 64}"
+    # The plan ran the very image it hands to the apply.
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert f"{repository}@sha256:{'a' * 64}" in create
+
+
 def _plan_output(**overrides: Any) -> dict[str, Any]:
     output = {
         "handler": "tf.plan",
@@ -1018,6 +1041,24 @@ async def test_apply_step_applies_the_saved_plan(monkeypatch):
     assert "hegemony.handler_id=tf.apply" in create
     assert "cd /shared/tf/plan" in state["roots"][RUN_SCRIPT]
     assert "\nbounded tofu apply" in state["roots"][RUN_SCRIPT]
+
+
+@pytest.mark.asyncio
+async def test_apply_step_runs_the_plan_image_by_digest(monkeypatch):
+    pinned = f"ghcr.io/hegemony-sh/opentofu-runner@sha256:{'b' * 64}"
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"})
+    services = _Services(
+        _plan_output(image="ghcr.io/hegemony-sh/opentofu-runner:0.6", image_digest=pinned)
+    )
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+
+    assert result.success is True, result.error
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert pinned in create
+    assert "ghcr.io/hegemony-sh/opentofu-runner:0.6" not in create
+    assert result.metrics["image"] == pinned
+    # The apply does not look the digest up again.
+    assert not any("{{json .RepoDigests}}" in call for call in state["calls"])
 
 
 def _without(key: str) -> dict[str, Any]:

@@ -14,8 +14,7 @@ import tomllib
 from package_paths import (
     PACKAGE_DIRS,
     PLUGIN_DIRS,
-    RUNNER_IMAGE,
-    RUNNER_IMAGE_FILES,
+    RUNNER_IMAGES,
     SDK_VERSION_FILE,
 )
 
@@ -37,15 +36,25 @@ def sibling_pin_failure(package: str, dependency: str, version: str) -> str | No
     return f"{package} must pin {name}=={version}, not {dependency}"
 
 
-def runner_image_failures(path, text: str, version: str) -> list[str]:
-    """Why ``text`` (one of RUNNER_IMAGE_FILES) names a runner image tag other than ``version``'s X.Y."""
+def runner_image_failures(path, text: str, version: str, repository: str) -> list[str]:
+    """Why ``text`` names a ``repository`` tag other than ``version``'s X.Y."""
     minor = ".".join(version.split(".")[:2])
-    tags = re.findall(re.escape(RUNNER_IMAGE) + r":([0-9][0-9.]*[0-9])", text)
+    tags = re.findall(re.escape(repository) + r":([0-9][0-9.]*[0-9])", text)
     return [
-        f"{path} names {RUNNER_IMAGE}:{tag}, expected {RUNNER_IMAGE}:{minor}"
+        f"{path} names {repository}:{tag}, expected {repository}:{minor}"
         for tag in sorted(set(tags))
         if tag != minor
     ]
+
+
+def default_image_failure(image) -> str | None:
+    """Why the step that ``image`` is the default of does not name it."""
+    default = re.search(
+        image.default_pattern, image.files[0].read_text(encoding="utf-8"), re.MULTILINE
+    )
+    if default is None or not default.group(1).startswith(f"{image.repository}:"):
+        return f"{image.files[0]} must default to {image.repository}:X.Y"
+    return None
 
 
 def _project_metadata(pyproject) -> dict:
@@ -90,16 +99,13 @@ def main() -> None:
     if match is None or match.group(1) != version:
         failures.append(f"{SDK_VERSION_FILE} __version__ must be {version}")
 
-    for path in RUNNER_IMAGE_FILES:
-        text = path.read_text(encoding="utf-8")
-        failures.extend(runner_image_failures(path, text, version))
-    default_image = re.search(
-        r'^DEFAULT_IMAGE = "([^"]+)"$',
-        RUNNER_IMAGE_FILES[0].read_text(encoding="utf-8"),
-        re.MULTILINE,
-    )
-    if default_image is None or not default_image.group(1).startswith(f"{RUNNER_IMAGE}:"):
-        failures.append(f"{RUNNER_IMAGE_FILES[0]} must set DEFAULT_IMAGE to {RUNNER_IMAGE}:X.Y")
+    for image in RUNNER_IMAGES:
+        for path in image.files:
+            text = path.read_text(encoding="utf-8")
+            failures.extend(runner_image_failures(path, text, version, image.repository))
+        failure = default_image_failure(image)
+        if failure:
+            failures.append(failure)
 
     if failures:
         raise SystemExit("\n".join(failures))
