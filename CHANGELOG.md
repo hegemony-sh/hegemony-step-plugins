@@ -1,3 +1,9 @@
+## [0.7.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.7.0...v0.7.1) (2026-09-30)
+
+### Bug Fixes
+
+* **release:** commit the runner image tags and publish the images when the release is published ([acef84c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/acef84cedf776ef06c65215fb20fa4595adfc0a1))
+
 ## [0.7.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.6.0...v0.7.0) (2026-09-30)
 
 ### Features
