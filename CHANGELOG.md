@@ -1,3 +1,25 @@
+## [0.7.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.6.0...v0.7.0) (2026-09-30)
+
+### Features
+
+* **ansible:** publish the default execution image with every release ([672bdca](https://github.com/hegemony-sh/hegemony-step-plugins/commit/672bdca4dace04782920f5d028356817c5f46696))
+* **licensing:** review every image component and ship notices in ansible-runner ([850af50](https://github.com/hegemony-sh/hegemony-step-plugins/commit/850af508c8f5ada693291ce29dc58dee9ea0d2c3))
+* **licensing:** ship the licence texts in every wheel ([c7e853f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c7e853f12b3b0493ac3fb7b1d677f6731235ec2c))
+* **tf:** hold a managed state from a plan until its run applies ([b61fd60](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b61fd60d1da1728688b6cadad4f63035deac508b))
+* **tf:** let a cancelled plan or apply stop cleanly ([15f7c0a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/15f7c0a1e84d3e8127bfc7aaf03863faf77c3401))
+* **tf:** publish opentofu-runner as the OpenTofu default and apply the plan's image by digest ([f33ddc4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f33ddc4cd491d6253c336264bdceda40ee7a1f66))
+
+### Bug Fixes
+
+* **ansible:** build the runner image on ansible-core 2.19.13 ([71616b1](https://github.com/hegemony-sh/hegemony-step-plugins/commit/71616b1046328b0fc864d0479a1bf5e66e6a5e8a))
+* **container:** finish the graceful stop through a second cancellation ([ec29f9c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ec29f9c933c39ce18dd94574dc3816ee1afa27ca))
+* **images:** build opentofu-runner's tofu from source with fixed Go modules ([434e938](https://github.com/hegemony-sh/hegemony-step-plugins/commit/434e9389f09a2c2fb921bf73dab629ccf4b38068))
+* **images:** ship the Go licence texts in opentofu-runner and name the runners' real licences ([c13cd1c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c13cd1cd6f6f9379eda59dc58d82bf1537a023a6))
+* **licensing:** refuse image installs from a requirements file ([badfe90](https://github.com/hegemony-sh/hegemony-step-plugins/commit/badfe90e6c400994160acc895dadeeffebf13759))
+* **runner:** pass on only the first stop request to the tool ([a9f9b57](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a9f9b57c067680d9e12cb6c39259b4baa1ba983b))
+* **runner:** start nothing after a stop request that came while preparing ([a9ea9a6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a9ea9a6ada52d52b7d2df95597026d315b2f2c6c))
+* **tf:** let the kill at the deadline wait out the whole stop grace ([81d90e2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/81d90e2daf92c1bf41df53a8b044d968b67e0001))
+
 ## [0.6.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.5.0...v0.6.0) (2026-09-28)
 
 ### Features
