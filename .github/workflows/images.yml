@@ -1,0 +1,269 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# Publishes the steps' default execution images, ghcr.io/<owner>/<name>, from
+# images/<name>: ansible-runner (ansible.playbook) and opentofu-runner (tf.plan
+# and tf.apply with OpenTofu). scripts/package_paths.py lists the same images.
+#
+# A release tag vX.Y.Z (pushed by the Release workflow) publishes X.Y.Z and
+# X.Y. The steps' defaults name X.Y, which scripts/set_version.py moves with
+# every release, so the wheels of a release pull the images built from the
+# same tag. A pull request that changes an image builds, smoke-tests and scans
+# both the same way, without pushing. Each image's smoke-test.sh runs inside
+# it. workflow_dispatch publishes an existing
+# release tag again, after a failed run or to pick up base-image fixes under
+# the same tags (X.Y only while that tag is the newest X.Y release).
+#
+# The image is built once and pushed by digest only; Trivy scans that digest
+# and the smoke test runs it before any tag points at it, so what the tags
+# name is what was checked (the platform repository's docker-publish does the
+# same).
+
+name: Images
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "images/ansible-runner/**"
+      - "images/opentofu-runner/**"
+      - ".github/workflows/images.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, e.g. v0.6.0"
+        required: true
+        type: string
+
+permissions: {}
+
+# One run per release tag at a time, whether a tag push or a re-publish of it.
+concurrency:
+  group: images-${{ github.event.pull_request.number || inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # A release publishes each image on its own: one image's failure must
+      # not cancel the other's promotion half-way.
+      fail-fast: false
+      matrix:
+        include:
+          - image: ansible-runner
+            description: Default execution image of the Hegemony ansible.playbook step
+            # What the image contains (no Hegemony code); its notices list each component.
+            licenses: GPL-3.0-or-later AND GPL-2.0-only AND GPL-2.0-or-later AND LGPL-2.1-or-later AND Python-2.0 AND Apache-2.0 AND MIT AND BSD-3-Clause AND MPL-2.0 AND SSH-OpenSSH
+            # The line that makes it the step's default, {image} standing for
+            # IMAGE:X.Y.
+            default_file: plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py
+            default_line: 'DEFAULT_IMAGE = "{image}"'
+          - image: opentofu-runner
+            description: Default OpenTofu image of the Hegemony tf.plan and tf.apply steps
+            licenses: MPL-2.0 AND BSD-3-Clause AND Apache-2.0 AND MIT AND GPL-2.0-only AND GPL-2.0-or-later AND SSH-OpenSSH
+            default_file: plugins/steps_tf/src/hegemony_steps_tf/common.py
+            default_line: '    "opentofu": "{image}",'
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+    steps:
+      - name: Resolve the release
+        id: release
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+          if ! printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::not a release tag: ${tag}"
+            exit 1
+          fi
+          version="${tag#v}"
+          {
+            echo "publish=true"
+            echo "ref=refs/tags/${tag}"
+            echo "version=${version}"
+            echo "minor=${version%.*}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ steps.release.outputs.ref }}
+          persist-credentials: false
+
+      # The tag's own step must name this minor version, or the release would
+      # publish an image its wheels never pull.
+      - name: Check the step names this release's image
+        if: steps.release.outputs.publish == 'true'
+        env:
+          EXPECTED: ${{ env.IMAGE }}:${{ steps.release.outputs.minor }}
+          DEFAULT_FILE: ${{ matrix.default_file }}
+          DEFAULT_LINE: ${{ matrix.default_line }}
+        run: |
+          set -euo pipefail
+          line="${DEFAULT_LINE//\{image\}/$EXPECTED}"
+          if ! grep -Fqx -- "$line" "$DEFAULT_FILE"; then
+            echo "::error::${DEFAULT_FILE} has no line: ${line}"
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+
+      - name: Image labels
+        id: labels
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+          TITLE: ${{ matrix.image }}
+          DESCRIPTION: ${{ matrix.description }}
+          LICENSES: ${{ matrix.licenses }}
+        run: |
+          set -euo pipefail
+          {
+            echo "labels<<EOF"
+            echo "org.opencontainers.image.title=${TITLE}"
+            echo "org.opencontainers.image.description=${DESCRIPTION}"
+            echo "org.opencontainers.image.source=${REPOSITORY}"
+            echo "org.opencontainers.image.revision=$(git rev-parse HEAD)"
+            echo "org.opencontainers.image.version=${VERSION:-dev}"
+            echo "org.opencontainers.image.licenses=${LICENSES}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Pull requests: build into the runner's daemon and stop there.
+      - name: Build
+        if: steps.release.outputs.publish != 'true'
+        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
+        with:
+          context: images/${{ matrix.image }}
+          labels: ${{ steps.labels.outputs.labels }}
+          tags: ${{ matrix.image }}:pr
+          load: true
+          push: false
+
+      - name: Log in to GHCR
+        if: steps.release.outputs.publish == 'true'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Reachable only as IMAGE@sha256:... until the promote step below.
+      - name: Build and push by digest
+        id: build
+        if: steps.release.outputs.publish == 'true'
+        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
+        with:
+          context: images/${{ matrix.image }}
+          labels: ${{ steps.labels.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Image reference
+        id: ref
+        env:
+          PUBLISH: ${{ steps.release.outputs.publish }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          NAME: ${{ matrix.image }}
+        run: |
+          if [ "$PUBLISH" = "true" ]; then
+            echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=${NAME}:pr" >> "$GITHUB_OUTPUT"
+          fi
+
+      # What the steps rely on, checked inside the image before any tag names
+      # it: images/<name>/smoke-test.sh, run by the image's /bin/sh.
+      - name: Smoke test
+        env:
+          IMAGE_REF: ${{ steps.ref.outputs.image }}
+          NAME: ${{ matrix.image }}
+        run: docker run --rm -i "$IMAGE_REF" -s < "images/${NAME}/smoke-test.sh"
+
+      # Gates the promotion: a CRITICAL/HIGH finding with a fixed version
+      # upstream fails the job before any tag names the image. It fails a pull
+      # request the same way, so an image the release would refuse is caught
+      # before it merges. Findings with no fix are reported by the next step.
+      - name: Scan with Trivy
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ steps.ref.outputs.image }}
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Report unfixable findings (non-blocking)
+        if: ${{ !cancelled() && steps.ref.outputs.image != '' }}
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ steps.ref.outputs.image }}
+          format: table
+          exit-code: 0
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+
+      # X.Y names the newest X.Y.Z release: re-publishing an older one (a
+      # workflow_dispatch of v0.6.0 after v0.6.1) updates only its own X.Y.Z.
+      # Checked just before writing the tags. A newer release's tag exists
+      # before its own run starts, and that run needs minutes to get here, so
+      # an older run that passed this check has written its tags long before.
+      - name: Promote the scanned digest to the release tags
+        if: steps.release.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.release.outputs.version }}
+          MINOR: ${{ steps.release.outputs.minor }}
+          REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest="$(
+            gh api --paginate "repos/${REPOSITORY}/git/matching-refs/tags/v${MINOR}." --jq '.[].ref' \
+              | python3 -c '
+          import re, sys
+          minor = sys.argv[1]
+          release = re.compile(r"refs/tags/v" + re.escape(minor) + r"\.(\d+)$")
+          patches = [int(m.group(1)) for line in sys.stdin if (m := release.match(line.strip()))]
+          print(f"{minor}.{max(patches)}" if patches else "")
+          ' "$MINOR"
+          )"
+          tags=("${IMAGE}:${VERSION}")
+          if [ "$latest" = "$VERSION" ]; then
+            tags+=("${IMAGE}:${MINOR}")
+          elif [ -z "$latest" ]; then
+            echo "::error::found no release tag v${MINOR}.N"
+            exit 1
+          else
+            echo "::notice::${VERSION} is not the newest ${MINOR} release (${latest}): ${IMAGE}:${MINOR} stays"
+          fi
+          args=()
+          for tag in "${tags[@]}"; do args+=(--tag "$tag"); done
+          docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
+          for tag in "${tags[@]}"; do
+            resolved="$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}')"
+            if [ "$resolved" != "$DIGEST" ]; then
+              echo "::error::${tag} resolves to ${resolved}, expected ${DIGEST}"
+              exit 1
+            fi
+            echo "ok: ${tag} -> ${resolved}"
+          done

@@ -12,19 +12,19 @@
 # pin an older core. Runs as an unprivileged user; the step stages its files
 # readable by any user and copies private keys to a folder that user owns.
 #
-# Not published by the release: build and push it to a registry the sandbox
-# can pull from (the step pulls on every run), or push it under your own tag
-# and set the step's Execution image:
+# The Images workflow (.github/workflows/images.yml) publishes it for every
+# release tag vX.Y.Z as ghcr.io/hegemony-sh/ansible-runner:X.Y.Z and :X.Y. The
+# step's default names X.Y (DEFAULT_IMAGE in
+# plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py), currently
+# ghcr.io/hegemony-sh/ansible-runner:0.6. To customise it, build and push it
+# under your own tag and set the step's Execution image:
 #
-#   docker build -t ghcr.io/hegemony-sh/ansible-runner:0.5 images/ansible-runner
-#   docker push ghcr.io/hegemony-sh/ansible-runner:0.5
-#
-# The tag follows the wheels' minor version (DEFAULT_IMAGE in
-# plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py).
+#   docker build -t registry.example.com/ansible-runner:custom images/ansible-runner
+#   docker push registry.example.com/ansible-runner:custom
 
 FROM python:3.12-slim-bookworm
 
-ARG ANSIBLE_CORE_VERSION=2.19.2
+ARG ANSIBLE_CORE_VERSION=2.19.13
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openssh-client sshpass git ca-certificates \
@@ -47,6 +47,19 @@ RUN pip install --no-cache-dir \
         arista.eos \
         junipernetworks.junos \
     && rm -rf /root/.ansible
+
+# Everything above is third-party. The notices (with the written source offer)
+# travel inside the image, next to inventories of exactly what this build
+# installed: Python distributions with their declared licences, and collections.
+# The inventory script refuses a distribution under a review-tier licence (the
+# ones scripts/check_image_licenses.py lists), so the build fails instead of
+# publishing one: the dependency closure is resolved here, not in any allowlist.
+COPY THIRD-PARTY-NOTICES.md /usr/share/doc/hegemony/THIRD-PARTY-NOTICES.md
+RUN --mount=type=bind,source=inventory.py,target=/tmp/inventory.py \
+    python /tmp/inventory.py --fail-on AGPL SSPL BUSL Elastic RSAL "Commons Clause" \
+        > /usr/share/doc/hegemony/python-packages.txt \
+    && ansible-galaxy collection list --collections-path /usr/share/ansible/collections \
+        > /usr/share/doc/hegemony/ansible-collections.txt
 
 RUN useradd --create-home --uid 1000 runner
 USER runner

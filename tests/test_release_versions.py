@@ -86,3 +86,80 @@ def test_the_verifier_insists_on_an_exact_sibling_pin(dependency, ok):
         "hegemony-steps-tf", dependency, "0.6.0"
     )
     assert (failure is None) is ok, failure
+
+
+@pytest.mark.parametrize("name", ["ansible-runner", "opentofu-runner"])
+def test_set_version_moves_a_runner_image_to_the_release_minor(name):
+    image = f"ghcr.io/hegemony-sh/{name}"
+    text = (
+        f'DEFAULT_IMAGE = "{image}:0.6"\n'
+        f"docker pull {image}:0.6 # and again\n"
+        f"registry.example.com/{name}:0.6 stays\n"
+        f"The default is {image}:0.6.\n"
+        f"Exact {image}:0.6.2 is not the default's form.\n"
+    )
+    moved = _script("set_version").set_runner_image_tag(text, "0.7.1", image)
+
+    assert f'DEFAULT_IMAGE = "{image}:0.7"' in moved
+    assert f"docker pull {image}:0.7 # and again" in moved
+    # Only the first-party image moves.
+    assert f"registry.example.com/{name}:0.6 stays" in moved
+    # A tag ending a sentence moves; a full version does not.
+    assert f"The default is {image}:0.7.\n" in moved
+    assert f"{image}:0.6.2 is not" in moved
+
+
+def test_set_version_moves_only_the_image_it_is_given():
+    text = "ghcr.io/hegemony-sh/ansible-runner:0.6 ghcr.io/hegemony-sh/opentofu-runner:0.6"
+    moved = _script("set_version").set_runner_image_tag(
+        text, "0.7.0", "ghcr.io/hegemony-sh/opentofu-runner"
+    )
+    assert moved == "ghcr.io/hegemony-sh/ansible-runner:0.6 ghcr.io/hegemony-sh/opentofu-runner:0.7"
+
+
+@pytest.mark.parametrize(
+    ("text", "ok"),
+    [
+        ("ghcr.io/hegemony-sh/ansible-runner:0.7 and ghcr.io/hegemony-sh/ansible-runner:0.7", True),
+        ("no image named at all", True),
+        ("ghcr.io/hegemony-sh/ansible-runner:0.6", False),
+        ("ghcr.io/hegemony-sh/ansible-runner:0.7.1", False),
+    ],
+)
+def test_the_verifier_insists_on_the_release_minor_image_tag(text, ok):
+    failures = _script("verify_release_version").runner_image_failures(
+        "f", text, "0.7.1", "ghcr.io/hegemony-sh/ansible-runner"
+    )
+
+    assert (failures == []) is ok
+
+
+def test_every_runner_image_is_a_step_default_named_by_the_current_minor_version():
+    """Between releases too: the release commit moves both together."""
+    import tomllib
+
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads(
+        (root / "plugins" / "steps_ansible" / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+    verifier = _script("verify_release_version")
+    paths = _script("package_paths")
+
+    assert [image.repository for image in paths.RUNNER_IMAGES] == [
+        "ghcr.io/hegemony-sh/ansible-runner",
+        "ghcr.io/hegemony-sh/opentofu-runner",
+    ]
+    failures = [
+        failure
+        for image in paths.RUNNER_IMAGES
+        for path in image.files
+        for failure in verifier.runner_image_failures(
+            path, path.read_text(encoding="utf-8"), project["version"], image.repository
+        )
+    ]
+    failures += [
+        failure
+        for image in paths.RUNNER_IMAGES
+        if (failure := verifier.default_image_failure(image))
+    ]
+    assert failures == []

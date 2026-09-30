@@ -61,12 +61,20 @@ MAX_COLLECTED_BYTES = 8 * 1024 * 1024
 COLLECT_GRACE_SECONDS = 10
 
 #: How long a tool run through ``bounded`` (:func:`deadline_shell_lines`) gets
-#: to stop after SIGTERM at the step's deadline before SIGKILL. OpenTofu and
+#: by default to stop after SIGTERM at the step's deadline before SIGKILL (the
+#: tf steps give a longer stop grace period in full). OpenTofu and
 #: Terraform stop starting new changes on SIGTERM and save the state of those
 #: done; this leaves them time to, and still ends the container well before
 #: the platform frees a managed-state lock held by a step whose worker died
 #: (the step timeout, then 600 s of grace).
 KILL_AFTER_SECONDS = 300
+
+#: The exit status ``bounded`` returns for a command it refused to start
+#: because the container was asked to stop (128 + SIGTERM).
+STOPPED_EXIT_STATUS = 143
+
+#: Longest stop grace period a job may ask for (see ``ContainerJob``).
+MAX_STOP_GRACE_SECONDS = 3600
 
 #: A secret reference written bare (``vault://orgs/acme/secrets/db/password``)
 #: rather than as a ``{{ secret('...') }}`` template.
@@ -114,6 +122,17 @@ class ContainerJob:
     # Host name -> IP address entries for the container's /etc/hosts
     # (``--add-host``), e.g. the platform API from ``open_state_backend``.
     extra_hosts: dict[str, str] = field(default_factory=dict)
+    # Seconds the container gets to stop after SIGTERM when the step is
+    # cancelled or times out, before it is removed; 0 removes it at once. A
+    # tool run through ``bounded`` (see :func:`deadline_shell_lines`) receives
+    # the SIGTERM when the run script is the container's PID 1 (start it with
+    # ``exec``), and can finish in-flight work, save state and release locks.
+    stop_grace_seconds: int = 0
+    # Run the pulled image by its registry digest and report it as
+    # ``ContainerJobResult.image_digest``, for a tool that hands its image to a
+    # later step (``tf.apply`` after ``tf.plan``): that step then gets exactly
+    # these bytes, even if the tag moved in between.
+    pin_image: bool = False
 
 
 @dataclass
@@ -140,6 +159,10 @@ class ContainerJobResult:
     # root whose copy failed, or one file over the budget) -> the reason. A path
     # in neither map was simply not written by the step.
     collect_errors: dict[str, str] = field(default_factory=dict)
+    # ``repository@sha256:...`` the container ran from, when the job asked for
+    # ``pin_image`` and the daemon knows the image's registry digest (an image
+    # built on the daemon and never pushed has none); otherwise empty.
+    image_digest: str = ""
 
 
 class ContainerExecutionConfig(BaseModel):
@@ -401,32 +424,82 @@ async def run_container_job(
     return await runner.run_job(ctx, job)
 
 
-def deadline_shell_lines(deadline: int) -> list[str]:
+def deadline_shell_lines(deadline: int, kill_after: int = KILL_AFTER_SECONDS) -> list[str]:
     """POSIX shell lines defining ``bounded CMD [ARG...]``: run CMD until ``deadline``.
 
     The worker stops a step's container at the step's timeout, but a worker
     that dies stops nothing, and the tool would run on in the sandbox past the
     access it was given (a managed-state token and lock). ``bounded`` sends the
-    command SIGTERM at ``deadline`` (a Unix time) and SIGKILL
-    :data:`KILL_AFTER_SECONDS` later, through ``timeout`` from BusyBox or
-    coreutils. With a ``timeout`` that has no ``-k`` it sends only SIGTERM, and
-    in an image without ``timeout`` the command runs unbounded, as before.
-    The command's exit status is returned (BusyBox gives 143 when the
-    deadline stopped it, coreutils 124).
+    command SIGTERM at ``deadline`` (a Unix time) and SIGKILL ``kill_after``
+    seconds later (:data:`KILL_AFTER_SECONDS` by default), through ``timeout``
+    from BusyBox or coreutils. With a ``timeout`` that has no ``-k`` it sends
+    only SIGTERM, and in an image without ``timeout`` the command runs
+    unbounded, as before. The command's exit status is returned (BusyBox
+    gives 143 when the deadline stopped it, coreutils 124).
+
+    The lines also pass a stop request on: a shell waiting for a foreground
+    command runs its traps only after the command ends, so ``bounded`` runs
+    the command in the background and waits for it, and SIGTERM or SIGINT to
+    the script (``docker stop`` signals PID 1) is sent on to the command as
+    SIGTERM, once: a later request is not passed on, since OpenTofu and
+    Terraform exit at once, without saving, on a second interrupt. After a
+    stop request, ``bounded`` starts nothing new and returns
+    :data:`STOPPED_EXIT_STATUS`, also when the request came while it was
+    about to start the command. Works under ``set -eu``.
     """
-    kill = f"-k {KILL_AFTER_SECONDS}"
+    kill = f"-k {int(kill_after)}"
+    stopped = f'if [ -n "$hegemony_stopping" ]; then return {STOPPED_EXIT_STATUS}; fi'
     return [
         f"hegemony_deadline={int(deadline)}",
+        "hegemony_child=",
+        "hegemony_stopping=",
+        "hegemony_forwarded=",
+        # Only the first request is passed on: OpenTofu and Terraform take a
+        # second interrupt as "exit now", and two stoppers (the step's worker
+        # and the platform's container sweep) can each send one.
+        "hegemony_forward() {",
+        '  if [ -n "$hegemony_child" ] && [ -z "$hegemony_forwarded" ]; then',
+        "    hegemony_forwarded=yes",
+        '    kill -TERM "$hegemony_child" 2>/dev/null || :',
+        "  fi",
+        "}",
+        "hegemony_stop() {",
+        '  if [ -n "$hegemony_stopping" ]; then return 0; fi',
+        "  hegemony_stopping=yes",
+        "  hegemony_forward",
+        "}",
+        "trap hegemony_stop TERM INT",
         "bounded() {",
+        f"  {stopped}",
         "  left=$((hegemony_deadline - $(date +%s)))",
         '  if [ "$left" -lt 1 ]; then left=1; fi',
         "  if ! command -v timeout >/dev/null 2>&1; then",
-        '    "$@"',
+        "    hegemony_how=none",
         f"  elif timeout -s TERM {kill} 5 true >/dev/null 2>&1; then",
-        f'    timeout -s TERM {kill} "$left" "$@"',
+        "    hegemony_how=kill",
         "  else",
-        '    timeout -s TERM "$left" "$@"',
+        "    hegemony_how=term",
         "  fi",
+        # A request that came while the lines above ran found nothing to stop.
+        f"  {stopped}",
+        '  case "$hegemony_how" in',
+        '    none) "$@" & ;;',
+        f'    kill) timeout -s TERM {kill} "$left" "$@" & ;;',
+        '    *) timeout -s TERM "$left" "$@" & ;;',
+        "  esac",
+        "  hegemony_child=$!",
+        # Nor did one that came between the launch and the line above.
+        '  if [ -n "$hegemony_stopping" ]; then hegemony_forward; fi',
+        # A trapped signal ends wait early (status > 128) while the command
+        # still runs: wait again until it has exited and been reaped.
+        "  hegemony_status=0",
+        '  wait "$hegemony_child" || hegemony_status=$?',
+        '  while kill -0 "$hegemony_child" 2>/dev/null; do',
+        "    hegemony_status=0",
+        '    wait "$hegemony_child" || hegemony_status=$?',
+        "  done",
+        "  hegemony_child=",
+        '  return "$hegemony_status"',
         "}",
     ]
 
@@ -438,9 +511,11 @@ __all__ = [
     "IO_ROOT",
     "KILL_AFTER_SECONDS",
     "MAX_COLLECTED_BYTES",
+    "MAX_STOP_GRACE_SECONDS",
     "OUTPUT_DIR",
     "SECRET_FILES_DIR",
     "SECRET_NAME_RE",
+    "STOPPED_EXIT_STATUS",
     "ContainerExecutionConfig",
     "ContainerJob",
     "ContainerJobResult",

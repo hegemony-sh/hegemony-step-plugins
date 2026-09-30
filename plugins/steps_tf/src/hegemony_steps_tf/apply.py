@@ -5,7 +5,7 @@
 """``tf.apply``: apply exactly the plan a ``tf.plan`` step saved in this run.
 
 Nothing about the configuration is repeated: the apply runs in the plan step's
-working directory with the same image, so the lock file, providers, backend
+working directory with the same image (by digest), so the lock file, providers, backend
 settings, and variables are the ones that were planned (and, typically,
 approved). The tool itself refuses the saved plan if the state changed since it
 was made. Only provider credentials, which are never stored in a plan, are
@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, HandlerTargeting, StepKind
 from hegemony_steps_container.runner import (
+    KILL_AFTER_SECONDS,
     OUTPUT_DIR,
     ContainerJob,
     ContainerJobResult,
@@ -49,8 +50,9 @@ from .common import (
     script_header,
     secret_environment,
     shared_workspace_mounted,
-    step_deadline,
+    tool_deadline,
     tool_env,
+    tool_kill_after,
     workdir_for,
 )
 
@@ -90,7 +92,12 @@ class TfApplyConfig(TfContainerConfig):
 
 
 def build_apply_script(
-    engine: str, workdir: str, lock_timeout: str, *, deadline: int | None = None
+    engine: str,
+    workdir: str,
+    lock_timeout: str,
+    *,
+    deadline: int | None = None,
+    kill_after: int = KILL_AFTER_SECONDS,
 ) -> str:
     """Apply the saved plan in the plan step's working directory.
 
@@ -100,8 +107,9 @@ def build_apply_script(
     run, so the script saves the state again (``state push``, retried), and if
     that fails too keeps it as a run artifact instead of losing it.
 
-    With a ``deadline`` (a Unix time), the apply and the output read stop by
-    then. Saving the errored state again is not bounded: it is what a stopped
+    With a ``deadline`` (a Unix time), the apply and the output read get
+    SIGTERM then, and SIGKILL ``kill_after`` seconds later. Saving the errored
+    state again is not bounded: it is what a stopped
     apply leaves to save, its retries are bounded, and the step's state access
     outlives the deadline for it.
     """
@@ -121,7 +129,7 @@ def build_apply_script(
     return (
         "\n".join(
             [
-                *script_header(deadline),
+                *script_header(deadline, kill_after),
                 f"if [ ! -f {quoted_workdir}/{PLAN_FILE} ]; then",
                 f"  echo {shlex.quote(NO_PLAN_MESSAGE)} >&2",
                 f"  exit {EXIT_NO_PLAN}",
@@ -167,6 +175,7 @@ class PlanHandoff(BaseModel):
 
     engine: Engine
     image: str = Field(min_length=1)
+    image_digest: str = ""
     state: StateMode
     state_name: str = ""
     working_dir: str
@@ -284,7 +293,9 @@ class TfApplyHandler(BaseHandler):
                 return self._refuse(f"plan step {plan_step!r} reports managed state with no name")
 
         engine = handoff.engine
-        image = handoff.image.strip()
+        # The plan's image by digest: the same tool version, which a saved
+        # plan requires, even if the image's tag moved since.
+        image = handoff.image_digest.strip() or handoff.image.strip()
         workdir = handoff.working_dir
         timeout = container_timeout(ctx, config)
         try:
@@ -299,7 +310,7 @@ class TfApplyHandler(BaseHandler):
                         **container_config_from(
                             {**ctx.config, "timeout_seconds": timeout},
                             image=image,
-                            command=[f"sh {RUN_SCRIPT}"],
+                            command=[f"exec sh {RUN_SCRIPT}"],
                             entrypoint="/bin/sh",
                             env=tool_env(),
                         ),
@@ -312,12 +323,14 @@ class TfApplyHandler(BaseHandler):
                             engine,
                             workdir,
                             config.lock_timeout.strip(),
-                            step_deadline(timeout),
+                            tool_deadline(timeout, config.stop_grace_seconds),
+                            tool_kill_after(timeout, config.stop_grace_seconds),
                         ),
                     ],
                     collect=[OUTPUT_DIR],
                     handler_id=self.handler_id,
                     extra_hosts=dict(access.extra_hosts) if access else {},
+                    stop_grace_seconds=config.stop_grace_seconds,
                 )
                 outcome = await run_container_job(ctx, job)
         except (ValueError, RuntimeError) as exc:
@@ -406,6 +419,10 @@ def apply_failure(
     return f"{tool} apply exited with code {outcome.exit_code}; see the container output"
 
 
-def _script_file(engine: str, workdir: str, lock_timeout: str, deadline: int) -> StagedFile:
-    script = build_apply_script(engine, workdir, lock_timeout, deadline=deadline)
+def _script_file(
+    engine: str, workdir: str, lock_timeout: str, deadline: int, kill_after: int
+) -> StagedFile:
+    script = build_apply_script(
+        engine, workdir, lock_timeout, deadline=deadline, kill_after=kill_after
+    )
     return StagedFile(RUN_SCRIPT, script, mode=0o755)

@@ -9,7 +9,12 @@ from __future__ import annotations
 import argparse
 import re
 
-from package_paths import PACKAGE_DIRS, PLUGIN_DIRS, SDK_VERSION_FILE
+from package_paths import (
+    PACKAGE_DIRS,
+    PLUGIN_DIRS,
+    RUNNER_IMAGES,
+    SDK_VERSION_FILE,
+)
 
 SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[a-zA-Z0-9.+-]+)?$")
 
@@ -67,6 +72,30 @@ def _set_sibling_pins(pyproject, version: str) -> None:
     pyproject.write_text(set_sibling_pins(text, version), encoding="utf-8")
 
 
+def _runner_image_tag(repository: str) -> re.Pattern[str]:
+    """``repository:X.Y``, the tag that names a minor version.
+
+    A sentence may end right after it, but a patch version (``:0.6.0``) is not it.
+    """
+    return re.compile(re.escape(repository) + r":\d+\.\d+(?!\.?\d)")
+
+
+def set_runner_image_tag(text: str, version: str, repository: str) -> str:
+    """``text`` with every ``repository:X.Y`` naming the minor version of ``version``."""
+    minor = ".".join(version.split(".")[:2])
+    return _runner_image_tag(repository).sub(f"{repository}:{minor}", text)
+
+
+def _set_runner_image_tags(version: str) -> None:
+    for image in RUNNER_IMAGES:
+        for index, path in enumerate(image.files):
+            text = path.read_text(encoding="utf-8")
+            # The first file holds the step's default: losing it must not pass silently.
+            if index == 0 and not _runner_image_tag(image.repository).search(text):
+                raise SystemExit(f"Could not update {path}: {image.repository}:X.Y not found")
+            path.write_text(set_runner_image_tag(text, version, image.repository), encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("version", help="Release version without a leading v, e.g. 0.2.0")
@@ -90,6 +119,8 @@ def main() -> None:
         path=str(SDK_VERSION_FILE),
     )
     SDK_VERSION_FILE.write_text(text, encoding="utf-8")
+
+    _set_runner_image_tags(version)
 
 
 if __name__ == "__main__":

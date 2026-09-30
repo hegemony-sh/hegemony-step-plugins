@@ -88,6 +88,16 @@ through `hegemony_steps_container.runner` instead of copying
   `run_container_job`. A failed `HandlerResult` is a failure before or
   around the run; return it. A `ContainerJobResult` means the container
   ran, whatever its exit code.
+- **Stopping.** Start the run script with `exec` (`exec sh /hegemony/run.sh`)
+  so it is the container's PID 1, which `docker stop` signals, and run the
+  tool through `bounded` (`deadline_shell_lines`): it stops the tool at the
+  step's deadline even when the worker is gone, and passes a SIGTERM the
+  script receives on to the tool. A tool that must not be cut off mid-change
+  (it writes state, holds a lock) sets `ContainerJob.stop_grace_seconds`: a
+  cancelled step's container then gets SIGTERM and that long before it is
+  removed, instead of `docker rm -f`. Give the in-script deadline the same
+  margin before the step's timeout (`tool_deadline` in the tf wheel), and
+  let its kill wait out that whole margin (`tool_kill_after`).
 - **Step I/O.** `/hegemony` is reserved in every step container. Write
   structured results under `/hegemony/out` (collected after exit, at most
   8 MiB per job) and read them from `collected`; `collect_errors` tells a
@@ -97,6 +107,19 @@ through `hegemony_steps_container.runner` instead of copying
   the step or report it as unknown.
 - **Docs.** Each handler has its page under `docs/` in the wheel, and the
   wheel README names its handlers and links there.
+- **Default image and licences.** Declare the image a step pulls when its
+  author sets none as a module-level `DEFAULT_IMAGE` (a string) or
+  `DEFAULT_IMAGES` (a dict of strings) literal. `scripts/check_image_licenses.py`
+  reads those with `ast`, and every image they name, like every image,
+  package and collection a Dockerfile under `images/` uses, must have a
+  reviewed row in the matching `images/.*-allowed.txt`. An image the Images
+  workflow publishes also carries a `THIRD-PARTY-NOTICES.md` naming what it
+  installs, with the written source offer. See LICENSING.md.
+- **Code that runs inside a third-party tool.** A file the step stages into
+  the tool's own process (the Ansible callback plugin runs inside
+  `ansible-playbook`) forms one program with that tool. When the tool is
+  GPL, license the file MIT rather than AGPL, as `callback_plugin.py` is, and
+  keep it in its own module so the licence boundary is a file boundary.
 
 ## Decision rules for a new handler
 
@@ -127,6 +150,13 @@ surface — e.g. `container` is alone so hardened deployments can omit Docker
 execution entirely) and along growth axes (per-platform wheels for
 platform-specific workflows). Prefer a new wheel over widening a namespace's
 meaning.
+
+Every wheel declares its licence as an SPDX expression (`license =
+"AGPL-3.0-or-later"`) with `license-files = ["LICENSE-*.txt"]`, and carries a
+copy of `LICENSES/<id>.txt` as `LICENSE-<id>.txt` for each identifier, so the
+installed wheel has the texts under `*.dist-info/licenses/`. A new package gets
+them from `python scripts/package_licenses.py`; `task licenses:packages` and a
+test check they match.
 
 ## Plugin kinds and their entry-point groups
 

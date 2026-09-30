@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Verify a release tag matches every package version, SDK pin, and sibling-wheel pin."""
+"""Verify a release tag matches every package version, SDK pin, sibling-wheel pin, and image tag."""
 
 from __future__ import annotations
 
@@ -11,7 +11,12 @@ import os
 import re
 import tomllib
 
-from package_paths import PACKAGE_DIRS, PLUGIN_DIRS, SDK_VERSION_FILE
+from package_paths import (
+    PACKAGE_DIRS,
+    PLUGIN_DIRS,
+    RUNNER_IMAGES,
+    SDK_VERSION_FILE,
+)
 
 #: A requirement's name, extras and version constraint (markers split off first).
 REQUIREMENT = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*(.*)")
@@ -29,6 +34,27 @@ def sibling_pin_failure(package: str, dependency: str, version: str) -> str | No
     if not SIBLING_NAME.fullmatch(name) or "".join(match.group(3).split()) == f"=={version}":
         return None
     return f"{package} must pin {name}=={version}, not {dependency}"
+
+
+def runner_image_failures(path, text: str, version: str, repository: str) -> list[str]:
+    """Why ``text`` names a ``repository`` tag other than ``version``'s X.Y."""
+    minor = ".".join(version.split(".")[:2])
+    tags = re.findall(re.escape(repository) + r":([0-9][0-9.]*[0-9])", text)
+    return [
+        f"{path} names {repository}:{tag}, expected {repository}:{minor}"
+        for tag in sorted(set(tags))
+        if tag != minor
+    ]
+
+
+def default_image_failure(image) -> str | None:
+    """Why the step that ``image`` is the default of does not name it."""
+    default = re.search(
+        image.default_pattern, image.files[0].read_text(encoding="utf-8"), re.MULTILINE
+    )
+    if default is None or not default.group(1).startswith(f"{image.repository}:"):
+        return f"{image.files[0]} must default to {image.repository}:X.Y"
+    return None
 
 
 def _project_metadata(pyproject) -> dict:
@@ -72,6 +98,14 @@ def main() -> None:
     match = re.search(r'^__version__ = "([^"]+)"$', sdk_version_text, re.MULTILINE)
     if match is None or match.group(1) != version:
         failures.append(f"{SDK_VERSION_FILE} __version__ must be {version}")
+
+    for image in RUNNER_IMAGES:
+        for path in image.files:
+            text = path.read_text(encoding="utf-8")
+            failures.extend(runner_image_failures(path, text, version, image.repository))
+        failure = default_image_failure(image)
+        if failure:
+            failures.append(failure)
 
     if failures:
         raise SystemExit("\n".join(failures))

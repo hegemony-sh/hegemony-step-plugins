@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 from types import SimpleNamespace
@@ -102,6 +103,7 @@ def _install_docker(
     out_links: dict[str, str] | None = None,
     collect_returncode: int = 0,
     exit_code: int = 0,
+    repo_digests: list[str] | None = None,
 ) -> dict[str, Any]:
     """Fake the docker CLI: record staged roots, serve collected files.
 
@@ -109,6 +111,7 @@ def _install_docker(
     ``state["dirs"]`` each staged directory to its mode. ``out_links`` adds
     symlinks (name -> target) to the collected copy, as ``docker cp`` would
     preserve them; ``collect_returncode`` makes the copy-out fail.
+    ``repo_digests`` is the pulled image's RepoDigests (none by default).
     """
     state: dict[str, Any] = {"roots": {}, "dirs": {}, "calls": [], "collect_sources": []}
     monkeypatch.setattr(
@@ -118,6 +121,8 @@ def _install_docker(
 
     def fake_run(cmd, *args, **kwargs):
         state["calls"].append(list(cmd))
+        if cmd[1:3] == ["image", "inspect"] and "{{json .RepoDigests}}" in cmd:
+            return SimpleNamespace(returncode=0, stdout=json.dumps(repo_digests or []), stderr="")
         if len(cmd) >= 4 and cmd[1] == "cp":
             src, dest = cmd[2], cmd[3]
             if dest.endswith(":/"):
@@ -370,6 +375,56 @@ async def test_run_container_job_stages_files_and_collects(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("image", "repo_digests", "pinned"),
+    [
+        (
+            "ghcr.io/x/tool:1",
+            ["registry.example.com/x/tool@sha256:aaa", "ghcr.io/x/tool@sha256:bbb"],
+            "ghcr.io/x/tool@sha256:bbb",
+        ),
+        # The daemon writes Docker Hub names short; the image keeps its spelling.
+        (
+            "docker.io/library/python:3.12",
+            ["python@sha256:ccc"],
+            "docker.io/library/python@sha256:ccc",
+        ),
+        ("python", ["python@sha256:ccc"], "python@sha256:ccc"),
+        # Built on the daemon, never pushed: no digest, the tag runs.
+        ("tool:local", [], ""),
+        # Already pinned: nothing to look up.
+        ("ghcr.io/x/tool@sha256:ddd", [], "ghcr.io/x/tool@sha256:ddd"),
+    ],
+)
+async def test_a_pinned_job_runs_and_reports_the_image_digest(
+    monkeypatch, image, repo_digests, pinned
+):
+    state = _install_docker(monkeypatch, repo_digests=repo_digests)
+    job = ContainerJob(
+        config=container_config_from({}, image=image, command=["true"]), pin_image=True
+    )
+    outcome = await run_container_job(_ctx({}), job)
+
+    assert isinstance(outcome, ContainerJobResult)
+    assert outcome.image_digest == pinned
+    assert outcome.image == image
+    # The container is created from the digest, which a later pull cannot move.
+    assert (pinned or image) in _create_args(state)
+
+
+@pytest.mark.asyncio
+async def test_an_unpinned_job_does_not_look_up_the_digest(monkeypatch):
+    state = _install_docker(monkeypatch, repo_digests=["ghcr.io/x/tool@sha256:bbb"])
+    job = ContainerJob(config=container_config_from({}, image="ghcr.io/x/tool:1", command=["true"]))
+    outcome = await run_container_job(_ctx({}), job)
+
+    assert isinstance(outcome, ContainerJobResult)
+    assert outcome.image_digest == ""
+    assert not any("{{json .RepoDigests}}" in call for call in state["calls"])
+    assert "ghcr.io/x/tool:1" in _create_args(state)
+
+
+@pytest.mark.asyncio
 async def test_run_container_job_validates_the_job_config(monkeypatch):
     state = _install_docker(monkeypatch)
     outcome = await run_container_job(
@@ -523,3 +578,113 @@ def test_bounded_runs_the_command_unbounded_without_timeout(tmp_path):
         (tmp_path / tool).symlink_to(found)
     code, _ = _run_bounded("bounded sh -c 'exit 5'", int(time.time()) + 60, str(tmp_path))
     assert code == 5
+
+
+def test_bounded_passes_a_stop_request_on_to_the_command(tmp_path):
+    """``docker stop`` signals the script (PID 1); the tool must get it, not wait for SIGKILL.
+
+    A shell waiting for a foreground command would run its trap only after the
+    command ends. The tool here saves and exits 7 on SIGTERM; after the stop
+    request the script starts nothing new and keeps the tool's status.
+    """
+    ready = tmp_path / "ready"
+    tool = (
+        'sh -c \'trap "echo tool: saved; exit 7" TERM; '
+        f": > {ready}; i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done; exit 0'"
+    )
+    script = "\n".join(
+        [
+            "set -eu",
+            *deadline_shell_lines(int(time.time()) + 600),
+            "set +e",
+            f"bounded {tool}",
+            "code=$?",
+            "bounded echo 'started after the stop request'",
+            'echo "second: $?"',
+            'exit "$code"',
+        ]
+    )
+    proc = subprocess.Popen(["sh", "-c", script], stdout=subprocess.PIPE, text=True)
+    started = time.monotonic()
+    while not ready.exists():
+        assert time.monotonic() - started < 10, "the tool never started"
+        time.sleep(0.05)
+    proc.send_signal(signal.SIGTERM)
+    out, _ = proc.communicate(timeout=10)
+
+    assert proc.returncode == 7
+    assert "tool: saved" in out
+    assert "started after the stop request" not in out
+    assert "second: 143" in out
+    assert time.monotonic() - started < 10
+
+
+def test_bounded_starts_nothing_when_stopped_while_it_prepares(tmp_path):
+    """A stop request that comes while ``bounded`` works out the time left
+    (the trap runs only after ``date`` returns) must still keep the command
+    from starting."""
+    started = tmp_path / "started"
+    script = "\n".join(
+        [
+            "set -eu",
+            # Stand-in for a SIGTERM that lands while bounded runs date.
+            'date() { kill -TERM "$$"; command date "$@"; }',
+            *deadline_shell_lines(int(time.time()) + 600),
+            "set +e",
+            f"bounded touch {started}",
+            'echo "status: $?"',
+        ]
+    )
+    done = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
+
+    assert "status: 143" in done.stdout
+    assert not started.exists()
+
+
+def test_bounded_passes_on_a_stop_request_that_came_as_the_command_started(tmp_path):
+    """The command asks for the stop itself, right as it starts, before or
+    after ``bounded`` has noted its process id: it must get one SIGTERM."""
+    for tool in ("sh", "date", "true", "sleep"):
+        found = shutil.which(tool)
+        assert found is not None
+        (tmp_path / tool).symlink_to(found)
+    terms = tmp_path / "terms"
+    # Without a timeout command, the command is the script's own child.
+    tool = (
+        f'sh -c \'trap "echo TERM >> {terms}; exit 7" TERM; kill -TERM "$PPID"; '
+        "i=0; while [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; exit 0'"
+    )
+    code, took = _run_bounded(f"bounded {tool}", int(time.time()) + 600, str(tmp_path))
+
+    assert code == 7
+    assert terms.read_text().splitlines() == ["TERM"]
+    assert took < 8
+
+
+def test_bounded_passes_on_only_the_first_stop_request(tmp_path):
+    """A second interrupt makes OpenTofu and Terraform exit without saving.
+
+    The step's worker and the platform's container sweep may both stop the
+    same container: the tool must see one SIGTERM, whatever the script gets.
+    """
+    ready = tmp_path / "ready"
+    terms = tmp_path / "terms"
+    tool = (
+        f'sh -c \'trap "echo TERM >> {terms}" TERM; : > {ready}; '
+        "i=0; while [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; exit 9'"
+    )
+    script = "\n".join(
+        ["set -eu", *deadline_shell_lines(int(time.time()) + 600), f"bounded {tool}"]
+    )
+    proc = subprocess.Popen(["sh", "-c", script])
+    started = time.monotonic()
+    while not ready.exists():
+        assert time.monotonic() - started < 10, "the tool never started"
+        time.sleep(0.05)
+    proc.send_signal(signal.SIGTERM)
+    time.sleep(0.3)
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=10)
+
+    assert proc.returncode == 9
+    assert terms.read_text().splitlines() == ["TERM"]

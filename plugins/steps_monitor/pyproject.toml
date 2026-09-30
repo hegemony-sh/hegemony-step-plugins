@@ -7,7 +7,8 @@ name = "hegemony-steps-monitor"
 version = "0.6.0"
 description = "Background connectivity-monitor step handlers for Hegemony"
 readme = "README.md"
-license = { text = "AGPL-3.0-or-later" }
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
     "hegemony-step-sdk==0.6.0",

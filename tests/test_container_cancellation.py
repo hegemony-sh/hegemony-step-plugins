@@ -183,3 +183,113 @@ async def test_cancelled_step_mid_stream_leaves_no_tasks_behind(monkeypatch) -> 
     # nothing from the step is still running.
     await asyncio.sleep(0.05)
     assert not _leaked_tasks(), "cancelled step left helper tasks running"
+
+
+def _record_docker_calls(monkeypatch) -> tuple[asyncio.Event, list[_AttachedProc], list[list[str]]]:
+    """``_install_mocks``, keeping every one-shot docker call's argv in order."""
+    started, procs = _install_mocks(monkeypatch, stream_cls=_EmptyStream)
+    calls: list[list[str]] = []
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        argv = list(cmd)
+        calls.append(argv)
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout="120000000\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_subprocess_run)
+    return started, procs, calls
+
+
+async def _cancel_job(monkeypatch, stop_grace_seconds: int) -> list[list[str]]:
+    from hegemony_steps_container.runner import ContainerJob, run_container_job
+
+    started, _, calls = _record_docker_calls(monkeypatch)
+    job = ContainerJob(
+        config={"image": "alpine:3.20", "command": ["echo hi"]},
+        handler_id="tf.apply",
+        stop_grace_seconds=stop_grace_seconds,
+    )
+    task = asyncio.create_task(run_container_job(_ctx(), job))
+    await asyncio.wait_for(started.wait(), timeout=10)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await _cancel_and_await(task)
+    return calls
+
+
+async def test_cancelled_job_with_a_stop_grace_is_stopped_before_it_is_removed(monkeypatch) -> None:
+    """SIGTERM and the grace period first, so a tf apply can save its state and unlock."""
+    calls = await _cancel_job(monkeypatch, stop_grace_seconds=45)
+
+    create = next(argv for argv in calls if argv[1:2] == ["create"])
+    assert create[create.index("--stop-signal") + 1] == "SIGTERM"
+    assert create[create.index("--stop-timeout") + 1] == "45"
+    name = create[create.index("--name") + 1]
+    stop = calls.index(["docker", "stop", "-t", "45", name])
+    remove = calls.index(["docker", "rm", "-f", name])
+    assert stop < remove
+
+
+async def test_cancelled_job_without_a_stop_grace_is_removed_at_once(monkeypatch) -> None:
+    calls = await _cancel_job(monkeypatch, stop_grace_seconds=0)
+
+    assert not any(argv[1:2] == ["stop"] for argv in calls)
+    create = next(argv for argv in calls if argv[1:2] == ["create"])
+    assert "--stop-signal" not in create
+    assert ["docker", "rm", "-f", create[create.index("--name") + 1]] in calls
+
+
+async def test_a_second_cancellation_waits_for_the_graceful_stop(monkeypatch) -> None:
+    """The worker shutting down cancels again mid-stop: the removal still waits.
+
+    Removing the container before ``docker stop`` returns would kill a tf
+    apply that is still saving its state.
+    """
+    import subprocess
+    import threading
+
+    from hegemony_steps_container.runner import ContainerJob, run_container_job
+
+    started, _, calls = _record_docker_calls(monkeypatch)
+    record = subprocess.run  # the recording fake from _record_docker_calls
+    stopping = threading.Event()
+    release = threading.Event()
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        argv = list(cmd)
+        if argv[1:2] == ["stop"]:
+            calls.append(argv)
+            stopping.set()
+            assert release.wait(timeout=10), "the test never released the stop"
+            calls.append(["stop finished"])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return record(cmd, *args, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", fake_subprocess_run)
+    job = ContainerJob(
+        config={"image": "alpine:3.20", "command": ["echo hi"]},
+        handler_id="tf.apply",
+        stop_grace_seconds=45,
+    )
+    task = asyncio.create_task(run_container_job(_ctx(), job))
+    await asyncio.wait_for(started.wait(), timeout=10)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    task.cancel()
+    assert await asyncio.to_thread(stopping.wait, 10), "the cancelled job was never stopped"
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert not task.done(), "a second cancellation cut the graceful stop short"
+    assert not any(argv[1:2] == ["rm"] for argv in calls)
+
+    release.set()
+    try:
+        await asyncio.wait_for(task, timeout=10)
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("cancellation should propagate out of the job")
+    remove = next(i for i, argv in enumerate(calls) if argv[1:2] == ["rm"])
+    assert calls.index(["stop finished"]) < remove

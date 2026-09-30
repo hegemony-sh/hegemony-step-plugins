@@ -43,6 +43,8 @@ from hegemony_steps_tf.common import (
     BACKEND_CONFIG_FILE,
     BACKEND_OVERRIDE_FILE,
     DEFAULT_IMAGES,
+    DEFAULT_STOP_GRACE_SECONDS,
+    HOLD_UNSUPPORTED_MESSAGE,
     KEEP_DIR,
     MAX_OUTPUT_VALUE_BYTES,
     PLAN_TEXT_MISSING_NOTE,
@@ -57,6 +59,8 @@ from hegemony_steps_tf.common import (
     lock_conflict_error,
     lock_timeout_errors,
     public_outputs,
+    tool_deadline,
+    tool_kill_after,
     typed_variable,
     workdir_for,
 )
@@ -411,14 +415,19 @@ class _Services:
         return "resolved-" + ref.split("/")[-1].split("'")[0] + "-long-enough"
 
     opened: list[tuple[str, int]] = []
+    held: list[str] = []
     closed: list[str] = []
     state_error: str = ""
 
     @asynccontextmanager
-    async def open_state_backend(self, name: str, *, ttl_seconds: int):
+    async def open_state_backend(
+        self, name: str, *, ttl_seconds: int, hold_until_apply: bool = False
+    ):
         if self.state_error:
             raise RuntimeError(self.state_error)
         self.opened = [*self.opened, (name, ttl_seconds)]
+        if hold_until_apply:
+            self.held = [*self.held, name]
         self.events.append(("open", name))
         try:
             yield StateBackendAccess(
@@ -440,9 +449,11 @@ def _install_docker(
     out: dict[str, bytes],
     exit_code: int = 0,
     events: list[Any] | None = None,
+    repo_digests: list[str] | None = None,
 ) -> dict[str, Any]:
     """Fake docker. ``events`` (a _Services' log) records the staging of the
-    container's files and the container start among the state access events."""
+    container's files and the container start among the state access events.
+    ``repo_digests`` is the pulled image's RepoDigests (none by default)."""
     state: dict[str, Any] = {"roots": {}, "calls": [], "exec": 0, "collected": []}
     events = events if events is not None else []
     monkeypatch.setattr(
@@ -452,6 +463,8 @@ def _install_docker(
 
     def fake_run(cmd, *args, **kwargs):
         state["calls"].append(list(cmd))
+        if cmd[1:3] == ["image", "inspect"] and "{{json .RepoDigests}}" in cmd:
+            return SimpleNamespace(returncode=0, stdout=json.dumps(repo_digests or []), stderr="")
         if len(cmd) >= 4 and cmd[1] == "cp":
             src, dest = cmd[2], cmd[3]
             if dest.endswith(":/"):
@@ -564,7 +577,8 @@ async def test_plan_step_reports_changes(monkeypatch):
     assert "hegemony.handler_id=tf.plan" in create
     assert not any("resolved-" in part for part in create)
     assert "TF_IN_AUTOMATION=1" in create
-    assert f"sh {RUN_SCRIPT}" in create[-1]
+    assert create[-1].endswith(f"exec sh {RUN_SCRIPT}")
+    assert create[create.index("--stop-timeout") + 1] == str(DEFAULT_STOP_GRACE_SECONDS)
     # The exit code and the readable plan are collected before the JSON plan.
     assert state["collected"][:3] == ["/hegemony/out", PLAN_OUTPUTS_DIR, PLAN_JSON_DIR]
 
@@ -782,6 +796,73 @@ async def test_state_access_lasts_as_long_as_the_container(
     assert [job.config["timeout_seconds"] for job in jobs] == [expected]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "config", "grace"),
+    [
+        (TfPlanHandler, {"state": "ephemeral"}, DEFAULT_STOP_GRACE_SECONDS),
+        (TfApplyHandler, {"plan_step": "plan"}, DEFAULT_STOP_GRACE_SECONDS),
+        (TfApplyHandler, {"plan_step": "plan", "stop_grace_seconds": 600}, 600),
+        (TfPlanHandler, {"state": "ephemeral", "stop_grace_seconds": 0}, 0),
+    ],
+)
+async def test_tool_steps_stop_gracefully_as_pid_1(monkeypatch, handler, config, grace):
+    """Cancelled mid-apply, the tool gets SIGTERM and the grace period (not docker rm -f)
+    to save its state and unlock; exec makes the run script the PID 1 docker stop signals."""
+    jobs = []
+
+    async def fake_run_container_job(ctx, job):
+        jobs.append(job)
+        return HandlerResult(success=False, error="stopped before the container")
+
+    monkeypatch.setattr(f"{handler.__module__}.run_container_job", fake_run_container_job)
+    await handler().execute(_ctx(config, _Services(_plan_output(state="ephemeral")), timeout=3600))
+
+    assert [job.stop_grace_seconds for job in jobs] == [grace]
+    assert jobs[0].config["command"] == [f"exec sh {RUN_SCRIPT}"]
+    script = next(str(file.content) for file in jobs[0].files if file.path == RUN_SCRIPT)
+    assert f"-k {max(300, grace)} " in script
+
+
+@pytest.mark.parametrize(
+    ("timeout", "grace", "interrupt_after"),
+    [
+        (3600, 120, 3480),
+        (3600, 0, 3600),
+        # At most half the timeout goes to stopping.
+        (600, 3600, 300),
+        (1, 120, 1),
+    ],
+)
+def test_the_tool_is_interrupted_a_grace_period_before_the_step_timeout(
+    monkeypatch, timeout, grace, interrupt_after
+):
+    monkeypatch.setattr("hegemony_steps_tf.common.time.time", lambda: 1_000_000.0)
+    assert tool_deadline(timeout, grace) == 1_000_000 + interrupt_after
+
+
+@pytest.mark.parametrize(
+    ("timeout", "grace", "kill_after"),
+    [
+        (3600, 120, 300),
+        (3600, 0, 300),
+        (3600, 600, 600),
+        # The grace is capped at half the timeout, and so is the wait for the kill.
+        (1200, 3600, 600),
+        (400, 3600, 300),
+    ],
+)
+def test_the_tool_is_killed_only_once_its_grace_period_has_passed(timeout, grace, kill_after):
+    """SIGKILL must not cut a long stop grace short: the kill waits for all of it."""
+    assert tool_kill_after(timeout, grace) == kill_after
+
+
+@pytest.mark.parametrize("value", [-1, 3601])
+def test_stop_grace_is_bounded(value):
+    errors = TfPlanHandler().validate_config({"state": "ephemeral", "stop_grace_seconds": value})
+    assert any("stop_grace_seconds" in error for error in errors), errors
+
+
 @pytest.mark.parametrize(
     ("handler", "config", "refused"),
     [
@@ -829,6 +910,49 @@ async def test_state_access_is_clamped_for_a_long_policy_timeout(monkeypatch, ha
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "held"),
+    [
+        ({"state_name": "core"}, False),
+        ({"state_name": "core", "hold_until_apply": True}, True),
+        # Hidden (and ignored) without managed state: no hold, and no error either.
+        ({"state": "ephemeral", "hold_until_apply": True}, False),
+    ],
+)
+async def test_plan_step_holds_the_state_until_apply_only_when_asked(monkeypatch, config, held):
+    services = _Services()
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+
+    result = await TfPlanHandler().execute(_ctx(config, services))
+
+    assert result.success is True, result.error
+    assert services.held == (["core"] if held else [])
+    assert result.output["state_held"] is held
+
+
+@pytest.mark.asyncio
+async def test_a_hold_on_a_platform_that_predates_it_fails_with_the_reason(monkeypatch):
+    state = _install_docker(monkeypatch, out={})
+
+    class OldPlatform(_Services):
+        @asynccontextmanager
+        async def open_state_backend(self, name: str, *, ttl_seconds: int):  # type: ignore[override]
+            yield None
+
+    old = OldPlatform()
+    result = await TfPlanHandler().execute(
+        _ctx({"state_name": "core", "hold_until_apply": True}, old)
+    )
+    assert result.success is False
+    assert result.error == HOLD_UNSUPPORTED_MESSAGE
+    assert state["calls"] == []
+    # Without the hold, the same platform works as before.
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    old_result = await TfPlanHandler().execute(_ctx({"state_name": "core"}, _Services()))
+    assert old_result.success is True, old_result.error
+
+
+@pytest.mark.asyncio
 async def test_plan_step_reports_unavailable_managed_state(monkeypatch):
     state = _install_docker(monkeypatch, out={})
     services = _Services()
@@ -853,6 +977,25 @@ async def test_plan_step_short_encryption_key_is_refused(monkeypatch):
     assert result.success is False
     assert "at least 16 characters" in (result.error or "")
     assert state["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_plan_step_records_its_image_by_digest(monkeypatch):
+    image = DEFAULT_IMAGES["opentofu"]
+    repository = image.rsplit(":", 1)[0]
+    state = _install_docker(
+        monkeypatch,
+        out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"},
+        repo_digests=[f"{repository}@sha256:{'a' * 64}"],
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+
+    assert result.success is True, result.error
+    assert result.output["image"] == image
+    assert result.output["image_digest"] == f"{repository}@sha256:{'a' * 64}"
+    # The plan ran the very image it hands to the apply.
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert f"{repository}@sha256:{'a' * 64}" in create
 
 
 def _plan_output(**overrides: Any) -> dict[str, Any]:
@@ -898,6 +1041,24 @@ async def test_apply_step_applies_the_saved_plan(monkeypatch):
     assert "hegemony.handler_id=tf.apply" in create
     assert "cd /shared/tf/plan" in state["roots"][RUN_SCRIPT]
     assert "\nbounded tofu apply" in state["roots"][RUN_SCRIPT]
+
+
+@pytest.mark.asyncio
+async def test_apply_step_runs_the_plan_image_by_digest(monkeypatch):
+    pinned = f"ghcr.io/hegemony-sh/opentofu-runner@sha256:{'b' * 64}"
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"})
+    services = _Services(
+        _plan_output(image="ghcr.io/hegemony-sh/opentofu-runner:0.6", image_digest=pinned)
+    )
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+
+    assert result.success is True, result.error
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert pinned in create
+    assert "ghcr.io/hegemony-sh/opentofu-runner:0.6" not in create
+    assert result.metrics["image"] == pinned
+    # The apply does not look the digest up again.
+    assert not any("{{json .RepoDigests}}" in call for call in state["calls"])
 
 
 def _without(key: str) -> dict[str, Any]:

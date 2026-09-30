@@ -210,7 +210,7 @@ class HandlerServices(Protocol):
         ...
 
     def open_state_backend(
-        self, name: str, *, ttl_seconds: int
+        self, name: str, *, ttl_seconds: int, hold_until_apply: bool = False
     ) -> AbstractAsyncContextManager[StateBackendAccess]:
         """Open access to the run org's managed state ``name`` for this step's container.
 
@@ -218,6 +218,11 @@ class HandlerServices(Protocol):
         on first write. Access lasts at most ``ttl_seconds`` and is revoked when
         the context exits. Raises ``RuntimeError`` when the platform cannot serve
         managed state (no encryption key configured, API unreachable).
+
+        With ``hold_until_apply``, the lock the step's tool takes also holds the
+        state for the run until the run applies or ends: meanwhile only the run's
+        own steps can lock or write it. A platform older than this parameter
+        raises ``TypeError``; pass it only when set.
         """
         ...
 

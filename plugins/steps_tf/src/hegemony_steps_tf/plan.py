@@ -30,6 +30,7 @@ from hegemony_step_sdk import (
     StepKind,
 )
 from hegemony_steps_container.runner import (
+    KILL_AFTER_SECONDS,
     OUTPUT_DIR,
     ContainerJob,
     ContainerJobResult,
@@ -72,8 +73,9 @@ from .common import (
     secret_environment,
     shared_workspace_mounted,
     state_name_errors,
-    step_deadline,
+    tool_deadline,
     tool_env,
+    tool_kill_after,
     typed_variable,
     variable_map_errors,
     workdir_for,
@@ -141,6 +143,17 @@ class TfPlanConfig(TfContainerConfig):
             "x_placeholder": "network-core",
             "x_show_when": {"field": "state", "value": "managed"},
         },
+    )
+    hold_until_apply: bool = Field(
+        default=False,
+        title="Hold the state until apply",
+        description=(
+            "Keep the managed state for this run from this plan until the run applies or "
+            "ends: meanwhile other runs and people cannot lock or change it, so the plan "
+            "stays valid while the run waits (for an approval, say). Every other flow using "
+            "the state waits that long."
+        ),
+        json_schema_extra={"x_show_when": {"field": "state", "value": "managed"}},
     )
     backend_config: dict[str, str] = Field(
         default_factory=dict,
@@ -233,9 +246,14 @@ class TfPlanConfig(TfContainerConfig):
         default="",
         title="Image",
         description=(
-            "Container image with the tool. Leave empty for the engine's pinned official image."
+            "Container image with the tool, run as root with a POSIX sh. Leave empty for "
+            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.6 for OpenTofu, "
+            "hashicorp/terraform at a pinned version for Terraform."
         ),
-        json_schema_extra={"x_placeholder": "ghcr.io/opentofu/opentofu:1.12.6", "x_advanced": True},
+        json_schema_extra={
+            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.6",
+            "x_advanced": True,
+        },
     )
 
 
@@ -246,10 +264,12 @@ def build_plan_script(
     has_vars: bool,
     has_secret_vars: bool,
     deadline: int | None = None,
+    kill_after: int = KILL_AFTER_SECONDS,
 ) -> str:
     """Copy the configuration into the working directory, init, validate, plan.
 
-    With a ``deadline`` (a Unix time), every tool call stops by then.
+    With a ``deadline`` (a Unix time), every tool call gets SIGTERM then, and
+    SIGKILL ``kill_after`` seconds later.
     """
     tf = BINARIES[config.engine]
     run = "" if deadline is None else "bounded "
@@ -284,7 +304,7 @@ def build_plan_script(
 
     quoted_workdir = shlex.quote(workdir)
     lines = [
-        *script_header(deadline),
+        *script_header(deadline, kill_after),
         f"rm -rf {quoted_workdir}",
         f"mkdir -p {quoted_workdir}",
         f"cp -R {shlex.quote(source)}/. {quoted_workdir}/",
@@ -388,15 +408,22 @@ class TfPlanHandler(BaseHandler):
         timeout = container_timeout(ctx, config)
 
         try:
-            async with managed_state_access(ctx, state_name, timeout) as access:
+            async with managed_state_access(
+                ctx, state_name, timeout, hold_until_apply=config.hold_until_apply
+            ) as access:
                 files, env_files = await self._files(
-                    ctx, config, workdir, access, step_deadline(timeout)
+                    ctx,
+                    config,
+                    workdir,
+                    access,
+                    tool_deadline(timeout, config.stop_grace_seconds),
+                    tool_kill_after(timeout, config.stop_grace_seconds),
                 )
                 job = ContainerJob(
                     config=container_config_from(
                         {**ctx.config, "timeout_seconds": timeout},
                         image=image,
-                        command=[f"sh {RUN_SCRIPT}"],
+                        command=[f"exec sh {RUN_SCRIPT}"],
                         entrypoint="/bin/sh",
                         env=tool_env(),
                     ),
@@ -404,6 +431,10 @@ class TfPlanHandler(BaseHandler):
                     collect=[OUTPUT_DIR, PLAN_OUTPUTS_DIR, PLAN_JSON_DIR],
                     handler_id=self.handler_id,
                     extra_hosts=dict(access.extra_hosts) if access else {},
+                    stop_grace_seconds=config.stop_grace_seconds,
+                    # tf.apply must run the same tool version: a saved plan is
+                    # refused by any other, and the image's tag may move.
+                    pin_image=True,
                 )
                 outcome = await run_container_job(ctx, job)
         except (ValueError, RuntimeError) as exc:
@@ -421,6 +452,7 @@ class TfPlanHandler(BaseHandler):
         workdir: str,
         access: StateBackendAccess | None,
         deadline: int,
+        kill_after: int,
     ) -> tuple[list[StagedFile], list[StagedFile]]:
         files: list[StagedFile] = []
         if config.state == "managed":
@@ -458,6 +490,7 @@ class TfPlanHandler(BaseHandler):
                     has_vars=bool(config.vars),
                     has_secret_vars=bool(secret_vars),
                     deadline=deadline,
+                    kill_after=kill_after,
                 ),
                 mode=0o755,
             )
@@ -576,8 +609,13 @@ class TfPlanHandler(BaseHandler):
             "summary": summary,
             "engine": config.engine,
             "image": image,
+            # The image by digest, which tf.apply runs; empty for an image the
+            # registry never saw (built on the sandbox daemon).
+            "image_digest": outcome.image_digest,
             "state": config.state,
             "state_name": config.state_name.strip() if config.state == "managed" else "",
+            # The run holds the state until it applies or ends (managed state only).
+            "state_held": config.state == "managed" and config.hold_until_apply,
             "working_dir": workdir,
             "apply_ready": apply_ready,
             "outputs": outputs,

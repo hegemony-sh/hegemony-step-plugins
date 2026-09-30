@@ -21,14 +21,9 @@ before an approval.
 The playbook runs on the platform's Docker-in-Docker sandbox through
 `container.run`'s runner (this wheel depends on `hegemony-steps-container`),
 under the flow's egress policy. The default execution image,
-`ghcr.io/hegemony-sh/ansible-runner:0.5`, is built from `images/ansible-runner/`
-in this repository and is not published by the release: build and push it to
-a registry the sandbox can pull from before the first run,
-
-```sh
-docker build -t ghcr.io/hegemony-sh/ansible-runner:0.5 images/ansible-runner
-docker push ghcr.io/hegemony-sh/ansible-runner:0.5
-```
-
-or push it under your own registry's tag and set the step's Execution image.
+`ghcr.io/hegemony-sh/ansible-runner:0.6`, is built from `images/ansible-runner/`
+in this repository and published on ghcr.io with every release (tagged
+`X.Y.Z` and `X.Y`; the step names its own minor version). To add collections
+or host it yourself, build it from `images/ansible-runner/`, push it under
+your own tag, and set the step's Execution image.
 Any Ansible execution environment image works.

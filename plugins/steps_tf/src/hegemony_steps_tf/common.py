@@ -30,6 +30,8 @@ from pydantic import BeforeValidator, Field
 from hegemony_step_sdk import HandlerContext, StateBackendAccess
 from hegemony_steps_container.run import RunContainerHandler
 from hegemony_steps_container.runner import (
+    KILL_AFTER_SECONDS,
+    MAX_STOP_GRACE_SECONDS,
     OUTPUT_DIR,
     ContainerExecutionConfig,
     StagedFile,
@@ -66,11 +68,15 @@ LockTimeout = Annotated[
     ),
 ]
 
-#: Exact, immutable default images. OpenTofu's image has sh and bash (its docs
-#: prefer copying the binary into your own image — images/opentofu-runner does
-#: that); HashiCorp's has busybox sh. Both run as root.
+#: Default images. OpenTofu's docs ask for the binary to be copied into your own
+#: image rather than their image run directly: ours is built from
+#: images/opentofu-runner, pins the OpenTofu version there, and names this
+#: release's minor version (scripts/set_version.py moves it). HashiCorp's image
+#: is used as published, at an exact version. Both run as root, so they can
+#: write the run's shared workspace, and have a POSIX sh with ``timeout``.
+#: tf.plan records the image's digest and tf.apply runs that.
 DEFAULT_IMAGES: dict[str, str] = {
-    "opentofu": "ghcr.io/opentofu/opentofu:1.12.6",
+    "opentofu": "ghcr.io/hegemony-sh/opentofu-runner:0.6",
     "terraform": "hashicorp/terraform:1.16.4",
 }
 BINARIES: dict[str, str] = {"opentofu": "tofu", "terraform": "terraform"}
@@ -118,8 +124,27 @@ MAX_STATE_ACCESS_SECONDS = 86400
 MAX_MANAGED_STATE_TIMEOUT = MAX_STATE_ACCESS_SECONDS - STATE_ACCESS_MARGIN_SECONDS
 
 
+#: Default time a tool gets to stop cleanly after SIGTERM (see ``stop_grace_seconds``).
+DEFAULT_STOP_GRACE_SECONDS = 120
+
+
 class TfContainerConfig(ContainerExecutionConfig):
-    """Fields both steps share: provider credentials and the image override."""
+    """Fields both steps share: provider credentials, the image override, stopping."""
+
+    stop_grace_seconds: int = Field(
+        default=DEFAULT_STOP_GRACE_SECONDS,
+        ge=0,
+        le=MAX_STOP_GRACE_SECONDS,
+        title="Stop grace period (seconds)",
+        description=(
+            "How long the tool gets to stop cleanly when the step is cancelled or reaches "
+            "its timeout: it receives SIGTERM, lets the changes in progress finish, saves "
+            "the state and releases the lock, and is killed only after this time. At a "
+            "timeout the time comes out of the step's timeout (at most half of it). 0 "
+            "stops the tool at once."
+        ),
+        json_schema_extra={"x_advanced": True},
+    )
 
     secret_env: dict[str, str] = Field(
         default_factory=dict,
@@ -259,11 +284,17 @@ def container_timeout(ctx: HandlerContext, config: ContainerExecutionConfig) -> 
 
 @asynccontextmanager
 async def managed_state_access(
-    ctx: HandlerContext, name: str | None, timeout_seconds: int
+    ctx: HandlerContext,
+    name: str | None,
+    timeout_seconds: int,
+    *,
+    hold_until_apply: bool = False,
 ) -> AsyncIterator[StateBackendAccess | None]:
     """Access to the platform-managed state ``name`` for one step (None: not managed).
 
     ``timeout_seconds`` is the container's own (see :func:`container_timeout`).
+    ``hold_until_apply``: the step's lock also holds the state for the run
+    until the run applies or ends (tf.plan's "Hold the state until apply").
     """
     if not name:
         yield None
@@ -279,8 +310,24 @@ async def managed_state_access(
         )
         logger.warning(message, extra={"run_id": ctx.run_id, "step_run_id": ctx.step_run_id})
         await ctx.emit_progress(message)
-    async with ctx.require_services().open_state_backend(name, ttl_seconds=ttl) as access:
+    services = ctx.require_services()
+    if hold_until_apply:
+        try:
+            manager = services.open_state_backend(name, ttl_seconds=ttl, hold_until_apply=True)
+        except TypeError as exc:
+            raise RuntimeError(HOLD_UNSUPPORTED_MESSAGE) from exc
+    else:
+        # Without the keyword, so a platform that predates the hold still works.
+        manager = services.open_state_backend(name, ttl_seconds=ttl)
+    async with manager as access:
         yield access
+
+
+#: The step's error on a platform too old to hold a state until apply.
+HOLD_UNSUPPORTED_MESSAGE = (
+    "This platform cannot hold a managed state until apply; upgrade Hegemony, or turn off "
+    "'Hold the state until apply'"
+)
 
 
 def managed_timeout_errors(value: object) -> list[str]:
@@ -478,8 +525,12 @@ def tool_env() -> dict[str, str]:
     }
 
 
-def script_header(deadline: int | None = None) -> list[str]:
-    """The run script's start; with a ``deadline``, it defines ``bounded`` too."""
+def script_header(deadline: int | None = None, kill_after: int = KILL_AFTER_SECONDS) -> list[str]:
+    """The run script's start; with a ``deadline``, it defines ``bounded`` too.
+
+    ``bounded`` kills the tool ``kill_after`` seconds after its SIGTERM at the
+    deadline (see ``tool_kill_after``).
+    """
     lines = [
         "#!/bin/sh",
         "# Generated by the tf step.",
@@ -489,8 +540,36 @@ def script_header(deadline: int | None = None) -> list[str]:
         f"mkdir -p {OUTPUT_DIR}",
     ]
     if deadline is not None:
-        lines += deadline_shell_lines(deadline)
+        lines += deadline_shell_lines(deadline, kill_after)
     return lines
+
+
+def reserved_stop_grace(timeout: int, stop_grace_seconds: int) -> int:
+    """The part of the step's timeout kept for the tool to stop in.
+
+    The stop grace period, capped at half the timeout.
+    """
+    return min(max(stop_grace_seconds, 0), timeout // 2)
+
+
+def tool_deadline(timeout: int, stop_grace_seconds: int) -> int:
+    """The Unix time the run script sends the tool SIGTERM (see ``deadline_shell_lines``).
+
+    The step's timeout less the reserved stop grace (``reserved_stop_grace``),
+    so a tool that stops cleanly in its grace period still ends within the step's
+    time, and its container is not killed by the worker's own timeout.
+    """
+    return step_deadline(timeout - reserved_stop_grace(timeout, stop_grace_seconds))
+
+
+def tool_kill_after(timeout: int, stop_grace_seconds: int) -> int:
+    """Seconds between the run script's SIGTERM to the tool and its SIGKILL.
+
+    The whole reserved stop grace, so the kill never cuts it short, and at
+    least ``KILL_AFTER_SECONDS``. With a grace that long, the kill comes at the
+    step's timeout, well before the platform frees the step's state lock.
+    """
+    return max(KILL_AFTER_SECONDS, reserved_stop_grace(timeout, stop_grace_seconds))
 
 
 def step_deadline(timeout: int) -> int:

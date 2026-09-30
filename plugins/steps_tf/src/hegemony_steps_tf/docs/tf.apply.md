@@ -14,7 +14,8 @@ same run. The usual shape is plan, then an approval step, then apply.
 Pick the plan step in Plan step. Nothing about the configuration is
 repeated: the apply runs in the plan step's working directory with the same
 engine and image, so the lock file, providers, backend settings, and
-variables are the ones that were planned. Give both steps shared (or
+variables are the ones that were planned. The image is run by the digest the
+plan recorded, so a tag moved since the plan does not change the tool. Give both steps shared (or
 explicit) execution affinity so they share the run's workspace and worker; the
 worker must have shared workspaces enabled.
 
@@ -44,7 +45,9 @@ without one (its saved plan is gone, so give it shared affinity and plan
 again) or this step has none (shared affinity missing, or the worker has
 shared workspaces disabled). It also fails when the apply itself fails.
 The tool refuses
-a saved plan made stale by a state change since planning: plan again. The
+a saved plan made stale by a state change since planning: plan again (a
+`tf.plan` with Hold the state until apply keeps others from changing a
+managed state meanwhile; this step's apply ends that hold). The
 saved plan lives in the run's shared workspace; when that workspace is gone
 (for example cleaned up after a worker restart while the run waited a long
 time for approval), the step says so: plan again. The state lock is taken
@@ -56,11 +59,21 @@ from its policy or the flow), plus a 10-minute margin, and at most 24
 hours: the step's own Timeout is refused above 85800 seconds (whatever the
 plan's state, since the plan step decides it), and a longer timeout from
 the policy or the flow still ends the state access after 24 hours, which
-the step's log says. At the timeout the apply is also stopped from inside
-the container (SIGTERM, on which the tool starts no new changes and saves
-the state of those done, then SIGKILL five minutes later, with the image's
-`timeout` command), so an apply stops even when the worker that should stop
-the container is gone, before the platform can free its lock.
+the step's log says.
+
+A cancelled step does not kill the apply: the tool receives SIGTERM, on
+which it starts no new changes, lets those in progress finish, saves the
+state and releases the lock, and it is killed only if it still runs after
+Stop grace period (120 seconds by default). The same happens at the
+timeout: the tool receives SIGTERM that long before the step's timeout (at
+most half of it), so it can stop cleanly within the step's time. That
+SIGTERM comes from inside the container (the image's `timeout` command,
+with SIGKILL once the grace period has passed, and not before five
+minutes), so an apply stops even when the worker
+that should stop the container is gone, before the platform can free its
+lock. A change the kill cuts off can be missing from the state; give
+providers whose changes take long (a database instance) a longer grace
+period. 0 stops the tool at once.
 
 When the tool changes resources but cannot save the resulting state (the
 backend is unreachable or refuses the write), it leaves the state in

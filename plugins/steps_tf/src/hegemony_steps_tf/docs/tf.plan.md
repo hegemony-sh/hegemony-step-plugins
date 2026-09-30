@@ -40,6 +40,12 @@ State decides where the state lives:
   block in the configuration is replaced, so the configuration needs none.
   Every flow that uses the same name shares one state and its lock. The step
   gets short-lived access to that one state, which ends with the step.
+  With Hold the state until apply, the plan's lock also holds the state for
+  the run until the run applies or ends: meanwhile other runs and people
+  cannot lock or change it (they wait, or fail after their Lock timeout,
+  naming the run), so the plan stays valid however long an approval takes.
+  Every other flow using the state waits that long. An admin can end the
+  hold with Force unlock on the state's page.
 - `backend`: the configuration's own backend block, such as S3, Azure
   Storage, GCS, Consul, or PostgreSQL. Backend settings fill a partial block
   (bucket, key, and so on) from a file. A configuration without a backend
@@ -49,6 +55,25 @@ State decides where the state lives:
 
 With a State encryption key (OpenTofu only), OpenTofu encrypts the state and
 the saved plan before writing them anywhere.
+
+## The Image
+
+OpenTofu runs in `ghcr.io/hegemony-sh/opentofu-runner:0.6` by default:
+OpenTofu at an exact version on Alpine Linux, with git and an SSH client for
+module sources, built from `images/opentofu-runner` in the plugin repository.
+`tofu` is compiled there from the OpenTofu release's source, with Go libraries
+that have known vulnerabilities raised to fixed versions until an OpenTofu
+release carries them; the image lists the change. That tag names a minor version of the plugins and follows its
+newest patch release.
+Terraform runs in HashiCorp's `hashicorp/terraform` image at an exact
+version. Image replaces either; it needs a POSIX `sh` with `timeout` (as
+BusyBox and coreutils have) and must run as root, since the step writes the
+run's shared workspace.
+
+The plan records the image's registry digest, and `tf.apply` runs that
+digest: a saved plan is refused by any other tool version, and the tag may
+move between the plan and an approved apply. An image built on the sandbox
+and never pushed has no digest, so the apply runs its tag.
 
 ## Applying The Plan
 
@@ -89,7 +114,9 @@ non-sensitive output values as the state held them when the plan was made
 not fail the plan: they are then empty. `handler` (`tf.plan`) marks the
 output for `tf.apply`, which refuses a step output without it. Branch on
 `steps.NODE_ID.output.has_changes`, or show the summary in an approval
-message.
+message. `state_held` is true when the step holds a managed state for the
+run until it applies. `image` is the image the plan ran, and `image_digest`
+the same image by digest (empty when it has none).
 
 ## When It Fails
 
@@ -103,10 +130,14 @@ anything when the config is
 invalid, a secret resolves to nothing, or the platform cannot serve managed
 state (for example, no state encryption key is configured). Provider downloads and remote state
 need network access to those endpoints under the flow's egress policy. The
-timeout covers the whole run, image pull included. At the timeout the tool
-is also stopped from inside the container (SIGTERM, then SIGKILL five
-minutes later, with the image's `timeout` command), so it stops even when
-the worker that should stop the container is gone. Without a Timeout on the
+timeout covers the whole run, image pull included. The tool receives
+SIGTERM Stop grace period (120 seconds by default, at most half the
+timeout) before the timeout, and when the step is cancelled, so it can
+release the state lock and exit cleanly; it is killed only if it still runs
+after that. The SIGTERM at the timeout comes from inside the container (the
+image's `timeout` command, with SIGKILL once the grace period has passed,
+and not before five minutes), so the tool stops even when the worker that
+should stop the container is gone. Without a Timeout on the
 step, the step's timeout from its policy or the flow applies; managed state
 access lasts as long as that timeout, plus a 10-minute margin. The platform
 grants state access for at most 24 hours, so with managed state the step's

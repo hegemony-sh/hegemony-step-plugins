@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# ============================================================================
+# Python package licence policy for the step plugin images
+# ============================================================================
+#
+# Every distribution a `pip install` in images/*/Dockerfile names must be
+# listed here (by normalised name). Enforced by scripts/check_image_licenses.py.
+# Their dependencies resolve at build time; the published image lists every
+# installed distribution with its licence in
+# /usr/share/doc/hegemony/python-packages.txt, and the Images workflow fails
+# the build if any declares a licence from the review list.
+#
+# FORMAT and TIERS -- as in images/.os-packages-allowed.txt. None of these is
+# linked into a Hegemony process: they run inside ansible-playbook, a separate
+# program the step's script starts in its own container.
+
+ansible-core | GPL-3.0-or-later | exec | The program the ansible.playbook step runs. The step's callback plugin runs inside it and is MIT for that reason (see LICENSING.md), so the combination is open to every licensee. Conveyed in the published image; Python source, so the installed files are the corresponding source, and the image's notices name where to get it.
+ansible-pylibssh | LGPL-2.1-or-later | exec | libssh bindings for Ansible's network_cli connections. Its manylinux wheel bundles libssh (LGPL-2.1-or-later) and OpenSSL (Apache-2.0). Loaded by Ansible, not by Hegemony code; installed as a replaceable module, which keeps the LGPL relinking right. Source offer in the image's notices.
+ncclient | Apache-2.0 | exec | NETCONF client for Junos. Pulls in paramiko (LGPL-2.1-or-later), which the image's notices name.
+jmespath | MIT | exec | JSON queries for Ansible's json_query filter.
+netaddr | BSD-3-Clause | exec | Address arithmetic for ansible.utils' ipaddr filters.

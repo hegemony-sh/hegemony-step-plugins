@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Install built wheels in a clean virtualenv and verify imports, entry points, and docs.
+"""Install built wheels in a clean virtualenv and verify imports, entry points, docs and licences.
 
 The docs half is the only mechanical proof that a plugin's documentation
 bundle left git and entered the built artifact: it loads every step-handler
@@ -102,6 +102,16 @@ def source_gaps() -> list[str]:
     return gaps
 
 
+def expected_licenses() -> dict[str, str]:
+    """Distribution name -> the SPDX licence expression its pyproject declares."""
+    licenses: dict[str, str] = {}
+    for package_dir in PACKAGE_DIRS:
+        with (package_dir / "pyproject.toml").open("rb") as fh:
+            project = tomllib.load(fh)["project"]
+        licenses[project["name"]] = project["license"]
+    return licenses
+
+
 def _python_bin(venv_dir: Path) -> Path:
     return venv_dir / ("Scripts" if sys.platform == "win32" else "bin") / "python"
 
@@ -126,7 +136,20 @@ def main() -> None:
         )
         code = f"""
 from importlib import import_module
-from importlib.metadata import entry_points
+from importlib.metadata import distribution, entry_points
+
+# Every wheel declares its licence and carries the texts it names
+# (dist-info/licenses/, from license-files).
+for name, expression in {expected_licenses()!r}.items():
+    dist = distribution(name)
+    assert dist.metadata["License-Expression"] == expression, (
+        name, dist.metadata["License-Expression"]
+    )
+    files = dist.metadata.get_all("License-File") or []
+    assert files, (name, "no License-File")
+    for file in files:
+        text = dist.read_text("licenses/" + file)
+        assert text and text.strip(), (name, file)
 
 modules = {EXPECTED_MODULES!r}
 for module in modules:

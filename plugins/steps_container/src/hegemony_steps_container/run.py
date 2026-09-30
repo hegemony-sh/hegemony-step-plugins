@@ -35,6 +35,7 @@ from .pull_progress import (
     EnginePullError,
     PullOutcome,
     format_size,
+    parse_image_reference,
     require_docker_host,
     stream_pull,
 )
@@ -42,6 +43,7 @@ from .runner import (
     COLLECT_GRACE_SECONDS,
     CONTEXT_PATH,
     MAX_COLLECTED_BYTES,
+    MAX_STOP_GRACE_SECONDS,
     OUTPUT_DIR,
     SECRET_FILES_DIR,
     ContainerJob,
@@ -56,6 +58,30 @@ logger = logging.getLogger(__name__)
 # The image-size lookup is a caption, not a step operation: bounded well below
 # any step deadline so a wedged daemon costs a missing number, not the step.
 _IMAGE_INSPECT_TIMEOUT = 15.0
+
+
+def _familiar_repository(name: str) -> str:
+    """``name`` as the daemon writes Docker Hub repositories: ``python``, ``me/app``."""
+    for prefix in ("docker.io/", "index.docker.io/"):
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            return name.removeprefix("library/")
+    return name
+
+
+def repo_digest_for(image: str, repo_digests: list[str]) -> str:
+    """The ``repository@sha256:...`` entry of ``repo_digests`` for ``image``'s repository.
+
+    ``repo_digests`` is ``docker image inspect``'s RepoDigests. The result
+    keeps ``image``'s spelling of the repository; "" when no entry matches.
+    """
+    repository = parse_image_reference(image)[0]
+    wanted = _familiar_repository(repository)
+    for entry in repo_digests:
+        name, sep, digest = entry.partition("@")
+        if sep and digest.startswith("sha256:") and _familiar_repository(name) == wanted:
+            return f"{repository}@{digest}"
+    return ""
 
 
 def _docker_env(docker_host: str) -> dict[str, str]:
@@ -1371,6 +1397,7 @@ class RunContainerHandler(BaseHandler):
         docker_mac: str = "",
         handler_id: str = "container.run",
         extra_hosts: dict[str, str] | None = None,
+        stop_grace_seconds: int = 0,
     ) -> list[str]:
         """Build the docker create command args from config.
 
@@ -1443,6 +1470,11 @@ class RunContainerHandler(BaseHandler):
         # a sandbox container cannot resolve itself, such as the platform API.
         for host_name, address in sorted((extra_hosts or {}).items()):
             args.extend(["--add-host", f"{_valid_host_name(host_name)}:{_valid_ip(address)}"])
+
+        # A job that stops gracefully gets SIGTERM whatever STOPSIGNAL its image
+        # declares, and the same grace from any `docker stop` without -t.
+        if stop_grace_seconds > 0:
+            args.extend(["--stop-signal", "SIGTERM", "--stop-timeout", str(stop_grace_seconds)])
 
         args.extend(
             [
@@ -1659,6 +1691,10 @@ class RunContainerHandler(BaseHandler):
 
         start_time = time.monotonic()
         deadline = start_time + timeout
+        # A step cancelled while its container runs gives the container
+        # stop_grace seconds after SIGTERM before removing it (see `finally`).
+        stop_grace = max(0, min(int(job.stop_grace_seconds or 0), MAX_STOP_GRACE_SECONDS))
+        cancelled_while_running = False
         output_lines: list[str] = []
         exit_code = -1
         staging_dir: str | None = None
@@ -2010,6 +2046,14 @@ class RunContainerHandler(BaseHandler):
             )
             if pull_failure is not None:
                 return pull_failure
+            image_digest = ""
+            if job.pin_image:
+                image_digest = await self._image_repo_digest(
+                    docker_bin=docker_bin, image=image, docker_env=docker_env, deadline=deadline
+                )
+                if image_digest:
+                    # The tag can move (another step pulls it) before `docker create`.
+                    config = {**config, "image": image_digest}
 
             # 7. Build docker create command (container is created but not started)
             shared_workspace_path: str | None = None
@@ -2037,6 +2081,7 @@ class RunContainerHandler(BaseHandler):
                 docker_mac=runtime.docker_mac,
                 handler_id=job.handler_id,
                 extra_hosts=job.extra_hosts,
+                stop_grace_seconds=stop_grace,
             )
             # 8. Create the container
             create_proc = await self._run_docker(
@@ -2408,6 +2453,7 @@ class RunContainerHandler(BaseHandler):
                 # whether or not anyone waits on it.
                 with contextlib.suppress(ProcessLookupError):
                     proc.kill()
+                cancelled_while_running = True
                 raise
 
             raw_stdout = stdout_out
@@ -2547,6 +2593,7 @@ class RunContainerHandler(BaseHandler):
                 skipped_artifacts=len(skipped_generated_artifacts),
                 collected=collected,
                 collect_errors=collect_errors,
+                image_digest=image_digest,
             )
 
         except subprocess.TimeoutExpired:
@@ -2580,6 +2627,25 @@ class RunContainerHandler(BaseHandler):
                 summary=f"Container execution error: {type(e).__name__}",
             )
         finally:
+            # A cancelled step's container may be mid-change (a tf apply): with a
+            # stop grace it gets SIGTERM and that long to finish in-flight work,
+            # save its state and release its locks before it is removed. A second
+            # cancellation (the worker shutting down) does not cut the wait short:
+            # removing the container then would kill the tool mid-save. The wait
+            # is bounded by docker stop's own timeout (the grace plus 30 s).
+            if cancelled_while_running and stop_grace:
+                stop = asyncio.ensure_future(
+                    self._stop_container(
+                        docker_bin, container_name, stop_grace, docker_host=docker_host
+                    )
+                )
+                try:
+                    while not stop.done():
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await asyncio.shield(stop)
+                    stop.result()
+                except (Exception, asyncio.CancelledError) as e:
+                    logger.warning(f"Cleanup: graceful stop of {container_name} failed: {e!r}")
             # Best-effort cleanup
             try:
                 await self._force_remove_container(
@@ -2869,6 +2935,46 @@ class RunContainerHandler(BaseHandler):
         except ValueError:
             return None
 
+    async def _image_repo_digest(
+        self,
+        *,
+        docker_bin: str,
+        image: str,
+        docker_env: dict[str, str],
+        deadline: float,
+    ) -> str:
+        """``repository@sha256:...`` of the pulled ``image``, or "" when unknown.
+
+        Read from the image's RepoDigests, the digests the daemon pulled it by,
+        for the repository ``image`` names (in ``image``'s own spelling). An
+        image built on the daemon and never pushed has none; the step then
+        runs, and reports, the tag. Never fails the step.
+        """
+        if "@" in image:
+            return image
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return ""
+        try:
+            proc = await self._run_docker(
+                docker_bin,
+                ["image", "inspect", "--format", "{{json .RepoDigests}}", image],
+                env=docker_env,
+                timeout=min(remaining, _IMAGE_INSPECT_TIMEOUT),
+            )
+        except (subprocess.SubprocessError, OSError):
+            return ""
+        if proc.returncode != 0:
+            return ""
+        try:
+            repo_digests = json.loads(proc.stdout.strip() or "null") or []
+        except ValueError:
+            return ""
+        digest = repo_digest_for(image, [str(entry) for entry in repo_digests])
+        if not digest:
+            logger.info("No registry digest for image %s; running it by tag", image)
+        return digest
+
     @staticmethod
     async def _run_docker(
         docker_bin: str,
@@ -2931,6 +3037,23 @@ class RunContainerHandler(BaseHandler):
                     )
         except Exception as e:
             logger.warning(f"Preflight cleanup failed: {e}")
+
+    @classmethod
+    async def _stop_container(
+        cls, docker_bin: str, container_name: str, grace_seconds: int, *, docker_host: str
+    ) -> None:
+        """``docker stop``: SIGTERM, then SIGKILL after ``grace_seconds`` if it still runs."""
+        logger.info(f"Stopping container {container_name}: SIGTERM, up to {grace_seconds}s to exit")
+        start = time.monotonic()
+        result = await cls._run_docker(
+            docker_bin,
+            ["stop", "-t", str(grace_seconds), container_name],
+            env=_docker_env(docker_host),
+            timeout=grace_seconds + 30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(str(result.stderr or "").strip()[:200] or "docker stop failed")
+        logger.info(f"Container {container_name} stopped after {time.monotonic() - start:.0f}s")
 
     @classmethod
     async def _force_remove_container(
