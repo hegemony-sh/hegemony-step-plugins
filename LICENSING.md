@@ -63,6 +63,7 @@ repository reviews its own:
   platform's (`deploy/.images-allowed.txt` in the hegemony repository).
 - **The gate.** `scripts/check_image_licenses.py` (`task licenses:images`,
   and `tests/test_image_licenses.py` in CI) fails on an unlisted component, on
+  an install from a requirements file (whose packages it cannot see), on
   copyleft code marked as linked into a Hegemony process, and on a published
   image whose notices are missing or do not name what it installs. Review-tier
   licences (AGPL, SSPL, BUSL and the like) are warnings until accepted;

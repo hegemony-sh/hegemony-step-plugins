@@ -89,7 +89,31 @@ RUN apk add --no-cache --virtual .build gcc
         ("python", "netaddr"),
         ("collection", "cisco.ios"),
         ("collection", "ansible.utils"),
+        # What a requirements file lists is out of the gate's sight.
+        ("unreviewable", "python: -r requirements.txt"),
     }
+
+
+@pytest.mark.parametrize(
+    ("install", "option"),
+    [
+        ("pip install -r requirements.txt", "python: -r requirements.txt"),
+        ("pip3 install --requirement=reqs.txt ansible-core", "python: --requirement=reqs.txt"),
+        ("pip install -rreqs.txt", "python: -rreqs.txt"),
+        (
+            "ansible-galaxy collection install --requirements-file req.yml",
+            "collection: --requirements-file req.yml",
+        ),
+    ],
+)
+def test_an_install_from_a_requirements_file_fails_the_gate(tmp_path, capsys, install, option):
+    root = _repo(tmp_path, f"FROM python:3.12\nRUN {install}\n")
+    _allow(root, "images", "python | PSF-2.0 | base-image | Base.")
+    _allow(root, "python-packages", "ansible-core | GPL-3.0-or-later | exec | A program.")
+    assert gate.main(["--root", str(root)]) == 1
+    err = capsys.readouterr().err
+    assert f"images/runner/Dockerfile installs from a file ({option})" in err
+    assert "name every package on the install command" in err
 
 
 def test_step_defaults_are_read_without_importing_the_plugin(tmp_path):

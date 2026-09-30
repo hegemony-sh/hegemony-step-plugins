@@ -100,6 +100,14 @@ _VALUE_OPTIONS = {
     },
     "os": {"-o", "--repository", "-X", "--virtual", "-t"},
 }
+#: Options that install whatever a file lists, which this gate cannot see: the
+#: file lives in the image, not in the Dockerfile. An install that uses one
+#: fails the gate; name the packages on the install command instead.
+_FILE_OPTIONS = {
+    "pip": {"-r", "--requirement"},
+    "galaxy": {"-r", "--requirements-file"},
+    "os": set(),
+}
 _SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
 _STAGE_ALIAS = re.compile(r"\s+AS\s+(\S+)\s*$", re.IGNORECASE)
 _ARG = re.compile(r"^ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(\S*))?", re.IGNORECASE)
@@ -127,7 +135,7 @@ class Entry:
 class Found:
     """A component the tree references, and where."""
 
-    kind: str  # image, os, python, collection
+    kind: str  # image, os, python, collection; unreviewable: an install from a file
     name: str
     source: str
 
@@ -186,22 +194,41 @@ def _instructions(text: str) -> list[str]:
     return joined
 
 
-def _packages_after(tokens: list[str], start: int, kind: str) -> list[str]:
-    """Package tokens from ``start`` up to the next shell operator."""
+def _file_option(token: str, kind: str) -> str | None:
+    """The file-list option ``token`` is (``-r``, ``-rfile``, ``--requirement=f``), if any."""
+    for option in _FILE_OPTIONS[kind]:
+        if token == option or token.startswith(f"{option}="):
+            return option
+        if not option.startswith("--") and token.startswith(option):
+            return option
+    return None
+
+
+def _packages_after(tokens: list[str], start: int, kind: str) -> tuple[list[str], list[str]]:
+    """``(packages, file options)`` from ``start`` up to the next shell operator.
+
+    The second list holds each option that installs from a file, with its value.
+    """
     names: list[str] = []
+    files: list[str] = []
     skip_next = False
-    for token in tokens[start:]:
+    for index, token in enumerate(tokens[start:], start):
         if token in _SHELL_OPERATORS:
             break
         if skip_next:
             skip_next = False
             continue
         if token.startswith("-"):
+            option = _file_option(token, kind)
+            if option is not None:
+                attached = token != option
+                value = token if attached else " ".join(tokens[index : index + 2])
+                files.append(value)
             if "=" not in token and token in _VALUE_OPTIONS[kind]:
                 skip_next = True
             continue
         names.append(token)
-    return names
+    return names, files
 
 
 def _normalise(kind: str, token: str) -> str:
@@ -256,8 +283,11 @@ def scan_dockerfile(path: Path, root: Path) -> list[Found]:
                     kind, start, option_kind = "collection", i + 3, "galaxy"
                 else:
                     continue
-                for name in _packages_after(tokens, start, option_kind):
+                names, files = _packages_after(tokens, start, option_kind)
+                for name in names:
                     found.append(Found(kind, _normalise(kind, name), source))
+                for option in files:
+                    found.append(Found("unreviewable", f"{kind}: {option}", source))
     return found
 
 
@@ -355,6 +385,13 @@ def main(argv: list[str] | None = None) -> int:
     allowed = {kind: parse_allowlist(path) for kind, path in allowlists.items()}
     failures: list[str] = []
     warnings: list[str] = []
+
+    for item in sorted({f for f in found if f.kind == "unreviewable"}, key=str):
+        failures.append(
+            f"{item.source} installs from a file ({item.name}), which this gate cannot\n"
+            f"      read: name every package on the install command so each one is reviewed."
+        )
+    found = [f for f in found if f.kind != "unreviewable"]
 
     unlisted: dict[tuple[str, str], set[str]] = {}
     for item in found:
