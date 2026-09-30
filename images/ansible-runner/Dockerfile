@@ -48,6 +48,19 @@ RUN pip install --no-cache-dir \
         junipernetworks.junos \
     && rm -rf /root/.ansible
 
+# Everything above is third-party. The notices (with the written source offer)
+# travel inside the image, next to inventories of exactly what this build
+# installed: Python distributions with their declared licences, and collections.
+# The inventory script refuses a distribution under a review-tier licence (the
+# ones scripts/check_image_licenses.py lists), so the build fails instead of
+# publishing one: the dependency closure is resolved here, not in any allowlist.
+COPY THIRD-PARTY-NOTICES.md /usr/share/doc/hegemony/THIRD-PARTY-NOTICES.md
+RUN --mount=type=bind,source=inventory.py,target=/tmp/inventory.py \
+    python /tmp/inventory.py --fail-on AGPL SSPL BUSL Elastic RSAL "Commons Clause" \
+        > /usr/share/doc/hegemony/python-packages.txt \
+    && ansible-galaxy collection list --collections-path /usr/share/ansible/collections \
+        > /usr/share/doc/hegemony/ansible-collections.txt
+
 RUN useradd --create-home --uid 1000 runner
 USER runner
 WORKDIR /home/runner

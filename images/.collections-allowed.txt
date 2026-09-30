@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# ============================================================================
+# Ansible collection licence policy for the step plugin images
+# ============================================================================
+#
+# Every collection an `ansible-galaxy collection install` in images/*/Dockerfile
+# names must be listed here. Enforced by scripts/check_image_licenses.py.
+#
+# FORMAT and TIERS -- as in images/.os-packages-allowed.txt. Collections run
+# inside ansible-playbook, a separate program, never in a Hegemony process.
+# Each installs with its own licence file, which travels in the image.
+
+ansible.netcommon | GPL-3.0-or-later | exec | network_cli and netconf connection plugins. Python source conveyed in the published image; notices in images/ansible-runner/THIRD-PARTY-NOTICES.md.
+ansible.utils | GPL-3.0-or-later | exec | Filters and validators the network collections depend on.
+ansible.posix | GPL-3.0-or-later | exec | POSIX modules (synchronize, sysctl, ...).
+community.general | GPL-3.0-or-later AND BSD-2-Clause AND MIT AND PSF-2.0 | exec | General-purpose modules; most files GPL-3.0-or-later, some utility files under the permissive licences listed.
+cisco.ios | GPL-3.0-or-later | exec | Cisco IOS and IOS-XE modules.
+cisco.nxos | GPL-3.0-or-later | exec | Cisco NX-OS modules.
+cisco.iosxr | GPL-3.0-or-later | exec | Cisco IOS-XR modules.
+arista.eos | GPL-3.0-or-later | exec | Arista EOS modules.
+junipernetworks.junos | GPL-3.0-or-later | exec | Juniper Junos modules.

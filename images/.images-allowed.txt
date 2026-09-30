@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# ============================================================================
+# Container image licence policy for the step plugins
+# ============================================================================
+#
+# Every image a Dockerfile under images/ builds on (FROM, COPY --from=<ref>),
+# and every image a step pulls when its author sets none (a module-level
+# DEFAULT_IMAGE or DEFAULT_IMAGES literal under plugins/), must be listed here.
+# Enforced by scripts/check_image_licenses.py (task licenses:images, and
+# tests/test_image_licenses.py in CI). The platform's licence process runs the
+# same script against the release it pins.
+#
+# FORMAT -- the platform's (deploy/.images-allowed.txt), four pipe-separated
+# fields:
+#
+#     repository | SPDX licence | tier | statement
+#
+# `repository` is the image reference with tag and digest removed.
+#
+# TIERS
+#   first-party   An image this repository builds and pushes to ghcr.io. Its
+#                 contents are Hegemony's redistribution obligation; see the
+#                 image's THIRD-PARTY-NOTICES.md.
+#   base-image    A layer inside an image built here. Conveyed when that image
+#                 is published, so notice and source-offer duties attach.
+#   step-default  An image a step pulls by default. The operator's Docker pulls
+#                 it from its own registry into the sandbox; Hegemony conveys
+#                 none of its bytes, and its licence binds whoever runs it.
+#
+# STATEMENT must say why the licence is acceptable for the tier, and for
+# anything non-permissive, what would remove it.
+
+ghcr.io/hegemony-sh/ansible-runner | AGPL-3.0-or-later | first-party | Built from images/ansible-runner/Dockerfile, published by .github/workflows/images.yml, and the default image of ansible.playbook. Holds no Hegemony code: every component is third-party, named with its licence in images/ansible-runner/THIRD-PARTY-NOTICES.md, which the image carries at /usr/share/doc/hegemony/ with the written source offer. The Ansible callback plugin the step stages at run time is MIT (see LICENSING.md), not part of the image.
+python | Python-2.0 AND GPL-2.0-or-later AND GPL-3.0-or-later AND LGPL-2.1-or-later | base-image | python:3.12-slim-bookworm, the base of ansible-runner: CPython under Python-2.0 (PSF) on a Debian userland of separate programs. Mere aggregation; conveyed in the published image, so covered by its notices and source offer. Same entry and analysis as the platform's deploy/.images-allowed.txt.
+alpine | MIT AND GPL-2.0-only AND GPL-2.0-or-later AND Apache-2.0 | base-image | Base of images/opentofu-runner, a sample Dockerfile for a custom tf image that is NOT published: busybox (GPL-2.0-only), apk-tools (GPL-2.0-only), musl (MIT) and the rest of the Alpine userland. If it is ever published it needs a THIRD-PARTY-NOTICES.md like ansible-runner's.
+ghcr.io/opentofu/opentofu | MPL-2.0 | step-default | The default image of tf.plan and tf.apply (engine opentofu), pulled by the sandbox's Docker; also the source images/opentofu-runner copies the tofu binary from (the sample is not published). OpenTofu is MPL-2.0, file-level copyleft over its own files, which Hegemony neither modifies nor conveys.
+hashicorp/terraform | BUSL-1.1 | step-default | Pulled only when a tf.plan step sets engine terraform; OpenTofu is the default precisely to avoid this. Terraform is source-available under BUSL-1.1, whose additional use grant excludes offering it to third parties as part of a product that competes with HashiCorp's (for example a hosted service that runs Terraform for customers). Hegemony conveys none of it; the licence binds the operator who chooses the engine. Removed by dropping the terraform engine.

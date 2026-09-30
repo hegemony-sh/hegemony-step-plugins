@@ -107,6 +107,19 @@ through `hegemony_steps_container.runner` instead of copying
   the step or report it as unknown.
 - **Docs.** Each handler has its page under `docs/` in the wheel, and the
   wheel README names its handlers and links there.
+- **Default image and licences.** Declare the image a step pulls when its
+  author sets none as a module-level `DEFAULT_IMAGE` (a string) or
+  `DEFAULT_IMAGES` (a dict of strings) literal. `scripts/check_image_licenses.py`
+  reads those with `ast`, and every image they name, like every image,
+  package and collection a Dockerfile under `images/` uses, must have a
+  reviewed row in the matching `images/.*-allowed.txt`. An image the Images
+  workflow publishes also carries a `THIRD-PARTY-NOTICES.md` naming what it
+  installs, with the written source offer. See LICENSING.md.
+- **Code that runs inside a third-party tool.** A file the step stages into
+  the tool's own process (the Ansible callback plugin runs inside
+  `ansible-playbook`) forms one program with that tool. When the tool is
+  GPL, license the file MIT rather than AGPL, as `callback_plugin.py` is, and
+  keep it in its own module so the licence boundary is a file boundary.
 
 ## Decision rules for a new handler
 

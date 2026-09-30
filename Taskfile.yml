@@ -66,14 +66,20 @@ tasks:
     cmds:
       - uv run python scripts/check_docs.py
 
+  licenses:images:
+    desc: Verify every image, OS package, Python package and collection the images and step defaults use is licence-reviewed
+    cmds:
+      - python3 scripts/check_image_licenses.py
+
   lint:
-    desc: Run Python lint, formatting, typecheck, REUSE, and plugin-docs checks
+    desc: Run Python lint, formatting, typecheck, REUSE, plugin-docs and image-licence checks
     cmds:
       - task: ruff
       - task: fmt:check
       - task: ty
       - task: reuse:lint
       - task: docs:check
+      - task: licenses:images
 
   build:
     desc: Build all workspace wheels into dist/

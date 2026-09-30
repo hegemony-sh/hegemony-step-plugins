@@ -181,6 +181,11 @@ jobs:
               ansible-galaxy collection list "$c" | grep -q "^$c " || { echo "missing $c"; exit 1; }
             done
             for b in ssh sshpass git; do command -v "$b" >/dev/null; done
+            for f in THIRD-PARTY-NOTICES.md python-packages.txt ansible-collections.txt; do
+              test -s "/usr/share/doc/hegemony/$f" || { echo "missing notices file $f"; exit 1; }
+            done
+            grep -q "^ansible-core | " /usr/share/doc/hegemony/python-packages.txt
+            grep -q "Written offer" /usr/share/doc/hegemony/THIRD-PARTY-NOTICES.md
           '
 
       # Gates the promotion: a CRITICAL/HIGH finding with a fixed version

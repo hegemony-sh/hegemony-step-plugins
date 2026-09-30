@@ -11,6 +11,7 @@ import os
 import shlex
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -635,6 +636,28 @@ def _load_callback(monkeypatch, results_path: str):
         namespace,
     )
     return namespace["CallbackModule"]()
+
+
+def test_the_staged_callback_is_mit_licensed():
+    """The plugin runs inside ansible-playbook (GPL-3.0-or-later), so it is MIT.
+
+    AGPL code combined with Ansible would stay open under the AGPL, but not under
+    Hegemony's commercial terms; MIT keeps the combination open to every
+    licensee. Both the source module and the file staged into the container say
+    so, and neither carries an AGPL licence tag.
+    """
+    import hegemony_steps_ansible.callback_plugin as callback_plugin
+
+    module_text = Path(callback_plugin.__file__).read_text(encoding="utf-8")
+    # REUSE-IgnoreStart
+    for text in (module_text, CALLBACK_SOURCE):
+        assert "SPDX-License-Identifier: MIT" in text
+        assert "SPDX-License-Identifier: AGPL" not in text
+    # REUSE-IgnoreEnd
+    assert CALLBACK_SOURCE.startswith("# SPDX-FileCopyrightText:")
+    # The rendered file travels alone into the container, so it carries the
+    # permission notice itself, as MIT asks of every copy.
+    assert "Permission is hereby granted, free of charge" in CALLBACK_SOURCE
 
 
 def test_callback_records_tasks_and_recap(monkeypatch, tmp_path):

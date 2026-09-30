@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# ============================================================================
+# Operating-system package licence policy for the step plugin images
+# ============================================================================
+#
+# Every package an `apt-get install` or `apk add` in images/*/Dockerfile
+# installs must be listed here. Enforced by scripts/check_image_licenses.py.
+#
+# FORMAT -- as in images/.images-allowed.txt:
+#
+#     package | SPDX licence | tier | statement
+#
+# TIERS -- the tier, not the licence, decides whether copyleft reaches
+# Hegemony's own code:
+#
+#   exec    A separate program the step's script starts, or data such a
+#           program reads. Mere aggregation (GPL-2.0 s.2, GPL-3.0 s.5): strong
+#           copyleft is acceptable and creates only notice and source-offer
+#           duties, met by the image's THIRD-PARTY-NOTICES.md.
+#   linked  Loaded into a Hegemony process. Copyleft here is a hard failure.
+#
+# A package with the same name in the Debian (ansible-runner) and Alpine
+# (opentofu-runner sample) images has one row covering both.
+
+openssh-client | SSH-OpenSSH | exec | ssh for Ansible's ssh connection plugin and git over SSH. BSD-style; upstream states OpenSSH contains no GPL code.
+sshpass | GPL-2.0-or-later | exec | Feeds passwords to ssh for playbooks that pin an ansible-core older than 2.19. Run by Ansible as a separate program. Conveyed in the published ansible-runner image, so it carries the GPL-2.0 s.3 source offer in images/ansible-runner/THIRD-PARTY-NOTICES.md.
+git | GPL-2.0-only | exec | Clones roles and collections that a playbook's requirements.yml names, and in the tf sample image, module sources. Always a separate program. Conveyed in the published ansible-runner image, so it carries the GPL-2.0 s.3 source offer in images/ansible-runner/THIRD-PARTY-NOTICES.md.
+ca-certificates | MPL-2.0 AND GPL-2.0-or-later AND MIT | exec | The Mozilla CA bundle (MPL-2.0) that TLS clients read, plus the update script (Debian: GPL-2.0-or-later; Alpine: MIT). Data and a separate program; nothing links it.
