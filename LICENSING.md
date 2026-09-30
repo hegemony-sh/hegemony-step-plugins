@@ -31,6 +31,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 Do not use public SPDX expressions such as `AGPL-3.0-or-later OR Commercial`.
 Commercial terms are handled by a separate agreement.
 
+Every wheel carries the texts of its licences. Its `pyproject.toml` declares an
+SPDX expression and `license-files`, and holds a copy of each named text from
+`LICENSES/` as `LICENSE-<id>.txt`, which an installed wheel keeps under
+`*.dist-info/licenses/`. `scripts/package_licenses.py` writes the copies;
+`task licenses:packages`, a test and the wheel smoke install check them.
+
 ## One MIT file
 
 `plugins/steps_ansible/src/hegemony_steps_ansible/callback_plugin.py` is

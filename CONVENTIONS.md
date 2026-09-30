@@ -151,6 +151,13 @@ execution entirely) and along growth axes (per-platform wheels for
 platform-specific workflows). Prefer a new wheel over widening a namespace's
 meaning.
 
+Every wheel declares its licence as an SPDX expression (`license =
+"AGPL-3.0-or-later"`) with `license-files = ["LICENSE-*.txt"]`, and carries a
+copy of `LICENSES/<id>.txt` as `LICENSE-<id>.txt` for each identifier, so the
+installed wheel has the texts under `*.dist-info/licenses/`. A new package gets
+them from `python scripts/package_licenses.py`; `task licenses:packages` and a
+test check they match.
+
 ## Plugin kinds and their entry-point groups
 
 Step handlers are one of several plugin kinds this repo ships. All kinds

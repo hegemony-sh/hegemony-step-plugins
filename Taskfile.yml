@@ -71,8 +71,13 @@ tasks:
     cmds:
       - python3 scripts/check_image_licenses.py
 
+  licenses:packages:
+    desc: Verify every wheel carries copies of the licence texts its SPDX expression names
+    cmds:
+      - python3 scripts/package_licenses.py --check
+
   lint:
-    desc: Run Python lint, formatting, typecheck, REUSE, plugin-docs and image-licence checks
+    desc: Run Python lint, formatting, typecheck, REUSE, plugin-docs and licence checks
     cmds:
       - task: ruff
       - task: fmt:check
@@ -80,6 +85,7 @@ tasks:
       - task: reuse:lint
       - task: docs:check
       - task: licenses:images
+      - task: licenses:packages
 
   build:
     desc: Build all workspace wheels into dist/

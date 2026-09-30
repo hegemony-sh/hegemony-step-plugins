@@ -7,7 +7,8 @@ name = "hegemony-step-sdk"
 version = "0.6.0"
 description = "Public SDK for Hegemony step-handler plugins"
 readme = "README.md"
-license = { text = "AGPL-3.0-or-later" }
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 # Intentionally dependency-light: pydantic only. This package must never import
 # FastAPI, SQLAlchemy, Temporal, or any Hegemony app internals so out-of-tree
