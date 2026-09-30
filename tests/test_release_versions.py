@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
@@ -191,3 +192,17 @@ def test_the_release_commit_carries_every_file_set_version_writes():
 
     missing = [path for path in relative if not any(_asset_matches(path, a) for a in assets)]
     assert missing == []
+
+
+def test_the_images_are_published_when_the_release_is_published():
+    """Not on the tag push: the tagged release commit carries the skip-CI marker,
+    which stops every push-triggered run, so the v0.7.0 tag published no images."""
+    paths = _script("package_paths")
+    workflow = yaml.safe_load(
+        (paths.ROOT / ".github" / "workflows" / "images.yml").read_text(encoding="utf-8")
+    )
+    # YAML 1.1 reads a bare ``on`` key as true.
+    triggers = workflow.get("on", workflow.get(True))
+
+    assert triggers["release"] == {"types": ["published"]}
+    assert "push" not in triggers
