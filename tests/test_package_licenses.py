@@ -84,7 +84,7 @@ def test_the_check_refuses_missing_stale_and_undeclared_copies(tmp_path, monkeyp
     problems = licenses.check()
     assert problems == [
         "stale/LICENSE-AGPL-3.0-or-later.txt is missing or differs from "
-        "LICENSES/AGPL-3.0-or-later.txt",
+        + "LICENSES/AGPL-3.0-or-later.txt",
         "stale/LICENSE-MIT.txt names a licence the package does not declare",
         "old_form/pyproject.toml: license must be an SPDX expression string",
         "no_files/pyproject.toml: license-files must be ['LICENSE-*.txt']",
