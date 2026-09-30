@@ -6,14 +6,17 @@
 # images/<name>: ansible-runner (ansible.playbook) and opentofu-runner (tf.plan
 # and tf.apply with OpenTofu). scripts/package_paths.py lists the same images.
 #
-# A release tag vX.Y.Z (pushed by the Release workflow) publishes X.Y.Z and
-# X.Y. The steps' defaults name X.Y, which scripts/set_version.py moves with
-# every release, so the wheels of a release pull the images built from the
-# same tag. A pull request that changes an image builds, smoke-tests and scans
+# Publishing the GitHub Release vX.Y.Z (the Release workflow does, with
+# RELEASE_TOKEN) publishes X.Y.Z and X.Y from its tag. Not the tag push: the
+# tagged release commit says [skip ci], which stops every push-triggered run,
+# tag pushes included. The steps' defaults name X.Y, which
+# scripts/set_version.py moves with every release and the release commit
+# carries, so the wheels of a release pull the images built from the same
+# tag. A pull request that changes an image builds, smoke-tests and scans
 # both the same way, without pushing. Each image's smoke-test.sh runs inside
-# it. workflow_dispatch publishes an existing
-# release tag again, after a failed run or to pick up base-image fixes under
-# the same tags (X.Y only while that tag is the newest X.Y release).
+# it. workflow_dispatch publishes an existing release tag again, after a
+# failed run or to pick up base-image fixes under the same tags (X.Y only
+# while that tag is the newest X.Y release).
 #
 # The image is built once and pushed by digest only; Trivy scans that digest
 # and the smoke test runs it before any tag points at it, so what the tags
@@ -23,8 +26,8 @@
 name: Images
 
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
   pull_request:
     branches: [main, develop]
     paths:
@@ -40,7 +43,7 @@ on:
 
 permissions: {}
 
-# One run per release tag at a time, whether a tag push or a re-publish of it.
+# One run per release tag at a time, whether its Release or a re-publish of it.
 concurrency:
   group: images-${{ github.event.pull_request.number || inputs.tag || github.ref_name }}
   cancel-in-progress: false

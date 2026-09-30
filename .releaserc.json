@@ -90,7 +90,15 @@
           "plugins/*/pyproject.toml",
           "transports/*/pyproject.toml",
           "probes/*/pyproject.toml",
-          "packages/*/src/*/_version.py"
+          "packages/*/src/*/_version.py",
+          "images/*/Dockerfile",
+          "plugins/steps_ansible/README.md",
+          "plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py",
+          "plugins/steps_ansible/src/hegemony_steps_ansible/docs/ansible.playbook.md",
+          "plugins/steps_tf/README.md",
+          "plugins/steps_tf/src/hegemony_steps_tf/common.py",
+          "plugins/steps_tf/src/hegemony_steps_tf/plan.py",
+          "plugins/steps_tf/src/hegemony_steps_tf/docs/tf.plan.md"
         ],
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }

@@ -51,8 +51,11 @@ it reads the Conventional Commits since the last tag, derives the next
 version from them, bumps every package and SDK pin (`scripts/set_version.py`),
 refreshes `uv.lock`, builds and smoke-installs the wheels, prepends
 `CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`, tags `vX.Y.Z` and
-publishes the wheels plus `SHA256SUMS` as the GitHub Release. There is no
-manual step any more: do not bump versions or push `v*` tags by hand.
+publishes the wheels plus `SHA256SUMS` as the GitHub Release. Publishing that
+Release starts the `Images` workflow, which publishes the steps' runner images
+(`ansible-runner`, `opentofu-runner`) as `X.Y.Z` and `X.Y` from the tag; the
+release commit carries the steps' defaults moved to `X.Y`. There is no manual
+step any more: do not bump versions or push `v*` tags by hand.
 
 | Commits since the last tag | Release |
 |---|---|
