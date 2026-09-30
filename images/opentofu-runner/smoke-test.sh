@@ -5,8 +5,9 @@
 # What tf.plan and tf.apply rely on, run inside the image by the Images
 # workflow (docker run -i IMAGE -s < smoke-test.sh): /bin/sh as the entrypoint,
 # root (the steps write the run's shared workspace), `timeout` with -k, git
-# and ssh for module sources, the CA bundle, the notices, and a saved plan
-# applied the way the steps apply it (offline: no provider).
+# and ssh for module sources, the CA bundle, the notices with the record of the
+# source build, and a saved plan applied the way the steps apply it (offline:
+# no provider).
 set -eu
 test "$(id -u)" = 0
 tofu version
@@ -17,6 +18,9 @@ for f in THIRD-PARTY-NOTICES.md alpine-packages.txt opentofu-version.txt; do
   test -s "/usr/share/doc/hegemony/$f" || { echo "missing notices file $f"; exit 1; }
 done
 grep -q "^OpenTofu v" /usr/share/doc/hegemony/opentofu-version.txt
+test -s /usr/share/doc/hegemony/opentofu/modules.txt
+test -f /usr/share/doc/hegemony/opentofu/source.diff
+grep -q "google.golang.org/grpc" /usr/share/doc/hegemony/opentofu/modules.txt
 grep -q "^git-" /usr/share/doc/hegemony/alpine-packages.txt
 grep -q "Written offer" /usr/share/doc/hegemony/THIRD-PARTY-NOTICES.md
 

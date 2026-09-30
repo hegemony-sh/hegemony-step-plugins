@@ -13,17 +13,23 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 repository and published by its Images workflow.
 
 **The image contains no Hegemony code.** Every program and library in it is
-third-party software, unmodified, under its own licence. Hegemony's licences
+third-party software under its own licence, unmodified except for the one
+security change to OpenTofu described below. Hegemony's licences
 (`AGPL-3.0-or-later`, or commercial terms; see
 [LICENSING.md](../../LICENSING.md)) cover none of it, and cannot grant rights
 over it. This file travels inside the image at
-`/usr/share/doc/hegemony/THIRD-PARTY-NOTICES.md`, next to two inventories
-written when the image is built:
+`/usr/share/doc/hegemony/THIRD-PARTY-NOTICES.md`, next to files written when
+the image is built:
 
 - `/usr/share/doc/hegemony/alpine-packages.txt`: every installed Alpine
   package, its version and its licence (`apk list --installed`);
 - `/usr/share/doc/hegemony/opentofu-version.txt`: the OpenTofu version
-  (`tofu version`).
+  (`tofu version`);
+- `/usr/share/doc/hegemony/opentofu/modules.txt`: the Go version and every Go
+  module compiled into `tofu`, with its version and checksum
+  (`go version -m`);
+- `/usr/share/doc/hegemony/opentofu/source.diff`: the change made to
+  OpenTofu's source, against the upstream release.
 
 ## How the steps use these components
 
@@ -40,13 +46,29 @@ programs, not part of the image.
 
 ### OpenTofu
 
-`ghcr.io/opentofu/opentofu` (the `-minimal` image, used only as the source of
-the `tofu` binary): OpenTofu, **MPL-2.0**. The binary is copied unmodified from
-the official release image, at the version the Dockerfile's
-`OPENTOFU_VERSION` names. It is a statically linked Go program: the Go
-standard library (BSD-3-Clause) and the Go modules OpenTofu depends on (among
-them MPL-2.0, Apache-2.0, BSD and MIT modules, listed in OpenTofu's `go.mod`
-at that version) are compiled into it.
+`tofu`: OpenTofu, **MPL-2.0**, built in the image's build stage from the
+upstream release commit (the Dockerfile's `OPENTOFU_VERSION` and
+`OPENTOFU_COMMIT`; the build refuses any other commit), with the release's own
+build flags. It is a statically linked Go program: the Go standard library
+(BSD-3-Clause) and the Go modules OpenTofu depends on (among them MPL-2.0,
+Apache-2.0, BSD and MIT modules) are compiled into it.
+
+**The one change.** The OpenTofu release pins some Go modules at versions with
+known HIGH vulnerabilities, and no OpenTofu release fixes them yet. The build
+raises exactly those modules (the Dockerfile's `GO_MODULE_RAISES`) to their
+first fixed versions; modules they depend on move with them. Raising the
+OpenTelemetry SDK also changes one import in
+`internal/tracing/traceattrs/semconv.go` to the SDK's own semantic-conventions
+version, which that file's comment asks for with every SDK upgrade. Nothing
+else in OpenTofu changes. The complete change is
+`/usr/share/doc/hegemony/opentofu/source.diff`, and OpenTofu's tests for the
+code those modules serve run on it during the build.
+
+### Build stage
+
+`golang` (`golang:1.26-bookworm`): the Go toolchain that compiles `tofu`. Only
+the compiled binary leaves the build stage; the Go standard library compiled
+into it is BSD-3-Clause.
 
 ### Base image
 
@@ -76,15 +98,17 @@ source is. Their source is offered in two ways.
 
 The image is offered from `ghcr.io`, so GPL-3.0 section 6(d) applies: access to
 the Corresponding Source is offered with directions next to the object code.
-Every component is an **unmodified upstream release**; Hegemony applies no
-patches:
+Every component is an **upstream release**, unmodified except for OpenTofu's
+module versions and one import, as the diff in the image shows:
 
 | Component | Corresponding Source |
 | --- | --- |
-| OpenTofu | <https://github.com/opentofu/opentofu>, at the tag `v<version>` that `opentofu-version.txt` names; release source archives are on the same repository's releases page |
+| OpenTofu | <https://github.com/opentofu/opentofu>, at the tag `v<version>` that `opentofu-version.txt` names (release source archives are on that repository's releases page), with `opentofu/source.diff` applied |
+| Go modules compiled into `tofu` | The module at the version `opentofu/modules.txt` lists, from <https://proxy.golang.org> or the module's own repository |
+| Go standard library | <https://go.dev/dl/>, the source archive of the Go version `opentofu/modules.txt` names |
 | Alpine packages (`git`, `openssh-client`, `ca-certificates`, and the rest of the `alpine:3.22` userland) | The package's build recipe under <https://gitlab.alpinelinux.org/alpine/aports>, branch `3.22-stable`, and the upstream source archives it names, mirrored at <https://distfiles.alpinelinux.org/distfiles/v3.22/> |
 
-The exact versions are read from the image: the two inventory files above. The
+The exact versions are read from the image: the inventory files above. The
 build instructions are [`images/opentofu-runner/Dockerfile`](Dockerfile).
 
 ### Written offer

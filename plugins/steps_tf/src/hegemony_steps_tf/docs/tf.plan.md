@@ -58,10 +58,12 @@ the saved plan before writing them anywhere.
 
 ## The Image
 
-OpenTofu runs in `ghcr.io/hegemony-sh/opentofu-runner:0.6` by default: the
-OpenTofu binary at an exact version on Alpine Linux, with git and an SSH
-client for module sources, built from `images/opentofu-runner` in the plugin
-repository. That tag names a minor version of the plugins and follows its
+OpenTofu runs in `ghcr.io/hegemony-sh/opentofu-runner:0.6` by default:
+OpenTofu at an exact version on Alpine Linux, with git and an SSH client for
+module sources, built from `images/opentofu-runner` in the plugin repository.
+`tofu` is compiled there from the OpenTofu release's source, with Go libraries
+that have known vulnerabilities raised to fixed versions until an OpenTofu
+release carries them; the image lists the change. That tag names a minor version of the plugins and follows its
 newest patch release.
 Terraform runs in HashiCorp's `hashicorp/terraform` image at an exact
 version. Image replaces either; it needs a POSIX `sh` with `timeout` (as

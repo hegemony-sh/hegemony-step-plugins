@@ -79,8 +79,10 @@ repository reviews its own:
   it at `/usr/share/doc/hegemony/`, with inventories of what that build
   installed (Python distributions and collections; Alpine packages and the
   OpenTofu version). The ansible-runner build refuses a Python distribution
-  under a review-tier licence. OpenTofu's binary is MPL-2.0 and copied
-  unmodified, so its notice says where its source is.
+  under a review-tier licence. OpenTofu (MPL-2.0) is compiled from its
+  release source with vulnerable Go modules raised to fixed versions; the
+  image carries that change as a diff, and its notice says where the rest of
+  the source is.
 - **Images a step pulls by default** are pulled by the operator's Docker from
   their own registries; Hegemony conveys none of their bytes, and their
   licences bind whoever runs them. One needs attention:
