@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+import fnmatch
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
@@ -163,3 +166,43 @@ def test_every_runner_image_is_a_step_default_named_by_the_current_minor_version
         if (failure := verifier.default_image_failure(image))
     ]
     assert failures == []
+
+
+def _asset_matches(path: str, pattern: str) -> bool:
+    """A simple glob as @semantic-release/git reads it: ``*`` stays in one segment."""
+    parts, globs = path.split("/"), pattern.split("/")
+    return len(parts) == len(globs) and all(map(fnmatch.fnmatchcase, parts, globs))
+
+
+def test_the_release_commit_carries_every_file_set_version_writes():
+    """A file left out keeps the previous version at the tag, while the wheels built
+    from the working tree carry the new one: v0.7.0's tag named the 0.6 runner
+    images, which the Images workflow refuses to publish."""
+    paths = _script("package_paths")
+    releaserc = json.loads((paths.ROOT / ".releaserc.json").read_text(encoding="utf-8"))
+    (assets,) = [
+        plugin[1]["assets"]
+        for plugin in releaserc["plugins"]
+        if isinstance(plugin, list) and plugin[0] == "@semantic-release/git"
+    ]
+    written = [package_dir / "pyproject.toml" for package_dir in paths.PACKAGE_DIRS]
+    written.append(paths.SDK_VERSION_FILE)
+    written += [path for image in paths.RUNNER_IMAGES for path in image.files]
+    relative = [path.relative_to(paths.ROOT).as_posix() for path in written]
+
+    missing = [path for path in relative if not any(_asset_matches(path, a) for a in assets)]
+    assert missing == []
+
+
+def test_the_images_are_published_when_the_release_is_published():
+    """Not on the tag push: the tagged release commit carries the skip-CI marker,
+    which stops every push-triggered run, so the v0.7.0 tag published no images."""
+    paths = _script("package_paths")
+    workflow = yaml.safe_load(
+        (paths.ROOT / ".github" / "workflows" / "images.yml").read_text(encoding="utf-8")
+    )
+    # YAML 1.1 reads a bare ``on`` key as true.
+    triggers = workflow.get("on", workflow.get(True))
+
+    assert triggers["release"] == {"types": ["published"]}
+    assert "push" not in triggers
