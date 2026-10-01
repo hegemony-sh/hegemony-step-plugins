@@ -39,8 +39,8 @@ section 2, GPL-3.0 section 5): no copyleft reaches Hegemony's own code.
 The step stages one file of Hegemony code into the container at run time: an
 Ansible callback plugin that records task results. It runs inside
 `ansible-playbook` (GPL-3.0-or-later), so it is licensed **MIT** rather than
-AGPL, which keeps that combination open to every licensee. It is not part of
-the image.
+AGPL: the staged copy carries its whole licence in its header and needs nothing
+beside it (see the repository's LICENSING.md). It is not part of the image.
 
 ## Components
 
