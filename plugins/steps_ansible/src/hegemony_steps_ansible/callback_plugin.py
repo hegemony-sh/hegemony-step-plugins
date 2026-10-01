@@ -6,9 +6,9 @@
 
 This module is MIT, unlike the rest of the package (AGPL-3.0-or-later). The
 plugin runs inside ``ansible-playbook`` (GPL-3.0-or-later) and subclasses its
-``CallbackBase``, so at run time it forms one program with Ansible. A
-permissive licence keeps that combination open to everyone, including anyone
-using Hegemony under commercial terms. See LICENSING.md.
+``CallbackBase``, so at run time it forms one program with Ansible. It is copied
+there on its own, so a permissive licence lets the copy carry its whole licence
+in its header and keeps that combination simple for everyone. See LICENSING.md.
 
 ``results`` fills in the placeholders (the results path and size bounds) and
 stages the rendered file into the step's container. The rendered file travels

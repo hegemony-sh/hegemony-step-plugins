@@ -6,30 +6,21 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 # Licensing
 
-The public source code in this repository is licensed under
-`AGPL-3.0-or-later`. Everyone who receives the public source from this
-repository receives it under those AGPL terms. See [LICENSE](LICENSE) and
+Apart from the one MIT file described below, the source code in this
+repository is licensed under `AGPL-3.0-or-later`, and under no other
+licence. See [LICENSE](LICENSE) and
 [LICENSES/AGPL-3.0-or-later.txt](LICENSES/AGPL-3.0-or-later.txt).
 
-Hegemony may also offer separate commercial licenses for Hegemony and its
-first-party step-handler SDK and plugins. Commercial terms are not granted
-by this public repository; they are granted only through a separate commercial
-agreement with the rights holder. Contact
-[contact@hegemony.sh](mailto:contact@hegemony.sh) for commercial licensing.
-
-External contributions are accepted only under the
-[Hegemony Contributor License Agreement](CLA.md). The CLA must grant Hegemony the
-rights needed to distribute accepted contributions under both the public AGPL
-license and separate commercial terms.
+Contributions are accepted under the same licence, with a
+[Developer Certificate of Origin](https://developercertificate.org/) sign-off
+on every commit; there is no Contributor License Agreement. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 Keep source file SPDX identifiers as:
 
 ```text
 SPDX-License-Identifier: AGPL-3.0-or-later
 ```
-
-Do not use public SPDX expressions such as `AGPL-3.0-or-later OR Commercial`.
-Commercial terms are handled by a separate agreement.
 
 Every wheel carries the texts of its licences. Its `pyproject.toml` declares an
 SPDX expression and `license-files`, and holds a copy of each named text from
@@ -44,10 +35,13 @@ SPDX expression and `license-files`, and holds a copy of each named text from
 `ansible.playbook` step stages into its container, where it runs inside
 `ansible-playbook` (GPL-3.0-or-later) and subclasses Ansible's `CallbackBase`:
 at run time the two form one program. AGPL-3.0 code may be combined with
-GPL-3.0 code (section 13 of each), but a copy under Hegemony's commercial terms
-could not be; MIT keeps the combination open to every licensee. The rendered
-file the step stages carries the same MIT header, and the
-`hegemony-steps-ansible` wheel declares `AGPL-3.0-or-later AND MIT`.
+GPL-3.0 code (section 13 of each), so AGPL would be allowed here too. MIT is
+kept because the step copies this one file, on its own, into a container that
+runs someone else's program, possibly an Ansible image the operator built:
+under MIT the copy carries its whole licence in its header and needs nothing
+beside it, and nobody running or adapting it has to weigh the AGPL's terms
+inside Ansible. The rendered file the step stages carries the same MIT header,
+and the `hegemony-steps-ansible` wheel declares `AGPL-3.0-or-later AND MIT`.
 
 Keep any other file that runs inside a third-party GPL program in its own
 module under MIT in the same way; everything else stays `AGPL-3.0-or-later`.

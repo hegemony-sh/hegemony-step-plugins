@@ -6,17 +6,24 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 # Contributing
 
-This repository is part of the Hegemony project. Public source is licensed under
-`AGPL-3.0-or-later`, and Hegemony may also offer separate commercial licenses.
+This repository is part of the Hegemony project. Its source is licensed under
+`AGPL-3.0-or-later`. Your contribution is licensed under the same terms, and you
+keep the copyright in it. There is no Contributor License Agreement.
 
-External contributions are accepted only under the
-[Hegemony Contributor License Agreement](CLA.md). The CLA must grant Hegemony the
-rights needed to distribute accepted contributions under both the public AGPL
-license and separate commercial terms.
+Every commit must be signed off under the
+[Developer Certificate of Origin](https://developercertificate.org/) (DCO),
+version 1.1. A `Signed-off-by:` line certifies that you wrote the change, or
+otherwise have the right to submit it under the project licence. Sign off with
+`git commit -s`. The DCO GitHub App checks every commit in a pull request: the
+sign-off's name and email must match the commit's author or committer. Merge
+commits and commits by GitHub bot accounts are skipped. To add a missing
+sign-off to every commit on your branch, run
+`git rebase --signoff origin/main` and force-push the branch.
 
-The CLA check is expected to run in pull requests. Until that automation is in
-place, maintainers should not merge external contributions unless the contributor
-has already signed the [Hegemony CLA](CLA.md).
+A commit written by an AI coding agent is signed off by the person who directs
+the agent and submits the work, as its committer; the agent never signs off in
+its own name. See the platform's
+[CONTRIBUTING.md](https://github.com/hegemony-sh/hegemony/blob/develop/CONTRIBUTING.md#licensing-and-dco).
 
 ## Documentation
 
