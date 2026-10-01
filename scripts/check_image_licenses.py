@@ -67,50 +67,56 @@ REVIEW_LICENSES = {
     "SSPL-1.0",
     "Commons-Clause",
 }
-#: Licences that are not compatible with AGPL-3.0-or-later. Fine for a program
-#: Hegemony executes (mere aggregation), never for a library linked into a
-#: Hegemony process, which forms one work with Hegemony's own code. GPL-3.0,
-#: LGPL, AGPL, GPL-2.0-or-later and MPL-2.0 are compatible and absent. Mirrors
-#: the platform's scripts/check-image-licenses.py.
-FORBIDDEN_WHEN_LINKED = {
-    # GPL version 1 or 2, and Affero GPL version 1, without "or later" cannot
-    # be combined with GPL-3.0. The bare forms are SPDX's deprecated spellings
-    # of the "-only" identifiers.
-    "AGPL-1.0",
-    "AGPL-1.0-only",
-    "GPL-1.0",
-    "GPL-1.0-only",
-    "GPL-2.0",
-    "GPL-2.0-only",
-    # Copyleft licences with terms the GPL does not allow.
-    "CDDL-1.0",
-    "CDDL-1.1",
-    "CPL-1.0",
-    "EPL-1.0",
-    "EPL-2.0",
-    "EUPL-1.1",
-    "MPL-1.0",
-    "MPL-1.1",
-    "MPL-2.0-no-copyleft-exception",
-    "OSL-1.0",
-    "OSL-2.0",
-    "OSL-2.1",
-    "OSL-3.0",
-    "QPL-1.0",
-    # Permissive licences with a clause the GPL does not allow.
-    "Apache-1.0",
-    "Apache-1.1",
-    "BSD-4-Clause",
-    "JSON",
-    "OpenSSL",
-    "PHP-3.0",
-    "PHP-3.01",
-    # Source-available: they restrict use in ways AGPL-3.0 section 10 forbids.
-    "BUSL-1.1",
-    "Commons-Clause",
-    "Elastic-2.0",
-    "RSAL-1.0",
-    "SSPL-1.0",
+#: Licences known to be compatible with AGPL-3.0-or-later. Any licence is fine
+#: for a program Hegemony executes (mere aggregation); a library linked into a
+#: Hegemony process forms one work with Hegemony's own code, so a linked row
+#: passes only when every identifier in its licence is in this set. The check
+#: fails closed: a licence the set does not name -- APSL, CPAL, MS-PL, a
+#: LicenseRef -- fails until a reviewer adds it here with the reason it is
+#: compatible, or moves the component to 'exec'. GPL-2.0-only, AGPL-1.0-only,
+#: EPL, CDDL, MPL-1.x and the source-available licences are absent because they
+#: are not compatible. Mirrors the platform's scripts/check-image-licenses.py.
+COMPATIBLE_WHEN_LINKED = {
+    # Copyleft licences that AGPL-3.0 code may be combined with: AGPL-3.0
+    # section 13 permits combining with GPL-3.0 work, LGPL-2.x lets a recipient
+    # take the code under GPL-2.0 or any later version, and MPL-2.0 names the
+    # GPL as a secondary licence.
+    "AGPL-1.0-or-later",
+    "AGPL-3.0-only",
+    "AGPL-3.0-or-later",
+    "GPL-1.0-or-later",
+    "GPL-2.0-or-later",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "LGPL-2.0-only",
+    "LGPL-2.0-or-later",
+    "LGPL-2.1-only",
+    "LGPL-2.1-or-later",
+    "LGPL-3.0-only",
+    "LGPL-3.0-or-later",
+    "MPL-2.0",
+    # Permissive licences the FSF lists as compatible with GPL-3.0.
+    "0BSD",
+    "Apache-2.0",
+    "Artistic-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "curl",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "NCSA",
+    "PostgreSQL",
+    "PSF-2.0",
+    "Python-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "UPL-1.0",
+    "X11",
+    "Zlib",
 }
 
 #: Options whose next token is a value, not a package name.
@@ -194,9 +200,24 @@ def parse_allowlist(path: Path) -> dict[str, Entry]:
 
 
 def license_identifiers(expression: str) -> set[str]:
-    """The SPDX identifiers an expression names, operators and brackets dropped."""
-    tokens = re.split(r"[\s()]+", expression)
-    return {t for t in tokens if t and t.upper() not in {"AND", "OR", "WITH"}}
+    """The SPDX licence identifiers an expression names.
+
+    Operators, brackets and exceptions are dropped. An exception ("WITH
+    Classpath-exception-2.0") only widens what its licence permits, so judging
+    the licence alone can make it look less compatible than it is, never more.
+    """
+    identifiers: set[str] = set()
+    after_with = False
+    for token in re.split(r"[\s()]+", expression):
+        if not token or token.upper() in {"AND", "OR"}:
+            continue
+        if token.upper() == "WITH":
+            after_with = True
+        elif after_with:
+            after_with = False
+        else:
+            identifiers.add(token)
+    return identifiers
 
 
 def repository_of(reference: str) -> str:
@@ -464,12 +485,15 @@ def main(argv: list[str] | None = None) -> int:
             # so the arm Hegemony elects for a linked component belongs in the
             # row itself, and failing is how the reviewer is asked to write it.
             ids = license_identifiers(entry.license_id)
-            if entry.tier == "linked" and ids & FORBIDDEN_WHEN_LINKED:
+            unknown = ids - COMPATIBLE_WHEN_LINKED
+            if entry.tier == "linked" and unknown:
                 failures.append(
                     f"{kind} '{entry.name}' is {entry.license_id} and marked 'linked'.\n"
                     f"      Loading it into a Hegemony process would combine it with"
-                    f" Hegemony's own code,\n      and that licence is not compatible"
-                    f" with AGPL-3.0-or-later."
+                    f" Hegemony's own code,\n      and {', '.join(sorted(unknown))} is not in"
+                    f" COMPATIBLE_WHEN_LINKED, the licences known to be\n      compatible"
+                    f" with AGPL-3.0-or-later. Mark it 'exec', drop it, or add the licence"
+                    f" to that\n      set with the reason it is compatible."
                 )
             elif entry.tier != "first-party" and ids & REVIEW_LICENSES:
                 message = f"{kind} '{entry.name}' is {entry.license_id}: {entry.statement}"

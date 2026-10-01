@@ -20,10 +20,11 @@
 #           program reads. Mere aggregation (GPL-2.0 s.2, GPL-3.0 s.5): strong
 #           copyleft is acceptable and creates only notice and source-offer
 #           duties, met by the image's THIRD-PARTY-NOTICES.md.
-#   linked  Loaded into a Hegemony process. A licence that is not compatible
-#           with AGPL-3.0-or-later is a hard failure here (FORBIDDEN_WHEN_LINKED
-#           in scripts/check_image_licenses.py); GPL-3.0, LGPL and AGPL are
-#           compatible.
+#   linked  Loaded into a Hegemony process, so its licence must be compatible
+#           with AGPL-3.0-or-later. Any licence not in COMPATIBLE_WHEN_LINKED
+#           in scripts/check_image_licenses.py is a hard failure here. GPL-3.0,
+#           LGPL, AGPL-3.0 and MPL-2.0 are in it; GPL-2.0-only, AGPL-1.0-only,
+#           EPL, CDDL and the source-available licences are not.
 #
 # A package with the same name in the Debian (ansible-runner) and Alpine
 # (opentofu-runner) images has one row covering both.

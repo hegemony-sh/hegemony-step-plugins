@@ -64,9 +64,10 @@ repository reviews its own:
 - **The gate.** `scripts/check_image_licenses.py` (`task licenses:images`,
   and `tests/test_image_licenses.py` in CI) fails on an unlisted component, on
   an install from a requirements file (whose packages it cannot see), on
-  code under an AGPL-incompatible licence (GPL-2.0-only, EPL, CDDL, the
-  source-available licences) marked as linked into a Hegemony process, and on
-  a published
+  code marked as linked into a Hegemony process whose licence is not on its
+  list of licences known to be compatible with AGPL-3.0-or-later
+  (GPL-2.0-only, AGPL-1.0-only, EPL, CDDL and the source-available licences
+  are not on it, nor is any licence nobody has reviewed), and on a published
   image whose notices are missing or do not name what it installs. Review-tier
   licences (AGPL, SSPL, BUSL and the like) are warnings until accepted;
   `--strict` fails on them. The platform's licence process runs this script
