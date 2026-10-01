@@ -160,6 +160,55 @@ def test_copyleft_linked_into_hegemony_fails_and_review_licences_warn(tmp_path, 
     assert gate.main(["--root", str(root), "--strict"]) == 1
 
 
+def test_agpl_compatible_copyleft_may_be_linked(tmp_path, capsys):
+    # The rule is AGPL compatibility, not the absence of copyleft: AGPL-3.0
+    # section 13 permits combining with GPL-3.0 work.
+    root = _repo(tmp_path, "FROM python:3.12\nRUN apt-get install -y libfoo\n")
+    _allow(root, "images", "python | PSF-2.0 | base-image | Base.")
+    _allow(root, "os-packages", "libfoo | GPL-3.0-or-later | linked | Linked into the worker.")
+    assert gate.main(["--root", str(root)]) == 0
+    assert "marked 'linked'" not in capsys.readouterr().err
+
+
+def test_affero_gpl_version_1_only_may_not_be_linked(tmp_path, capsys):
+    # AGPL-1.0 without "or later" is GPL-2.0-based and cannot be combined with
+    # AGPL-3.0; the deprecated bare identifier means the same.
+    for licence in ("AGPL-1.0-only", "AGPL-1.0"):
+        root = _repo(tmp_path / licence, "FROM python:3.12\nRUN apt-get install -y libfoo\n")
+        _allow(root, "images", "python | PSF-2.0 | base-image | Base.")
+        _allow(root, "os-packages", f"libfoo | {licence} | linked | Linked into the worker.")
+        assert gate.main(["--root", str(root)]) == 1
+        assert f"os 'libfoo' is {licence} and marked 'linked'" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("licence", ["APSL-2.0", "CPAL-1.0", "MS-PL", "NASA-1.3"])
+def test_a_linked_licence_not_known_to_be_compatible_fails(tmp_path, capsys, licence):
+    # The linked tier fails closed. Each of these is GPL-incompatible, and none
+    # is on a short list of forbidden licences, so a denylist would pass it.
+    root = _repo(tmp_path, "FROM python:3.12\nRUN apt-get install -y libfoo\n")
+    _allow(root, "images", "python | PSF-2.0 | base-image | Base.")
+    _allow(root, "os-packages", f"libfoo | {licence} | linked | Linked into the worker.")
+    assert gate.main(["--root", str(root)]) == 1
+    err = capsys.readouterr().err
+    assert f"os 'libfoo' is {licence} and marked 'linked'" in err
+    assert "COMPATIBLE_WHEN_LINKED" in err
+
+
+def test_an_exception_does_not_fail_a_compatible_linked_licence(tmp_path):
+    root = _repo(tmp_path, "FROM python:3.12\nRUN apt-get install -y libfoo\n")
+    _allow(root, "images", "python | PSF-2.0 | base-image | Base.")
+    _allow(
+        root,
+        "os-packages",
+        "libfoo | GPL-3.0-or-later WITH GCC-exception-3.1 | linked | Linked into the worker.",
+    )
+    assert gate.main(["--root", str(root)]) == 0
+    assert gate.license_identifiers("(MIT OR GPL-2.0-only WITH Classpath-exception-2.0)") == {
+        "MIT",
+        "GPL-2.0-only",
+    }
+
+
 def test_a_published_image_needs_notices_naming_what_it_installs(tmp_path, capsys):
     root = _repo(tmp_path, "FROM python:3.12\nRUN apt-get install -y git sshpass\n", published=True)
     _allow(root, "images", "python | PSF-2.0 | base-image | Base.")

@@ -13,10 +13,9 @@ Hegemony's `ansible.playbook` step. It is built from
 repository and published by its Images workflow.
 
 **The image contains no Hegemony code.** Every program and library in it is
-third-party software, unmodified, under its own licence. Hegemony's licences
-(`AGPL-3.0-or-later`, or commercial terms; see
-[LICENSING.md](../../LICENSING.md)) cover none of it, and cannot grant rights
-over it. This file travels inside the image at
+third-party software, unmodified, under its own licence. Hegemony's licence
+(`AGPL-3.0-or-later`; see [LICENSING.md](../../LICENSING.md)) covers none of
+it, and cannot grant rights over it. This file travels inside the image at
 `/usr/share/doc/hegemony/THIRD-PARTY-NOTICES.md`, next to two inventories
 written when the image is built:
 
@@ -40,8 +39,8 @@ section 2, GPL-3.0 section 5): no copyleft reaches Hegemony's own code.
 The step stages one file of Hegemony code into the container at run time: an
 Ansible callback plugin that records task results. It runs inside
 `ansible-playbook` (GPL-3.0-or-later), so it is licensed **MIT** rather than
-AGPL, which keeps that combination open to every licensee. It is not part of
-the image.
+AGPL: the staged copy carries its whole licence in its header and needs nothing
+beside it (see the repository's LICENSING.md). It is not part of the image.
 
 ## Components
 

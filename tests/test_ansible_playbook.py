@@ -653,10 +653,10 @@ def _load_callback(monkeypatch, results_path: str):
 def test_the_staged_callback_is_mit_licensed():
     """The plugin runs inside ansible-playbook (GPL-3.0-or-later), so it is MIT.
 
-    AGPL code combined with Ansible would stay open under the AGPL, but not under
-    Hegemony's commercial terms; MIT keeps the combination open to every
-    licensee. Both the source module and the file staged into the container say
-    so, and neither carries an AGPL licence tag.
+    The staged file travels into the container on its own, so MIT lets it carry
+    its whole licence in its header and keeps the combination with Ansible
+    simple for everyone. Both the source module and the file staged into the
+    container say so, and neither carries an AGPL licence tag.
     """
     import hegemony_steps_ansible.callback_plugin as callback_plugin
 

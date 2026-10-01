@@ -14,10 +14,9 @@ repository and published by its Images workflow.
 
 **The image contains no Hegemony code.** Every program and library in it is
 third-party software under its own licence, unmodified except for the one
-security change to OpenTofu described below. Hegemony's licences
-(`AGPL-3.0-or-later`, or commercial terms; see
-[LICENSING.md](../../LICENSING.md)) cover none of it, and cannot grant rights
-over it. This file travels inside the image at
+security change to OpenTofu described below. Hegemony's licence
+(`AGPL-3.0-or-later`; see [LICENSING.md](../../LICENSING.md)) covers none of
+it, and cannot grant rights over it. This file travels inside the image at
 `/usr/share/doc/hegemony/THIRD-PARTY-NOTICES.md`, next to files written when
 the image is built:
 
