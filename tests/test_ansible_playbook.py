@@ -607,6 +607,18 @@ def test_validate_config_accepts_defaults():
     assert AnsiblePlaybookHandler().validate_config({"playbook": "site.yml"}) == []
 
 
+def test_cache_image_is_on_by_default_and_travels_to_the_job():
+    from hegemony_steps_ansible.playbook import AnsiblePlaybookConfig
+    from hegemony_steps_container.runner import container_config_from
+
+    config = AnsiblePlaybookConfig(playbook="site.yml")
+    assert config.cache_image is True
+    job_config = container_config_from(
+        {"playbook": "site.yml", "cache_image": False}, image=config.image, command=["true"]
+    )
+    assert job_config["cache_image"] is False
+
+
 # ── callback plugin ──────────────────────────────────────────────────────────
 
 

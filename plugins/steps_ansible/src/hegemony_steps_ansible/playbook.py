@@ -303,6 +303,18 @@ class AnsiblePlaybookConfig(ContainerExecutionConfig):
         ),
         json_schema_extra={"x_advanced": True, "x_col_span": 2},
     )
+    cache_image: bool = Field(
+        default=True,
+        title="Cache image",
+        description=(
+            "Keep a copy of the pulled image in the platform registry, under this "
+            "organization, and use it on later runs. A tag is still checked against the "
+            "image's registry by digest, and the copy serves when that registry is "
+            "unreachable. Turn off for an image that must come straight from its registry "
+            "every time. No effect when the platform runs no registry."
+        ),
+        json_schema_extra={"x_advanced": True},
+    )
 
 
 def _relative_path_error(field_name: str, value: object) -> str | None:

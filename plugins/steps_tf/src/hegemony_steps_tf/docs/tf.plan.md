@@ -72,10 +72,18 @@ run's shared workspace. An image in a registry that needs a login pulls with
 the organization's registry credential for that host, stored once by an
 admin; the step itself needs no login settings.
 
+When the platform runs its own container registry, Cache image (on by
+default) keeps a copy of the image there after the first pull; later plans
+use it, asking the image's registry only whether the tag moved, and a plan
+with that registry unreachable uses the copy. The apply follows the plan's
+choice.
+
 The plan records the image's registry digest, and `tf.apply` runs that
 digest: a saved plan is refused by any other tool version, and the tag may
-move between the plan and an approved apply. An image built on the sandbox
-and never pushed has no digest, so the apply runs its tag.
+move between the plan and an approved apply. When the plan ran a copy from
+the platform registry, the digest names that copy, which the apply pulls
+from the platform registry too. An image built on the sandbox and never
+pushed has no digest, so the apply runs its tag.
 
 ## Applying The Plan
 

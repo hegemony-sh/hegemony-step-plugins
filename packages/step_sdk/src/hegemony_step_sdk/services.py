@@ -109,6 +109,34 @@ class ShellTransport(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class ImageCache:
+    """The platform registry a step may keep copies of the images it pulls in.
+
+    Served inside :class:`ContainerRuntime` when the platform runs its own
+    registry. A step with ``cache_image`` on (the default) looks for a copy of
+    its image under ``namespace`` first, then under each of ``read_namespaces``,
+    and pulls from upstream only when none holds the image's current digest;
+    the copy it then saves goes under ``namespace`` alone. The host writes the
+    registry's login (a short-lived step token) into the step's Docker
+    configuration (``ContainerRuntime.docker_config_dir``), so the daemon's
+    pulls and the handler's pushes authenticate with it and the handler's own
+    HTTP calls to ``api_url`` reuse it.
+    """
+
+    # Host name image references use for the platform registry, as the
+    # sandbox daemon pulls from it (``registry.hegemony.internal``).
+    registry: str
+    # Base URL the handler reaches the registry's HTTP API at from the worker
+    # (``http://registry.hegemony.internal``); scheme included, no path.
+    api_url: str
+    # Repository prefix the step reads first and writes its copies under
+    # (``orgs/acme``). Copies live at ``<namespace>/<upstream host>/<repo>``.
+    namespace: str
+    # Read-only prefixes consulted after ``namespace``, in order (``global``).
+    read_namespaces: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ContainerRuntime:
     """The platform's container-execution environment served to the run_container handler."""
 
@@ -149,6 +177,11 @@ class ContainerRuntime:
     # login for the image's host. Empty means the worker's own configuration
     # applies, as before: pulls run anonymously unless it says otherwise.
     docker_config_dir: str = ""
+    # The platform registry a step may cache its image in (see
+    # :class:`ImageCache`). None means the platform has no registry: images
+    # are pulled from their own registry every time, as before, and a step's
+    # ``cache_image`` option has no effect.
+    image_cache: ImageCache | None = None
 
 
 @dataclass(frozen=True, slots=True)

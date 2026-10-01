@@ -267,6 +267,41 @@ def test_container_runtime_docker_config_dir_defaults_to_empty():
     assert runtime.docker_config_dir == ""
 
 
+def test_container_runtime_image_cache_defaults_to_none():
+    """The platform registry is optional and arrives as one structured value.
+
+    A host without a registry constructs the runtime without ``image_cache``
+    and every image is pulled from its own registry; a host with one passes
+    an :class:`ImageCache` whose write namespace is required and whose
+    read-only namespaces default to none.
+    """
+    field = next(f for f in dataclasses.fields(sdk.ContainerRuntime) if f.name == "image_cache")
+    assert field.default is None
+    runtime = sdk.ContainerRuntime(
+        docker_bin="docker",
+        shared_workspaces_enabled=False,
+        shared_workspace_root="",
+        shared_workspace_volume="",
+        docker_host="tcp://dind:2375",
+    )
+    assert runtime.image_cache is None
+
+    cache = sdk.ImageCache(
+        registry="registry.hegemony.internal",
+        api_url="http://registry.hegemony.internal",
+        namespace="orgs/acme",
+    )
+    assert cache.read_namespaces == ()
+    assert [f.name for f in dataclasses.fields(sdk.ImageCache)] == [
+        "registry",
+        "api_url",
+        "namespace",
+        "read_namespaces",
+    ]
+    with_cache = dataclasses.replace(runtime, image_cache=cache)
+    assert with_cache.image_cache is cache
+
+
 def test_registry_protocol_shape():
     signature = inspect.signature(sdk.StepHandlerRegistry.register_handler_type)
     assert list(signature.parameters) == ["self", "handler_class"]

@@ -998,6 +998,33 @@ async def test_plan_step_records_its_image_by_digest(monkeypatch):
     assert f"{repository}@sha256:{'a' * 64}" in create
 
 
+@pytest.mark.asyncio
+async def test_plan_hands_its_cache_choice_to_the_apply(monkeypatch):
+    """The apply pulls the plan's image the way the plan did (on by default)."""
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+    assert result.success is True, result.error
+    assert result.output["cache_image"] is True
+
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    result = await TfPlanHandler().execute(
+        _ctx({"state": "ephemeral", "cache_image": False}, _Services())
+    )
+    assert result.success is True, result.error
+    assert result.output["cache_image"] is False
+
+
+def test_apply_reads_the_cache_choice_and_defaults_it_for_older_plans():
+    from hegemony_steps_tf.apply import read_plan_handoff
+
+    handoff = read_plan_handoff("plan", _plan_output(cache_image=False)["plan"]["output"])
+    assert not isinstance(handoff, str)
+    assert handoff.cache_image is False
+    older = read_plan_handoff("plan", _plan_output()["plan"]["output"])
+    assert not isinstance(older, str)
+    assert older.cache_image is True
+
+
 def _plan_output(**overrides: Any) -> dict[str, Any]:
     output = {
         "handler": "tf.plan",

@@ -176,6 +176,9 @@ class PlanHandoff(BaseModel):
     engine: Engine
     image: str = Field(min_length=1)
     image_digest: str = ""
+    # Whether the plan step kept a copy of its image in the platform registry;
+    # the apply follows it (a plan from an older tf.plan reads as the default).
+    cache_image: bool = True
     state: StateMode
     state_name: str = ""
     working_dir: str
@@ -316,6 +319,7 @@ class TfApplyHandler(BaseHandler):
                         ),
                         # An unsaved state is kept here and harvested as an artifact.
                         "new_artifacts_path": KEEP_DIR,
+                        "cache_image": handoff.cache_image,
                     },
                     files=[
                         *env_files,

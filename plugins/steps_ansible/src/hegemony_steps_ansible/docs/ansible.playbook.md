@@ -137,6 +137,12 @@ release, tagged with the release version and its minor version; the step
 names the minor version of the wheel you run. The sandbox's Docker daemon
 pulls the image on every run, so it must be able to reach ghcr.io (directly
 or through its proxy); otherwise set Execution image to a mirror it can reach.
+When the platform runs its own container registry, Cache image (on by
+default) keeps a copy of the image there after the first pull and later runs
+use it, asking ghcr.io only whether the tag moved; a run with ghcr.io
+unreachable uses the copy. An image in a registry that needs a login pulls
+with the organization's registry credential for that host, stored once by an
+admin; the step itself needs no login settings.
 
 To add collections or Python packages, or to host the image yourself, build
 it from a checkout of that repository and push it under your own tag, then
