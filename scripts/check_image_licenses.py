@@ -53,9 +53,10 @@ IMAGE_TIERS = {"first-party", "base-image", "step-default"}
 #: or that such a program loads. ``linked``: loaded into a Hegemony process.
 COMPONENT_TIERS = {"exec", "linked"}
 
-#: Licences that need a written acceptance: they either propagate across a
-#: network boundary (AGPL, SSPL) or restrict the redistribution the commercial
-#: licence offers (BUSL, Elastic, RSAL, Commons Clause). Mirrors the platform's
+#: Licences that need a written acceptance: their terms reach past notices and a
+#: source offer, either by attaching source obligations to offering the software
+#: over a network (AGPL, SSPL) or by restricting who may use or offer it (BUSL,
+#: Elastic, RSAL, Commons Clause). Mirrors the platform's
 #: scripts/check-image-licenses.py.
 REVIEW_LICENSES = {
     "AGPL-3.0-only",
@@ -66,13 +67,44 @@ REVIEW_LICENSES = {
     "SSPL-1.0",
     "Commons-Clause",
 }
-#: Fine for a program Hegemony executes (mere aggregation), never for a library
-#: linked into a Hegemony process.
-FORBIDDEN_WHEN_LINKED = REVIEW_LICENSES - {"Commons-Clause"} | {
+#: Licences that are not compatible with AGPL-3.0-or-later. Fine for a program
+#: Hegemony executes (mere aggregation), never for a library linked into a
+#: Hegemony process, which forms one work with Hegemony's own code. GPL-3.0,
+#: LGPL, AGPL, GPL-2.0-or-later and MPL-2.0 are compatible and absent. Mirrors
+#: the platform's scripts/check-image-licenses.py.
+FORBIDDEN_WHEN_LINKED = {
+    # GPL version 1 or 2 without "or later" cannot be combined with GPL-3.0.
+    "GPL-1.0-only",
     "GPL-2.0-only",
-    "GPL-2.0-or-later",
-    "GPL-3.0-only",
-    "GPL-3.0-or-later",
+    # Copyleft licences with terms the GPL does not allow.
+    "CDDL-1.0",
+    "CDDL-1.1",
+    "CPL-1.0",
+    "EPL-1.0",
+    "EPL-2.0",
+    "EUPL-1.1",
+    "MPL-1.0",
+    "MPL-1.1",
+    "MPL-2.0-no-copyleft-exception",
+    "OSL-1.0",
+    "OSL-2.0",
+    "OSL-2.1",
+    "OSL-3.0",
+    "QPL-1.0",
+    # Permissive licences with a clause the GPL does not allow.
+    "Apache-1.0",
+    "Apache-1.1",
+    "BSD-4-Clause",
+    "JSON",
+    "OpenSSL",
+    "PHP-3.0",
+    "PHP-3.01",
+    # Source-available: they restrict use in ways AGPL-3.0 section 10 forbids.
+    "BUSL-1.1",
+    "Commons-Clause",
+    "Elastic-2.0",
+    "RSAL-1.0",
+    "SSPL-1.0",
 }
 
 #: Options whose next token is a value, not a package name.
@@ -424,8 +456,9 @@ def main(argv: list[str] | None = None) -> int:
             if entry.tier == "linked" and ids & FORBIDDEN_WHEN_LINKED:
                 failures.append(
                     f"{kind} '{entry.name}' is {entry.license_id} and marked 'linked'.\n"
-                    f"      Loading it into a Hegemony process would place Hegemony's own"
-                    f" code under\n      that licence and break the commercial grant."
+                    f"      Loading it into a Hegemony process would combine it with"
+                    f" Hegemony's own code,\n      and that licence is not compatible"
+                    f" with AGPL-3.0-or-later."
                 )
             elif entry.tier != "first-party" and ids & REVIEW_LICENSES:
                 message = f"{kind} '{entry.name}' is {entry.license_id}: {entry.statement}"

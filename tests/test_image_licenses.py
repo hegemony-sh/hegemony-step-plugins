@@ -160,6 +160,16 @@ def test_copyleft_linked_into_hegemony_fails_and_review_licences_warn(tmp_path, 
     assert gate.main(["--root", str(root), "--strict"]) == 1
 
 
+def test_agpl_compatible_copyleft_may_be_linked(tmp_path, capsys):
+    # The rule is AGPL compatibility, not the absence of copyleft: AGPL-3.0
+    # section 13 permits combining with GPL-3.0 work.
+    root = _repo(tmp_path, "FROM python:3.12\nRUN apt-get install -y libfoo\n")
+    _allow(root, "images", "python | PSF-2.0 | base-image | Base.")
+    _allow(root, "os-packages", "libfoo | GPL-3.0-or-later | linked | Linked into the worker.")
+    assert gate.main(["--root", str(root)]) == 0
+    assert "marked 'linked'" not in capsys.readouterr().err
+
+
 def test_a_published_image_needs_notices_naming_what_it_installs(tmp_path, capsys):
     root = _repo(tmp_path, "FROM python:3.12\nRUN apt-get install -y git sshpass\n", published=True)
     _allow(root, "images", "python | PSF-2.0 | base-image | Base.")
