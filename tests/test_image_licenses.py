@@ -170,6 +170,17 @@ def test_agpl_compatible_copyleft_may_be_linked(tmp_path, capsys):
     assert "marked 'linked'" not in capsys.readouterr().err
 
 
+def test_affero_gpl_version_1_only_may_not_be_linked(tmp_path, capsys):
+    # AGPL-1.0 without "or later" is GPL-2.0-based and cannot be combined with
+    # AGPL-3.0; the deprecated bare identifier means the same.
+    for licence in ("AGPL-1.0-only", "AGPL-1.0"):
+        root = _repo(tmp_path / licence, "FROM python:3.12\nRUN apt-get install -y libfoo\n")
+        _allow(root, "images", "python | PSF-2.0 | base-image | Base.")
+        _allow(root, "os-packages", f"libfoo | {licence} | linked | Linked into the worker.")
+        assert gate.main(["--root", str(root)]) == 1
+        assert f"os 'libfoo' is {licence} and marked 'linked'" in capsys.readouterr().err
+
+
 def test_a_published_image_needs_notices_naming_what_it_installs(tmp_path, capsys):
     root = _repo(tmp_path, "FROM python:3.12\nRUN apt-get install -y git sshpass\n", published=True)
     _allow(root, "images", "python | PSF-2.0 | base-image | Base.")

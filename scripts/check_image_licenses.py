@@ -73,8 +73,14 @@ REVIEW_LICENSES = {
 #: LGPL, AGPL, GPL-2.0-or-later and MPL-2.0 are compatible and absent. Mirrors
 #: the platform's scripts/check-image-licenses.py.
 FORBIDDEN_WHEN_LINKED = {
-    # GPL version 1 or 2 without "or later" cannot be combined with GPL-3.0.
+    # GPL version 1 or 2, and Affero GPL version 1, without "or later" cannot
+    # be combined with GPL-3.0. The bare forms are SPDX's deprecated spellings
+    # of the "-only" identifiers.
+    "AGPL-1.0",
+    "AGPL-1.0-only",
+    "GPL-1.0",
     "GPL-1.0-only",
+    "GPL-2.0",
     "GPL-2.0-only",
     # Copyleft licences with terms the GPL does not allow.
     "CDDL-1.0",
@@ -452,6 +458,11 @@ def main(argv: list[str] | None = None) -> int:
                     f"{', '.join(sorted(tiers))}."
                 )
                 continue
+            # Every identifier is judged, so a linked row reading "GPL-2.0-only
+            # OR MIT" fails although its MIT arm is compatible. That is
+            # deliberate, as in the platform's gate: rows are written by hand,
+            # so the arm Hegemony elects for a linked component belongs in the
+            # row itself, and failing is how the reviewer is asked to write it.
             ids = license_identifiers(entry.license_id)
             if entry.tier == "linked" and ids & FORBIDDEN_WHEN_LINKED:
                 failures.append(
