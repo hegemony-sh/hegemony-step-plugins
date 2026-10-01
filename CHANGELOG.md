@@ -1,3 +1,9 @@
+## [0.9.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.9.0...v0.9.1) (2026-10-01)
+
+### Bug Fixes
+
+* **container:** never cache an image from a registry named without a dot ([bf66b0f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bf66b0fcae649d3ee2351a5ca05328076bcbe7a0))
+
 ## [0.9.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.8.0...v0.9.0) (2026-10-01)
 
 ### Features
