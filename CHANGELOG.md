@@ -1,3 +1,14 @@
+## [0.9.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.8.0...v0.9.0) (2026-10-01)
+
+### Features
+
+* **container:** cache pulled images in the platform registry ([c1770a7](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c1770a74c97b2a52154d2e822a6cbec24c55ba38))
+
+### Bug Fixes
+
+* **container:** pull the checked digest, keep denials out of the cache, bound the lookups ([66a9740](https://github.com/hegemony-sh/hegemony-step-plugins/commit/66a974053d54ad64ace5f08a784c482d4658faf3))
+* **container:** write a registry port with an underscore in a copy's path ([8b75fbc](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8b75fbc00250d1ae6cac95130fb296cecff7a5a9))
+
 ## [0.8.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.7.1...v0.8.0) (2026-10-01)
 
 ### Features
