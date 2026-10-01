@@ -149,7 +149,10 @@ docker push registry.example.com/ansible-runner:custom
 
 When the default image cannot be pulled, the step fails at the pull with an
 error saying so. Any other Ansible execution environment image works too, as
-long as it has `/bin/sh` and the collections the playbook needs.
+long as it has `/bin/sh` and the collections the playbook needs. An image in
+a registry that needs a login pulls with the organization's registry
+credential for that host, stored once by an admin; the step itself needs no
+login settings.
 
 ## When It Fails
 

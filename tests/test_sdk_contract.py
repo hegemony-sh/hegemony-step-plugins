@@ -246,6 +246,27 @@ def test_container_runtime_requires_the_sandbox_daemon():
         raise AssertionError("ContainerRuntime must require docker_host")
 
 
+def test_container_runtime_docker_config_dir_defaults_to_empty():
+    """The step's Docker configuration directory is optional.
+
+    A host older than the field constructs the runtime without it and the
+    handler keeps inheriting the worker's configuration (anonymous pulls);
+    only a non-empty value redirects ``DOCKER_CONFIG``.
+    """
+    field = next(
+        f for f in dataclasses.fields(sdk.ContainerRuntime) if f.name == "docker_config_dir"
+    )
+    assert field.default == ""
+    runtime = sdk.ContainerRuntime(
+        docker_bin="docker",
+        shared_workspaces_enabled=False,
+        shared_workspace_root="",
+        shared_workspace_volume="",
+        docker_host="tcp://dind:2375",
+    )
+    assert runtime.docker_config_dir == ""
+
+
 def test_registry_protocol_shape():
     signature = inspect.signature(sdk.StepHandlerRegistry.register_handler_type)
     assert list(signature.parameters) == ["self", "handler_class"]

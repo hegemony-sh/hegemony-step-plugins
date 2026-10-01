@@ -31,8 +31,9 @@ from hegemony_steps_container.run import RunContainerHandler, _docker_env
 class _FakeServices:
     """Minimal HandlerServices stub exercising only the container.run path."""
 
-    def __init__(self, docker_host: str) -> None:
+    def __init__(self, docker_host: str, docker_config_dir: str = "") -> None:
         self._docker_host = docker_host
+        self._docker_config_dir = docker_config_dir
 
     def container_runtime(self) -> ContainerRuntime:
         return ContainerRuntime(
@@ -41,6 +42,7 @@ class _FakeServices:
             shared_workspace_root="",
             shared_workspace_volume="",
             docker_host=self._docker_host,
+            docker_config_dir=self._docker_config_dir,
         )
 
     async def fetch_run_attachments(self, run_id: str) -> list[dict]:
@@ -159,6 +161,47 @@ async def test_docker_host_set_applies_to_every_docker_call(monkeypatch) -> None
         assert argv[:3] == ["docker", "start", "-a"]
         assert env is not None
         assert env["DOCKER_HOST"] == "tcp://dind:2375"
+
+
+def test_docker_env_helper_points_docker_config_at_the_step_directory() -> None:
+    """The step's registry logins ride on the same environment as the daemon."""
+    env = _docker_env("tcp://dind:2375", "/tmp/hegemony-docker-config-abc")
+    assert env["DOCKER_HOST"] == "tcp://dind:2375"
+    assert env["DOCKER_CONFIG"] == "/tmp/hegemony-docker-config-abc"
+
+
+def test_docker_env_helper_leaves_docker_config_alone_without_a_directory(monkeypatch) -> None:
+    """No step directory means the worker's own configuration, as before."""
+    monkeypatch.delenv("DOCKER_CONFIG", raising=False)
+    assert "DOCKER_CONFIG" not in _docker_env("tcp://dind:2375")
+    assert "DOCKER_CONFIG" not in _docker_env("tcp://dind:2375", "   ")
+    monkeypatch.setenv("DOCKER_CONFIG", "/home/worker/.docker")
+    assert _docker_env("tcp://dind:2375")["DOCKER_CONFIG"] == "/home/worker/.docker"
+
+
+async def test_docker_config_dir_applies_to_every_docker_call(monkeypatch) -> None:
+    """Both pull paths and every other docker call see the step's logins."""
+    captured = _install_docker_mocks(monkeypatch)
+
+    services = _FakeServices("tcp://dind:2375", docker_config_dir="/tmp/hegemony-docker-config-x")
+    result = await RunContainerHandler().execute(_ctx(services))
+    assert result.success is True
+
+    # The cleanup helpers (preflight `ps`/`rm`, the final `rm`, `stop`) build
+    # their own daemon-only environment: nothing they do talks to a registry.
+    docker_runs = [
+        (cmd, env)
+        for cmd, env in captured["run"]
+        if cmd and cmd[0] == "docker" and cmd[1] not in ("ps", "rm", "stop")
+    ]
+    assert any(cmd[1] == "create" for cmd, _env in docker_runs)
+    for cmd, env in docker_runs:
+        assert env is not None, f"no env passed to {cmd[:3]}"
+        assert env["DOCKER_CONFIG"] == "/tmp/hegemony-docker-config-x", cmd[:3]
+    assert captured["exec"], "docker start -a was never spawned"
+    for _argv, env in captured["exec"]:
+        assert env is not None
+        assert env["DOCKER_CONFIG"] == "/tmp/hegemony-docker-config-x"
 
 
 @pytest.mark.parametrize("docker_host", ["", "   ", "unix://", "tcp://", "tcp://:2375", None])

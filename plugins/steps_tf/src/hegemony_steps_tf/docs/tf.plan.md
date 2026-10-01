@@ -68,7 +68,9 @@ newest patch release.
 Terraform runs in HashiCorp's `hashicorp/terraform` image at an exact
 version. Image replaces either; it needs a POSIX `sh` with `timeout` (as
 BusyBox and coreutils have) and must run as root, since the step writes the
-run's shared workspace.
+run's shared workspace. An image in a registry that needs a login pulls with
+the organization's registry credential for that host, stored once by an
+admin; the step itself needs no login settings.
 
 The plan records the image's registry digest, and `tf.apply` runs that
 digest: a saved plan is refused by any other tool version, and the tag may
