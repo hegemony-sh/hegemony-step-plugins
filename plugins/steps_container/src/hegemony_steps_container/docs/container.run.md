@@ -47,7 +47,10 @@ image's registry by that digest, so the copy holds exactly what was checked
 even if the tag moves meanwhile, and saved as a copy in turn, without ever
 failing the step when the save cannot happen. A registry that refuses the
 check's login gets the plain pull instead, with no copy served or saved: a
-refusal may mean access was withdrawn. A copy made by another organization is never
+refusal may mean access was withdrawn. An image from a registry whose name
+has no dot and is not `localhost` (`myregistry:5000`) is pulled from it and
+never cached: the platform registry tells a copy's host segment from an
+organization's own image names by that shape. A copy made by another organization is never
 used; copies the platform admins place in the global namespace are. Turn the
 option off for an image that must come straight from its registry every
 time. Without a platform registry the option changes nothing. The evidence

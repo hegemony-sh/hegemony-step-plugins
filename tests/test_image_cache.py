@@ -118,6 +118,15 @@ def test_plan_writes_a_registry_port_with_an_underscore() -> None:
     assert local.write_repo == "orgs/acme/localhost_5000/tool"
 
 
+def test_a_registry_named_without_a_dot_is_never_cached() -> None:
+    """The platform registry knows a host segment by its dot or by localhost."""
+    assert plan_cache("myregistry:5000/team/tool:1", CACHE) is None
+    # Without a port such a name is a Docker Hub path, not a registry: cached.
+    assert plan_cache("myregistry/team/tool:1", CACHE) is not None
+    assert plan_cache("localhost:5000/tool:dev", CACHE) is not None
+    assert plan_cache("registry.example.com:5000/tool:1", CACHE) is not None
+
+
 def test_an_image_already_in_the_platform_registry_is_not_cached_again() -> None:
     assert plan_cache(f"registry.hegemony.internal/orgs/acme/ghcr.io/x/y@{DIGEST}", CACHE) is None
     assert plan_cache("registry.hegemony.internal/global/base:1", CACHE) is None

@@ -180,9 +180,15 @@ def plan_cache(image: str, cache: ImageCache) -> CachePlan | None:
     reference = parse_reference(image)
     if reference.host == cache.registry:
         return None
+    # The platform registry tells a copy's host segment from an organization's
+    # own image names by its shape: a dot, or localhost. A registry named
+    # without either (``myregistry:5000``) is pulled from and never cached,
+    # since the registry would refuse the copy.
+    label = reference.host.split(":", 1)[0]
+    if "." not in label and label != "localhost":
+        return None
     # A repository path component may not contain a colon, so a registry port
-    # is written with an underscore (``registry.example.com_5000``); host names
-    # never contain underscores, so the spelling cannot clash with a host.
+    # is written with an underscore (``registry.example.com_5000``).
     path = f"{reference.host.replace(':', '_')}/{reference.repo}"
     write_repo = f"{cache.namespace}/{path}"
     read_repos = (write_repo, *(f"{namespace}/{path}" for namespace in cache.read_namespaces))
