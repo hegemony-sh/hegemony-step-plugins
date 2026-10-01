@@ -2067,6 +2067,10 @@ class RunContainerHandler(BaseHandler):
                 if image_digest:
                     # The tag can move (another step pulls it) before `docker create`.
                     config = {**config, "image": image_digest}
+            elif "@sha256:" in image:
+                # A digest-qualified reference already names exact content; record
+                # it as the digest without the inspect a pinned job pays for.
+                image_digest = image
 
             # 7. Build docker create command (container is created but not started)
             shared_workspace_path: str | None = None

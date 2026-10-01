@@ -30,8 +30,10 @@ Docker Hub account, a company registry) pulls without any change to the step:
 an organization admin stores the login once as a registry credential (host,
 username, password as a secret reference), and the platform hands it to the
 pull whenever an image's host matches. Without a matching credential the pull
-is anonymous, as before. The step's evidence records the image and the
-registry digest it resolved to, so the exact content that ran is on record.
+is anonymous, as before. The step's evidence records the image reference it
+ran. For a tagged image that is the tag, which can move between runs; give a
+digest-qualified reference (`image@sha256:…`) when the exact content that ran
+must be on record, and the evidence carries that digest.
 
 The container is provisioned with your flow's files. Flow attachments are
 copied under the attachments mount path (default `/attachments`); use the

@@ -425,6 +425,21 @@ async def test_an_unpinned_job_does_not_look_up_the_digest(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_an_unpinned_job_with_a_digest_reference_reports_it_without_a_lookup(monkeypatch):
+    """`image@sha256:…` already names exact content: it is the digest, no inspect needed."""
+    state = _install_docker(monkeypatch, repo_digests=["ghcr.io/x/tool@sha256:bbb"])
+    pinned = "ghcr.io/x/tool@sha256:" + "d" * 64
+    job = ContainerJob(config=container_config_from({}, image=pinned, command=["true"]))
+    outcome = await run_container_job(_ctx({}), job)
+
+    assert isinstance(outcome, ContainerJobResult)
+    assert outcome.image_digest == pinned
+    assert outcome.image == pinned
+    assert not any("{{json .RepoDigests}}" in call for call in state["calls"])
+    assert pinned in _create_args(state)
+
+
+@pytest.mark.asyncio
 async def test_run_container_job_validates_the_job_config(monkeypatch):
     state = _install_docker(monkeypatch)
     outcome = await run_container_job(
