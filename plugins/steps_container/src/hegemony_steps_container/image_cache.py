@@ -158,11 +158,16 @@ def plan_cache(image: str, cache: ImageCache) -> CachePlan | None:
     An image that already lives in the platform registry (its host is the
     cache's registry) is pulled as it is: a copy of a copy would add nothing,
     and ``tf.apply`` reaches its plan's image by exactly such a reference.
+    The copy's repository is ``<namespace>/<host>/<repository>``, the host
+    with any port written after an underscore.
     """
     reference = parse_reference(image)
     if reference.host == cache.registry:
         return None
-    path = f"{reference.host}/{reference.repo}"
+    # A repository path component may not contain a colon, so a registry port
+    # is written with an underscore (``registry.example.com_5000``); host names
+    # never contain underscores, so the spelling cannot clash with a host.
+    path = f"{reference.host.replace(':', '_')}/{reference.repo}"
     write_repo = f"{cache.namespace}/{path}"
     read_repos = (write_repo, *(f"{namespace}/{path}" for namespace in cache.read_namespaces))
     return CachePlan(

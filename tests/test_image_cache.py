@@ -92,10 +92,14 @@ def test_plan_names_the_copy_after_the_upstream_reference() -> None:
     )
 
 
-def test_plan_keeps_ports_and_nested_paths() -> None:
+def test_plan_writes_a_registry_port_with_an_underscore() -> None:
+    """A repository path component may not hold a colon; a port cannot clash with a host."""
     plan = plan_cache("registry.example.com:5000/team/tools/net:1", CACHE)
     assert plan is not None
-    assert plan.write_repo == "orgs/acme/registry.example.com:5000/team/tools/net"
+    assert plan.write_repo == "orgs/acme/registry.example.com_5000/team/tools/net"
+    local = plan_cache("localhost:5000/tool:dev", CACHE)
+    assert local is not None
+    assert local.write_repo == "orgs/acme/localhost_5000/tool"
 
 
 def test_an_image_already_in_the_platform_registry_is_not_cached_again() -> None:
