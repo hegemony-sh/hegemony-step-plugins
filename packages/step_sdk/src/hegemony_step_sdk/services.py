@@ -141,6 +141,14 @@ class ContainerRuntime:
     # Docker choose one — the step runs identically, and its egress report
     # covers the whole policy network instead of just itself.
     docker_mac: str = ""
+    # Directory holding the Docker configuration (``config.json``) for this
+    # step: the run organization's logins for external container registries,
+    # written by the host before the step and removed when it ends. The
+    # handler points ``DOCKER_CONFIG`` at it on every docker invocation, so
+    # both pull paths (Engine API and the ``docker pull`` fallback) find the
+    # login for the image's host. Empty means the worker's own configuration
+    # applies, as before: pulls run anonymously unless it says otherwise.
+    docker_config_dir: str = ""
 
 
 @dataclass(frozen=True, slots=True)

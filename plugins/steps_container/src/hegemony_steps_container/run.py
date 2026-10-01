@@ -84,7 +84,7 @@ def repo_digest_for(image: str, repo_digests: list[str]) -> str:
     return ""
 
 
-def _docker_env(docker_host: str) -> dict[str, str]:
+def _docker_env(docker_host: str, docker_config_dir: str = "") -> dict[str, str]:
     """Environment for a docker subprocess, selecting the sandbox daemon.
 
     ``docker_host`` is the worker's ``container_docker_host`` setting, surfaced
@@ -96,6 +96,13 @@ def _docker_env(docker_host: str) -> dict[str, str]:
     since the inherited one reaches the worker's own daemon.
     Daemon selection is environment, never argv, so the ``docker create`` args
     are identical whichever daemon is selected.
+
+    ``docker_config_dir`` is :attr:`ContainerRuntime.docker_config_dir`: the
+    step's own Docker configuration, holding the run organization's registry
+    logins. When set it becomes ``DOCKER_CONFIG`` for the same invocations, so
+    the Engine API pull (which reads ``config.json`` for its auth header) and
+    the ``docker pull`` fallback agree on the login for the image's host.
+    Empty leaves the inherited configuration in place.
 
     The override is deliberately per invocation: exporting ``DOCKER_HOST``
     process-wide would also redirect the worker's own daemon queries (e.g. the
@@ -111,6 +118,8 @@ def _docker_env(docker_host: str) -> dict[str, str]:
     docker_host = require_docker_host(docker_host)
     env = {key: value for key, value in os.environ.items() if key != "DOCKER_CONTEXT"}
     env["DOCKER_HOST"] = docker_host
+    if docker_config_dir and docker_config_dir.strip():
+        env["DOCKER_CONFIG"] = docker_config_dir.strip()
     return env
 
 
@@ -1076,6 +1085,7 @@ def _container_run_result(ctx: HandlerContext, outcome: ContainerJobResult) -> H
             "exit_code": exit_code,
             "duration_seconds": outcome.duration_seconds,
             "image": outcome.image,
+            "image_digest": outcome.image_digest,
             "skipped_artifacts": outcome.skipped_artifacts,
         },
         evidence=evidence,
@@ -1670,7 +1680,10 @@ class RunContainerHandler(BaseHandler):
             )
 
         docker_bin = runtime.docker_bin
-        docker_env = _docker_env(docker_host)
+        # The step's Docker configuration (the organization's registry logins)
+        # rides on the same environment as the daemon selection, so every pull
+        # path and every docker call sees the same login for the image's host.
+        docker_env = _docker_env(docker_host, getattr(runtime, "docker_config_dir", "") or "")
         image = config.get("image", "")
         timeout = config.get("timeout_seconds", ctx.timeout_seconds)
         working_dir = config.get("working_dir", "/workspace")
@@ -2563,6 +2576,7 @@ class RunContainerHandler(BaseHandler):
                     "content_json": {
                         "exit_code": exit_code,
                         "image": image,
+                        "image_digest": image_digest,
                         "duration_seconds": round(duration, 2),
                         "truncated": truncated,
                         "container_name": container_name,

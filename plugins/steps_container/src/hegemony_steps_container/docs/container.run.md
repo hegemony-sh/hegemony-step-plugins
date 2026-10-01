@@ -25,6 +25,14 @@ override, the handler runs the script with `sh -c`; set Entrypoint override to
 fields accept templates such as `{{ steps.NODE_ID.output.stdout }}`, resolved
 before the container starts.
 
+An image in a registry that needs a login (a private ghcr.io package, a
+Docker Hub account, a company registry) pulls without any change to the step:
+an organization admin stores the login once as a registry credential (host,
+username, password as a secret reference), and the platform hands it to the
+pull whenever an image's host matches. Without a matching credential the pull
+is anonymous, as before. The step's evidence records the image and the
+registry digest it resolved to, so the exact content that ran is on record.
+
 The container is provisioned with your flow's files. Flow attachments are
 copied under the attachments mount path (default `/attachments`); use the
 Attachments selector to narrow which ones. Snapshots of every completed
