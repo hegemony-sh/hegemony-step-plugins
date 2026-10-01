@@ -607,6 +607,18 @@ def test_validate_config_accepts_defaults():
     assert AnsiblePlaybookHandler().validate_config({"playbook": "site.yml"}) == []
 
 
+def test_cache_image_is_on_by_default_and_travels_to_the_job():
+    from hegemony_steps_ansible.playbook import AnsiblePlaybookConfig
+    from hegemony_steps_container.runner import container_config_from
+
+    config = AnsiblePlaybookConfig(playbook="site.yml")
+    assert config.cache_image is True
+    job_config = container_config_from(
+        {"playbook": "site.yml", "cache_image": False}, image=config.image, command=["true"]
+    )
+    assert job_config["cache_image"] is False
+
+
 # ── callback plugin ──────────────────────────────────────────────────────────
 
 
@@ -1085,6 +1097,8 @@ async def test_secret_values_are_staged_as_data_not_templates(monkeypatch):
     }
     result = await AnsiblePlaybookHandler().execute(_ctx(config, [_device("r1")]))
     assert result.success is True, result.error
+    # The image's provenance reaches the metrics of every container-backed handler.
+    assert {"image_served", "image_source", "image_cached"} <= result.metrics.keys()
     staged = json.loads(state["roots"][SECRETS_FILE])
     assert staged == {"api_token": literal("resolved-{{x}}")}
 

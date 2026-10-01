@@ -35,6 +35,26 @@ ran. For a tagged image that is the tag, which can move between runs; give a
 digest-qualified reference (`image@sha256:…`) when the exact content that ran
 must be on record, and the evidence carries that digest.
 
+When the platform runs its own container registry, Cache image (on by
+default) keeps a copy of the pulled image there, under the organization's
+namespace, named after the image's own registry and repository. Later runs
+ask the image's registry only which digest the tag points at today (one
+manifest request, plus whatever login round trip that registry asks for;
+Docker Hub does not count these requests against its pull limits) and pull
+the copy when it matches, or the newest copy under the tag when that registry
+is unreachable; the step's events say which. A new digest is pulled from the
+image's registry by that digest, so the copy holds exactly what was checked
+even if the tag moves meanwhile, and saved as a copy in turn, without ever
+failing the step when the save cannot happen. A registry that refuses the
+check's login gets the plain pull instead, with no copy served or saved: a
+refusal may mean access was withdrawn. A copy made by another organization is never
+used; copies the platform admins place in the global namespace are. Turn the
+option off for an image that must come straight from its registry every
+time. Without a platform registry the option changes nothing. The evidence
+records the reference the container ran by (`image_served`), where it came
+from (`image_source`: `upstream`, `cache` or `platform`) and whether this run
+saved a copy (`image_cached`).
+
 The container is provisioned with your flow's files. Flow attachments are
 copied under the attachments mount path (default `/attachments`); use the
 Attachments selector to narrow which ones. Snapshots of every completed

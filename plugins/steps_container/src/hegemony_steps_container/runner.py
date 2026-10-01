@@ -163,6 +163,15 @@ class ContainerJobResult:
     # ``pin_image`` and the daemon knows the image's registry digest (an image
     # built on the daemon and never pushed has none); otherwise empty.
     image_digest: str = ""
+    # The reference the container actually ran by: ``image`` itself, or the
+    # platform registry's copy of it when the cache served the step.
+    image_served: str = ""
+    # Where the image came from: ``upstream`` (its own registry), ``cache`` (a
+    # copy in the platform registry) or ``platform`` (an image that lives in
+    # the platform registry under its own name).
+    image_source: str = "upstream"
+    # True when this step saved a copy of the image to the platform registry.
+    image_cached: bool = False
 
 
 class ContainerExecutionConfig(BaseModel):
@@ -274,6 +283,7 @@ CONTAINER_PASSTHROUGH_FIELDS = (
     "egress_mode",
     "egress_allow",
     "egress_deny",
+    "cache_image",
 )
 
 

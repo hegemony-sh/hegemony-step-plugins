@@ -15,7 +15,9 @@ Pick the plan step in Plan step. Nothing about the configuration is
 repeated: the apply runs in the plan step's working directory with the same
 engine and image, so the lock file, providers, backend settings, and
 variables are the ones that were planned. The image is run by the digest the
-plan recorded, so a tag moved since the plan does not change the tool. Give both steps shared (or
+plan recorded, so a tag moved since the plan does not change the tool; when
+the plan ran a copy from the platform registry, that copy is what the apply
+pulls, and the plan's Cache image choice applies to the apply too. Give both steps shared (or
 explicit) execution affinity so they share the run's workspace and worker; the
 worker must have shared workspaces enabled.
 

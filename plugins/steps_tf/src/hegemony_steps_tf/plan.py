@@ -255,6 +255,18 @@ class TfPlanConfig(TfContainerConfig):
             "x_advanced": True,
         },
     )
+    cache_image: bool = Field(
+        default=True,
+        title="Cache image",
+        description=(
+            "Keep a copy of the pulled image in the platform registry, under this "
+            "organization, and use it on later runs. A tag is still checked against the "
+            "image's registry by digest, and the copy serves when that registry is "
+            "unreachable. Turn off for an image that must come straight from its registry "
+            "every time. No effect when the platform runs no registry."
+        ),
+        json_schema_extra={"x_advanced": True},
+    )
 
 
 def build_plan_script(
@@ -524,7 +536,13 @@ class TfPlanHandler(BaseHandler):
                 success=False,
                 summary=f"{tool} plan failed",
                 error=error or f"{tool} {reason}; see the container output",
-                metrics={"exit_code": exit_code, "duration_seconds": outcome.duration_seconds},
+                metrics={
+                    "exit_code": exit_code,
+                    "duration_seconds": outcome.duration_seconds,
+                    "image_served": outcome.image_served,
+                    "image_source": outcome.image_source,
+                    "image_cached": outcome.image_cached,
+                },
                 evidence=evidence,
             )
 
@@ -550,7 +568,13 @@ class TfPlanHandler(BaseHandler):
                     f"could not be read back from the container ({cause}), "
                     "so whether it has changes is unknown; run the step again"
                 ),
-                metrics={"exit_code": exit_code, "duration_seconds": outcome.duration_seconds},
+                metrics={
+                    "exit_code": exit_code,
+                    "duration_seconds": outcome.duration_seconds,
+                    "image_served": outcome.image_served,
+                    "image_source": outcome.image_source,
+                    "image_cached": outcome.image_cached,
+                },
                 evidence=evidence,
             )
         has_changes = plan_code == "2"
@@ -612,6 +636,8 @@ class TfPlanHandler(BaseHandler):
             # The image by digest, which tf.apply runs; empty for an image the
             # registry never saw (built on the sandbox daemon).
             "image_digest": outcome.image_digest,
+            # tf.apply pulls the plan's image the way the plan did.
+            "cache_image": config.cache_image,
             "state": config.state,
             "state_name": config.state_name.strip() if config.state == "managed" else "",
             # The run holds the state until it applies or ends (managed state only).
@@ -628,6 +654,9 @@ class TfPlanHandler(BaseHandler):
                 "exit_code": exit_code,
                 "duration_seconds": outcome.duration_seconds,
                 "image": image,
+                "image_served": outcome.image_served,
+                "image_source": outcome.image_source,
+                "image_cached": outcome.image_cached,
                 "has_changes": has_changes,
                 "add": summary_data.get("add", 0),
                 "change": summary_data.get("change", 0),

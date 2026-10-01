@@ -34,7 +34,7 @@ import json
 import os
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -187,21 +187,30 @@ def _load_docker_config(env: Mapping[str, str]) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def build_registry_auth_header(image: str, env: Mapping[str, str]) -> dict[str, str]:
-    """Static-``auths`` credential parity with the docker CLI.
+@dataclass(frozen=True, slots=True)
+class RegistryLogin:
+    """A static ``auths`` entry of ``config.json``: who to be at one registry."""
 
-    Reads ``$DOCKER_CONFIG/config.json`` (default ``~/.docker``) and builds the
-    ``X-Registry-Auth`` header the Engine API expects (URL-safe base64 of a
-    JSON AuthConfig). Credential helpers (``credsStore``/``credHelpers``) and
-    ``identitytoken``-only entries are out of scope: those return ``{}`` so the
-    pull is attempted anonymously — a daemon-side auth failure then lands in
-    the CLI fallback, which resolves helpers itself.
+    username: str
+    password: str = field(repr=False)
+    # The key the entry was found under, as the Engine API's ``serveraddress``.
+    serveraddress: str = ""
+
+
+def registry_login(host: str | None, env: Mapping[str, str]) -> RegistryLogin | None:
+    """The login ``config.json`` holds for ``host`` (None: Docker Hub), if any.
+
+    Reads ``$DOCKER_CONFIG/config.json`` (default ``~/.docker``) the way the
+    docker CLI reads static entries: the host as written, or with an
+    ``https://``/``http://`` prefix, and Docker Hub under its legacy index key
+    and the hostnames tooling writes instead. Credential helpers
+    (``credsStore``/``credHelpers``) and ``identitytoken``-only entries are out
+    of scope and read as no login.
     """
     auths = _load_docker_config(env).get("auths")
     if not isinstance(auths, dict):
-        return {}
-    host = _registry_host(image)
-    candidates = [host] if host else list(DOCKER_HUB_AUTH_KEYS)
+        return None
+    candidates = [host] if host and host not in DOCKER_HUB_AUTH_KEYS else list(DOCKER_HUB_AUTH_KEYS)
     entry: dict[str, Any] | None = None
     serveraddress = ""
     for key in candidates:
@@ -216,7 +225,7 @@ def build_registry_auth_header(image: str, env: Mapping[str, str]) -> dict[str, 
         if entry is not None:
             break
     if entry is None:
-        return {}
+        return None
     username = entry.get("username")
     password = entry.get("password")
     packed = entry.get("auth")
@@ -224,7 +233,7 @@ def build_registry_auth_header(image: str, env: Mapping[str, str]) -> dict[str, 
         try:
             decoded = base64.b64decode(packed).decode("utf-8")
         except (ValueError, UnicodeDecodeError):
-            return {}
+            return None
         username, _, password = decoded.partition(":")
     if (
         not isinstance(username, str)
@@ -232,9 +241,28 @@ def build_registry_auth_header(image: str, env: Mapping[str, str]) -> dict[str, 
         or not username
         or not password
     ):
+        return None
+    return RegistryLogin(username=username, password=password, serveraddress=serveraddress)
+
+
+def build_registry_auth_header(image: str, env: Mapping[str, str]) -> dict[str, str]:
+    """Static-``auths`` credential parity with the docker CLI.
+
+    Builds the ``X-Registry-Auth`` header the Engine API expects (URL-safe
+    base64 of a JSON AuthConfig) from :func:`registry_login` for the image's
+    host. No usable login returns ``{}`` so the pull is attempted anonymously —
+    a daemon-side auth failure then lands in the CLI fallback, which resolves
+    credential helpers itself.
+    """
+    login = registry_login(_registry_host(image), env)
+    if login is None:
         return {}
     payload = json.dumps(
-        {"username": username, "password": password, "serveraddress": serveraddress}
+        {
+            "username": login.username,
+            "password": login.password,
+            "serveraddress": login.serveraddress,
+        }
     )
     header = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
     return {"X-Registry-Auth": header}
