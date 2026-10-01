@@ -15,14 +15,15 @@ Every commit must be signed off under the
 version 1.1. A `Signed-off-by:` line certifies that you wrote the change, or
 otherwise have the right to submit it under the project licence. Sign off with
 `git commit -s`. The DCO GitHub App checks every commit in a pull request: the
-sign-off's name and email must match the commit's author or committer. Merge
+sign-off's name and email must match the commit's author. Merge
 commits and commits by GitHub bot accounts are skipped. To add a missing
 sign-off to every commit on your branch, run
 `git rebase --signoff origin/main` and force-push the branch.
 
 A commit written by an AI coding agent is signed off by the person who directs
-the agent and submits the work, as its committer; the agent never signs off in
-its own name. See the platform's
+the agent and submits the work, as its author; the agent is credited in a
+`Co-authored-by:` trailer and never signs off in its own name. See the
+platform's
 [CONTRIBUTING.md](https://github.com/hegemony-sh/hegemony/blob/develop/CONTRIBUTING.md#licensing-and-dco).
 
 ## Documentation
