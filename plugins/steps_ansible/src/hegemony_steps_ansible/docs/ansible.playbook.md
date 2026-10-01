@@ -135,12 +135,12 @@ platform maps device platforms onto. It is built from `images/ansible-runner/`
 in the hegemony-step-plugins repository and published on ghcr.io with every
 release, tagged with the release version and its minor version; the step
 names the minor version of the wheel you run. The sandbox's Docker daemon
-pulls the image on every run, so it must be able to reach ghcr.io (directly
-or through its proxy); otherwise set Execution image to a mirror it can reach.
-When the platform runs its own container registry, Cache image (on by
-default) keeps a copy of the image there after the first pull and later runs
-use it, asking ghcr.io only whether the tag moved; a run with ghcr.io
-unreachable uses the copy. An image in a registry that needs a login pulls
+pulls the image from ghcr.io, so it must be able to reach it (directly or
+through its proxy) at least on the first run; otherwise set Execution image
+to a mirror it can reach. When the platform runs its own container registry,
+Cache image (on by default) keeps a copy of the image there after the first
+pull and later runs use it, asking ghcr.io only whether the tag moved; a run
+with ghcr.io unreachable uses the copy. An image in a registry that needs a login pulls
 with the organization's registry credential for that host, stored once by an
 admin; the step itself needs no login settings.
 

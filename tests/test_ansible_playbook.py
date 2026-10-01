@@ -1097,6 +1097,8 @@ async def test_secret_values_are_staged_as_data_not_templates(monkeypatch):
     }
     result = await AnsiblePlaybookHandler().execute(_ctx(config, [_device("r1")]))
     assert result.success is True, result.error
+    # The image's provenance reaches the metrics of every container-backed handler.
+    assert {"image_served", "image_source", "image_cached"} <= result.metrics.keys()
     staged = json.loads(state["roots"][SECRETS_FILE])
     assert staged == {"api_token": literal("resolved-{{x}}")}
 

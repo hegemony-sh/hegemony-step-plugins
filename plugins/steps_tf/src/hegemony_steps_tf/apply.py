@@ -363,6 +363,9 @@ class TfApplyHandler(BaseHandler):
             "exit_code": outcome.exit_code,
             "duration_seconds": outcome.duration_seconds,
             "image": image,
+            "image_served": outcome.image_served,
+            "image_source": outcome.image_source,
+            "image_cached": outcome.image_cached,
         }
         if outcome.exit_code != 0:
             return HandlerResult(

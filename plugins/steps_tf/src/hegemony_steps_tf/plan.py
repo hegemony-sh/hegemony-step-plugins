@@ -536,7 +536,13 @@ class TfPlanHandler(BaseHandler):
                 success=False,
                 summary=f"{tool} plan failed",
                 error=error or f"{tool} {reason}; see the container output",
-                metrics={"exit_code": exit_code, "duration_seconds": outcome.duration_seconds},
+                metrics={
+                    "exit_code": exit_code,
+                    "duration_seconds": outcome.duration_seconds,
+                    "image_served": outcome.image_served,
+                    "image_source": outcome.image_source,
+                    "image_cached": outcome.image_cached,
+                },
                 evidence=evidence,
             )
 
@@ -562,7 +568,13 @@ class TfPlanHandler(BaseHandler):
                     f"could not be read back from the container ({cause}), "
                     "so whether it has changes is unknown; run the step again"
                 ),
-                metrics={"exit_code": exit_code, "duration_seconds": outcome.duration_seconds},
+                metrics={
+                    "exit_code": exit_code,
+                    "duration_seconds": outcome.duration_seconds,
+                    "image_served": outcome.image_served,
+                    "image_source": outcome.image_source,
+                    "image_cached": outcome.image_cached,
+                },
                 evidence=evidence,
             )
         has_changes = plan_code == "2"
@@ -642,6 +654,9 @@ class TfPlanHandler(BaseHandler):
                 "exit_code": exit_code,
                 "duration_seconds": outcome.duration_seconds,
                 "image": image,
+                "image_served": outcome.image_served,
+                "image_source": outcome.image_source,
+                "image_cached": outcome.image_cached,
                 "has_changes": has_changes,
                 "add": summary_data.get("add", 0),
                 "change": summary_data.get("change", 0),

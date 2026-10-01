@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -23,6 +25,7 @@ from hegemony_steps_container.image_cache import (
     cache_key_tag,
     login_for,
     parse_reference,
+    pin_reference,
     plan_cache,
     upstream_api_url,
 )
@@ -70,6 +73,19 @@ def test_manifest_reference_prefers_the_digest() -> None:
     assert parse_reference(f"ghcr.io/x/y:1.2@{DIGEST}").manifest_reference == DIGEST
     assert parse_reference("ghcr.io/x/y:1.2").manifest_reference == "1.2"
     assert parse_reference("ghcr.io/x/y").manifest_reference == "latest"
+
+
+@pytest.mark.parametrize(
+    ("image", "pinned"),
+    [
+        ("alpine:3.20", "alpine@sha256:" + "11" * 32),
+        ("alpine", "alpine@sha256:" + "11" * 32),
+        ("localhost:5000/team/tool:1.2", "localhost:5000/team/tool@sha256:" + "11" * 32),
+        ("ghcr.io/x/tool:1@sha256:" + "ab" * 32, "ghcr.io/x/tool@sha256:" + "11" * 32),
+    ],
+)
+def test_pin_reference_replaces_the_tag_with_the_digest(image: str, pinned: str) -> None:
+    assert pin_reference(image, "sha256:" + "11" * 32) == pinned
 
 
 def test_cache_key_tag_is_a_legal_tag_naming_the_upstream_digest() -> None:
@@ -287,6 +303,7 @@ from hegemony_steps_container.runner import ContainerJob, run_container_job  # n
 
 UPSTREAM_DIGEST = "sha256:" + "11" * 32
 KEY_TAG = "sha256-" + "11" * 32
+PINNED = f"alpine@{UPSTREAM_DIGEST}"
 OWN_REPO = "orgs/acme/docker.io/library/alpine"
 GLOBAL_REPO = "global/docker.io/library/alpine"
 OWN_COPY = f"registry.hegemony.internal/{OWN_REPO}"
@@ -352,10 +369,14 @@ class _Registries:
         self.manifests: dict[tuple[str, str, str], Any] = {}
         self.requests: list[tuple[str, str]] = []
         self.unreachable: set[str] = set()
+        # Seconds a registry sleeps before answering: a slow upstream.
+        self.delays: dict[str, float] = {}
 
     def transport(self, base_url: str) -> httpx.MockTransport:
-        def handler(request: httpx.Request) -> httpx.Response:
+        async def handler(request: httpx.Request) -> httpx.Response:
             self.requests.append((request.method, str(request.url)))
+            if base_url in self.delays:
+                await asyncio.sleep(self.delays[base_url])
             if base_url in self.unreachable:
                 raise httpx.ConnectError("connection refused")
             path = request.url.path  # /v2/<repo>/manifests/<ref>
@@ -364,6 +385,8 @@ class _Registries:
             answer = self.manifests.get((base_url, repo, reference))
             if isinstance(answer, Exception):
                 raise answer
+            if isinstance(answer, httpx.Response):
+                return answer
             if answer is None:
                 return httpx.Response(404)
             return httpx.Response(200, headers={"Docker-Content-Digest": answer})
@@ -371,12 +394,19 @@ class _Registries:
         return httpx.MockTransport(handler)
 
 
-def _install(monkeypatch, *, pull_failures: frozenset[str] = frozenset(), push_returncode: int = 0):
+def _install(
+    monkeypatch,
+    *,
+    pull_failures: frozenset[str] = frozenset(),
+    push_returncode: int = 0,
+    push_results: list[int] | None = None,
+):
     """Script the registries, the Engine API pull and the docker CLI.
 
     The Engine API pull succeeds for every image but those in ``pull_failures``,
     which raise and whose CLI fallback also fails, so the handler reports the
-    pull as failed for exactly those references.
+    pull as failed for exactly those references. Pushes answer
+    ``push_returncode``, or ``push_results`` one by one when given.
     """
     registries = _Registries()
     monkeypatch.setattr("hegemony_steps_container.run._registry_transport", registries.transport)
@@ -391,10 +421,12 @@ def _install(monkeypatch, *, pull_failures: frozenset[str] = frozenset(), push_r
 
     monkeypatch.setattr("hegemony_steps_container.run.stream_pull", fake_stream_pull)
 
-    captured: dict[str, list] = {"run": [], "exec": [], "pulled": pulled}
+    captured: dict[str, list] = {"run": [], "exec": [], "pulled": pulled, "timeouts": []}
+    remaining_push_results = list(push_results or [])
 
     def fake_subprocess_run(cmd, *args, **kwargs):
         captured["run"].append((list(cmd), kwargs.get("env")))
+        captured["timeouts"].append((list(cmd), kwargs.get("timeout")))
         argv = list(cmd)
         if argv[:2] == ["docker", "pull"]:
             if argv[2] in pull_failures:
@@ -402,7 +434,8 @@ def _install(monkeypatch, *, pull_failures: frozenset[str] = frozenset(), push_r
             pulled.append(argv[2])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if argv[:2] == ["docker", "push"]:
-            return SimpleNamespace(returncode=push_returncode, stdout="", stderr="denied: push")
+            code = remaining_push_results.pop(0) if remaining_push_results else push_returncode
+            return SimpleNamespace(returncode=code, stdout="", stderr="denied: push")
         if argv[:3] == ["docker", "image", "inspect"]:
             if "RepoDigests" in " ".join(argv):
                 name = argv[-1].split("@")[0].rsplit(":", 1)[0]
@@ -488,11 +521,13 @@ async def test_a_miss_pulls_upstream_and_saves_a_copy_under_both_tags(monkeypatc
         ("HEAD", f"http://registry.hegemony.internal/v2/{OWN_REPO}/manifests/{KEY_TAG}"),
         ("HEAD", f"http://registry.hegemony.internal/v2/{GLOBAL_REPO}/manifests/{KEY_TAG}"),
     ]
-    assert captured["pulled"] == ["alpine:3.20"]
+    # Pulled by the digest the check named, so the copy holds that content
+    # even if the tag moved in between.
+    assert captured["pulled"] == [PINNED]
     # The digest key lands first, the human tag second, each tagged then pushed.
     assert _docker(captured, "tag") == [
-        ["docker", "tag", "alpine:3.20", f"{OWN_COPY}:{KEY_TAG}"],
-        ["docker", "tag", "alpine:3.20", f"{OWN_COPY}:3.20"],
+        ["docker", "tag", PINNED, f"{OWN_COPY}:{KEY_TAG}"],
+        ["docker", "tag", PINNED, f"{OWN_COPY}:3.20"],
     ]
     assert _docker(captured, "push") == [
         ["docker", "push", f"{OWN_COPY}:{KEY_TAG}"],
@@ -501,13 +536,14 @@ async def test_a_miss_pulls_upstream_and_saves_a_copy_under_both_tags(monkeypatc
     # Pushes run on the sandbox daemon with the step's Docker configuration.
     push_env = next(env for cmd, env in captured["run"] if cmd[:2] == ["docker", "push"])
     assert push_env["DOCKER_HOST"] == "tcp://dind:2375"
-    assert "alpine:3.20" in _create_argv(captured)
+    assert PINNED in _create_argv(captured)
     assert "image_cache_store" in _milestones(events)
+    assert result.metrics["image_served"] == PINNED
     assert result.metrics["image_source"] == "upstream"
     assert result.metrics["image_cached"] is True
     evidence = next(e for e in result.evidence if e["kind"] == "container_output")
     assert evidence["content_json"]["image"] == "alpine:3.20"
-    assert evidence["content_json"]["image_served"] == "alpine:3.20"
+    assert evidence["content_json"]["image_served"] == PINNED
     assert evidence["content_json"]["image_cached"] is True
 
 
@@ -599,7 +635,8 @@ async def test_platform_registry_unreachable_means_a_plain_pull(monkeypatch) -> 
 
     result = await RunContainerHandler().execute(_handler_ctx(events))
     assert result.success is True
-    assert captured["pulled"] == ["alpine:3.20"]
+    # The check named a digest, so that is what is pulled; just no copy is made.
+    assert captured["pulled"] == [PINNED]
     assert _docker(captured, "push") == []
     skip = next(attrs for _m, attrs in events if attrs.get("milestone") == "image_cache_skip")
     assert "connection refused" in skip["reason"]
@@ -623,6 +660,83 @@ async def test_a_refused_push_never_fails_the_step(monkeypatch) -> None:
     assert result.metrics["image_cached"] is False
 
 
+async def test_a_refused_check_pulls_upstream_without_the_cache(monkeypatch) -> None:
+    """A registry that refuses the manifest check is not an outage: no stale copy."""
+    registries, captured = _install(monkeypatch)
+    registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
+        httpx.Response(403)
+    )
+    # A copy under the tag exists and must not stand in for the refused image.
+    registries.manifests[("http://registry.hegemony.internal", OWN_REPO, "3.20")] = (
+        "sha256:" + "44" * 32
+    )
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True
+    assert captured["pulled"] == ["alpine:3.20"]
+    assert _docker(captured, "push") == []
+    assert all("registry.hegemony.internal" not in url for _m, url in registries.requests)
+    skip = next(attrs for _m, attrs in events if attrs.get("milestone") == "image_cache_skip")
+    assert "refused" in skip["reason"]
+    assert "image_cache_stale" not in _milestones(events)
+    assert result.metrics["image_source"] == "upstream"
+    assert result.metrics["image_cached"] is False
+
+
+async def test_a_copy_saved_under_its_key_alone_counts_as_saved(monkeypatch) -> None:
+    registries, captured = _install(monkeypatch, push_results=[0, 1])
+    registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
+        UPSTREAM_DIGEST
+    )
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True
+    assert len(_docker(captured, "push")) == 2
+    partial = next(
+        attrs for _m, attrs in events if attrs.get("milestone") == "image_cache_store_partial"
+    )
+    assert partial["copy"] == f"{OWN_COPY}:{KEY_TAG}"
+    assert partial["missing"] == f"{OWN_COPY}:3.20"
+    assert "denied: push" in partial["reason"]
+    assert "image_cache_store_failed" not in _milestones(events)
+    assert result.metrics["image_cached"] is True
+
+
+async def test_tagging_the_copy_is_capped_by_the_copy_budget(monkeypatch) -> None:
+    registries, captured = _install(monkeypatch)
+    registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
+        UPSTREAM_DIGEST
+    )
+    events: list = []
+    # 40 s of step minus the 20 s reserve: a 20 s budget, under the 30 s a tag
+    # may otherwise take.
+    ctx = _handler_ctx(
+        events, config={"image": "alpine:3.20", "command": ["true"], "timeout_seconds": 40}
+    )
+    result = await RunContainerHandler().execute(ctx)
+    assert result.success is True
+    tag_timeouts = [t for cmd, t in captured["timeouts"] if cmd[:2] == ["docker", "tag"]]
+    assert tag_timeouts and all(t is not None and 15 < t <= 20 for t in tag_timeouts)
+
+
+async def test_a_slow_manifest_check_is_the_steps_timeout(monkeypatch) -> None:
+    """A registry that never answers does not carry the step past its deadline."""
+    registries, captured = _install(monkeypatch)
+    registries.delays["https://registry-1.docker.io"] = 5.0
+    events: list = []
+    ctx = _handler_ctx(
+        events, config={"image": "alpine:3.20", "command": ["true"], "timeout_seconds": 1}
+    )
+    started = time.monotonic()
+    result = await RunContainerHandler().execute(ctx)
+    assert time.monotonic() - started < 4
+    assert result.success is False
+    assert "timed out" in (result.error or "")
+    assert captured["pulled"] == []
+
+
 async def test_a_cached_copy_that_cannot_be_pulled_falls_back_to_upstream(monkeypatch) -> None:
     registries, captured = _install(monkeypatch, pull_failures=frozenset({f"{OWN_COPY}:{KEY_TAG}"}))
     registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
@@ -635,7 +749,7 @@ async def test_a_cached_copy_that_cannot_be_pulled_falls_back_to_upstream(monkey
 
     result = await RunContainerHandler().execute(_handler_ctx(events))
     assert result.success is True
-    assert captured["pulled"] == ["alpine:3.20"]
+    assert captured["pulled"] == [PINNED]
     # No point pushing to the registry that just failed to serve the copy.
     assert _docker(captured, "push") == []
     assert "image_cache_miss" in _milestones(events)

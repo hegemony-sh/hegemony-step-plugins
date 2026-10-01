@@ -41,6 +41,7 @@ from .image_cache import (
     cache_key_tag,
     login_for,
     parse_reference,
+    pin_reference,
     plan_cache,
     upstream_api_url,
 )
@@ -77,6 +78,9 @@ _IMAGE_INSPECT_TIMEOUT = 15.0
 _COPY_RESERVE_SECONDS = 20.0
 _COPY_MAX_SECONDS = 600.0
 _COPY_MIN_SECONDS = 15.0
+#: Tagging the pulled image for its copy is local and quick; this is the most a
+#: wedged daemon may spend on it, inside whatever the copy budget still allows.
+_TAG_TIMEOUT_SECONDS = 30.0
 
 
 def _registry_transport(base_url: str) -> httpx.AsyncBaseTransport | None:
@@ -1121,6 +1125,7 @@ def _container_run_result(ctx: HandlerContext, outcome: ContainerJobResult) -> H
             "duration_seconds": outcome.duration_seconds,
             "image": outcome.image,
             "image_digest": outcome.image_digest,
+            "image_served": outcome.image_served,
             "image_source": outcome.image_source,
             "image_cached": outcome.image_cached,
             "skipped_artifacts": outcome.skipped_artifacts,
@@ -2965,6 +2970,32 @@ class RunContainerHandler(BaseHandler):
         await emit(message, attrs=attrs)
         return None
 
+    async def _lookup(
+        self,
+        client: RegistryClient,
+        repo: str,
+        reference: str,
+        *,
+        docker_bin: str,
+        image: str,
+        deadline: float,
+    ) -> str | None:
+        """:meth:`RegistryClient.manifest_digest`, bounded by the step's deadline.
+
+        A registry that answers slowly must not carry the step past its own
+        timeout before the pull has even started: out of time here is the same
+        timeout the pull reports, so ``execute`` ends the step the same way.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired([docker_bin, "pull", image], 0)
+        try:
+            return await asyncio.wait_for(
+                client.manifest_digest(repo, reference), timeout=remaining
+            )
+        except TimeoutError:
+            raise subprocess.TimeoutExpired([docker_bin, "pull", image], remaining) from None
+
     async def _acquire_image(
         self,
         *,
@@ -2985,10 +3016,14 @@ class RunContainerHandler(BaseHandler):
         today (one ``HEAD``; a digest-qualified reference already says), look
         for a copy of that digest under the step's own namespace and then the
         read-only ones, and pull the copy when there is one. A missing copy
-        means pulling from upstream and saving one (:meth:`_store_copy`). An
-        unreachable upstream falls back to the last copy by tag, with a
-        warning; an unreachable platform registry means a plain upstream pull,
-        with a note. Nothing here fails the step except the pull itself.
+        means pulling that digest from upstream and saving a copy of it
+        (:meth:`_store_copy`). An unreachable upstream falls back to the last
+        copy by tag, with a warning; an upstream that refuses the check gets
+        the plain pull, with no copy served or saved, since a refusal may mean
+        access was withdrawn; an unreachable platform registry means a plain
+        upstream pull, with a note. Every registry lookup is bounded by what
+        is left of the step's deadline. Nothing here fails the step except the
+        pull itself, or running out of time.
         """
         wants_cache = bool(job.config.get("cache_image", True))
         plan = plan_cache(image, cache) if (wants_cache and cache is not None) else None
@@ -3024,22 +3059,46 @@ class RunContainerHandler(BaseHandler):
             transport=_registry_transport(upstream_url),
         )
 
-        # 1. The digest upstream serves today: the key a copy is filed under.
-        key_tag: str | None = None
+        # 1. The digest upstream serves today: the key a copy is filed under,
+        # and what the pull below asks for.
+        upstream_digest: str | None = reference.digest
         upstream_problem: str | None = None
-        if reference.digest:
-            key_tag = cache_key_tag(reference.digest)
-        else:
+        if upstream_digest is None:
             try:
-                digest = await upstream.manifest_digest(
-                    reference.repo, reference.manifest_reference
+                upstream_digest = await self._lookup(
+                    upstream,
+                    reference.repo,
+                    reference.manifest_reference,
+                    docker_bin=docker_bin,
+                    image=image,
+                    deadline=deadline,
                 )
-            except (RegistryUnavailable, RegistryDenied) as exc:
+            except RegistryUnavailable as exc:
                 upstream_problem = str(exc)
-            else:
-                if digest is not None:
-                    key_tag = cache_key_tag(digest)
-                # None: the tag does not exist upstream; the pull below says so.
+            except RegistryDenied as exc:
+                # A refusal is an answer, not an outage. The login this client
+                # could offer was not accepted, so no copy stands in for the
+                # image (access may have been withdrawn) and none is made (the
+                # digest is unknown). The pull is the authority: docker may
+                # hold a login this client cannot use, or fail the step.
+                await emit(
+                    f"{reference.host} refused the manifest check for {image} ({exc}); "
+                    "pulling it from its registry without the cache",
+                    attrs={"milestone": "image_cache_skip", "image": image, "reason": str(exc)},
+                )
+                failure = await self._pull_image(
+                    docker_bin=docker_bin,
+                    image=image,
+                    docker_env=docker_env,
+                    docker_host=docker_host,
+                    deadline=deadline,
+                    emit=emit,
+                )
+                if failure is not None:
+                    return failure
+                return AcquiredImage(served=image, source="upstream", cached=False)
+            # None: the tag does not exist upstream; the pull below says so.
+        key_tag = cache_key_tag(upstream_digest) if upstream_digest else None
 
         # 2. A copy of that digest, or, with upstream unreachable, the last copy
         # under the tag.
@@ -3049,7 +3108,14 @@ class RunContainerHandler(BaseHandler):
         if lookup_tag:
             for repo in plan.read_repos:
                 try:
-                    found = await registry.manifest_digest(repo, lookup_tag)
+                    found = await self._lookup(
+                        registry,
+                        repo,
+                        lookup_tag,
+                        docker_bin=docker_bin,
+                        image=image,
+                        deadline=deadline,
+                    )
                 except (RegistryUnavailable, RegistryDenied) as exc:
                     cache_problem = str(exc)
                     break
@@ -3099,10 +3165,15 @@ class RunContainerHandler(BaseHandler):
                 attrs={"milestone": "image_cache_skip", "image": image, "reason": cache_problem},
             )
 
-        # 3. The image's own registry.
+        # 3. The image's own registry, by the digest the check named when it
+        # named one: the tag may move between the check and the pull, and a
+        # copy filed under a digest must hold that digest's content.
+        target = image
+        if upstream_digest and not reference.digest:
+            target = pin_reference(image, upstream_digest)
         failure = await self._pull_image(
             docker_bin=docker_bin,
-            image=image,
+            image=target,
             docker_env=docker_env,
             docker_host=docker_host,
             deadline=deadline,
@@ -3114,7 +3185,7 @@ class RunContainerHandler(BaseHandler):
         if key_tag and cache_problem is None:
             tags = [key_tag, *([reference.tag] if reference.tag else [])]
             cached = await self._store_copy(
-                image=image,
+                image=target,
                 plan=plan,
                 tags=tags,
                 docker_bin=docker_bin,
@@ -3122,7 +3193,7 @@ class RunContainerHandler(BaseHandler):
                 deadline=deadline,
                 emit=emit,
             )
-        return AcquiredImage(served=image, source="upstream", cached=cached)
+        return AcquiredImage(served=target, source="upstream", cached=cached)
 
     async def _store_copy(
         self,
@@ -3138,12 +3209,13 @@ class RunContainerHandler(BaseHandler):
         """Push the pulled ``image`` into the platform registry under ``tags``.
 
         The digest key goes first, so a later run finds the copy even if the
-        human-readable tag never lands. Bounded by what is left of the step's
-        deadline minus a reserve for the step itself, and by an absolute cap;
-        out of time, a refused push or a daemon error leave a note in the
-        step's events and the step carries on with the image it already has.
-        The local tags stay on the daemon: the next pull of the copy then
-        finds it present.
+        human-readable tag never lands; a copy that made it under the key
+        alone counts as saved, with a note about the missing tag. Bounded by
+        what is left of the step's deadline minus a reserve for the step
+        itself, and by an absolute cap, the tagging included; out of time, a
+        refused push or a daemon error leave a note in the step's events and
+        the step carries on with the image it already has. The local tags stay
+        on the daemon: the next pull of the copy then finds it present.
         """
         remaining = deadline - time.monotonic()
         budget = min(remaining - _COPY_RESERVE_SECONDS, _COPY_MAX_SECONDS)
@@ -3155,11 +3227,20 @@ class RunContainerHandler(BaseHandler):
             return False
         started = time.monotonic()
         problem = ""
+        published: list[str] = []
+        copy = ""
         for tag in tags:
             copy = plan.copy_reference(plan.write_repo, tag)
             try:
+                left = budget - (time.monotonic() - started)
+                if left <= 0:
+                    problem = "ran out of time"
+                    break
                 tagged = await self._run_docker(
-                    docker_bin, ["tag", image, copy], env=docker_env, timeout=30
+                    docker_bin,
+                    ["tag", image, copy],
+                    env=docker_env,
+                    timeout=min(left, _TAG_TIMEOUT_SECONDS),
                 )
                 if tagged.returncode != 0:
                     problem = (tagged.stderr or "docker tag failed")[:300]
@@ -3174,19 +3255,36 @@ class RunContainerHandler(BaseHandler):
                 if pushed.returncode != 0:
                     problem = (pushed.stderr or "docker push failed")[:300]
                     break
+                published.append(copy)
             except subprocess.TimeoutExpired:
-                problem = "the push ran out of time"
+                problem = "ran out of time"
                 break
             except (subprocess.SubprocessError, OSError) as exc:
                 problem = str(exc)[:300] or type(exc).__name__
                 break
         duration = time.monotonic() - started
-        if problem:
+        if problem and not published:
             await emit(
                 f"Could not save a copy of {image} to the platform registry: {problem}",
                 attrs={"milestone": "image_cache_store_failed", "image": image, "reason": problem},
             )
             return False
+        if problem:
+            # The key is in place, so later runs find the copy; only the
+            # human-readable tag is missing. The copy counts as saved.
+            await emit(
+                f"Saved a copy of {image} to the platform registry as {published[-1]}, "
+                f"but not as {copy}: {problem}",
+                attrs={
+                    "milestone": "image_cache_store_partial",
+                    "image": image,
+                    "copy": published[-1],
+                    "missing": copy,
+                    "reason": problem,
+                    "duration_seconds": round(duration, 1),
+                },
+            )
+            return True
         copy = plan.copy_reference(plan.write_repo, tags[-1])
         await emit(
             f"Saved a copy of {image} to the platform registry as {copy} in {duration:.1f}s",

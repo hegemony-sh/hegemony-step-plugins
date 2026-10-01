@@ -111,6 +111,22 @@ def parse_reference(image: str) -> ImageReference:
     return ImageReference(host=host, repo=path, tag=tag or None, digest=digest or None)
 
 
+def pin_reference(image: str, digest: str) -> str:
+    """``image`` with its tag replaced by ``digest``: what the pull asks for.
+
+    ``alpine:3.20`` becomes ``alpine@sha256:…`` and ``host:5000/x:1`` keeps
+    its port. Pulling that reference brings exactly the manifest the upstream
+    check named, however the tag moves in between, so a copy filed under the
+    digest holds the digest's content.
+    """
+    name, _, _ = image.partition("@")
+    slash = name.rfind("/")
+    colon = name.rfind(":")
+    if colon > slash:
+        name = name[:colon]
+    return f"{name}@{digest}"
+
+
 def cache_key_tag(digest: str) -> str:
     """The tag a copy carries for the upstream digest it was made from.
 

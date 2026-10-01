@@ -1084,6 +1084,7 @@ async def test_apply_step_runs_the_plan_image_by_digest(monkeypatch):
     assert pinned in create
     assert "ghcr.io/hegemony-sh/opentofu-runner:0.6" not in create
     assert result.metrics["image"] == pinned
+    assert {"image_served", "image_source", "image_cached"} <= result.metrics.keys()
     # The apply does not look the digest up again.
     assert not any("{{json .RepoDigests}}" in call for call in state["calls"])
 
