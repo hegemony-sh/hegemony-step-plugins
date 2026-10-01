@@ -1,3 +1,13 @@
+## [0.8.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.7.1...v0.8.0) (2026-10-01)
+
+### Features
+
+* **container:** honour a per-step Docker config directory ([e3a9909](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e3a9909324ca0af770d136feae557a97ccedfc74))
+
+### Bug Fixes
+
+* **container:** record a digest-qualified image reference as the digest ([25d277c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/25d277c5df10e6c68ce61d48b7f0c83499dd26c2))
+
 ## [0.7.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.7.0...v0.7.1) (2026-09-30)
 
 ### Bug Fixes
