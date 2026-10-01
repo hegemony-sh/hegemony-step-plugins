@@ -7,8 +7,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 # Contributing
 
 This repository is part of the Hegemony project. Its source is licensed under
-`AGPL-3.0-or-later`. Your contribution is licensed under the same terms, and you
-keep the copyright in it. There is no Contributor License Agreement.
+`AGPL-3.0-or-later`. Your contribution is licensed under the same terms, and
+contributing it transfers no copyright to the project. There is no Contributor
+License Agreement.
 
 Every commit must be signed off under the
 [Developer Certificate of Origin](https://developercertificate.org/) (DCO),
