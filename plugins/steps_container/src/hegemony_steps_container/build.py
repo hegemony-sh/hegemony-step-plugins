@@ -641,7 +641,10 @@ class BuildImageHandler(BaseHandler):
                 "characters; shorten the image name or the tag",
                 "Config validation failed",
             )
-        context_dir = config.context_dir.strip().strip("/")
+        # "images/x/", "./images/x" and "images//x" name one folder; "." the root.
+        context_dir = posixpath.normpath(config.context_dir.strip() or ".").strip("/")
+        if context_dir == ".":
+            context_dir = ""
         dockerfile = config.dockerfile.strip() or "Dockerfile"
 
         try:

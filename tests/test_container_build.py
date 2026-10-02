@@ -502,6 +502,35 @@ async def test_a_build_pushes_the_run_tag_and_the_extra_tags(fake_docker) -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("context_dir", ["images/tool/", "./images/tool", "images//tool"])
+async def test_the_context_folder_is_normalized(fake_docker, context_dir: str) -> None:
+    services = _Services(fake_docker["bin"], fake_docker["config_dir"], build=_target())
+    result = await BuildImageHandler().execute(
+        _ctx({"image": "tools/x", "context_dir": context_dir}, services, [])
+    )
+    assert result.success, result.error
+    assert set(_builds(fake_docker)[0]["files"]) == {"Dockerfile", os.path.join("app", "main.py")}
+
+
+@pytest.mark.asyncio
+async def test_the_attachments_root_is_the_default_context(fake_docker) -> None:
+    attachments = [
+        {"filename": "Dockerfile", "content": "FROM alpine\n"},
+        {"filename": "src/app.py", "content": "print(1)\n"},
+    ]
+    services = _Services(
+        fake_docker["bin"], fake_docker["config_dir"], build=_target(), attachments=attachments
+    )
+    for context_dir in ("", "."):
+        result = await BuildImageHandler().execute(
+            _ctx({"image": "tools/x", "context_dir": context_dir}, services, [])
+        )
+        assert result.success, result.error
+    for build in _builds(fake_docker):
+        assert set(build["files"]) == {"Dockerfile", os.path.join("src", "app.py")}
+
+
+@pytest.mark.asyncio
 async def test_an_open_policy_gives_the_build_the_default_network(fake_docker) -> None:
     services = _Services(
         fake_docker["bin"], fake_docker["config_dir"], build=_target(BUILD_NETWORK_DEFAULT)
