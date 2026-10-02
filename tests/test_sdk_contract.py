@@ -40,6 +40,10 @@ def test_public_surface():
         "resolve_target_devices_for_roles",
         "DeviceCredentials",
         "StateBackendAccess",
+        "ImageCache",
+        "ImageBuild",
+        "BUILD_NETWORK_DEFAULT",
+        "BUILD_NETWORK_NONE",
     ):
         assert hasattr(sdk, name), name
 
@@ -84,6 +88,7 @@ def test_container_backed_defaults_off():
     assert sdk.BaseHandler.container_backed is False
     assert sdk.BaseHandler.platform_api_access is False
     assert sdk.BaseHandler.node_scoped_state is False
+    assert sdk.BaseHandler.builds_images is False
 
 
 def test_handler_services_declares_open_state_backend():
@@ -300,6 +305,37 @@ def test_container_runtime_image_cache_defaults_to_none():
     ]
     with_cache = dataclasses.replace(runtime, image_cache=cache)
     assert with_cache.image_cache is cache
+
+
+def test_container_runtime_image_build_defaults_to_none():
+    """A step that may push what it builds gets one structured value; nobody else does.
+
+    A host older than the field constructs the runtime without it, and a
+    building handler then fails with a clear message instead of pushing
+    somewhere it was not granted. The network defaults to none: a host that
+    names no network gives the build none (fail closed).
+    """
+    field = next(f for f in dataclasses.fields(sdk.ContainerRuntime) if f.name == "image_build")
+    assert field.default is None
+    runtime = sdk.ContainerRuntime(
+        docker_bin="docker",
+        shared_workspaces_enabled=False,
+        shared_workspace_root="",
+        shared_workspace_volume="",
+        docker_host="tcp://dind:2375",
+    )
+    assert runtime.image_build is None
+
+    build = sdk.ImageBuild(registry="registry.hegemony.internal", namespace="orgs/acme")
+    assert build.network == sdk.BUILD_NETWORK_NONE == "none"
+    assert sdk.BUILD_NETWORK_DEFAULT == "default"
+    assert [f.name for f in dataclasses.fields(sdk.ImageBuild)] == [
+        "registry",
+        "namespace",
+        "network",
+    ]
+    with_build = dataclasses.replace(runtime, image_build=build)
+    assert with_build.image_build is build
 
 
 def test_registry_protocol_shape():
