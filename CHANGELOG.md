@@ -1,3 +1,9 @@
+## [0.9.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.9.1...v0.9.2) (2026-10-02)
+
+### Bug Fixes
+
+* **container:** name the cache key tag sha256_<digest>, not sha256-<digest> ([770d7ab](https://github.com/hegemony-sh/hegemony-step-plugins/commit/770d7ab01853782d9b45f5e2e3563d0a868adccf))
+
 ## [0.9.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.9.0...v0.9.1) (2026-10-01)
 
 ### Bug Fixes
