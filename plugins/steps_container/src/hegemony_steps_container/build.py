@@ -26,6 +26,9 @@ What a build may reach and use is decided here, never by the Dockerfile:
   no build reads the daemon's build cache (``--no-cache``): the sandbox is
   shared by every organization, and an image or a cached step another
   organization left there must not stand in for one this step is entitled to.
+  Cache mounts (``RUN --mount=type=cache``) also get a name unique to the
+  build (``BUILDKIT_CACHE_MOUNT_NS``), so none is shared with another build
+  even if BuildKit kept one across ``--no-cache`` builds.
 - Only the official Dockerfile frontend runs: a ``# syntax`` directive naming
   another image is refused, and so are ``BUILDKIT_*`` build arguments, which
   steer BuildKit itself.
@@ -44,8 +47,9 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -80,6 +84,11 @@ _FLUSH_SECONDS = 0.25
 #: The ``docker buildx version`` check and the digest lookup are quick; a
 #: wedged worker or daemon must not hold the step for longer than this.
 _PROBE_TIMEOUT_SECONDS = 15.0
+#: The build's output is read in chunks of this size, and a line longer than
+#: this reaches the log in pieces (asyncio's line reader raises on one).
+_READ_CHUNK_BYTES = 64 * 1024
+#: The build argument that prefixes every cache mount's id (Dockerfile frontend).
+CACHE_MOUNT_NS_ARG = "BUILDKIT_CACHE_MOUNT_NS"
 
 #: The tag every build gets: ``run-`` and the run id's first eight characters,
 #: the short id the run pages show.
@@ -402,11 +411,14 @@ def buildx_argv(
     secret_files: dict[str, str] | None = None,
     target: str = "",
     platform: str = "",
+    cache_namespace: str = "",
 ) -> list[str]:
     """The ``docker`` arguments of one build (without the docker binary itself).
 
     Pure, for testing. ``secret_files`` maps a secret id to the private file
     holding its value; the value itself never reaches the argument list.
+    ``cache_namespace`` prefixes the id of every cache mount the Dockerfile
+    declares.
     """
     args = [
         "buildx",
@@ -414,7 +426,8 @@ def buildx_argv(
         "--progress=plain",
         # Base images come from their registries with this step's logins, and
         # nothing is read from the build cache the sandbox shares with every
-        # other organization (cache mounts included).
+        # other organization (cache mounts start empty as well; the namespace
+        # below keeps them apart even if they did not).
         "--pull",
         "--no-cache",
         # A plain image: no attestation manifests beside it.
@@ -432,6 +445,10 @@ def buildx_argv(
         args += ["--platform", platform]
     for name, value in sorted((build_args or {}).items()):
         args += ["--build-arg", f"{name}={value}"]
+    if cache_namespace:
+        # The step's own build arguments never start with BUILDKIT_, so this
+        # one cannot be overridden.
+        args += ["--build-arg", f"{CACHE_MOUNT_NS_ARG}={cache_namespace}"]
     for key, value in sorted((labels or {}).items()):
         args += ["--label", f"{key}={value}"]
     for secret_id, path in sorted((secret_files or {}).items()):
@@ -464,6 +481,24 @@ def build_environment(docker_host: str, docker_config_dir: str) -> dict[str, str
 
 def _failure(error: str, summary: str, **extra: Any) -> HandlerResult:
     return HandlerResult(success=False, error=error, summary=summary, **extra)
+
+
+async def _output_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
+    """The stream's lines with their newline; a very long line comes in pieces.
+
+    Read in chunks rather than with ``readline``, which raises on a line longer
+    than the stream's limit (64 KiB), and a build can print one.
+    """
+    pending = b""
+    while chunk := await stream.read(_READ_CHUNK_BYTES):
+        *lines, pending = (pending + chunk).split(b"\n")
+        for line in lines:
+            yield line + b"\n"
+        while len(pending) >= _READ_CHUNK_BYTES:
+            yield pending[:_READ_CHUNK_BYTES]
+            pending = pending[_READ_CHUNK_BYTES:]
+    if pending:
+        yield pending
 
 
 def _error_line(lines: deque[str]) -> str:
@@ -703,6 +738,7 @@ class BuildImageHandler(BaseHandler):
                 secret_files=secret_files,
                 target=config.target.strip(),
                 platform=config.platform.strip(),
+                cache_namespace=f"hegemony-build-{uuid.uuid4().hex}",
             )
             source = f"attachments/{context_dir}" if context_dir else "the attachments root"
             network_note = (
@@ -764,10 +800,31 @@ class BuildImageHandler(BaseHandler):
             digest = self._metadata_digest(metadata_file) or await self._daemon_digest(
                 docker_bin, env, references[0]
             )
-            pinned = f"{repository}@{digest}" if digest else references[0]
-            note = "" if digest else " (the registry digest could not be read)"
+            if not digest:
+                # Later steps run output.reference; a tag in its place could
+                # move to another image after this step reported success.
+                reason = (
+                    f"The image was pushed as {', '.join(tags)}, but its digest could not be "
+                    "read (neither from the build's metadata nor from the sandbox daemon), so "
+                    "the step cannot report the exact image it built"
+                )
+                await emit(
+                    reason,
+                    attrs={
+                        "milestone": "build_failed",
+                        "image": repository,
+                        "references": references,
+                    },
+                )
+                return _failure(
+                    reason,
+                    "Image digest unavailable",
+                    evidence=[self._log_artifact(ctx, log, 0, repository, "", duration)],
+                    metrics={"exit_code": 0, "duration_seconds": duration, "image": repository},
+                )
+            pinned = f"{repository}@{digest}"
             await emit(
-                f"Pushed {pinned} as {', '.join(tags)} in {duration:.1f}s{note}",
+                f"Pushed {pinned} as {', '.join(tags)} in {duration:.1f}s",
                 attrs={
                     "milestone": "image_pushed",
                     "image": repository,
@@ -794,12 +851,12 @@ class BuildImageHandler(BaseHandler):
             }
             summary_lines = [
                 f"Image: {repository}",
-                f"Digest: {digest or 'unknown'}",
+                f"Digest: {digest}",
                 *(f"Pushed: {reference}" for reference in references),
             ]
             return HandlerResult(
                 success=True,
-                summary=f"Built and pushed {repository} ({', '.join(tags)}){note}",
+                summary=f"Built and pushed {repository} ({', '.join(tags)})",
                 metrics={
                     "exit_code": 0,
                     "duration_seconds": duration,
@@ -930,10 +987,7 @@ class BuildImageHandler(BaseHandler):
 
             flusher = asyncio.create_task(ticker())
             try:
-                while True:
-                    line = await stream.readline()
-                    if not line:
-                        break
+                async for line in _output_lines(stream):
                     await log.add(line)
             finally:
                 flusher.cancel()
@@ -955,6 +1009,13 @@ class BuildImageHandler(BaseHandler):
             # without waiting on it (the event loop reaps it).
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
+            raise
+        except Exception:
+            # Nor may a failure while reading its output.
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=10)
             raise
 
     @staticmethod

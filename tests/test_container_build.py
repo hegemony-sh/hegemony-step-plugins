@@ -35,6 +35,7 @@ from hegemony_steps_container.build import (
     RUN_LABEL,
     STEP_LABEL,
     BuildImageHandler,
+    _BuildLog,
     build_environment,
     buildx_argv,
     frontend_error,
@@ -211,6 +212,7 @@ def test_buildx_argv_pins_what_the_dockerfile_cannot_change() -> None:
         secret_files={"tok": "/tmp/secrets/secret-0"},
         target="runtime",
         platform="linux/arm64",
+        cache_namespace="hegemony-build-abc",
     )
     assert argv[:2] == ["buildx", "build"]
     for flag in (
@@ -232,7 +234,7 @@ def test_buildx_argv_pins_what_the_dockerfile_cannot_change() -> None:
     assert ("--secret", "id=tok,src=/tmp/secrets/secret-0") in pairs
     assert ("--label", f"{RUN_LABEL}=r") in pairs
     build_args = [value for flag, value in pairs if flag == "--build-arg"]
-    assert build_args == ["A=b", "VERSION=1.2"]
+    assert build_args == ["A=b", "VERSION=1.2", "BUILDKIT_CACHE_MOUNT_NS=hegemony-build-abc"]
     tags = [value for flag, value in pairs if flag == "--tag"]
     assert tags == [f"{REGISTRY}/orgs/acme/x:run-1", f"{REGISTRY}/orgs/acme/x:latest"]
 
@@ -276,6 +278,9 @@ if args[:2] == ["buildx", "version"]:
 if args[:2] == ["image", "inspect"]:
     save({"argv": args})
     ref = args[-1]
+    if mode == "no-digest":
+        print("[]")
+        sys.exit(0)
     print(json.dumps([ref.rsplit(":", 1)[0] + "@" + os.environ["FAKE_DOCKER_DIGEST"]]))
     sys.exit(0)
 
@@ -301,17 +306,20 @@ if args[:2] == ["buildx", "build"]:
         "secrets": secrets,
         "context": context,
         "env": {k: v for k, v in os.environ.items() if k.startswith(("DOCKER_", "BUILDX_"))},
+        "pid": os.getpid(),
     })
     print("#1 [internal] load build definition from Dockerfile", flush=True)
     print("#5 [2/2] RUN echo hello", flush=True)
     print("#5 0.105 hello", flush=True)
+    if mode == "long-line":
+        print("#5 0.200 " + "x" * 200_000, flush=True)
     if mode == "slow":
         time.sleep(30)
     if mode == "fail":
         print("#5 ERROR: process did not complete successfully: exit code: 1", flush=True)
         print("ERROR: failed to build: failed to solve: exit code: 1", flush=True)
         sys.exit(1)
-    if mode != "no-metadata":
+    if mode not in ("no-metadata", "no-digest"):
         metadata = dict(pairs)["--metadata-file"]
         with open(metadata, "w", encoding="utf-8") as handle:
             json.dump({"containerimage.digest": os.environ["FAKE_DOCKER_DIGEST"]}, handle)
@@ -459,6 +467,12 @@ async def test_a_build_pushes_the_run_tag_and_the_extra_tags(fake_docker) -> Non
     assert "--network=none" in argv
     assert "--pull" in argv and "--no-cache" in argv and "--push" in argv
     assert ("--build-arg", "VERSION=1.2") in pairs
+    (namespace,) = [
+        value.partition("=")[2]
+        for flag, value in pairs
+        if flag == "--build-arg" and value.startswith("BUILDKIT_CACHE_MOUNT_NS=")
+    ]
+    assert namespace.startswith("hegemony-build-")
     labels = dict(value.split("=", 1) for flag, value in pairs if flag == "--label")
     assert labels[RUN_LABEL] == RUN_ID
     assert labels[STEP_LABEL] == "build_tool"
@@ -608,6 +622,60 @@ async def test_the_digest_falls_back_to_what_the_daemon_recorded(fake_docker, mo
     assert result.output["digest"] == DIGEST
     inspects = [c for c in fake_docker["calls"]() if c["argv"][:2] == ["image", "inspect"]]
     assert inspects and inspects[0]["argv"][-1] == f"{REGISTRY}/orgs/acme/tools/x:run-1a2b3c4d"
+
+
+@pytest.mark.asyncio
+async def test_a_push_without_a_readable_digest_fails_the_step(fake_docker, monkeypatch) -> None:
+    """A tag can move, so it never stands in for the digest later steps run."""
+    monkeypatch.setenv("FAKE_DOCKER_MODE", "no-digest")
+    services = _Services(fake_docker["bin"], fake_docker["config_dir"], build=_target())
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(
+        _ctx({"image": "tools/x", "context_dir": "images/tool"}, services, events)
+    )
+    assert not result.success
+    assert result.summary == "Image digest unavailable"
+    assert result.error is not None and "run-1a2b3c4d" in result.error
+    assert result.output in (None, {})
+    (log,) = result.evidence
+    assert log["kind"] == "container_output"
+    assert events[-1][1]["milestone"] == "build_failed"
+    assert events[-1][1]["references"] == [f"{REGISTRY}/orgs/acme/tools/x:run-1a2b3c4d"]
+
+
+@pytest.mark.asyncio
+async def test_a_very_long_output_line_is_logged_whole(fake_docker, monkeypatch) -> None:
+    """Longer than asyncio's 64 KiB line limit: read in pieces, not raised on."""
+    monkeypatch.setenv("FAKE_DOCKER_MODE", "long-line")
+    services = _Services(fake_docker["bin"], fake_docker["config_dir"], build=_target())
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(
+        _ctx({"image": "tools/x", "context_dir": "images/tool"}, services, events)
+    )
+    assert result.success, result.error
+    log = result.evidence[0]["content_text"]
+    assert "#5 0.200 " + "x" * 200_000 + "\n#12 pushing layers done" in log
+    streamed = "".join(message for message, attrs in events if attrs.get("milestone") == "output")
+    assert "x" * 200_000 in streamed
+
+
+@pytest.mark.asyncio
+async def test_a_failure_reading_the_output_stops_the_build(fake_docker, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_DOCKER_MODE", "slow")
+
+    async def broken_add(self, raw: bytes) -> None:
+        raise RuntimeError("log sink broke")
+
+    monkeypatch.setattr(_BuildLog, "add", broken_add)
+    services = _Services(fake_docker["bin"], fake_docker["config_dir"], build=_target())
+    with pytest.raises(RuntimeError, match="log sink broke"):
+        await BuildImageHandler().execute(
+            _ctx({"image": "tools/x", "context_dir": "images/tool"}, services, [])
+        )
+    (build,) = _builds(fake_docker)
+    # Killed and reaped: the build's client process is gone.
+    with pytest.raises(ProcessLookupError):
+        os.kill(build["pid"], 0)
 
 
 @pytest.mark.asyncio

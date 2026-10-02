@@ -26,7 +26,7 @@ upstream images.
 
 Every build is tagged `run-` and the run's short id (the first eight
 characters of the run id, as the run pages show it), so each run's image stays
-addressable. Extra tags adds more, one per line, such as `latest` or
+addressable. Extra tags add more, one per line, such as `latest` or
 `{{ inputs.version }}`. Tags are up to 128 letters, digits, `_`, `.` or `-`;
 the digest shapes `sha256_…` and `sha256-…` are reserved. A tag that already
 exists is moved to the new image.
@@ -54,13 +54,15 @@ RUN --mount=type=secret,id=pypi_token \
 ```
 
 A secret is handed to BuildKit from a private file on the worker: it never
-lands in a layer, the image's history or the build's command line, and its
-value is redacted from the log.
+lands in a layer, the image's history or the build's command line. A value
+resolved from a reference is redacted from the log; text that is not a
+reference is used as written and is not redacted, so keep real secrets in a
+backend.
 
 Target stage builds a multi-stage Dockerfile up to one stage (`--target`).
 Platform builds for another platform, such as `linux/arm64`; one platform per
 step, and an architecture other than the sandbox's needs emulation (QEMU)
-registered on the sandbox host. Labels adds image labels such as
+registered on the sandbox host. Labels add image labels such as
 `org.opencontainers.image.source`. The step always sets
 `org.opencontainers.image.created` (the build's start, in UTC),
 `sh.hegemony.run` (the run id) and `sh.hegemony.step` (the step id); label
@@ -80,7 +82,9 @@ container step's image is, with the organization's registry logins and the
 step's platform registry token: an image in another organization's namespace
 is refused. They are pulled on every build, never taken from the sandbox's
 local images, and no build reads the sandbox's build cache: the sandbox is
-shared by every organization. Every instruction therefore runs on every build.
+shared by every organization. Every instruction therefore runs on every build,
+and cache mounts (`RUN --mount=type=cache`) start empty: each build's cache
+mounts get a name of their own, never shared with another build.
 `ADD` with a URL is fetched by the sandbox daemon too, outside the egress
 policy, like the base images.
 
@@ -113,7 +117,9 @@ the Dockerfile is not among the attachments, when its syntax directive names
 another frontend, when a secret resolves to nothing, when the platform has no
 registry or did not grant the step access to it, when the worker's Docker CLI
 has no buildx plugin, or when the build or the push fails: the error names the
-build's own explanation and the full log is in the evidence. A push the
+build's own explanation and the full log is in the evidence. It also fails
+when the pushed image's digest cannot be read, rather than report a tag that
+can later move to another image. A push the
 registry refuses (an image name outside what the step may write) fails the
 same way. The step's timeout (30 minutes unless the step or the flow sets
 another) covers the whole build and push; at its end the build is cancelled.
