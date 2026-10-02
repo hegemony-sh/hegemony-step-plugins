@@ -10,7 +10,7 @@ platform registry, under its organization's namespace, and later runs pull
 that copy instead of going back to the image's own registry. The copy is
 named after the upstream reference — ``<namespace>/<host>/<repository>`` —
 and tagged twice: with the upstream tag, for people and for the offline
-fallback, and with ``sha256-<upstream digest>``, the key a later run looks up
+fallback, and with ``sha256_<upstream digest>``, the key a later run looks up
 after asking upstream which digest the tag points at today. A copy is a
 single-platform image with a digest of its own, so the upstream digest can
 only be found by that tag, never by ``@digest``.
@@ -130,11 +130,16 @@ def pin_reference(image: str, digest: str) -> str:
 def cache_key_tag(digest: str) -> str:
     """The tag a copy carries for the upstream digest it was made from.
 
-    ``sha256:<hex>`` becomes ``sha256-<hex>``: a tag may not contain a colon,
-    and the hex alone is 64 characters, well inside the 128 a tag allows.
+    ``sha256:<hex>`` becomes ``sha256_<hex>``: a tag may not contain a colon,
+    and the hex alone is 64 characters, well inside the 128 a tag allows. An
+    underscore, not a dash: ``sha256-<hex>`` is the shape the OCI distribution
+    spec reserves for its referrers fallback tags (signatures, attestations),
+    and a registry that honours it (zot does) keeps such a tag out of its tag
+    index, its pull statistics and its retention, so the copy would be
+    invisible and never expire.
     """
     algorithm, _, hexdigest = digest.partition(":")
-    return f"{algorithm}-{hexdigest}"
+    return f"{algorithm}_{hexdigest}"
 
 
 @dataclass(frozen=True, slots=True)

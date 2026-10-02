@@ -90,8 +90,11 @@ def test_pin_reference_replaces_the_tag_with_the_digest(image: str, pinned: str)
 
 def test_cache_key_tag_is_a_legal_tag_naming_the_upstream_digest() -> None:
     tag = cache_key_tag(DIGEST)
-    assert tag == "sha256-" + "ab" * 32
+    assert tag == "sha256_" + "ab" * 32
     assert ":" not in tag and len(tag) <= 128
+    # Not the OCI referrers-tag shape (sha256-<hex>), which zot hides from its
+    # index, statistics and retention.
+    assert "sha256-" not in tag
 
 
 def test_plan_names_the_copy_after_the_upstream_reference() -> None:
@@ -293,9 +296,9 @@ async def test_the_platform_registry_is_asked_over_its_api_url() -> None:
         return httpx.Response(404)
 
     client = _client(handler, base_url=CACHE.api_url)
-    assert await client.manifest_digest("orgs/acme/docker.io/library/alpine", "sha256-ab") is None
+    assert await client.manifest_digest("orgs/acme/docker.io/library/alpine", "sha256_ab") is None
     assert seen == [
-        "http://registry.hegemony.internal/v2/orgs/acme/docker.io/library/alpine/manifests/sha256-ab"
+        "http://registry.hegemony.internal/v2/orgs/acme/docker.io/library/alpine/manifests/sha256_ab"
     ]
 
 
@@ -311,7 +314,7 @@ from hegemony_steps_container.run import RunContainerHandler  # noqa: E402
 from hegemony_steps_container.runner import ContainerJob, run_container_job  # noqa: E402
 
 UPSTREAM_DIGEST = "sha256:" + "11" * 32
-KEY_TAG = "sha256-" + "11" * 32
+KEY_TAG = "sha256_" + "11" * 32
 PINNED = f"alpine@{UPSTREAM_DIGEST}"
 OWN_REPO = "orgs/acme/docker.io/library/alpine"
 GLOBAL_REPO = "global/docker.io/library/alpine"
