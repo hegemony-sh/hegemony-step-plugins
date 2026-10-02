@@ -8,10 +8,12 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 Container execution on the platform's Docker-in-Docker sandbox, never on the
 worker's own Docker daemon. Deliberately its own wheel: the security-sensitive
-handler (docker socket, privileged mode) — hardened deployments simply don't
-install it.
+handlers (docker socket, privileged mode, image builds) — hardened deployments
+simply don't install it.
 
-Handlers: `container.run`.
+Handlers: `container.run` (run a container) and `container.build` (build an
+image from the flow's attachments and push it to the organization's namespace
+of the platform registry).
 
 Namespace prefix (= entry-point name): `container.` — see the repo-level
 `CONVENTIONS.md` for the naming rules.

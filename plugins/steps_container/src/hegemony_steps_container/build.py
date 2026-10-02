@@ -1,0 +1,1029 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""``container.build``: build an image on the sandbox and push it to the platform registry.
+
+The build context is a folder among the flow's attachments, the files
+``tf.plan`` and ``ansible.playbook`` read their sources from too (a flow
+synced from git brings them from the repository). The worker writes that
+folder into a private directory and runs ``docker buildx build --push``
+against the sandbox daemon (BuildKit, Docker driver) with the step's Docker
+configuration, so the push authenticates with the step's registry token. The
+image lands at ``<registry>/orgs/<slug>/<name>``
+(:class:`~hegemony_step_sdk.ImageBuild`), tagged ``run-<short run id>`` plus
+the step's extra tags, and carries the labels ``org.opencontainers.image.created``,
+``sh.hegemony.run`` and ``sh.hegemony.step``.
+
+What a build may reach and use is decided here, never by the Dockerfile:
+
+- ``RUN`` instructions get the sandbox's default network only when the host
+  says the step's egress policy is open; otherwise ``--network=none``.
+- Build secrets reach ``RUN --mount=type=secret`` through BuildKit
+  (``--secret``), read from private files: never build arguments, never a
+  layer, never the command line.
+- Base images are always pulled with the step's own logins (``--pull``) and
+  no build reads the daemon's build cache (``--no-cache``): the sandbox is
+  shared by every organization, and an image or a cached step another
+  organization left there must not stand in for one this step is entitled to.
+- Only the official Dockerfile frontend runs: a ``# syntax`` directive naming
+  another image is refused, and so are ``BUILDKIT_*`` build arguments, which
+  steer BuildKit itself.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import os
+import posixpath
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+from collections import deque
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from hegemony_step_sdk import (
+    BUILD_NETWORK_DEFAULT,
+    BUILD_NETWORK_NONE,
+    BaseHandler,
+    HandlerContext,
+    HandlerResult,
+    HandlerTargeting,
+    StepKind,
+)
+
+from .pull_progress import require_docker_host
+from .run import RunContainerHandler, _docker_env, repo_digest_for
+from .runner import container_config_from, resolve_secret_values, secret_map_errors
+
+logger = logging.getLogger(__name__)
+
+HANDLER_ID = "container.build"
+
+#: Built-in step timeout: a build installs packages and pushes layers.
+DEFAULT_BUILD_TIMEOUT_SECONDS = 1800
+#: The build log kept as evidence; the live log streams all of it.
+MAX_LOG_BYTES = 5 * 1024 * 1024
+#: Live output is sent in batches of about this many characters, or every
+#: :data:`_FLUSH_SECONDS`, whichever comes first.
+_EVENT_BATCH_CHARS = 2048
+_FLUSH_SECONDS = 0.25
+#: The ``docker buildx version`` check and the digest lookup are quick; a
+#: wedged worker or daemon must not hold the step for longer than this.
+_PROBE_TIMEOUT_SECONDS = 15.0
+
+#: The tag every build gets: ``run-`` and the run id's first eight characters,
+#: the short id the run pages show.
+RUN_TAG_PREFIX = "run-"
+#: Labels the step sets on every image; a step's own labels may not use them.
+CREATED_LABEL = "org.opencontainers.image.created"
+RUN_LABEL = "sh.hegemony.run"
+STEP_LABEL = "sh.hegemony.step"
+RESERVED_LABEL_PREFIX = "sh.hegemony."
+
+#: An OCI repository name: lowercase components separated by slashes (the
+#: platform registry's own rule).
+_NAME_COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+_IMAGE_NAME_RE = re.compile(rf"^{_NAME_COMPONENT}(?:/{_NAME_COMPONENT})*$")
+MAX_IMAGE_NAME_LENGTH = 200
+#: A full reference (registry, namespace, name and tag) Docker accepts.
+MAX_REFERENCE_LENGTH = 255
+_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
+#: ``sha256_<hex>`` is the platform cache's key tag and ``sha256-<hex>`` the
+#: OCI referrers fallback tag, which zot keeps out of its index entirely.
+_DIGEST_SHAPED_TAG_RE = re.compile(r"^sha256[_-][0-9a-f]{64}$")
+_ARG_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_LABEL_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
+_STAGE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+_PLATFORM_RE = re.compile(r"^[a-z0-9]+/[a-z0-9_]+(?:/[a-z0-9]+)?$")
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_TEMPLATE_RE = re.compile(r"\{\{|\{%")
+#: A parser directive line at the top of a Dockerfile (``# syntax=...``).
+_DIRECTIVE_RE = re.compile(r"^#\s*([A-Za-z_]+)\s*=\s*(.*?)\s*$")
+#: The official Dockerfile frontends, by tag and/or digest.
+_OFFICIAL_FRONTEND_RE = re.compile(
+    r"^(?:docker\.io/)?docker/dockerfile(?:-upstream)?"
+    r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$"
+)
+#: Placeholder image for validating the step's egress fields with
+#: ``container.run``'s own rules: a build pulls no image of its own.
+_EGRESS_CHECK_IMAGE = "scratch"
+
+
+def looks_like_host(segment: str) -> bool:
+    """Whether a name's first segment has the shape of a registry host.
+
+    The platform registry's rule (``looks_like_host`` in the platform's
+    ``registry_tokens``): a dot, or ``localhost`` with or without a port
+    after an underscore. Such names are the cache's copies of upstream
+    images (``orgs/<slug>/<host>/<repository>``), so a built image never
+    takes one, and the registry refuses the push.
+    """
+    return "." in segment or segment == "localhost" or segment.startswith("localhost_")
+
+
+def _templated(value: object) -> bool:
+    """Whether ``value`` still holds template syntax, which the host renders before a run."""
+    return isinstance(value, str) and bool(_TEMPLATE_RE.search(value))
+
+
+def image_name_error(name: object, *, allow_template: bool = False) -> str | None:
+    """Why ``name`` cannot name a built image under the organization's namespace, or None."""
+    if not isinstance(name, str) or not name.strip():
+        return "'image' is required: the image's name under the organization, e.g. tools/netbox"
+    if allow_template and _templated(name):
+        return None
+    name = name.strip()
+    if len(name) > MAX_IMAGE_NAME_LENGTH:
+        return f"'image' must be at most {MAX_IMAGE_NAME_LENGTH} characters"
+    if not _IMAGE_NAME_RE.match(name):
+        return (
+            f"'image' {name!r} is not a valid image name: lowercase letters and digits, "
+            "separated by '.', '_', '__' or '-', in segments joined by '/' (tools/netbox-sync), "
+            "without a registry host or a tag"
+        )
+    first = name.split("/", 1)[0]
+    if looks_like_host(first):
+        return (
+            f"'image' {name!r} starts with {first!r}, which has the shape of a registry host "
+            "(a dot, or localhost): such names are reserved for the platform's cached copies "
+            "of upstream images. Name the image without a registry, e.g. tools/netbox-sync"
+        )
+    return None
+
+
+def tag_error(field: str, tag: object, *, allow_template: bool = False) -> str | None:
+    """Why ``tag`` cannot tag a built image, or None."""
+    if not isinstance(tag, str) or not tag.strip():
+        return f"'{field}' must be a non-empty tag"
+    if allow_template and _templated(tag):
+        return None
+    tag = tag.strip()
+    if not _TAG_RE.match(tag):
+        return (
+            f"'{field}' {tag!r} is not a valid tag: up to 128 letters, digits, '_', '.' or '-', "
+            "not starting with '.' or '-'"
+        )
+    if _DIGEST_SHAPED_TAG_RE.match(tag):
+        return (
+            f"'{field}' {tag!r} has the shape of a digest tag, which the platform registry "
+            "reserves for cached copies and referrers"
+        )
+    return None
+
+
+def relative_path_error(field: str, value: object, *, allow_empty: bool) -> str | None:
+    """Why ``value`` is not a relative path among the flow attachments, or None."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None if allow_empty else f"'{field}' is required"
+    if not isinstance(value, str):
+        return f"'{field}' must be a relative path among the flow attachments"
+    path = value.strip()
+    if path.startswith("/") or "\\" in path or "\0" in path:
+        return f"'{field}' must be a relative path among the flow attachments"
+    if ".." in path.split("/"):
+        return f"'{field}' must not contain '..'"
+    return None
+
+
+def frontend_error(dockerfile: str) -> str | None:
+    """Why the Dockerfile's ``# syntax`` directive is refused, or None.
+
+    BuildKit reads parser directives in the comment lines at the top of the
+    file. A ``syntax`` directive runs the named image as the build's
+    frontend, which builds whatever it likes and ignores this step's rules
+    (it could read the sandbox's shared build cache), so only the official
+    ``docker/dockerfile`` frontends are taken. Conservative on purpose: every
+    directive-shaped comment before the first instruction is checked, even
+    one BuildKit would read as a plain comment.
+    """
+    for raw in dockerfile.lstrip("﻿").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if not line.startswith("#"):
+            return None
+        match = _DIRECTIVE_RE.match(line)
+        if match is None or match.group(1).lower() != "syntax":
+            continue
+        frontend = match.group(2)
+        if not _OFFICIAL_FRONTEND_RE.match(frontend):
+            return (
+                f"the Dockerfile's syntax directive names the frontend {frontend!r}; only the "
+                "official docker/dockerfile frontend may build here (or none: the built-in "
+                "one takes every current Dockerfile)"
+            )
+    return None
+
+
+def run_tag(run_id: str) -> str:
+    """The tag every build of a run gets: ``run-`` and the run's short id."""
+    short = re.sub(r"[^A-Za-z0-9_.-]", "", run_id)[:8]
+    return f"{RUN_TAG_PREFIX}{short or 'unknown'}"
+
+
+class BuildImageConfig(BaseModel):
+    """Config for ``container.build``.
+
+    The semantic checks (name and tag shapes, paths, reserved names) live in
+    :meth:`BuildImageHandler.validate_config`.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    image: str = Field(
+        min_length=1,
+        title="Image name",
+        description=(
+            "Name of the image under this organization's namespace of the platform registry, "
+            "e.g. tools/netbox-sync: the step pushes "
+            "registry.hegemony.internal/orgs/ORG/tools/netbox-sync. Lowercase, without a "
+            "registry host or a tag; a first segment with a dot is reserved for cached copies."
+        ),
+        json_schema_extra={"x_placeholder": "tools/netbox-sync"},
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        title="Extra tags",
+        description=(
+            "Tags to push besides run-SHORT_RUN_ID, which every build gets; one per line, "
+            "e.g. latest or {{ inputs.version }}."
+        ),
+        json_schema_extra={
+            "x_widget": "commands",
+            "x_placeholder": "latest\n{{ inputs.version }}",
+            "x_rows": 2,
+        },
+    )
+    context_dir: str = Field(
+        default="",
+        title="Build context folder",
+        description=(
+            "Folder among the flow attachments to build from, e.g. images/netbox-sync. Leave "
+            "empty for the attachments root. Only the files under it are sent to the build."
+        ),
+        json_schema_extra={"x_placeholder": "images/netbox-sync"},
+    )
+    dockerfile: str = Field(
+        default="Dockerfile",
+        title="Dockerfile",
+        description="Path of the Dockerfile inside the build context folder.",
+        json_schema_extra={"x_placeholder": "Dockerfile"},
+    )
+    build_args: dict[str, str] = Field(
+        default_factory=dict,
+        title="Build arguments",
+        description=(
+            "NAME=value, one per line, for the Dockerfile's ARG instructions. Values may use "
+            "templates such as {{ inputs.version }}. Build arguments are recorded in the "
+            "image's history: put credentials in Build secrets instead."
+        ),
+        json_schema_extra={
+            "x_widget": "env-vars",
+            "x_placeholder": "VERSION={{ inputs.version }}",
+            "x_rows": 2,
+            "x_col_span": 2,
+        },
+    )
+    secrets: dict[str, str] = Field(
+        default_factory=dict,
+        title="Build secrets",
+        description=(
+            "ID=secret reference, one per line (a {{ secret('...') }} template or a bare "
+            "reference such as vault://orgs/acme/secrets/pypi/token). A RUN instruction reads "
+            "one with --mount=type=secret,id=ID (at /run/secrets/ID); it never lands in a "
+            "layer, the image's history or the build's command line, and is redacted from "
+            "the log."
+        ),
+        json_schema_extra={
+            "x_widget": "env-vars",
+            "x_placeholder": "pypi_token=vault://orgs/acme/secrets/pypi/token",
+            "x_rows": 2,
+            "x_col_span": 2,
+        },
+    )
+    target: str = Field(
+        default="",
+        title="Target stage",
+        description="Build only up to this stage of a multi-stage Dockerfile (--target).",
+        json_schema_extra={"x_placeholder": "runtime", "x_advanced": True},
+    )
+    platform: str = Field(
+        default="",
+        title="Platform",
+        description=(
+            "Platform to build for, e.g. linux/arm64. Leave empty for the sandbox's own. "
+            "Another architecture needs emulation (QEMU) registered on the sandbox host."
+        ),
+        json_schema_extra={"x_placeholder": "linux/amd64", "x_advanced": True},
+    )
+    labels: dict[str, str] = Field(
+        default_factory=dict,
+        title="Labels",
+        description=(
+            "KEY=value image labels, one per line, e.g. "
+            "org.opencontainers.image.source=https://git.example.com/netbox-sync. The step "
+            "always sets org.opencontainers.image.created, sh.hegemony.run and "
+            "sh.hegemony.step; keys starting with sh.hegemony. are reserved."
+        ),
+        json_schema_extra={
+            "x_widget": "env-vars",
+            "x_placeholder": "org.opencontainers.image.source=https://git.example.com/netbox-sync",
+            "x_rows": 2,
+            "x_col_span": 2,
+            "x_advanced": True,
+        },
+    )
+    egress_mode: str = Field(
+        default="",
+        title="Egress policy mode",
+        description=(
+            "Network for the build's RUN instructions: they reach the network only when the "
+            "effective policy is 'open' with no Deny rules, and build without any network "
+            "otherwise ('allow-listed', 'deny-all', or Deny rules). Leave empty to inherit the "
+            "flow's network policy."
+        ),
+        json_schema_extra={
+            "x_placeholder": "open | allow-listed | deny-all",
+            "x_advanced": True,
+            "x_col_span": 2,
+        },
+    )
+    egress_allow: list[str] = Field(
+        default_factory=list,
+        title="Egress allow rules",
+        description=(
+            "One rule per line, used with allow-listed mode: CIDR[:port[-port]][/tcp|udp] or "
+            "service:port. A build cannot be held to them, so it gets no network at all."
+        ),
+        json_schema_extra={
+            "x_widget": "commands",
+            "x_placeholder": "0.0.0.0/0:443/tcp",
+            "x_rows": 2,
+            "x_advanced": True,
+            "x_col_span": 2,
+        },
+    )
+    egress_deny: list[str] = Field(
+        default_factory=list,
+        title="Egress deny rules",
+        description=(
+            "One rule per line, same format as Allow rules. Any Deny rule takes the build's "
+            "network away entirely."
+        ),
+        json_schema_extra={
+            "x_widget": "commands",
+            "x_placeholder": "169.254.169.254/32",
+            "x_rows": 2,
+            "x_advanced": True,
+            "x_col_span": 2,
+        },
+    )
+
+
+def buildx_argv(
+    *,
+    context: str,
+    dockerfile: str,
+    references: list[str],
+    network: str,
+    metadata_file: str,
+    build_args: dict[str, str] | None = None,
+    labels: dict[str, str] | None = None,
+    secret_files: dict[str, str] | None = None,
+    target: str = "",
+    platform: str = "",
+) -> list[str]:
+    """The ``docker`` arguments of one build (without the docker binary itself).
+
+    Pure, for testing. ``secret_files`` maps a secret id to the private file
+    holding its value; the value itself never reaches the argument list.
+    """
+    args = [
+        "buildx",
+        "build",
+        "--progress=plain",
+        # Base images come from their registries with this step's logins, and
+        # nothing is read from the build cache the sandbox shares with every
+        # other organization (cache mounts included).
+        "--pull",
+        "--no-cache",
+        # A plain image: no attestation manifests beside it.
+        "--provenance=false",
+        "--sbom=false",
+        f"--network={network}",
+        "--file",
+        dockerfile,
+        "--metadata-file",
+        metadata_file,
+    ]
+    if target:
+        args += ["--target", target]
+    if platform:
+        args += ["--platform", platform]
+    for name, value in sorted((build_args or {}).items()):
+        args += ["--build-arg", f"{name}={value}"]
+    for key, value in sorted((labels or {}).items()):
+        args += ["--label", f"{key}={value}"]
+    for secret_id, path in sorted((secret_files or {}).items()):
+        args += ["--secret", f"id={secret_id},src={path}"]
+    for reference in references:
+        args += ["--tag", reference]
+    args += ["--push", context]
+    return args
+
+
+def build_environment(docker_host: str, docker_config_dir: str) -> dict[str, str]:
+    """The environment of every docker call a build makes.
+
+    The sandbox daemon and the step's Docker configuration, as for
+    ``container.run``; buildx settings inherited from the worker are dropped,
+    and the ones a build needs are set: no default attestations, and a
+    metadata file without the provenance record (it would carry the build
+    arguments).
+    """
+    env = {
+        key: value
+        for key, value in _docker_env(docker_host, docker_config_dir).items()
+        if not key.startswith(("BUILDX_", "BUILDKIT_"))
+    }
+    env["BUILDX_NO_DEFAULT_ATTESTATIONS"] = "1"
+    env["BUILDX_METADATA_PROVENANCE"] = "disabled"
+    env["BUILDX_METADATA_WARNINGS"] = "false"
+    return env
+
+
+def _failure(error: str, summary: str, **extra: Any) -> HandlerResult:
+    return HandlerResult(success=False, error=error, summary=summary, **extra)
+
+
+def _error_line(lines: deque[str]) -> str:
+    """The build's own explanation of a failure: its last ``ERROR:`` line."""
+    for line in reversed(lines):
+        if line.startswith("ERROR:"):
+            return line[len("ERROR:") :].strip()[:500]
+    for line in reversed(lines):
+        if "ERROR" in line:
+            return line.strip()[:500]
+    return ""
+
+
+class _BuildLog:
+    """The build's output: streamed to the live log in batches, kept for evidence."""
+
+    def __init__(self, emit: Callable[..., Awaitable[Any]]) -> None:
+        self._emit = emit
+        # One emission at a time, so batches reach the log in order.
+        self._lock = asyncio.Lock()
+        self._pending: list[str] = []
+        self._pending_chars = 0
+        self._last_flush = time.monotonic()
+        self.captured = bytearray()
+        self.truncated = False
+        self.tail: deque[str] = deque(maxlen=40)
+
+    async def add(self, raw: bytes) -> None:
+        text = raw.decode("utf-8", errors="replace")
+        if len(self.captured) < MAX_LOG_BYTES:
+            room = MAX_LOG_BYTES - len(self.captured)
+            self.captured.extend(raw[:room])
+            if len(raw) > room:
+                self.truncated = True
+        else:
+            self.truncated = True
+        self.tail.append(text.rstrip("\n"))
+        self._pending.append(text)
+        self._pending_chars += len(text)
+        if (
+            self._pending_chars >= _EVENT_BATCH_CHARS
+            or time.monotonic() - self._last_flush >= _FLUSH_SECONDS
+        ):
+            await self.flush()
+
+    async def flush(self) -> None:
+        async with self._lock:
+            self._last_flush = time.monotonic()
+            if not self._pending:
+                return
+            chunk = "".join(self._pending)
+            self._pending.clear()
+            self._pending_chars = 0
+            try:
+                await self._emit(chunk, attrs={"milestone": "output", "stream": "stdout"})
+            except Exception as exc:  # noqa: BLE001 - the live log must never fail the build
+                logger.debug("Build output event failed: %s", exc)
+
+    def text(self) -> str:
+        output = self.captured.decode("utf-8", errors="replace")
+        if self.truncated:
+            output += f"\n[TRUNCATED after {MAX_LOG_BYTES} bytes]"
+        return output
+
+
+class BuildImageHandler(BaseHandler):
+    """Build an image from flow attachments and push it into the organization's namespace."""
+
+    handler_id = HANDLER_ID
+    supported_kinds = [StepKind.ACTION, StepKind.EXECUTE]
+    display_name = "Build Image"
+    description = (
+        "Build a container image from the flow's attachments on the Docker-in-Docker "
+        "sandbox and push it to the organization's namespace of the platform registry."
+    )
+    category = "Actions"
+    targeting = HandlerTargeting(roles=False, ips=False)
+    container_backed = True
+    builds_images = True
+    # Secret references reach the handler as written (see resolve_secret_values).
+    raw_config_keys = frozenset({"secrets"})
+    config_model = BuildImageConfig
+    default_config = {"dockerfile": "Dockerfile"}
+    default_timeout_seconds = DEFAULT_BUILD_TIMEOUT_SECONDS
+
+    def validate_config(self, config: dict[str, Any]) -> list[str]:
+        """Validate the step's fields; templated values are checked again once rendered."""
+        errors = super().validate_config(config)
+        if errors:
+            return errors
+        return self._semantic_errors(config, allow_templates=True)
+
+    def _semantic_errors(self, config: dict[str, Any], *, allow_templates: bool) -> list[str]:
+        errors: list[str] = []
+        error = image_name_error(config.get("image"), allow_template=allow_templates)
+        if error:
+            errors.append(error)
+        for index, tag in enumerate(config.get("tags") or []):
+            error = tag_error(f"tags[{index}]", tag, allow_template=allow_templates)
+            if error:
+                errors.append(error)
+        for field, allow_empty in (("context_dir", True), ("dockerfile", True)):
+            error = relative_path_error(field, config.get(field), allow_empty=allow_empty)
+            if error:
+                errors.append(error)
+        for name in config.get("build_args") or {}:
+            if not isinstance(name, str) or not _ARG_NAME_RE.match(name):
+                errors.append(f"'build_args' name {name!r} is not a valid ARG name")
+            elif name.upper().startswith("BUILDKIT_"):
+                errors.append(
+                    f"'build_args' name {name!r} is reserved: BUILDKIT_ arguments steer BuildKit "
+                    "itself"
+                )
+        errors.extend(secret_map_errors("secrets", config.get("secrets")))
+        for key in config.get("labels") or {}:
+            if not isinstance(key, str) or not _LABEL_KEY_RE.match(key):
+                errors.append(f"'labels' key {key!r} is not a valid label key")
+            elif key.startswith(RESERVED_LABEL_PREFIX) or key == CREATED_LABEL:
+                errors.append(f"'labels' key {key!r} is set by the step itself")
+        for field, pattern, example in (
+            ("target", _STAGE_RE, "a stage name such as runtime"),
+            ("platform", _PLATFORM_RE, "os/arch[/variant], e.g. linux/arm64"),
+        ):
+            value = config.get(field)
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            if allow_templates and _templated(value):
+                continue
+            if not isinstance(value, str) or not pattern.match(value.strip()):
+                errors.append(f"'{field}' must be {example}")
+        # The egress fields, by container.run's own rules (one vocabulary).
+        errors.extend(
+            RunContainerHandler().validate_config(
+                container_config_from(config, image=_EGRESS_CHECK_IMAGE, command=[])
+            )
+        )
+        return errors
+
+    async def execute(self, ctx: HandlerContext) -> HandlerResult:
+        """Build the image, push it, and report the pushed references and digest."""
+        errors = self.validate_config(ctx.config)
+        if not errors:
+            # Rendered now: a templated name or tag must hold up as well.
+            errors = self._semantic_errors(ctx.config, allow_templates=False)
+        if errors:
+            return _failure(
+                f"Invalid build config: {'; '.join(errors)}", "Config validation failed"
+            )
+        config = BuildImageConfig.model_validate(ctx.config)
+
+        services = ctx.require_services()
+        runtime = services.container_runtime()
+        target = runtime.image_build
+        if target is None:
+            return _failure(
+                "This step cannot push the image it builds: the platform runs no container "
+                "registry, or did not grant the step access to it (see the step's events)",
+                "Platform registry unavailable",
+            )
+        try:
+            docker_host = require_docker_host(runtime.docker_host or "")
+        except ValueError as exc:
+            return _failure(str(exc), "Container sandbox not configured")
+
+        network = (
+            BUILD_NETWORK_DEFAULT if target.network == BUILD_NETWORK_DEFAULT else BUILD_NETWORK_NONE
+        )
+        repository = f"{target.registry}/{target.namespace}/{config.image.strip()}"
+        tags = list(dict.fromkeys([run_tag(ctx.run_id), *(t.strip() for t in config.tags)]))
+        references = [f"{repository}:{tag}" for tag in tags]
+        too_long = [ref for ref in references if len(ref) > MAX_REFERENCE_LENGTH]
+        if too_long:
+            return _failure(
+                f"Image reference {too_long[0]!r} is longer than {MAX_REFERENCE_LENGTH} "
+                "characters; shorten the image name or the tag",
+                "Config validation failed",
+            )
+        context_dir = config.context_dir.strip().strip("/")
+        dockerfile = config.dockerfile.strip() or "Dockerfile"
+
+        try:
+            secrets = await resolve_secret_values(
+                ctx, config.secrets, source=f"{HANDLER_ID}.secrets"
+            )
+        except ValueError as exc:
+            return _failure(f"Invalid build config: {exc}", "Config validation failed")
+
+        async def emit(message: str, attrs: dict[str, Any] | None = None) -> None:
+            try:
+                await ctx.emit_progress(message, attrs=attrs)
+            except Exception as exc:  # noqa: BLE001 - events never fail the build
+                logger.debug("Build progress event failed: %s", exc)
+
+        docker_bin = runtime.docker_bin
+        env = build_environment(docker_host, getattr(runtime, "docker_config_dir", "") or "")
+        started = time.monotonic()
+        deadline = started + max(int(ctx.timeout_seconds or 0), 1)
+        workdir = tempfile.mkdtemp(prefix="hegemony-build-")
+        try:
+            context_root = os.path.join(workdir, "context")
+            os.mkdir(context_root)
+            try:
+                staged = await self._stage_context(ctx, context_root, context_dir, dockerfile)
+            except _ContextError as exc:
+                return _failure(str(exc), "Build context unavailable")
+            dockerfile_path = os.path.join(context_root, *dockerfile.split("/"))
+            with open(dockerfile_path, encoding="utf-8", errors="replace") as handle:
+                problem = frontend_error(handle.read())
+            if problem:
+                return _failure(f"Invalid Dockerfile: {problem}", "Config validation failed")
+
+            secret_files = self._write_secrets(workdir, secrets)
+            metadata_file = os.path.join(workdir, "metadata.json")
+
+            probe = await self._probe_buildx(docker_bin, env)
+            if probe is not None:
+                return probe
+
+            created = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            labels = {
+                **config.labels,
+                CREATED_LABEL: created,
+                RUN_LABEL: ctx.run_id,
+                STEP_LABEL: ctx.step_id,
+            }
+            argv = buildx_argv(
+                context=context_root,
+                dockerfile=dockerfile_path,
+                references=references,
+                network=network,
+                metadata_file=metadata_file,
+                build_args=dict(config.build_args),
+                labels=labels,
+                secret_files=secret_files,
+                target=config.target.strip(),
+                platform=config.platform.strip(),
+            )
+            source = f"attachments/{context_dir}" if context_dir else "the attachments root"
+            network_note = (
+                "RUN instructions may reach the network"
+                if network == BUILD_NETWORK_DEFAULT
+                else "RUN instructions have no network (the step's egress policy is not open)"
+            )
+            await emit(
+                f"Building {repository} from {source} ({staged} file(s), {dockerfile}); "
+                f"{network_note}",
+                attrs={
+                    "milestone": "build_start",
+                    "image": repository,
+                    "tags": tags,
+                    "network": network,
+                },
+            )
+
+            log = _BuildLog(ctx.emit_progress)
+            exit_code = await self._run_build(docker_bin, argv, env, log, deadline)
+            await log.flush()
+            duration = round(time.monotonic() - started, 2)
+            if exit_code is None:
+                timeout = int(ctx.timeout_seconds or 0)
+                await emit(
+                    f"Image build timed out after {timeout}s",
+                    attrs={"milestone": "build_failed", "image": repository},
+                )
+                return _failure(
+                    f"Image build timed out after {timeout}s",
+                    "Build timed out",
+                    evidence=[self._log_artifact(ctx, log, -1, repository, "", duration)],
+                    metrics={"duration_seconds": duration, "image": repository},
+                )
+
+            if exit_code != 0:
+                reason = (
+                    _error_line(log.tail) or f"docker buildx build exited with code {exit_code}"
+                )
+                await emit(
+                    f"Image build failed: {reason}",
+                    attrs={
+                        "milestone": "build_failed",
+                        "image": repository,
+                        "exit_code": exit_code,
+                    },
+                )
+                return _failure(
+                    reason,
+                    "Image build failed",
+                    evidence=[self._log_artifact(ctx, log, exit_code, repository, "", duration)],
+                    metrics={
+                        "exit_code": exit_code,
+                        "duration_seconds": duration,
+                        "image": repository,
+                    },
+                )
+
+            digest = self._metadata_digest(metadata_file) or await self._daemon_digest(
+                docker_bin, env, references[0]
+            )
+            pinned = f"{repository}@{digest}" if digest else references[0]
+            note = "" if digest else " (the registry digest could not be read)"
+            await emit(
+                f"Pushed {pinned} as {', '.join(tags)} in {duration:.1f}s{note}",
+                attrs={
+                    "milestone": "image_pushed",
+                    "image": repository,
+                    "digest": digest,
+                    "references": references,
+                    "duration_seconds": duration,
+                },
+            )
+            details = {
+                "repository": repository,
+                "digest": digest,
+                "reference": pinned,
+                "tags": tags,
+                "references": references,
+                "context": source,
+                "dockerfile": dockerfile,
+                "target": config.target.strip(),
+                "platform": config.platform.strip(),
+                "network": network,
+                "labels": labels,
+                # Names only: values may be sensitive, and secrets stay with their backend.
+                "build_args": sorted(config.build_args),
+                "secrets": sorted(secrets),
+            }
+            summary_lines = [
+                f"Image: {repository}",
+                f"Digest: {digest or 'unknown'}",
+                *(f"Pushed: {reference}" for reference in references),
+            ]
+            return HandlerResult(
+                success=True,
+                summary=f"Built and pushed {repository} ({', '.join(tags)}){note}",
+                metrics={
+                    "exit_code": 0,
+                    "duration_seconds": duration,
+                    "image": repository,
+                    "image_digest": digest,
+                    "tag_count": len(tags),
+                },
+                evidence=[
+                    self._log_artifact(ctx, log, 0, pinned, digest, duration),
+                    {
+                        "kind": "step_result",
+                        "name": f"image_build_{ctx.step_id}",
+                        "content_text": "\n".join(summary_lines) + "\n",
+                        "content_json": details,
+                    },
+                ],
+                output={
+                    "image": repository,
+                    "digest": digest,
+                    "reference": pinned,
+                    "tags": tags,
+                    "references": references,
+                },
+            )
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    async def _stage_context(
+        self, ctx: HandlerContext, context_root: str, context_dir: str, dockerfile: str
+    ) -> int:
+        """Write the attachments under ``context_dir`` into ``context_root``; returns how many."""
+        try:
+            attachments = await ctx.require_services().fetch_run_attachments(ctx.run_id)
+        except Exception as exc:  # noqa: BLE001 - reported as the step's failure
+            raise _ContextError(f"Could not fetch the flow's attachments: {exc}") from exc
+        prefix = f"{context_dir}/" if context_dir else ""
+        staged = 0
+        for attachment in attachments:
+            filename = str(attachment.get("filename") or "").replace("\\", "/")
+            if not filename.startswith(prefix) or filename.endswith("/"):
+                continue
+            relative = posixpath.normpath(filename[len(prefix) :])
+            if relative.startswith(("../", "/")) or relative in ("..", "."):
+                logger.warning("Skipping attachment outside the build context: %s", filename)
+                continue
+            path = os.path.join(context_root, *relative.split("/"))
+            content = attachment.get("content")
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8", newline="") as handle:
+                    handle.write("" if content is None else str(content))
+            except OSError as exc:
+                raise _ContextError(
+                    f"Could not write attachment {filename} into the build context: {exc}"
+                ) from exc
+            staged += 1
+        dockerfile_path = os.path.join(context_root, *dockerfile.split("/"))
+        if not os.path.isfile(dockerfile_path):
+            where = f"{context_dir}/{dockerfile}" if context_dir else dockerfile
+            raise _ContextError(
+                f"The Dockerfile {where} is not among the flow's attachments"
+                + ("" if staged else f" (no attachment lies under {context_dir or 'the root'})")
+            )
+        return staged
+
+    @staticmethod
+    def _write_secrets(workdir: str, secrets: dict[str, str]) -> dict[str, str]:
+        """Each secret in a file only this process can read; returns id -> path."""
+        if not secrets:
+            return {}
+        directory = os.path.join(workdir, "secrets")
+        os.mkdir(directory, 0o700)
+        files: dict[str, str] = {}
+        for index, (secret_id, value) in enumerate(sorted(secrets.items())):
+            # Numbered, not named after the id: the path is in the argument list.
+            path = os.path.join(directory, f"secret-{index}")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(value)
+            files[secret_id] = path
+        return files
+
+    @staticmethod
+    async def _probe_buildx(docker_bin: str, env: dict[str, str]) -> HandlerResult | None:
+        """A failed result when the worker's Docker CLI cannot build, else None."""
+        try:
+            proc = await RunContainerHandler._run_docker(
+                docker_bin, ["buildx", "version"], env=env, timeout=_PROBE_TIMEOUT_SECONDS
+            )
+        except FileNotFoundError:
+            return _failure(f"Docker binary not found at '{docker_bin}'", "Docker not available")
+        except (subprocess.SubprocessError, OSError) as exc:
+            return _failure(f"docker buildx version failed: {exc}", "BuildKit not available")
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()[:300]
+            return _failure(
+                "The worker's Docker CLI has no working buildx plugin, which builds need"
+                + (f": {detail}" if detail else ""),
+                "BuildKit not available",
+            )
+        return None
+
+    @staticmethod
+    async def _run_build(
+        docker_bin: str,
+        argv: list[str],
+        env: dict[str, str],
+        log: _BuildLog,
+        deadline: float,
+    ) -> int | None:
+        """Run the build, streaming its output; the exit code, or None at the deadline."""
+        proc = await asyncio.create_subprocess_exec(
+            docker_bin,
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
+        stream = proc.stdout
+        if stream is None:  # pragma: no cover - PIPE always gives a stream
+            raise RuntimeError("subprocess pipe not available")
+
+        async def pump() -> int:
+            async def ticker() -> None:
+                while True:
+                    await asyncio.sleep(_FLUSH_SECONDS)
+                    await log.flush()
+
+            flusher = asyncio.create_task(ticker())
+            try:
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    await log.add(line)
+            finally:
+                flusher.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await flusher
+            return await proc.wait()
+
+        try:
+            return await asyncio.wait_for(pump(), timeout=max(deadline - time.monotonic(), 1))
+        except TimeoutError:
+            # The client is BuildKit's session: ending it cancels the build.
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            return None
+        except asyncio.CancelledError:
+            # A cancelled step must not leave its build running: kill the client
+            # without waiting on it (the event loop reaps it).
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            raise
+
+    @staticmethod
+    def _metadata_digest(path: str) -> str:
+        """The pushed manifest's digest from buildx's metadata file, or ""."""
+        try:
+            with open(path, encoding="utf-8") as handle:
+                metadata = json.load(handle)
+        except (OSError, ValueError):
+            return ""
+        digest = metadata.get("containerimage.digest") if isinstance(metadata, dict) else None
+        return digest if isinstance(digest, str) and _DIGEST_RE.match(digest) else ""
+
+    @staticmethod
+    async def _daemon_digest(docker_bin: str, env: dict[str, str], reference: str) -> str:
+        """The pushed digest as the sandbox daemon recorded it (RepoDigests), or ""."""
+        try:
+            proc = await RunContainerHandler._run_docker(
+                docker_bin,
+                ["image", "inspect", "--format", "{{json .RepoDigests}}", reference],
+                env=env,
+                timeout=_PROBE_TIMEOUT_SECONDS,
+            )
+            entries = json.loads(proc.stdout.strip() or "null") if proc.returncode == 0 else []
+        except (subprocess.SubprocessError, OSError, ValueError):
+            return ""
+        pinned = repo_digest_for(reference, [str(entry) for entry in entries or []])
+        return pinned.partition("@")[2]
+
+    @staticmethod
+    def _log_artifact(
+        ctx: HandlerContext,
+        log: _BuildLog,
+        exit_code: int,
+        image: str,
+        digest: str,
+        duration: float,
+    ) -> dict[str, Any]:
+        """The build log as ``container_output`` evidence, shaped like container.run's."""
+        output = log.text()
+        return {
+            "kind": "container_output",
+            "name": f"build_output_{ctx.step_id}",
+            "content_text": output,
+            "content_json": {
+                "exit_code": exit_code,
+                "image": image,
+                "image_digest": digest,
+                "duration_seconds": duration,
+                "truncated": log.truncated,
+                "stdout": output,
+                "stderr": "",
+            },
+        }
+
+
+class _ContextError(Exception):
+    """The build context could not be put together from the attachments."""
+
+
+__all__ = [
+    "CREATED_LABEL",
+    "HANDLER_ID",
+    "RUN_LABEL",
+    "STEP_LABEL",
+    "BuildImageConfig",
+    "BuildImageHandler",
+    "build_environment",
+    "buildx_argv",
+    "frontend_error",
+    "image_name_error",
+    "looks_like_host",
+    "run_tag",
+    "tag_error",
+]
