@@ -377,6 +377,13 @@ class BaseHandler(ABC):
     # instructions get from the flow's egress policy, and serves both as
     # ``ContainerRuntime.image_build``.
     builds_images: bool = False
+    # True for handlers that store values in the run organization's secret
+    # store (secret.write). The host grants ``services.read_secret``,
+    # ``write_secret`` and ``delete_secret`` only to such handlers, and only
+    # for paths under the prefixes the organization allows steps to write; it
+    # may refuse the handler outright (at save or at run time) where an
+    # administrator has not enabled secret writes by steps.
+    writes_secrets: bool = False
     # True for handlers that keep run-scoped state keyed by the step's node id
     # (tf.plan's working directory under /shared, tf.apply's lookup of the
     # plan step's output). Two executions of one node at the same time would

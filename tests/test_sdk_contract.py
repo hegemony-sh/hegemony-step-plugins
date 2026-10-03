@@ -44,8 +44,10 @@ def test_public_surface():
         "ImageBuild",
         "BUILD_NETWORK_DEFAULT",
         "BUILD_NETWORK_NONE",
+        "SecretWriteResult",
     ):
         assert hasattr(sdk, name), name
+        assert name in sdk.__all__, name
 
 
 def test_entry_point_group_and_abi():
@@ -89,6 +91,7 @@ def test_container_backed_defaults_off():
     assert sdk.BaseHandler.platform_api_access is False
     assert sdk.BaseHandler.node_scoped_state is False
     assert sdk.BaseHandler.builds_images is False
+    assert sdk.BaseHandler.writes_secrets is False
 
 
 def test_handler_services_declares_open_state_backend():
@@ -97,6 +100,65 @@ def test_handler_services_declares_open_state_backend():
     # Added later: optional, so a host implementing only the first three still fits.
     assert parameters["hold_until_apply"].default is False
     assert parameters["hold_until_apply"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_handler_services_declares_the_secret_store_methods():
+    """Added after the first hosts shipped: handlers feature-detect them with getattr."""
+    assert inspect.iscoroutinefunction(sdk.HandlerServices.read_secret)
+    assert inspect.iscoroutinefunction(sdk.HandlerServices.write_secret)
+    assert inspect.iscoroutinefunction(sdk.HandlerServices.delete_secret)
+    assert list(inspect.signature(sdk.HandlerServices.read_secret).parameters) == [
+        "self",
+        "path",
+    ]
+    write = inspect.signature(sdk.HandlerServices.write_secret).parameters
+    assert list(write) == ["self", "path", "values", "merge"]
+    assert write["merge"].default is False
+    assert write["merge"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert list(inspect.signature(sdk.HandlerServices.delete_secret).parameters) == [
+        "self",
+        "path",
+    ]
+
+
+def test_a_host_without_the_secret_store_methods_lacks_them():
+    """What a handler sees on a host older than the secret services: no attribute."""
+
+    class _OldHost:
+        async def resolve_secret_ref(self, ref, *, source):  # pragma: no cover - not called
+            return None
+
+    for name in ("read_secret", "write_secret", "delete_secret"):
+        assert getattr(_OldHost(), name, None) is None
+
+
+def test_secret_write_result_carries_names_and_the_reference_only():
+    """The result names what was stored; it has no field a value could travel in."""
+    assert [f.name for f in dataclasses.fields(sdk.SecretWriteResult)] == [
+        "path",
+        "reference",
+        "keys",
+        "created",
+    ]
+    result = sdk.SecretWriteResult(
+        path="certs/web",
+        reference="vault://orgs/acme/secrets/certs/web",
+        keys=("cert", "key"),
+        created=True,
+    )
+    assert result.reference + "/cert" == "vault://orgs/acme/secrets/certs/web/cert"
+    field_name = "created"  # through a variable: assigning a frozen field is the point
+    try:
+        setattr(result, field_name, False)
+    except dataclasses.FrozenInstanceError:
+        pass
+    else:
+        raise AssertionError("SecretWriteResult must be frozen")
+
+
+def test_the_abi_version_stays_for_optional_services():
+    """New optional services and handler flags are not an incompatible change."""
+    assert sdk.SDK_ABI_VERSION == 1
 
 
 def test_state_backend_access_keeps_the_token_out_of_repr():
