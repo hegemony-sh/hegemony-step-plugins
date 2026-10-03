@@ -136,6 +136,39 @@ class ImageCache:
     read_namespaces: tuple[str, ...] = ()
 
 
+#: :attr:`ImageBuild.network` values: the network a build's ``RUN``
+#: instructions get. ``default`` is the sandbox daemon's default network.
+BUILD_NETWORK_DEFAULT = "default"
+BUILD_NETWORK_NONE = "none"
+
+
+@dataclass(frozen=True, slots=True)
+class ImageBuild:
+    """Where a step that builds an image pushes it, and the network its build gets.
+
+    Served inside :class:`ContainerRuntime` to handlers that declare
+    ``builds_images`` (``container.build``), when the platform runs its own
+    registry and granted the step push access to its organization's image
+    names. The image goes to ``<registry>/<namespace>/<name>:<tag>``; the
+    host writes the step's registry login (a short-lived token whose grant
+    covers those names) into the step's Docker configuration
+    (``ContainerRuntime.docker_config_dir``), which the build's push reads.
+    """
+
+    # Host name image references use for the platform registry
+    # (``registry.hegemony.internal``).
+    registry: str
+    # Repository prefix the image is pushed under (``orgs/acme``). The name the
+    # step gives goes after it; a first segment shaped like a registry host
+    # (a dot, or ``localhost``) is reserved for cached copies and refused.
+    namespace: str
+    # The network the build's RUN instructions get: ``default`` when the flow's
+    # egress policy for the step is open (open mode, no deny rules), ``none``
+    # otherwise. The host decides; the handler only applies it. Fail closed:
+    # anything but ``default`` builds without network.
+    network: str = BUILD_NETWORK_NONE
+
+
 @dataclass(frozen=True, slots=True)
 class ContainerRuntime:
     """The platform's container-execution environment served to the run_container handler."""
@@ -182,6 +215,11 @@ class ContainerRuntime:
     # are pulled from their own registry every time, as before, and a step's
     # ``cache_image`` option has no effect.
     image_cache: ImageCache | None = None
+    # Where a step that builds an image pushes it (see :class:`ImageBuild`).
+    # None means the step cannot push a built image: the platform has no
+    # registry, the handler does not declare ``builds_images``, or the host
+    # could not grant the step push access. A building handler fails then.
+    image_build: ImageBuild | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,7 +372,12 @@ class HandlerServices(Protocol):
         ...
 
     def container_runtime(self) -> ContainerRuntime:
-        """Describe the platform's container-execution environment (docker binary, workspaces)."""
+        """Describe the platform's container-execution environment (docker binary, workspaces).
+
+        For a handler declaring ``builds_images`` the runtime also carries
+        :attr:`ContainerRuntime.image_build` when the step may push what it
+        builds.
+        """
         ...
 
     async def open_shell(

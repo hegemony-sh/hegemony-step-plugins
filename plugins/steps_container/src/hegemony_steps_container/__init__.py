@@ -2,12 +2,13 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Docker container execution step handler for Hegemony.
+"""Docker container execution step handlers for Hegemony.
 
 Container execution on the platform's Docker-in-Docker sandbox, never on the
-worker's own Docker daemon. Deliberately its own wheel: the security-sensitive
-handler (docker socket, privileged mode) — hardened deployments simply don't
-install it.
+worker's own Docker daemon: ``container.run`` runs a container, and
+``container.build`` builds an image there and pushes it to the platform
+registry. Deliberately its own wheel: the security-sensitive handlers (docker
+socket, privileged mode) — hardened deployments simply don't install it.
 
 Registers under the ``hegemony.step_handlers`` entry-point group; the entry
 point name is the claimed handler-id namespace prefix (``container``).
@@ -18,9 +19,10 @@ from __future__ import annotations
 
 from hegemony_step_sdk import BaseHandler, StepHandlerRegistry
 
+from .build import BuildImageHandler
 from .run import RunContainerHandler
 
-ALL_HANDLERS: tuple[type[BaseHandler], ...] = (RunContainerHandler,)
+ALL_HANDLERS: tuple[type[BaseHandler], ...] = (RunContainerHandler, BuildImageHandler)
 
 
 def register(registry: StepHandlerRegistry) -> None:

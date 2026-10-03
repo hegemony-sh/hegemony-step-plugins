@@ -42,9 +42,12 @@ from .probes import (
 )
 from .registry import StepHandlerRegistry
 from .services import (
+    BUILD_NETWORK_DEFAULT,
+    BUILD_NETWORK_NONE,
     CommandResult,
     ContainerRuntime,
     HandlerServices,
+    ImageBuild,
     ImageCache,
     ShellResult,
     ShellTransport,
@@ -66,6 +69,8 @@ from .transports import (
 STEP_HANDLER_ENTRY_POINT_GROUP = "hegemony.step_handlers"
 
 __all__ = [
+    "BUILD_NETWORK_DEFAULT",
+    "BUILD_NETWORK_NONE",
     "DEFAULT_DEVICE_MGMT_PORT",
     "DEFAULT_DEVICE_PLATFORM",
     "MAX_CHAIN_OUTPUT_CHARS",
@@ -84,6 +89,7 @@ __all__ = [
     "CommandResult",
     "ConnectionCancellationRegistry",
     "ContainerRuntime",
+    "ImageBuild",
     "ImageCache",
     "DeviceConnectionSpec",
     "DeviceCredentials",

@@ -370,6 +370,13 @@ class BaseHandler(ABC):
     # what the container may do there is limited by the short-lived token it
     # gets from ``services.open_state_backend``.
     platform_api_access: bool = False
+    # True for container-backed handlers that build an image and push it into
+    # the organization's namespace of the platform registry (container.build).
+    # The host then asks for the step's registry token with push rights on the
+    # organization's own image names, decides the network the build's RUN
+    # instructions get from the flow's egress policy, and serves both as
+    # ``ContainerRuntime.image_build``.
+    builds_images: bool = False
     # True for handlers that keep run-scoped state keyed by the step's node id
     # (tf.plan's working directory under /shared, tf.apply's lookup of the
     # plan step's output). Two executions of one node at the same time would
