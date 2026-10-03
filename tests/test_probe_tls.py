@@ -1,0 +1,1297 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""``probe.tls``: endpoint parsing, certificate rules, and the handler end to end.
+
+The PKI is generated here (a root, an intermediate, and leaves for each
+case), served by local TLS servers on 127.0.0.1, with a local OCSP responder
+answering for them. Nothing leaves the machine.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import ipaddress
+import socket
+import ssl
+import threading
+from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+from cryptography.hazmat.primitives.serialization import pkcs7
+from cryptography.x509 import ocsp
+from cryptography.x509.oid import AuthorityInformationAccessOID, ExtendedKeyUsageOID, NameOID
+
+from hegemony_step_sdk import HandlerContext, HandlerServices
+from hegemony_step_sdk.docs import check_page, load_docs_bundle
+from hegemony_steps_probe import tls_certs, tls_check
+from hegemony_steps_probe.tls_certs import (
+    EndpointSpec,
+    dns_name_matches,
+    evaluate_ocsp_response,
+    hostname_matches,
+    load_certificates_any,
+    load_pem_certificates,
+    normalize_fingerprint,
+    parse_endpoint,
+    split_endpoint_entries,
+    verify_chain_offline,
+)
+from hegemony_steps_probe.tls_check import TlsProbeConfig, TlsProbeHandler
+
+NOW = datetime.now(UTC)
+
+SigningKey = rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey | ed25519.Ed25519PrivateKey
+
+
+# --- PKI ----------------------------------------------------------------------
+
+
+def _name(common_name: str) -> x509.Name:
+    return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+
+
+def _san(value: str) -> x509.GeneralName:
+    try:
+        return x509.IPAddress(ipaddress.ip_address(value))
+    except ValueError:
+        return x509.DNSName(value)
+
+
+def issue(
+    common_name: str,
+    key: SigningKey,
+    *,
+    issuer: x509.Certificate | None = None,
+    issuer_key: SigningKey | None = None,
+    ca: bool = False,
+    path_length: int | None = None,
+    sans: tuple[str, ...] = (),
+    not_before: datetime | None = None,
+    not_after: datetime | None = None,
+    ocsp_url: str | None = None,
+    issuer_url: str | None = None,
+    eku: tuple[x509.ObjectIdentifier, ...] | None = (ExtendedKeyUsageOID.SERVER_AUTH,),
+    basic_constraints: bool = True,
+) -> x509.Certificate:
+    """A certificate for ``key``, self-signed unless an issuer is given."""
+    signer = issuer_key or key
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(_name(common_name))
+        .issuer_name(issuer.subject if issuer is not None else _name(common_name))
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_before or NOW - timedelta(days=1))
+        .not_valid_after(not_after or NOW + timedelta(days=60))
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+    )
+    if basic_constraints:
+        builder = builder.add_extension(
+            x509.BasicConstraints(ca=ca, path_length=path_length if ca else None), critical=True
+        )
+    if issuer is not None:
+        builder = builder.add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(signer.public_key()),
+            critical=False,
+        )
+    if sans:
+        builder = builder.add_extension(
+            x509.SubjectAlternativeName([_san(value) for value in sans]), critical=False
+        )
+    if eku and not ca:
+        builder = builder.add_extension(x509.ExtendedKeyUsage(list(eku)), critical=False)
+    access: list[x509.AccessDescription] = []
+    if ocsp_url:
+        access.append(
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.OCSP, x509.UniformResourceIdentifier(ocsp_url)
+            )
+        )
+    if issuer_url:
+        access.append(
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.CA_ISSUERS,
+                x509.UniformResourceIdentifier(issuer_url),
+            )
+        )
+    if access:
+        builder = builder.add_extension(x509.AuthorityInformationAccess(access), critical=False)
+    algorithm = None if isinstance(signer, ed25519.Ed25519PrivateKey) else hashes.SHA256()
+    return builder.sign(signer, algorithm)
+
+
+def pem_of(*certs: x509.Certificate) -> str:
+    return "".join(cert.public_bytes(serialization.Encoding.PEM).decode() for cert in certs)
+
+
+def fingerprint_of(cert: x509.Certificate) -> str:
+    return cert.fingerprint(hashes.SHA256()).hex()
+
+
+@dataclass
+class _OcspEntry:
+    cert: x509.Certificate
+    issuer: x509.Certificate
+    issuer_key: SigningKey
+    status: ocsp.OCSPCertStatus
+    revoked_at: datetime | None = None
+
+
+@dataclass
+class OcspResponder:
+    """A local OCSP responder plus the caIssuers download it serves."""
+
+    port: int
+    entries: dict[int, _OcspEntry] = field(default_factory=dict)
+    issuer_der: bytes = b""
+    requests: list[str] = field(default_factory=list)
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/ocsp"
+
+    @property
+    def issuer_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/issuer.der"
+
+    def answer(self, body: bytes) -> bytes:
+        request = ocsp.load_der_ocsp_request(body)
+        entry = self.entries.get(request.serial_number)
+        if entry is None:
+            return ocsp.OCSPResponseBuilder.build_unsuccessful(
+                ocsp.OCSPResponseStatus.UNAUTHORIZED
+            ).public_bytes(serialization.Encoding.DER)
+        response = (
+            ocsp.OCSPResponseBuilder()
+            .add_response(
+                cert=entry.cert,
+                issuer=entry.issuer,
+                algorithm=hashes.SHA1(),
+                cert_status=entry.status,
+                this_update=NOW - timedelta(hours=1),
+                next_update=NOW + timedelta(days=1),
+                revocation_time=entry.revoked_at,
+                revocation_reason=(
+                    x509.ReasonFlags.key_compromise if entry.revoked_at is not None else None
+                ),
+            )
+            .responder_id(ocsp.OCSPResponderEncoding.HASH, entry.issuer)
+            .sign(entry.issuer_key, hashes.SHA256())
+        )
+        return response.public_bytes(serialization.Encoding.DER)
+
+
+@pytest.fixture(scope="module")
+def responder() -> Iterator[OcspResponder]:
+    state = OcspResponder(port=0)
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            state.requests.append(f"POST {self.path}")
+            payload = state.answer(body)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/ocsp-response")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self) -> None:
+            state.requests.append(f"GET {self.path}")
+            if self.path != "/issuer.der":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pkix-cert")
+            self.send_header("Content-Length", str(len(state.issuer_der)))
+            self.end_headers()
+            self.wfile.write(state.issuer_der)
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    state.port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@dataclass
+class Leaf:
+    cert: x509.Certificate
+    key: SigningKey
+    chain: tuple[x509.Certificate, ...]
+
+
+@dataclass
+class Pki:
+    root: x509.Certificate
+    root_key: SigningKey
+    inter: x509.Certificate
+    inter_key: SigningKey
+    leaves: dict[str, Leaf]
+
+    @property
+    def root_pem(self) -> str:
+        return pem_of(self.root)
+
+
+@pytest.fixture(scope="module")
+def pki(responder: OcspResponder) -> Pki:
+    root_key = ec.generate_private_key(ec.SECP256R1())
+    root = issue("Probe Test Root", root_key, ca=True, not_after=NOW + timedelta(days=3650))
+    inter_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    inter = issue(
+        "Probe Test Intermediate",
+        inter_key,
+        issuer=root,
+        issuer_key=root_key,
+        ca=True,
+        path_length=0,
+        not_after=NOW + timedelta(days=1825),
+    )
+    responder.issuer_der = inter.public_bytes(serialization.Encoding.DER)
+    leaves: dict[str, Leaf] = {}
+
+    def leaf(
+        name: str,
+        key: SigningKey,
+        *,
+        status: ocsp.OCSPCertStatus | None = None,
+        revoked_at: datetime | None = None,
+        signed_by_root: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        issuer, issuer_key = (root, root_key) if signed_by_root else (inter, inter_key)
+        cert = issue(f"{name}.example.test", key, issuer=issuer, issuer_key=issuer_key, **kwargs)
+        leaves[name] = Leaf(cert, key, () if signed_by_root else (inter,))
+        if status is not None:
+            responder.entries[cert.serial_number] = _OcspEntry(
+                cert, issuer, issuer_key, status, revoked_at
+            )
+
+    with_aia: dict[str, Any] = {"ocsp_url": responder.url, "issuer_url": responder.issuer_url}
+    leaf(
+        "rsa",
+        rsa.generate_private_key(public_exponent=65537, key_size=2048),
+        sans=("leaf.example.test", "127.0.0.1"),
+        not_after=NOW + timedelta(days=41, hours=1),
+        status=ocsp.OCSPCertStatus.GOOD,
+        **with_aia,
+    )
+    leaf(
+        "ec",
+        ec.generate_private_key(ec.SECP384R1()),
+        sans=("ec.example.test", "127.0.0.1"),
+        not_after=NOW + timedelta(days=90, hours=1),
+        status=ocsp.OCSPCertStatus.GOOD,
+        **with_aia,
+    )
+    leaf(
+        "expired",
+        ec.generate_private_key(ec.SECP256R1()),
+        sans=("leaf.example.test", "127.0.0.1"),
+        not_before=NOW - timedelta(days=30),
+        not_after=NOW - timedelta(days=2, hours=12),
+    )
+    leaf("wrong_host", ec.generate_private_key(ec.SECP256R1()), sans=("other.example.test",))
+    leaf("wildcard", ec.generate_private_key(ec.SECP256R1()), sans=("*.example.test",))
+    leaf(
+        "revoked",
+        ec.generate_private_key(ec.SECP256R1()),
+        sans=("leaf.example.test", "127.0.0.1"),
+        status=ocsp.OCSPCertStatus.REVOKED,
+        revoked_at=(NOW - timedelta(days=1)).replace(microsecond=0),
+        **with_aia,
+    )
+    leaf("no_aia", ec.generate_private_key(ec.SECP256R1()), sans=("127.0.0.1",))
+    leaf(
+        "direct",
+        ec.generate_private_key(ec.SECP256R1()),
+        sans=("127.0.0.1",),
+        signed_by_root=True,
+        status=ocsp.OCSPCertStatus.GOOD,
+        ocsp_url=responder.url,
+    )
+    return Pki(root, root_key, inter, inter_key, leaves)
+
+
+@contextlib.asynccontextmanager
+async def tls_server(tmp_path: Path, leaf: Leaf, *, with_chain: bool = True) -> AsyncIterator[int]:
+    """Serve ``leaf`` (and its chain) on 127.0.0.1; yields the port."""
+    serial = format(leaf.cert.serial_number, "x")
+    cert_file = tmp_path / f"{serial}-chain.pem"
+    key_file = tmp_path / f"{serial}-key.pem"
+    chain = leaf.chain if with_chain else ()
+    cert_file.write_text(pem_of(leaf.cert, *chain))
+    key_file.write_bytes(
+        leaf.key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_file, key_file)
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(Exception):
+            await reader.read()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=context)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield port
+    finally:
+        server.close()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(server.wait_closed(), 2)
+
+
+def closed_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class Denied(Exception):
+    """Stands in for the host's egress-denial error."""
+
+
+class FakeServices:
+    """The two services ``probe.tls`` uses: the egress gate and secret resolution."""
+
+    def __init__(
+        self, *, secrets: dict[str, str] | None = None, deny: tuple[str, ...] = ()
+    ) -> None:
+        self.secrets = secrets or {}
+        self.deny = deny
+        self.egress: list[tuple[str, int | None, str | None, str]] = []
+        self.secret_calls: list[tuple[str | None, str]] = []
+
+    async def enforce_egress(
+        self,
+        host: str,
+        port: int | None = None,
+        *,
+        proto: str | None = None,
+        kind: str = "connection",
+    ) -> None:
+        self.egress.append((host, port, proto, kind))
+        if host in self.deny:
+            raise Denied(f"{kind} to {host} refused by the flow egress policy")
+
+    async def resolve_secret_ref(self, ref: str | None, *, source: str) -> str | None:
+        self.secret_calls.append((ref, source))
+        return self.secrets.get(ref or "")
+
+
+def make_ctx(
+    config: dict[str, Any],
+    *,
+    devices: list[dict[str, Any]] | None = None,
+    ips: list[str] | None = None,
+    services: Any = None,
+) -> HandlerContext:
+    return HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        config=config,
+        target_roles=["edge"] if devices else [],
+        target_devices_by_role={"edge": devices} if devices else {},
+        step_target_ips=ips or [],
+        services=cast(HandlerServices, services) if services is not None else None,
+    )
+
+
+async def run_step(config: dict[str, Any], **kwargs: Any):
+    kwargs.setdefault("services", FakeServices())
+    config = {"timeout_sec": 5, **config}
+    return await TlsProbeHandler().execute(make_ctx(config, **kwargs))
+
+
+# --- Endpoint parsing ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ("portal.example.com", EndpointSpec("portal.example.com", 443)),
+        ("portal.example.com:8443", EndpointSpec("portal.example.com", 8443)),
+        (
+            "192.0.2.10:8443:device.example.com",
+            EndpointSpec("192.0.2.10", 8443, "device.example.com"),
+        ),
+        ("192.0.2.10::device.example.com", EndpointSpec("192.0.2.10", 443, "device.example.com")),
+        ("  host.example:444:  ", EndpointSpec("host.example", 444)),
+        ("[2001:db8::1]:443", EndpointSpec("2001:db8::1", 443)),
+        ("[2001:db8::1]", EndpointSpec("2001:db8::1", 443)),
+        ("[2001:db8::1]:8443:name.example", EndpointSpec("2001:db8::1", 8443, "name.example")),
+        ("[::1]:10443", EndpointSpec("::1", 10443)),
+    ],
+)
+def test_parse_endpoint_accepts_every_documented_form(entry, expected):
+    assert parse_endpoint(entry, default_port=443) == expected
+
+
+@pytest.mark.parametrize(
+    ("entry", "fragment"),
+    [
+        ("2001:db8::1", "brackets"),
+        ("2001:db8::1:443", "brackets"),
+        ("[2001:db8::1", "unclosed"),
+        ("[192.0.2.1]:443", "not an IPv6 address"),
+        ("[2001:db8::1]443", "expected ':port'"),
+        ("host.example:0", "outside 1-65535"),
+        ("host.example:70000", "outside 1-65535"),
+        ("host.example:https", "not a number"),
+        ("https://host.example", "not a URL"),
+        ("host.example:443:bad/name", "SNI"),
+        (":443", "not a host name"),
+    ],
+)
+def test_parse_endpoint_rejects_malformed_entries(entry, fragment):
+    with pytest.raises(ValueError, match=fragment):
+        parse_endpoint(entry, default_port=443)
+
+
+def test_split_endpoint_entries_takes_newlines_commas_and_lists():
+    assert split_endpoint_entries("a:1\nb:2, c:3,,\n\n  d  ") == ["a:1", "b:2", "c:3", "d"]
+    assert split_endpoint_entries(["a:1", "b:2,c:3", "  ", "d\ne"]) == [
+        "a:1",
+        "b:2",
+        "c:3",
+        "d",
+        "e",
+    ]
+    assert split_endpoint_entries(None) == []
+    assert split_endpoint_entries("") == []
+    with pytest.raises(ValueError, match="must be a string"):
+        split_endpoint_entries(["a:1", 443])
+    with pytest.raises(ValueError, match="list of strings"):
+        split_endpoint_entries(443)
+
+
+# --- Hostname matching --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("pattern", "host", "matches"),
+    [
+        ("www.example.com", "www.example.com", True),
+        ("WWW.Example.COM", "www.example.com", True),
+        ("www.example.com.", "www.example.com", True),
+        ("www.example.com", "WWW.EXAMPLE.COM.", True),
+        ("www.example.com", "example.com", False),
+        ("*.example.com", "www.example.com", True),
+        ("*.example.com", "WWW.example.com", True),
+        ("*.example.com", "example.com", False),
+        ("*.example.com", "a.b.example.com", False),
+        ("*.example.com", ".example.com", False),
+        ("*.com", "example.com", False),
+        ("*", "localhost", False),
+        ("w*.example.com", "www.example.com", False),
+        ("*w.example.com", "www.example.com", False),
+        ("www.*.example.com", "www.a.example.com", False),
+        ("*.*.example.com", "a.b.example.com", False),
+        ("*.example.com", "192.0.2.1", False),
+        ("192.0.2.1", "192.0.2.1", False),
+        ("xn--bcher-kva.example", "bücher.example", True),
+        ("", "example.com", False),
+    ],
+)
+def test_dns_name_matches_follows_rfc_6125(pattern, host, matches):
+    assert dns_name_matches(pattern, host) is matches
+
+
+@pytest.mark.parametrize(
+    ("host", "dns_names", "ips", "cn", "matches"),
+    [
+        # IP hosts match IP SANs only, never DNS SANs.
+        ("127.0.0.1", ["localhost"], ["127.0.0.1"], None, True),
+        ("127.0.0.1", ["127.0.0.1"], [], None, False),
+        ("2001:db8::1", [], ["2001:db8:0:0:0:0:0:1"], None, True),
+        ("[2001:db8::1]", [], ["2001:db8::1"], None, True),
+        ("192.0.2.2", [], ["192.0.2.1"], None, False),
+        # Names match DNS SANs, wildcards included.
+        ("www.example.com", ["*.example.com"], [], None, True),
+        ("www.example.com", [], ["192.0.2.1"], "www.example.com", False),
+        # CN only without any SAN.
+        ("www.example.com", [], [], "www.example.com", True),
+        ("www.example.com", [], [], "*.example.com", True),
+        ("www.example.com", ["other.example.com"], [], "www.example.com", False),
+        ("192.0.2.1", [], [], "192.0.2.1", True),
+        ("192.0.2.1", ["x.example"], [], "192.0.2.1", False),
+        ("www.example.com", [], [], None, False),
+    ],
+)
+def test_hostname_matches_prefers_sans_and_keeps_ips_apart(host, dns_names, ips, cn, matches):
+    assert hostname_matches(host, dns_names, ips, cn) is matches
+
+
+# --- Fingerprints and loading -------------------------------------------------
+
+
+def test_normalize_fingerprint_ignores_colons_case_and_labels():
+    plain = "ab" * 32
+    colon = ":".join(["AB"] * 32)
+    assert normalize_fingerprint(plain) == plain
+    assert normalize_fingerprint(colon) == plain
+    assert normalize_fingerprint(f"SHA256 Fingerprint={colon}") == plain
+    assert normalize_fingerprint(f"sha256:{plain}") == plain
+    assert normalize_fingerprint(f"  {plain[:32]} {plain[32:]}\n") == plain
+    for bad in ("", "ab" * 31, "zz" * 32, "ab" * 33):
+        with pytest.raises(ValueError, match="SHA-256"):
+            normalize_fingerprint(bad)
+
+
+def test_load_pem_certificates_skips_surrounding_text(pki):
+    text = "Leaf:\n" + pem_of(pki.leaves["rsa"].cert) + "\nIntermediate:\n" + pem_of(pki.inter)
+    certs = load_pem_certificates(text)
+    assert [cert.subject for cert in certs] == [pki.leaves["rsa"].cert.subject, pki.inter.subject]
+    assert load_pem_certificates("no certificates here") == []
+    broken = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+    with pytest.raises(ValueError, match="#1"):
+        load_pem_certificates(broken)
+
+
+def test_load_certificates_any_reads_der_pem_and_pkcs7(pki):
+    der = pki.inter.public_bytes(serialization.Encoding.DER)
+    assert load_certificates_any(der) == [pki.inter]
+    assert load_certificates_any(pem_of(pki.inter).encode()) == [pki.inter]
+    bundle = pkcs7.serialize_certificates([pki.inter, pki.root], serialization.Encoding.DER)
+    # A PKCS#7 bundle is a DER SET: the order is the encoding's, not ours.
+    assert set(load_certificates_any(bundle)) == {pki.inter, pki.root}
+    assert load_certificates_any(b"garbage") == []
+
+
+def test_certificate_fields_describe_the_leaf(pki):
+    cert = pki.leaves["ec"].cert
+    fields = tls_certs.certificate_fields(cert, now=NOW)
+    assert fields["subject_cn"] == "ec.example.test"
+    assert fields["sans"] == ["ec.example.test", "127.0.0.1"]
+    assert fields["issuer_cn"] == "Probe Test Intermediate"
+    assert fields["issuer"] == "CN=Probe Test Intermediate"
+    assert fields["serial"] == format(cert.serial_number, "x")
+    assert fields["fingerprint_sha256"] == fingerprint_of(cert)
+    assert fields["not_after"].endswith("Z") and "T" in fields["not_after"]
+    assert fields["days_left"] == 90
+    assert fields["expired"] is False
+    assert (fields["key_type"], fields["key_bits"], fields["key_curve"]) == ("ec", 384, "secp384r1")
+    assert fields["signature_algorithm"] == "sha256WithRSAEncryption"
+    assert fields["is_ca"] is False
+    assert tls_certs.certificate_fields(pki.root, now=NOW)["is_ca"] is True
+
+
+def test_days_left_floors_and_goes_negative(pki):
+    expired = pki.leaves["expired"].cert
+    assert tls_certs.days_left(expired, NOW) == -3
+    assert tls_certs.days_left(pki.leaves["rsa"].cert, NOW) == 41
+
+
+# --- Offline chain validation -------------------------------------------------
+
+
+def test_offline_chain_ok_with_intermediate_and_root(pki):
+    leaf = pki.leaves["rsa"].cert
+    assert verify_chain_offline(leaf, [pki.inter], [pki.root], now=NOW) == (True, None)
+
+
+def test_offline_chain_missing_intermediate(pki):
+    leaf = pki.leaves["rsa"].cert
+    assert verify_chain_offline(leaf, [], [pki.root], now=NOW) == (
+        False,
+        "unable to get local issuer certificate",
+    )
+
+
+def test_offline_chain_untrusted_root(pki):
+    other_key = ec.generate_private_key(ec.SECP256R1())
+    other_root = issue("Other Root", other_key, ca=True)
+    ok, error = verify_chain_offline(
+        pki.leaves["rsa"].cert, [pki.inter, pki.root], [other_root], now=NOW
+    )
+    assert ok is False
+    assert error == "self-signed certificate in chain"
+
+
+def test_offline_chain_expired_leaf(pki):
+    ok, error = verify_chain_offline(pki.leaves["expired"].cert, [pki.inter], [pki.root], now=NOW)
+    assert (ok, error) == (False, "certificate has expired")
+
+
+def test_offline_chain_trusts_a_pinned_self_signed_leaf_and_an_intermediate_anchor(pki):
+    key = ec.generate_private_key(ec.SECP256R1())
+    self_signed = issue("device.example.test", key, sans=("device.example.test",))
+    assert verify_chain_offline(self_signed, [], [self_signed], now=NOW) == (True, None)
+    assert verify_chain_offline(self_signed, [], [pki.root], now=NOW) == (
+        False,
+        "self-signed certificate",
+    )
+    # Every anchor is trusted as given, an intermediate included.
+    assert verify_chain_offline(pki.leaves["rsa"].cert, [], [pki.inter], now=NOW) == (True, None)
+
+
+def test_offline_chain_refuses_a_non_ca_issuer_and_path_length(pki):
+    not_ca_key = ec.generate_private_key(ec.SECP256R1())
+    not_ca = issue("Not A CA", not_ca_key, issuer=pki.root, issuer_key=pki.root_key, eku=None)
+    leaf_key = ec.generate_private_key(ec.SECP256R1())
+    leaf = issue("x.example.test", leaf_key, issuer=not_ca, issuer_key=not_ca_key)
+    assert verify_chain_offline(leaf, [not_ca], [pki.root], now=NOW) == (
+        False,
+        "invalid CA certificate",
+    )
+    # The intermediate allows no further CA below it (pathlen 0).
+    sub_key = ec.generate_private_key(ec.SECP256R1())
+    sub = issue("Sub CA", sub_key, issuer=pki.inter, issuer_key=pki.inter_key, ca=True)
+    deep = issue("deep.example.test", leaf_key, issuer=sub, issuer_key=sub_key)
+    assert verify_chain_offline(deep, [sub, pki.inter], [pki.root], now=NOW) == (
+        False,
+        "path length constraint exceeded",
+    )
+
+
+def test_offline_chain_checks_the_leaf_purpose(pki):
+    key = ec.generate_private_key(ec.SECP256R1())
+    client_only = issue(
+        "client.example.test",
+        key,
+        issuer=pki.inter,
+        issuer_key=pki.inter_key,
+        eku=(ExtendedKeyUsageOID.CLIENT_AUTH,),
+    )
+    assert verify_chain_offline(client_only, [pki.inter], [pki.root], now=NOW) == (
+        False,
+        "unsupported certificate purpose",
+    )
+
+
+# --- OCSP response evaluation -------------------------------------------------
+
+
+def _ocsp_response(
+    cert: x509.Certificate,
+    issuer: x509.Certificate,
+    signer: x509.Certificate,
+    signer_key: SigningKey,
+    *,
+    status: ocsp.OCSPCertStatus = ocsp.OCSPCertStatus.GOOD,
+    next_update: datetime | None = None,
+    certificates: list[x509.Certificate] | None = None,
+) -> bytes:
+    builder = (
+        ocsp.OCSPResponseBuilder()
+        .add_response(
+            cert=cert,
+            issuer=issuer,
+            algorithm=hashes.SHA256(),
+            cert_status=status,
+            this_update=NOW - timedelta(hours=2),
+            next_update=next_update or NOW + timedelta(days=1),
+            revocation_time=None,
+            revocation_reason=None,
+        )
+        .responder_id(ocsp.OCSPResponderEncoding.NAME, signer)
+    )
+    if certificates:
+        builder = builder.certificates(certificates)
+    algorithm = None if isinstance(signer_key, ed25519.Ed25519PrivateKey) else hashes.SHA256()
+    return builder.sign(signer_key, algorithm).public_bytes(serialization.Encoding.DER)
+
+
+def test_ocsp_response_signed_by_the_issuer_or_a_delegate(pki):
+    leaf = pki.leaves["rsa"].cert
+    good = _ocsp_response(leaf, pki.inter, pki.inter, pki.inter_key)
+    assert evaluate_ocsp_response(good, leaf, pki.inter, now=NOW)["ocsp"] == "good"
+    unknown = _ocsp_response(
+        leaf, pki.inter, pki.inter, pki.inter_key, status=ocsp.OCSPCertStatus.UNKNOWN
+    )
+    assert evaluate_ocsp_response(unknown, leaf, pki.inter, now=NOW)["ocsp"] == "unknown"
+
+    delegate_key = ed25519.Ed25519PrivateKey.generate()
+    delegate = issue(
+        "OCSP Signer",
+        delegate_key,
+        issuer=pki.inter,
+        issuer_key=pki.inter_key,
+        eku=(ExtendedKeyUsageOID.OCSP_SIGNING,),
+    )
+    delegated = _ocsp_response(leaf, pki.inter, delegate, delegate_key, certificates=[delegate])
+    assert evaluate_ocsp_response(delegated, leaf, pki.inter, now=NOW)["ocsp"] == "good"
+
+
+def test_ocsp_response_problems_are_errors(pki):
+    leaf = pki.leaves["rsa"].cert
+    stranger_key = ec.generate_private_key(ec.SECP256R1())
+    stranger = issue("Stranger", stranger_key, eku=(ExtendedKeyUsageOID.OCSP_SIGNING,))
+    forged = _ocsp_response(leaf, pki.inter, stranger, stranger_key, certificates=[stranger])
+    outcome = evaluate_ocsp_response(forged, leaf, pki.inter, now=NOW)
+    assert outcome["ocsp"] == "error"
+    assert "not signed by the issuer" in outcome["ocsp_detail"]
+
+    stale = _ocsp_response(
+        leaf, pki.inter, pki.inter, pki.inter_key, next_update=NOW - timedelta(hours=1)
+    )
+    outcome = evaluate_ocsp_response(stale, leaf, pki.inter, now=NOW)
+    assert (outcome["ocsp"], "stale" in outcome["ocsp_detail"]) == ("error", True)
+
+    other = _ocsp_response(pki.leaves["ec"].cert, pki.inter, pki.inter, pki.inter_key)
+    outcome = evaluate_ocsp_response(other, leaf, pki.inter, now=NOW)
+    assert outcome["ocsp_detail"] == "response does not cover this certificate"
+
+    refused = ocsp.OCSPResponseBuilder.build_unsuccessful(
+        ocsp.OCSPResponseStatus.TRY_LATER
+    ).public_bytes(serialization.Encoding.DER)
+    outcome = evaluate_ocsp_response(refused, leaf, pki.inter, now=NOW)
+    assert outcome == {
+        "ocsp": "error",
+        "ocsp_detail": "responder answered try_later",
+        "revocation_time": None,
+    }
+    assert evaluate_ocsp_response(b"junk", leaf, pki.inter, now=NOW)["ocsp"] == "error"
+
+
+# --- The handler: sources ----------------------------------------------------
+
+
+async def test_device_target_reports_the_served_certificate(pki, tmp_path):
+    leaf = pki.leaves["rsa"]
+    async with tls_server(tmp_path, leaf) as port:
+        result = await run_step(
+            {"port": port, "ca_bundle": pki.root_pem},
+            devices=[{"id": "d1", "name": "edge1", "mgmt_host": "127.0.0.1"}],
+        )
+    assert result.success is True, result.error
+    output = result.output
+    assert set(output) == {"endpoints", "summary", "all_ok", "min_days_left"}
+    assert output["all_ok"] is True
+    assert output["min_days_left"] == 41
+    [record] = output["endpoints"]
+    assert record["source"] == "target"
+    assert (record["host"], record["port"], record["sni"]) == ("127.0.0.1", port, None)
+    assert (record["device_id"], record["device_name"]) == ("d1", "edge1")
+    assert record["reachable"] is True and record["error"] is None
+    assert record["tls_version"].startswith("TLS")
+    assert record["cipher"]
+    assert (record["chain_ok"], record["chain_error"]) == (True, None)
+    assert record["hostname_ok"] is True  # IP SAN 127.0.0.1
+    assert record["matches_expected"] is None
+    assert record["ocsp"] is None
+    assert record["subject_cn"] == "rsa.example.test"
+    assert record["sans"] == ["leaf.example.test", "127.0.0.1"]
+    assert record["issuer_cn"] == "Probe Test Intermediate"
+    assert record["fingerprint_sha256"] == fingerprint_of(leaf.cert)
+    assert record["serial"] == format(leaf.cert.serial_number, "x")
+    assert (record["key_type"], record["key_bits"], record["key_curve"]) == ("rsa", 2048, None)
+    assert record["days_left"] == 41 and record["expired"] is False
+    assert "certificate_pem" not in record
+    assert record["ok"] is True and record["failures"] == []
+
+    assert output["summary"] == {
+        "total": 1,
+        "reachable": 1,
+        "unreachable": 0,
+        "expired": 0,
+        "chain_failures": 0,
+        "hostname_failures": 0,
+        "mismatches": 0,
+        "ocsp_revoked": 0,
+        "failed": 0,
+        "warn_30": 0,
+        "warn_14": 0,
+        "warn_7": 0,
+        "min_days_left": 41,
+    }
+    assert result.summary == "tls: 1 endpoint, 1 reachable, min 41 days left"
+    assert result.metrics == {"endpoints": 1, "unreachable": 0, "min_days_left": 41}
+    [evidence] = result.evidence
+    assert evidence["kind"] == "transport_meta"
+    assert evidence["name"] == f"tls_127.0.0.1_{port}"
+    assert evidence["device_id"] == "d1"
+    assert evidence["content_json"]["fingerprint_sha256"] == record["fingerprint_sha256"]
+
+
+@pytest.mark.parametrize("form", ["newlines", "commas", "list"])
+async def test_endpoints_string_and_list_forms(pki, tmp_path, form):
+    async with (
+        tls_server(tmp_path, pki.leaves["rsa"]) as first,
+        tls_server(tmp_path, pki.leaves["ec"]) as second,
+    ):
+        entries = [f"127.0.0.1:{first}:leaf.example.test", f"127.0.0.1:{second}"]
+        endpoints: Any = {
+            "newlines": "\n".join(entries) + "\n\n",
+            "commas": ", ".join(entries),
+            "list": entries,
+        }[form]
+        result = await run_step({"endpoints": endpoints, "ca_bundle": pki.root_pem})
+    assert result.success is True, result.error
+    records = result.output["endpoints"]
+    assert [(r["source"], r["port"], r["sni"]) for r in records] == [
+        ("endpoint", first, "leaf.example.test"),
+        ("endpoint", second, None),
+    ]
+    assert [r["hostname_ok"] for r in records] == [True, True]
+    assert [r["subject_cn"] for r in records] == ["rsa.example.test", "ec.example.test"]
+    assert result.summary == "tls: 2 endpoints, 2 reachable, min 41 days left"
+    assert [e["device_id"] for e in result.evidence] == [None, None]
+
+
+async def test_targets_and_endpoints_combine_without_duplicates(pki, tmp_path):
+    async with tls_server(tmp_path, pki.leaves["rsa"]) as port:
+        result = await run_step(
+            {"port": port, "endpoints": [f"127.0.0.1:{port}"], "ca_bundle": pki.root_pem},
+            ips=["127.0.0.1"],
+        )
+    assert result.success is True, result.error
+    assert [r["source"] for r in result.output["endpoints"]] == ["target"]
+
+
+async def test_pem_mode_never_connects(pki, monkeypatch):
+    async def no_dial(*args, **kwargs):
+        raise AssertionError("pem mode must not connect")
+
+    monkeypatch.setattr(tls_check, "tls_handshake", no_dial)
+    leaf = pki.leaves["rsa"].cert
+    # No services bound: a pasted certificate needs neither the network nor secrets.
+    result = await TlsProbeHandler().execute(
+        make_ctx(
+            {
+                "pem": pem_of(leaf, pki.inter),
+                "ca_bundle": pki.root_pem,
+                "sni": "leaf.example.test",
+                "include_pem": True,
+            }
+        )
+    )
+    assert result.success is True, result.error
+    [record] = result.output["endpoints"]
+    assert record["source"] == "pem"
+    assert (record["host"], record["port"], record["sni"]) == (None, None, "leaf.example.test")
+    assert record["reachable"] is None and record["tls_version"] is None
+    assert (record["chain_ok"], record["hostname_ok"]) == (True, True)
+    assert record["certificate_pem"] == pem_of(leaf)
+    assert result.summary == "tls: pem certificate, min 41 days left"
+    assert result.evidence[0]["name"] == "tls_pem"
+    assert result.output["summary"]["reachable"] == 0
+
+
+async def test_pem_mode_chain_failures(pki, monkeypatch):
+    leaf = pki.leaves["rsa"].cert
+    # Missing intermediate.
+    result = await run_step({"pem": pem_of(leaf), "ca_bundle": pki.root_pem})
+    [record] = result.output["endpoints"]
+    assert (record["chain_ok"], record["chain_error"]) == (
+        False,
+        "unable to get local issuer certificate",
+    )
+    assert result.success is True  # chain validity is not required by default
+
+    # No CA bundle: the worker's trust store, which does not know the test root.
+    unrelated = issue("Unrelated Root", ec.generate_private_key(ec.SECP256R1()), ca=True)
+    monkeypatch.setattr(tls_certs, "load_system_anchors", lambda: [unrelated])
+    result = await run_step({"pem": pem_of(leaf, pki.inter), "require_valid_chain": True})
+    assert result.success is False
+    [record] = result.output["endpoints"]
+    assert record["chain_ok"] is False
+    assert "chain not valid" in (result.error or "")
+
+    # No loadable trust store at all: unknown, explained.
+    monkeypatch.setattr(tls_certs, "load_system_anchors", lambda: [])
+    result = await run_step({"pem": pem_of(leaf, pki.inter), "require_valid_chain": True})
+    [record] = result.output["endpoints"]
+    assert record["chain_ok"] is None
+    assert "set a CA bundle" in record["chain_error"]
+    assert "chain not verified" in (result.error or "")
+
+
+# --- The handler: chain, host name, expiry, fingerprints ----------------------
+
+
+async def test_live_chain_without_ca_bundle_and_missing_intermediate(pki, tmp_path):
+    leaf = pki.leaves["rsa"]
+    async with tls_server(tmp_path, leaf) as port:
+        system = await run_step({"endpoints": f"127.0.0.1:{port}"})
+    [record] = system.output["endpoints"]
+    assert record["chain_ok"] is False
+    assert "unable to get local issuer certificate" in record["chain_error"]
+    assert system.success is True
+    assert system.output["summary"]["chain_failures"] == 1
+
+    async with tls_server(tmp_path, leaf, with_chain=False) as port:
+        missing = await run_step({"endpoints": f"127.0.0.1:{port}", "ca_bundle": pki.root_pem})
+    [record] = missing.output["endpoints"]
+    assert record["chain_ok"] is False
+    assert "unable to get local issuer certificate" in record["chain_error"]
+
+
+async def test_wildcard_and_wrong_host_name(pki, tmp_path):
+    async with (
+        tls_server(tmp_path, pki.leaves["wildcard"]) as wildcard,
+        tls_server(tmp_path, pki.leaves["wrong_host"]) as wrong,
+    ):
+        result = await run_step(
+            {
+                "endpoints": [
+                    f"127.0.0.1:{wildcard}:www.example.test",
+                    f"127.0.0.1:{wildcard}:example.test",
+                    f"127.0.0.1:{wrong}:leaf.example.test",
+                ],
+                "require_hostname_match": True,
+                "ca_bundle": pki.root_pem,
+            }
+        )
+    records = result.output["endpoints"]
+    assert [r["hostname_ok"] for r in records] == [True, False, False]
+    assert [r["chain_ok"] for r in records] == [True, True, True]
+    assert result.success is False
+    assert result.output["summary"]["hostname_failures"] == 2
+    assert "certificate is not valid for example.test" in (result.error or "")
+    assert "certificate is not valid for leaf.example.test" in (result.error or "")
+
+
+async def test_expired_certificate(pki, tmp_path):
+    async with tls_server(tmp_path, pki.leaves["expired"]) as port:
+        relaxed = await run_step({"endpoints": f"127.0.0.1:{port}"})
+        strict = await run_step({"endpoints": f"127.0.0.1:{port}", "min_days_left": 0})
+    [record] = relaxed.output["endpoints"]
+    assert (record["days_left"], record["expired"]) == (-3, True)
+    assert relaxed.success is True
+    summary = relaxed.output["summary"]
+    assert (summary["expired"], summary["warn_30"], summary["warn_7"]) == (1, 1, 1)
+    assert relaxed.metrics["min_days_left"] == -3
+    assert strict.success is False
+    assert f"expired on {record['not_after']}" in (strict.error or "")
+
+
+async def test_expected_fingerprints_normalise_and_override(pki, tmp_path):
+    rsa_fp = fingerprint_of(pki.leaves["rsa"].cert)
+    colon_upper = ":".join(rsa_fp[i : i + 2] for i in range(0, 64, 2)).upper()
+    async with (
+        tls_server(tmp_path, pki.leaves["rsa"]) as first,
+        tls_server(tmp_path, pki.leaves["ec"]) as second,
+    ):
+        endpoints = [f"127.0.0.1:{first}", f"127.0.0.1:{second}"]
+        everywhere = await run_step({"endpoints": endpoints, "expected_fingerprint": colon_upper})
+        per_endpoint = await run_step(
+            {
+                "endpoints": endpoints,
+                "expected_fingerprint": colon_upper,
+                "expected_fingerprints": {
+                    f"127.0.0.1:{second}": fingerprint_of(pki.leaves["ec"].cert).upper()
+                },
+            }
+        )
+    assert [r["matches_expected"] for r in everywhere.output["endpoints"]] == [True, False]
+    assert everywhere.success is False
+    assert everywhere.output["summary"]["mismatches"] == 1
+    assert f"127.0.0.1:{second} (fingerprint does not match" in (everywhere.error or "")
+    assert [r["matches_expected"] for r in per_endpoint.output["endpoints"]] == [True, True]
+    assert per_endpoint.success is True, per_endpoint.error
+
+
+@pytest.mark.parametrize(
+    ("leaf_name", "config", "reason"),
+    [
+        ("rsa", {"min_days_left": 60}, "41 days left (minimum 60)"),
+        ("rsa", {"require_valid_chain": True, "ca_bundle": ""}, "chain not valid"),
+        ("rsa", {"require_hostname_match": True, "sni": "nope.example.test"}, "not valid for"),
+        ("rsa", {"expected_fingerprint": "00" * 32}, "fingerprint does not match"),
+        ("revoked", {"check_ocsp": True, "require_ocsp_good": True}, "OCSP revoked"),
+    ],
+    ids=["min-days", "chain", "hostname", "fingerprint", "ocsp"],
+)
+async def test_each_assertion_fails_the_step_with_output_populated(
+    pki, tmp_path, leaf_name, config, reason
+):
+    leaf = pki.leaves[leaf_name]
+    async with tls_server(tmp_path, leaf) as port:
+        result = await run_step(
+            {"port": port, "ca_bundle": pki.root_pem, **config}, ips=["127.0.0.1"]
+        )
+    assert result.success is False
+    assert reason in (result.error or "")
+    assert result.error.startswith("TLS check failed for 1 of 1 endpoint: 127.0.0.1:")
+    output = result.output
+    assert output["all_ok"] is False
+    [record] = output["endpoints"]
+    assert record["ok"] is False and record["failures"]
+    assert record["fingerprint_sha256"] == fingerprint_of(leaf.cert)
+    assert record["reachable"] is True
+    assert output["summary"]["failed"] == 1
+    assert result.summary.endswith(", 1 failing")
+    assert len(result.evidence) == 1
+
+
+# --- The handler: reachability, egress, secrets, parallelism ------------------
+
+
+async def test_unreachable_endpoint_follows_require_reachable():
+    port = closed_port()
+    strict = await run_step({"endpoints": f"127.0.0.1:{port}"})
+    assert strict.success is False
+    assert f"127.0.0.1:{port} (unreachable: connection refused)" in (strict.error or "")
+    [record] = strict.output["endpoints"]
+    assert (record["reachable"], record["error"]) == (False, "connection refused")
+    assert record["fingerprint_sha256"] is None and "days_left" in record
+
+    relaxed = await run_step(
+        {"endpoints": f"127.0.0.1:{port}", "require_reachable": False, "min_days_left": 30}
+    )
+    assert relaxed.success is True, relaxed.error
+    assert relaxed.output["all_ok"] is True
+    assert relaxed.output["summary"]["unreachable"] == 1
+    assert relaxed.output["min_days_left"] is None
+    assert relaxed.summary == "tls: 1 endpoint, 0 reachable"
+    assert relaxed.metrics == {"endpoints": 1, "unreachable": 1}
+
+
+async def test_a_target_without_an_address_always_fails():
+    result = await run_step({"require_reachable": False}, devices=[{"id": "d9", "name": "ghost"}])
+    assert result.success is False
+    assert "ghost (target has no management address)" in (result.error or "")
+
+
+async def test_egress_denial_is_the_step_error(pki, tmp_path):
+    services = FakeServices(deny=("127.0.0.1",))
+    async with tls_server(tmp_path, pki.leaves["rsa"]) as port:
+        with pytest.raises(Denied, match="tls probe"):
+            await run_step({"endpoints": f"127.0.0.1:{port}"}, services=services)
+    assert services.egress == [("127.0.0.1", port, "tcp", "tls probe")]
+
+
+async def test_ca_bundle_as_a_bare_secret_reference(pki, tmp_path):
+    reference = "vault://orgs/acme/secrets/tls/internal-ca"
+    template = "{{ secret('" + reference + "') }}"
+    services = FakeServices(secrets={template: pki.root_pem})
+    async with tls_server(tmp_path, pki.leaves["rsa"]) as port:
+        result = await run_step(
+            {"endpoints": f"127.0.0.1:{port}", "ca_bundle": reference, "require_valid_chain": True},
+            services=services,
+        )
+        templated = await run_step(
+            {"endpoints": f"127.0.0.1:{port}", "ca_bundle": template, "require_valid_chain": True},
+            services=services,
+        )
+    assert result.success is True, result.error
+    assert templated.success is True, templated.error
+    assert services.secret_calls == [
+        (template, "probe.tls.ca_bundle"),
+        (template, "probe.tls.ca_bundle"),
+    ]
+    assert "ca_bundle" in TlsProbeHandler.raw_config_keys
+
+    empty = await run_step(
+        {"endpoints": "127.0.0.1:1", "ca_bundle": "vault://orgs/acme/missing"},
+        services=FakeServices(),
+    )
+    assert empty.success is False
+    assert "resolved to an empty value" in (empty.error or "")
+
+
+async def test_parallelism_is_bounded_and_results_keep_their_order(monkeypatch):
+    active = 0
+    peak = 0
+
+    async def fake_handshake(host, port, server_name, context, timeout):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.02)
+        finally:
+            active -= 1
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    monkeypatch.setattr(tls_check, "tls_handshake", fake_handshake)
+    endpoints = [f"192.0.2.{index}:443" for index in range(1, 13)]
+    result = await run_step({"endpoints": endpoints, "max_parallel": 3, "require_reachable": False})
+    assert peak == 3
+    assert [r["host"] for r in result.output["endpoints"]] == [
+        f"192.0.2.{index}" for index in range(1, 13)
+    ]
+    assert result.output["summary"]["unreachable"] == 12
+
+
+# --- The handler: OCSP --------------------------------------------------------
+
+
+async def test_ocsp_good_through_the_issuer_download(pki, tmp_path, responder):
+    services = FakeServices()
+    async with tls_server(tmp_path, pki.leaves["rsa"]) as port:
+        result = await run_step(
+            {
+                "endpoints": f"127.0.0.1:{port}",
+                "ca_bundle": pki.root_pem,
+                "check_ocsp": True,
+                "require_ocsp_good": True,
+            },
+            services=services,
+        )
+    assert result.success is True, result.error
+    [record] = result.output["endpoints"]
+    assert record["ocsp"] == "good"
+    assert record["revocation_time"] is None
+    gated = [entry for entry in services.egress if entry[3] == "ocsp check"]
+    assert gated and all(entry[:3] == ("127.0.0.1", responder.port, "tcp") for entry in gated)
+
+
+async def test_ocsp_good_with_the_issuer_in_the_ca_bundle(pki, tmp_path, responder):
+    before = len(responder.requests)
+    async with tls_server(tmp_path, pki.leaves["direct"]) as port:
+        result = await run_step(
+            {"endpoints": f"127.0.0.1:{port}", "ca_bundle": pki.root_pem, "check_ocsp": True}
+        )
+    [record] = result.output["endpoints"]
+    assert record["ocsp"] == "good", record["ocsp_detail"]
+    assert responder.requests[before:] == ["POST /ocsp"]
+
+
+async def test_ocsp_revoked_and_unavailable(pki, tmp_path):
+    async with (
+        tls_server(tmp_path, pki.leaves["revoked"]) as revoked,
+        tls_server(tmp_path, pki.leaves["no_aia"]) as no_aia,
+    ):
+        result = await run_step(
+            {
+                "endpoints": [f"127.0.0.1:{revoked}", f"127.0.0.1:{no_aia}"],
+                "ca_bundle": pki.root_pem,
+                "check_ocsp": True,
+            }
+        )
+    assert result.success is True, result.error  # nothing requires a good answer
+    revoked_record, unavailable = result.output["endpoints"]
+    assert revoked_record["ocsp"] == "revoked"
+    assert revoked_record["ocsp_detail"] == "certificate is revoked (reason: key_compromise)"
+    expected_time = (NOW - timedelta(days=1)).replace(microsecond=0)
+    assert revoked_record["revocation_time"] == expected_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert unavailable["ocsp"] == "unavailable"
+    assert unavailable["ocsp_detail"] == "the certificate names no OCSP responder"
+    assert result.output["summary"]["ocsp_revoked"] == 1
+
+
+async def test_ocsp_responder_down_is_an_error(pki, monkeypatch):
+    leaf = pki.leaves["rsa"].cert
+    dead = f"http://127.0.0.1:{closed_port()}/ocsp"
+    monkeypatch.setattr(tls_certs, "ocsp_responder_urls", lambda cert: [dead])
+    result = await run_step(
+        {"pem": pem_of(leaf, pki.inter), "ca_bundle": pki.root_pem, "check_ocsp": True}
+    )
+    [record] = result.output["endpoints"]
+    assert record["ocsp"] == "error"
+    assert record["ocsp_detail"].startswith(f"OCSP request to {dead} failed: ConnectError")
+
+
+# --- Configuration -------------------------------------------------------------
+
+
+async def test_configuration_errors_stop_before_any_connection(pki):
+    handler = TlsProbeHandler()
+    no_source = await run_step({})
+    assert no_source.success is False
+    assert no_source.error == "No target devices, IPs, endpoints, or certificate PEM configured"
+
+    mixed = await run_step({"pem": pki.root_pem, "endpoints": "a.example:443"})
+    assert "cannot be combined" in (mixed.error or "")
+
+    too_many = await run_step({"endpoints": [f"h{index}.example" for index in range(501)]})
+    assert "Too many endpoints: 501" in (too_many.error or "")
+
+    bad_fp = await run_step({"endpoints": "a.example", "expected_fingerprint": "abc"})
+    assert "SHA-256" in (bad_fp.error or "")
+
+    bad_endpoint = await run_step({"endpoints": "a.example:99999"})
+    assert "outside 1-65535" in (bad_endpoint.error or "")
+
+    assert handler.validate_config({"endpoints": "a.example:443"}) == []
+    assert handler.validate_config({"endpoints": "{{ steps.inventory.output.hosts }}"}) == []
+    assert handler.validate_config({"endpoints": "a.example:x"}) == [
+        "endpoints: 'a.example:x': port 'x' is not a number"
+    ]
+    assert handler.validate_config({"pem": "nothing"}) == ["pem: no PEM certificate found"]
+    assert handler.validate_config({"ca_bundle": "vault://orgs/acme/ca"}) == []
+    assert handler.validate_config({"ca_bundle": "not pem"}) == [
+        "ca_bundle: no PEM certificate found"
+    ]
+    assert handler.validate_config({"expected_fingerprints": {"a.example:443": "zz"}})
+    assert handler.validate_config({"max_parallel": 51})
+    assert handler.validate_config({"warn_days": [30, -1]})
+
+
+def test_every_config_field_is_documented_and_the_page_meets_the_contract():
+    for name, model_field in TlsProbeConfig.model_fields.items():
+        assert (model_field.title or "").strip(), name
+        assert (model_field.description or "").strip(), name
+    bundle = load_docs_bundle("hegemony_steps_probe")
+    assert "probe.tls" in bundle
+    assert check_page("probe.tls", bundle["probe.tls"]) == []
+    page = bundle["probe.tls"]
+    for key in ("chain_ok", "hostname_ok", "matches_expected", "min_days_left", "warn_30"):
+        assert key in page, key
+
+
+async def test_ocsp_takes_the_issuer_from_the_served_chain(pki, responder, monkeypatch):
+    """Where the TLS library exposes the served chain (Python 3.13+), the
+    issuer comes from it and nothing is downloaded."""
+    leaf = pki.leaves["rsa"].cert
+    served = [
+        leaf.public_bytes(serialization.Encoding.DER),
+        pki.inter.public_bytes(serialization.Encoding.DER),
+    ]
+
+    async def fake_handshake(host, port, server_name, context, timeout):
+        return tls_check._Handshake(
+            der=served[0], version="TLSv1.3", cipher="TLS_AES_128_GCM_SHA256", chain_der=served
+        )
+
+    monkeypatch.setattr(tls_check, "tls_handshake", fake_handshake)
+    before = len(responder.requests)
+    result = await run_step({"endpoints": "192.0.2.80:443", "check_ocsp": True})
+    [record] = result.output["endpoints"]
+    assert record["ocsp"] == "good", record["ocsp_detail"]
+    assert (record["tls_version"], record["cipher"]) == ("TLSv1.3", "TLS_AES_128_GCM_SHA256")
+    assert record["chain_ok"] is True
+    assert responder.requests[before:] == ["POST /ocsp"]
+
+
+async def test_an_ocsp_request_the_egress_policy_denies_is_the_step_error(pki):
+    services = FakeServices(deny=("127.0.0.1",))
+    leaf = pki.leaves["rsa"].cert
+    with pytest.raises(Denied, match="ocsp check"):
+        await run_step(
+            {"pem": pem_of(leaf, pki.inter), "ca_bundle": pki.root_pem, "check_ocsp": True},
+            services=services,
+        )
+    assert [entry[3] for entry in services.egress] == ["ocsp check"]
+
+
+async def test_the_step_error_names_the_first_twenty_failing_endpoints(monkeypatch):
+    async def refused(host, port, server_name, context, timeout):
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    monkeypatch.setattr(tls_check, "tls_handshake", refused)
+    endpoints = [f"192.0.2.{index}:443" for index in range(1, 24)]
+    result = await run_step({"endpoints": endpoints})
+    error = result.error or ""
+    assert error.startswith("TLS check failed for 23 of 23 endpoints: 192.0.2.1:443 (")
+    assert "192.0.2.20:443" in error and "192.0.2.21:443" not in error
+    assert error.endswith(", and 3 more")
+    assert len(result.output["endpoints"]) == 23
