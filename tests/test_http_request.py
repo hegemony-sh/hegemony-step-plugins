@@ -25,10 +25,9 @@ from typing import Any, cast
 import httpx
 import pytest
 
-import hegemony_steps_http
 from hegemony_step_sdk import HandlerContext, HandlerServices, StepKind
 from hegemony_step_sdk.docs import check_page, load_docs_bundle
-from hegemony_steps_http import request as request_module, security
+from hegemony_steps_http import register, request as request_module, security
 from hegemony_steps_http.jsonpath import PathError, get_path, parse_path, replace_at
 from hegemony_steps_http.request import (
     HttpRequestHandler,
@@ -166,7 +165,7 @@ def test_the_wheel_registers_one_handler_with_its_metadata():
         def register_handler_type(self, handler_class: type) -> None:
             registered.append(handler_class)
 
-    hegemony_steps_http.register(_Registry())
+    register(_Registry())
     assert registered == [HttpRequestHandler]
     cls = HttpRequestHandler
     assert cls.handler_id == "http.request"

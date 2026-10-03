@@ -54,7 +54,6 @@ from .security import (
 
 HANDLER_ID = "http.request"
 
-METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 #: Methods that never carry a request body here.
 BODYLESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
