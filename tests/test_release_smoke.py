@@ -30,8 +30,10 @@ def _smoke_module():
 def test_the_smoke_test_expects_every_packages_modules_and_entry_points():
     smoke = _smoke_module()
     assert smoke.source_gaps() == []
-    assert {"hegemony_steps_ansible", "hegemony_steps_tf"} <= set(smoke.EXPECTED_MODULES)
-    assert {"ansible", "tf"} <= smoke.EXPECTED_ENTRY_POINTS
+    assert {"hegemony_steps_ansible", "hegemony_steps_tf", "hegemony_steps_secret"} <= set(
+        smoke.EXPECTED_MODULES
+    )
+    assert {"ansible", "tf", "secret"} <= smoke.EXPECTED_ENTRY_POINTS
 
 
 def test_a_forgotten_entry_point_is_reported(monkeypatch):
@@ -41,3 +43,5 @@ def test_a_forgotten_entry_point_is_reported(monkeypatch):
     gaps = smoke.source_gaps()
     assert "EXPECTED_MODULES lacks hegemony_steps_tf" in gaps
     assert "expected entry points of hegemony.step_handlers lack 'tf'" in gaps
+    assert "EXPECTED_MODULES lacks hegemony_steps_secret" in gaps
+    assert "expected entry points of hegemony.step_handlers lack 'secret'" in gaps

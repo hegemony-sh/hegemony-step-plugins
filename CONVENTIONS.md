@@ -32,7 +32,7 @@ platforms, transports, and libraries multiply.
 ## Namespace kinds
 
 1. **Capability namespaces** — vendor/protocol-neutral semantics:
-   `general`, `probe`, `evidence`, `container`, `flow`
+   `general`, `probe`, `evidence`, `container`, `flow`, `secret`
    (and host-owned `monitor` for the in-tree background-monitor family).
 2. **Device-interaction paradigms** — protocol families whose config schemas
    differ fundamentally: `netcli` today; `netconf`, `gnmi`, `shell` when they

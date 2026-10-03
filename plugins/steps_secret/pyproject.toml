@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[project]
+name = "hegemony-steps-secret"
+version = "0.10.0"
+description = "Secret-store step handlers for Hegemony (write, swap and delete a secret)"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE-*.txt"]
+requires-python = ">=3.11"
+# Its own wheel: storing secrets from a flow is a security surface a
+# deployment can leave out by not installing this package.
+dependencies = [
+    "hegemony-step-sdk==0.10.0",
+]
+
+[project.entry-points."hegemony.step_handlers"]
+"secret" = "hegemony_steps_secret:register"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "hegemony_steps_secret"
+module-root = "src"
