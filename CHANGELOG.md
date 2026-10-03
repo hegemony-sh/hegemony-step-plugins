@@ -1,3 +1,15 @@
+## [0.10.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.9.2...v0.10.0) (2026-10-03)
+
+### Features
+
+* **container:** add container.build to build and push images ([d788fa5](https://github.com/hegemony-sh/hegemony-step-plugins/commit/d788fa5435d9f6d343481679464060eaca997d86))
+* **sdk:** describe where a building step pushes its image ([6bf5d7f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6bf5d7fe6d26766104a31dd815f48401c8ffc3db))
+
+### Bug Fixes
+
+* **container:** pin the build's digest, read long output, scope cache mounts ([55c8503](https://github.com/hegemony-sh/hegemony-step-plugins/commit/55c8503c42e4bef6125839364e87db8c313b819e))
+* **container:** read the build context folder however it is spelled ([eb4e876](https://github.com/hegemony-sh/hegemony-step-plugins/commit/eb4e876b2e5305abf75cc0d36706091ecfe042dc))
+
 ## [0.9.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.9.1...v0.9.2) (2026-10-02)
 
 ### Bug Fixes
