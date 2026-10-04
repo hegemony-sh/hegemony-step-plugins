@@ -1383,7 +1383,7 @@ def _pinned_case() -> tuple[Leaf, str]:
 
 
 _PARITY_CASES: dict[str, tuple[Any, bool | None]] = {
-    "valid": (lambda pki: _chain_case(pki), True),
+    "valid": (_chain_case, True),
     "issuer-key-usage": (
         lambda pki: _chain_case(pki, inter_extensions=(_key_usage(digital_signature=True),)),
         False,
