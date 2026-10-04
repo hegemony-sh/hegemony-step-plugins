@@ -57,7 +57,9 @@ A file may be at most 64 KiB and all files of the step together at most
 
 Delete source files is on by default: after the write succeeded, each
 source file is overwritten with zeros and deleted from the workspace, so the
-plain copy does not outlive the step. This is best effort, not a secure wipe:
+plain copy does not outlive the step. The step first moves the file to a
+private name and checks it is the file it read, so a file a container writes
+at the same path meanwhile is never touched. This is best effort, not a secure wipe:
 a copy-on-write file system, a snapshot or a backup can still hold the old
 bytes. A file with other hard links is deleted without being overwritten. A
 file that cannot be deleted does not fail the step; the summary and the
@@ -108,6 +110,12 @@ Later steps read the step's output as `steps.NODE_ID.output.KEY`:
 - `previous_path`: where the previous keys were copied, or null.
 - `swapped_with`: the other secret of a swap, or null.
 - `deleted`: true when a delete removed a secret.
+
+Every key is present when the step fails too. Then `reference` is null,
+`keys` is empty and the flags are false, while `operation` and `path` name
+what was asked (null when the config itself was refused), and
+`previous_path` names where the previous keys were copied if that happened
+before the failure.
 
 Metrics record `keys`, the number of keys written (for a swap, the keys now
 at Secret path), and for files `source_files` and `source_files_deleted`.

@@ -263,19 +263,18 @@ def _host_summary(exc: BaseException) -> str:
     return "Secret store failed"
 
 
-def _failure(error: str, summary: str, *, output: dict[str, Any] | None = None) -> HandlerResult:
-    return HandlerResult(success=False, error=error, summary=summary, output=output or {})
+def _failure(error: str, summary: str, *, output: dict[str, Any]) -> HandlerResult:
+    """A failed result; ``output`` carries every output key, as a success does."""
+    return HandlerResult(success=False, error=error, summary=summary, output=output)
 
 
-def _host_failure(
-    action: str, exc: BaseException, *, output: dict[str, Any] | None = None
-) -> HandlerResult:
+def _host_failure(action: str, exc: BaseException, *, output: dict[str, Any]) -> HandlerResult:
     return _failure(f"Could not {action}: {_describe(exc)}", _host_summary(exc), output=output)
 
 
 def _result_output(
-    operation: str,
-    path: str,
+    operation: str | None,
+    path: str | None,
     *,
     reference: str | None = None,
     keys: list[str] | None = None,
@@ -295,6 +294,16 @@ def _result_output(
         "swapped_with": swapped_with,
         "deleted": deleted,
     }
+
+
+def _requested_output(config: dict[str, Any]) -> dict[str, Any]:
+    """The output of a step whose config was refused: what it asked for, nothing done."""
+    operation = config.get("operation") or "write"
+    path = config.get("path")
+    return _result_output(
+        operation if operation in ("write", "swap", "delete") else None,
+        path.strip() if isinstance(path, str) and path.strip() else None,
+    )
 
 
 def _success(
@@ -396,7 +405,9 @@ class WriteSecretHandler(BaseHandler):
             errors = semantic_errors(ctx.config, allow_templates=False)
         if errors:
             return _failure(
-                f"Invalid secret step config: {'; '.join(errors)}", "Config validation failed"
+                f"Invalid secret step config: {'; '.join(errors)}",
+                "Config validation failed",
+                output=_requested_output(ctx.config),
             )
         config = SecretWriteConfig.model_validate(ctx.config)
 
@@ -407,6 +418,7 @@ class WriteSecretHandler(BaseHandler):
                 "this platform does not provide secret writes to steps: its worker lacks "
                 f"{', '.join(missing)}. Upgrade the platform to use this step",
                 "Secret writes unavailable",
+                output=_result_output(config.operation, config.path.strip()),
             )
 
         path = config.path.strip()
@@ -423,17 +435,20 @@ class WriteSecretHandler(BaseHandler):
         path: str,
         config: SecretWriteConfig,
     ) -> HandlerResult:
+        base = _result_output("write", path)
         workspace = ""
         sources: list[SourceFile] = []
         if config.files:
             try:
                 workspace = _workspace_dir(ctx, services)
             except _NoWorkspace as exc:
-                return _failure(str(exc), "Shared workspace unavailable")
+                return _failure(str(exc), "Shared workspace unavailable", output=base)
             try:
                 sources = await asyncio.to_thread(read_source_files, workspace, config.files)
             except WorkspaceError as exc:
-                return _failure(f"Cannot use a source file: {exc}", "Source file refused")
+                return _failure(
+                    f"Cannot use a source file: {exc}", "Source file refused", output=base
+                )
 
         values: dict[str, str] = {}
         for source in sources:
@@ -445,6 +460,7 @@ class WriteSecretHandler(BaseHandler):
                         f"file {source.path!r} (key {source.key!r}) is not UTF-8 text: set "
                         "File encoding to base64 to store it",
                         "Source file refused",
+                        output=base,
                     )
             else:
                 values[source.key] = base64.b64encode(source.data).decode("ascii")
@@ -452,7 +468,9 @@ class WriteSecretHandler(BaseHandler):
             values.update(await resolve_values(services, config.values, source=RESOLVE_SOURCE))
         except Exception as exc:  # noqa: BLE001 - reported without values, step fails
             return _failure(
-                f"Could not resolve 'values': {_describe(exc)}", "Secret value not resolved"
+                f"Could not resolve 'values': {_describe(exc)}",
+                "Secret value not resolved",
+                output=base,
             )
         written = sorted(values)
 
@@ -463,13 +481,15 @@ class WriteSecretHandler(BaseHandler):
             try:
                 current = await services.read_secret(path)
             except Exception as exc:  # noqa: BLE001 - mapped to a failed result
-                return _host_failure(f"read the current keys of {path}", exc)
+                return _host_failure(f"read the current keys of {path}", exc, output=base)
             if current:
                 try:
                     await services.write_secret(keep, dict(current), merge=False)
                 except Exception as exc:  # noqa: BLE001 - mapped to a failed result
                     return _host_failure(
-                        f"keep the current keys of {path} at {keep}; {path} is unchanged", exc
+                        f"keep the current keys of {path} at {keep}; {path} is unchanged",
+                        exc,
+                        output=base,
                     )
                 previous_path = keep
             else:
@@ -481,7 +501,9 @@ class WriteSecretHandler(BaseHandler):
             action = f"write {_plural(len(written))} to {path}"
             if previous_path:
                 action += f" (its previous keys were already copied to {previous_path})"
-            return _host_failure(action, exc)
+            return _host_failure(
+                action, exc, output=_result_output("write", path, previous_path=previous_path)
+            )
         reference, keys, created = _stored(result, written)
 
         not_removed: dict[str, str] = {}
@@ -539,23 +561,27 @@ class WriteSecretHandler(BaseHandler):
     async def _swap(
         self, ctx: HandlerContext, services: HandlerServices, path: str, other: str
     ) -> HandlerResult:
+        base = _result_output("swap", path)
         try:
             first = await services.read_secret(path)
             second = await services.read_secret(other)
         except Exception as exc:  # noqa: BLE001 - mapped to a failed result
-            return _host_failure(f"read {path} and {other} to swap them", exc)
+            return _host_failure(f"read {path} and {other} to swap them", exc, output=base)
         absent = [name for name, held in ((path, first), (other, second)) if not held]
         if absent or first is None or second is None:
             return _failure(
                 f"Cannot swap {path} and {other}: no secret exists at {' or '.join(absent)}; "
                 "nothing changed",
                 "Secret not found",
+                output=base,
             )
 
         try:
             written = await services.write_secret(path, dict(second), merge=False)
         except Exception as exc:  # noqa: BLE001 - mapped to a failed result
-            return _host_failure(f"write {other}'s keys to {path}; nothing changed", exc)
+            return _host_failure(
+                f"write {other}'s keys to {path}; nothing changed", exc, output=base
+            )
         try:
             written_other = await services.write_secret(other, dict(first), merge=False)
         except Exception as exc:  # noqa: BLE001 - restore, then report
@@ -595,7 +621,7 @@ class WriteSecretHandler(BaseHandler):
         try:
             deleted = bool(await services.delete_secret(path))
         except Exception as exc:  # noqa: BLE001 - mapped to a failed result
-            return _host_failure(f"delete {path}", exc)
+            return _host_failure(f"delete {path}", exc, output=_result_output("delete", path))
         output = _result_output("delete", path, deleted=deleted)
         if not deleted and not missing_ok:
             return _failure(

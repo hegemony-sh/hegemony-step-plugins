@@ -19,6 +19,7 @@ Messages name keys and paths inside the workspace, never file contents.
 from __future__ import annotations
 
 import os
+import secrets
 import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -56,6 +57,7 @@ class SourceFile:
 
 
 def _require_safe_open() -> None:
+    """Refuse to read where files cannot be opened without following symbolic links."""
     if not (_O_NOFOLLOW and _O_DIRECTORY) or os.open not in os.supports_dir_fd:
         raise WorkspaceError(
             "this worker's operating system cannot open files without following symbolic "
@@ -241,25 +243,78 @@ def _write_zeros(fd: int, size: int) -> None:
     os.fsync(fd)
 
 
+#: Prefix of the private name a source file is moved to before it is removed.
+_QUARANTINE_PREFIX = ".hegemony-scrub-"
+
+
+def _restore(dir_fd: int, quarantine: str, name: str) -> str:
+    """Put a file that turned out not to be the source back under ``name``; why it is left."""
+    try:
+        # A hard link never replaces an existing entry, so a file a container
+        # wrote at ``name`` meanwhile is kept.
+        os.link(quarantine, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+    except FileExistsError:
+        return f"left as {quarantine!r}, since a newer file took its name"
+    except OSError:
+        try:
+            os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            os.rename(quarantine, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            return "left in place"
+        return f"left as {quarantine!r}, since a newer file took its name"
+    os.unlink(quarantine, dir_fd=dir_fd)
+    return "left in place"
+
+
 def _scrub_one(root_fd: int, source: SourceFile) -> None:
+    """Overwrite and remove one source file, touching no file but the one read.
+
+    The directory entry is first renamed to a private name in the same
+    directory, atomically: from then on, a file a container writes at the
+    original name is never touched. The renamed file is opened without
+    following links and must be the file read (same device, inode, size and
+    modification time); only then is it overwritten and unlinked. Anything
+    else found under the private name is put back.
+    """
     label = f"file {source.path!r}"
     dir_fd, name = _open_parent(root_fd, source.path, label)
     try:
+        quarantine = _QUARANTINE_PREFIX + secrets.token_hex(12)
         try:
-            fd = os.open(name, os.O_WRONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC, dir_fd=dir_fd)
+            os.rename(name, quarantine, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except FileNotFoundError:
             raise WorkspaceError(f"{label} is already gone") from None
         try:
+            fd = os.open(
+                quarantine, os.O_WRONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC, dir_fd=dir_fd
+            )
+        except OSError:
+            # Not a regular file any more (a link, a directory, a FIFO).
+            outcome = _restore(dir_fd, quarantine, name)
+            raise WorkspaceError(f"{label} changed since it was read; {outcome}") from None
+        try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or _identity(info) != source.identity:
-                raise WorkspaceError(f"{label} changed since it was read; left in place")
-            # A file with other names (hard links) keeps its content under them;
-            # overwriting it would change those too, so it is only unlinked.
-            if info.st_nlink <= 1:
-                _write_zeros(fd, info.st_size)
+                mismatch = True
+            else:
+                mismatch = False
+                # A file with other names (hard links) keeps its content under
+                # them; overwriting it would change those too, so it is only
+                # unlinked.
+                if info.st_nlink <= 1:
+                    _write_zeros(fd, info.st_size)
         finally:
             os.close(fd)
-        os.unlink(name, dir_fd=dir_fd)
+        if mismatch:
+            outcome = _restore(dir_fd, quarantine, name)
+            raise WorkspaceError(f"{label} changed since it was read; {outcome}")
+        try:
+            os.unlink(quarantine, dir_fd=dir_fd)
+        except OSError as exc:
+            raise WorkspaceError(
+                f"{label} was overwritten but not removed ({_reason(exc)}); it is left as "
+                f"{quarantine!r}"
+            ) from None
     finally:
         if dir_fd != root_fd:
             os.close(dir_fd)
@@ -270,12 +325,19 @@ def scrub_source_files(root: str, sources: Sequence[SourceFile]) -> dict[str, st
 
     Not a secure wipe: a copy-on-write or journaling file system, a snapshot,
     or a backup may still hold the old bytes. A file that changed since it was
-    read (another inode at the path) is left alone. Returns ``{path: reason}``
-    for every file not removed; an empty dict means all are gone.
+    read (another inode at the path) is left alone, and so is any file written
+    at the path while the step removes it (see :func:`_scrub_one`). Returns
+    ``{path: reason}`` for every file not removed; an empty dict means all are
+    gone.
     """
     failures: dict[str, str] = {}
     try:
         _require_safe_open()
+        if os.rename not in os.supports_dir_fd:
+            raise WorkspaceError(
+                "this worker's operating system cannot rename files relative to a directory, "
+                "so the step leaves its source files in place"
+            )
         root_fd = _open_root(root)
     except WorkspaceError as exc:
         return {source.path: str(exc) for source in sources}

@@ -446,8 +446,11 @@ async def test_source_files_are_overwritten_with_zeros_before_unlinking(
     )
     result = await _run({"path": "certs/web", "files": {"cert": "out/cert.pem"}}, store)
     assert result.success is True, result.error
-    assert unlinked == ["cert.pem"]
-    assert cert.read_bytes() == bytes(len(CERT_PEM.encode()))
+    # Removed under the private name it was moved to, after being zeroed.
+    (removed,) = unlinked
+    assert removed.startswith(".hegemony-scrub-")
+    assert not cert.exists()
+    assert (cert.parent / removed).read_bytes() == bytes(len(CERT_PEM.encode()))
 
 
 async def test_a_source_file_that_cannot_be_deleted_does_not_fail_the_step(
@@ -957,3 +960,133 @@ async def test_a_refused_delete(store):
     assert result.success is False
     assert result.summary == "Refused by the platform"
     assert "read-only" in (result.error or "")
+
+
+# ── review follow-ups: removal race, output shape ──────────────────────────
+
+
+def _no_leftovers(directory: Path) -> None:
+    assert not [p.name for p in directory.iterdir() if p.name.startswith(".hegemony-scrub-")]
+
+
+def _while_removing(monkeypatch, action) -> None:
+    """Run ``action`` once, the moment the step opens a source file to overwrite it."""
+    real_open = os.open
+    fired: list[bool] = []
+
+    def spying_open(path, flags, mode=0o777, *, dir_fd=None):
+        if flags & os.O_WRONLY and dir_fd is not None and not fired:
+            fired.append(True)
+            action()
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("hegemony_steps_secret.workspace.os.open", spying_open)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {spying_open})
+
+
+def test_a_file_written_at_the_path_during_removal_is_never_touched(workspace, monkeypatch):
+    _put(workspace, "out/cert.pem", CERT_PEM)
+    sources = read_source_files(str(workspace), {"cert": "out/cert.pem"})
+    # A container writes a new file at the same path while the step removes the old one.
+    _while_removing(monkeypatch, lambda: _put(workspace, "out/cert.pem", "a new file"))
+
+    assert scrub_source_files(str(workspace), sources) == {}
+    assert (workspace / "out" / "cert.pem").read_text(encoding="utf-8") == "a new file"
+    _no_leftovers(workspace / "out")
+
+
+def test_a_replaced_file_goes_back_under_its_name(workspace):
+    _put(workspace, "out/cert.pem", CERT_PEM)
+    (source,) = read_source_files(str(workspace), {"cert": "out/cert.pem"})
+    os.unlink(workspace / "out" / "cert.pem")
+    os.symlink("/etc/passwd", workspace / "out" / "cert.pem")
+
+    failures = scrub_source_files(str(workspace), [source])
+    assert failures["out/cert.pem"].endswith("changed since it was read; left in place")
+    assert os.readlink(workspace / "out" / "cert.pem") == "/etc/passwd"
+    _no_leftovers(workspace / "out")
+
+
+def test_a_replaced_file_is_never_put_over_a_newer_one(workspace, monkeypatch):
+    _put(workspace, "out/cert.pem", CERT_PEM)
+    (source,) = read_source_files(str(workspace), {"cert": "out/cert.pem"})
+    os.unlink(workspace / "out" / "cert.pem")
+    _put(workspace, "out/cert.pem", "replacement")
+    _while_removing(monkeypatch, lambda: _put(workspace, "out/cert.pem", "newest"))
+
+    failures = scrub_source_files(str(workspace), [source])
+    assert "a newer file took its name" in failures["out/cert.pem"]
+    assert (workspace / "out" / "cert.pem").read_text(encoding="utf-8") == "newest"
+    (kept,) = [p for p in (workspace / "out").iterdir() if p.name.startswith(".hegemony-scrub-")]
+    assert kept.read_text(encoding="utf-8") == "replacement"
+
+
+OUTPUT_KEYS = {
+    "operation",
+    "path",
+    "reference",
+    "keys",
+    "created",
+    "previous_path",
+    "swapped_with",
+    "deleted",
+}
+
+
+@pytest.mark.parametrize(
+    ("config", "prepare", "operation", "path"),
+    [
+        ({"files": {"cert": "out/cert.pem"}}, None, "write", None),
+        ({"path": "certs/web", "files": {"cert": "out/missing.pem"}}, None, "write", "certs/web"),
+        (
+            {"path": "certs/web", "values": {"pw": "vault://orgs/acme/secrets/unknown"}},
+            None,
+            "write",
+            "certs/web",
+        ),
+        (
+            {"path": "certs/web", "values": {"user": "svc"}},
+            lambda store: store.write_outcomes.setdefault("certs/web", []).append(
+                RuntimeError("store down")
+            ),
+            "write",
+            "certs/web",
+        ),
+        ({"operation": "swap", "path": "a", "swap_with": "b"}, None, "swap", "a"),
+        (
+            {"operation": "delete", "path": "certs/web"},
+            lambda store: setattr(store, "delete_error", PermissionError("not allowed")),
+            "delete",
+            "certs/web",
+        ),
+    ],
+    ids=["config", "source-file", "unresolved-value", "store-error", "swap-missing", "delete"],
+)
+async def test_a_failure_still_carries_every_output_key(store, config, prepare, operation, path):
+    if prepare is not None:
+        prepare(store)
+    result = await _run(config, store)
+    assert result.success is False
+    assert set(result.output) == OUTPUT_KEYS
+    assert (result.output["operation"], result.output["path"]) == (operation, path)
+    assert result.output["reference"] is None
+    assert result.output["keys"] == []
+
+
+async def test_a_host_without_the_services_still_returns_every_output_key():
+    result = await _run({"path": "certs/web", "values": {"user": "svc"}}, _OldHost())
+    assert result.success is False
+    assert set(result.output) == OUTPUT_KEYS
+    assert result.output["path"] == "certs/web"
+
+
+async def test_a_failed_write_after_keeping_the_previous_keys_says_where_they_went(store):
+    store.secrets["certs/web"] = {"cert": OLD_VALUE}
+    store.write_outcomes["certs/web"] = [RuntimeError("store down")]
+    result = await _run(
+        {"path": "certs/web", "values": {"user": "svc"}, "keep_previous_at": "certs/web-old"},
+        store,
+    )
+    assert result.success is False
+    assert result.output["previous_path"] == "certs/web-old"
+    _assert_no_values(result)
