@@ -43,7 +43,12 @@ a single pinned server certificate works too. CA bundle takes PEM text or a
 secret reference, either bare (`vault://orgs/acme/secrets/tls/internal-ca`)
 or as a `{{ secret('...') }}` template. A pasted certificate is verified
 offline by the same rules, with the chain certificates you pasted as
-intermediates.
+intermediates: every certificate is within its validity dates, signed by the
+next and free of critical extensions the verifier does not handle; every CA
+is marked as one, may sign certificates (key usage) and respects its path
+length; the server certificate's extended key usage and key usage allow a
+TLS server; and every name stays within the name constraints of the CAs
+above it.
 
 The host name is checked against the certificate itself. A name must match
 one of its DNS names, where a wildcard covers exactly one left-most label:
@@ -56,7 +61,8 @@ Check OCSP asks the responder named in each certificate whether the
 certificate has been revoked. The issuer certificate the question needs comes
 from the pasted or served chain where available, from CA bundle, or is
 downloaded from the address the certificate names. A response counts only
-when the issuer, or a responder the issuer authorised, signed it.
+when the issuer, or a responder the issuer authorised whose own certificate
+is currently valid, signed it, and only when it names this certificate.
 
 Parallel checks (default 10, up to 50) sets how many endpoints are checked at
 once. When the flow runs under an egress policy, every connection the step
@@ -75,7 +81,9 @@ The step fails when an endpoint breaks an enabled assertion:
 - Require host name match: the host name check passed.
 - Expected fingerprint: the certificate's SHA-256 fingerprint equals this
   value; colons and case are ignored. Expected fingerprints per endpoint sets
-  one per `host:port` and overrides the general one for that endpoint.
+  one per `host:port` or `host:port:sni` and overrides the general one for
+  that endpoint. An entry with a server name applies only to that name; one
+  without applies to every server name on that host and port.
 - Require OCSP good, with Check OCSP on: the responder reported the
   certificate good.
 

@@ -171,8 +171,10 @@ class TlsProbeConfig(BaseModel):
         default_factory=dict,
         title="Expected fingerprints per endpoint",
         description=(
-            "host:port=fingerprint, one per line. Overrides Expected fingerprint for "
-            "the endpoints it names."
+            "host:port=fingerprint or host:port:sni=fingerprint, one per line. Overrides "
+            "Expected fingerprint for the endpoints it names: an entry with a server name "
+            "applies only to that name, one without to every server name on that host "
+            "and port."
         ),
         json_schema_extra={
             "x_widget": "env-vars",
@@ -245,6 +247,7 @@ class TlsProbeConfig(BaseModel):
     @field_validator("warn_days")
     @classmethod
     def _non_negative_windows(cls, value: list[int]) -> list[int]:
+        """Refuse negative warning windows."""
         if any(days < 0 for days in value):
             raise ValueError("warning windows must be 0 or more days")
         return value
@@ -256,6 +259,7 @@ def is_bare_secret_ref(value: str) -> bool:
 
 
 def _templated(value: Any) -> bool:
+    """Whether ``value`` (or any item or key inside it) still holds template syntax."""
     if isinstance(value, str):
         return bool(_TEMPLATE_RE.search(value))
     if isinstance(value, list | tuple):
@@ -342,6 +346,7 @@ async def tls_handshake(
     """Connect, complete a TLS handshake, record what the server presented, close."""
 
     async def _run() -> _Handshake:
+        """Open the connection, record the handshake, and close it again."""
         _reader, writer = await asyncio.open_connection(
             host,
             port,
@@ -402,29 +407,41 @@ class _Settings:
 
     config: TlsProbeConfig
     expected_default: str | None
-    expected_by_endpoint: dict[tuple[str, int], str]
+    expected_by_endpoint: dict[tuple[str, int, str], str]
 
     @classmethod
     def from_config(cls, config: TlsProbeConfig) -> _Settings:
+        """Settings from a validated config, with every expected fingerprint normalised."""
         expected_default = (
             tls_certs.normalize_fingerprint(config.expected_fingerprint)
             if config.expected_fingerprint.strip()
             else None
         )
-        by_endpoint: dict[tuple[str, int], str] = {}
+        by_endpoint: dict[tuple[str, int, str], str] = {}
         for key, value in config.expected_fingerprints.items():
             spec = tls_certs.parse_endpoint(key, default_port=config.port)
-            by_endpoint[tls_certs.endpoint_key(spec.host, spec.port)] = (
-                tls_certs.normalize_fingerprint(value)
-            )
+            host, port = tls_certs.endpoint_key(spec.host, spec.port)
+            by_endpoint[(host, port, _sni_key(spec.sni))] = tls_certs.normalize_fingerprint(value)
         return cls(config, expected_default, by_endpoint)
 
-    def expected_for(self, host: str | None, port: int | None) -> str | None:
+    def expected_for(self, host: str | None, port: int | None, sni: str | None) -> str | None:
+        """The fingerprint expected at ``host:port`` with server name ``sni``.
+
+        An entry naming this server name wins, then an entry for the host and
+        port without one, then Expected fingerprint; None when none applies.
+        """
         if host and port:
-            override = self.expected_by_endpoint.get(tls_certs.endpoint_key(host, port))
-            if override is not None:
-                return override
+            endpoint = tls_certs.endpoint_key(host, port)
+            for name in (_sni_key(sni), ""):
+                override = self.expected_by_endpoint.get((*endpoint, name))
+                if override is not None:
+                    return override
         return self.expected_default
+
+
+def _sni_key(sni: str | None) -> str:
+    """Comparable form of a server name for fingerprint overrides (empty when none)."""
+    return (sni or "").strip().rstrip(".").lower()
 
 
 class _TlsRun:
@@ -439,6 +456,7 @@ class _TlsRun:
         bundle_anchors: list[x509.Certificate] | None,
         bundle_pem: str | None,
     ) -> None:
+        """Hold the settings and trust anchors for one run; contexts are built on first use."""
         self.settings = settings
         self.config = settings.config
         self.now = now
@@ -453,6 +471,7 @@ class _TlsRun:
     # --- records ---------------------------------------------------------
 
     def blank_record(self, plan: dict[str, Any]) -> dict[str, Any]:
+        """An endpoint record with every key present and nothing determined yet."""
         record: dict[str, Any] = {
             "source": plan["source"],
             "host": plan["host"],
@@ -496,7 +515,7 @@ class _TlsRun:
             record["hostname_ok"] = tls_certs.hostname_matches(
                 hostname, dns_names, ip_addresses, tls_certs.common_name(leaf)
             )
-        expected = self.settings.expected_for(record["host"], record["port"])
+        expected = self.settings.expected_for(record["host"], record["port"], record["sni"])
         if expected is not None:
             record["matches_expected"] = record["fingerprint_sha256"] == expected
         if self.config.check_ocsp:
@@ -505,16 +524,19 @@ class _TlsRun:
     # --- live endpoints --------------------------------------------------
 
     def observe_context(self) -> ssl.SSLContext:
+        """The permissive context for the first handshake, built once per run."""
         if self._observe is None:
             self._observe = observe_context()
         return self._observe
 
     def verify_context(self) -> ssl.SSLContext:
+        """The verifying context for the second handshake, built once per run."""
         if self._verify is None:
             self._verify = verify_context(self.bundle_pem)
         return self._verify
 
     async def probe_endpoint(self, plan: dict[str, Any]) -> dict[str, Any]:
+        """Check one live endpoint: egress gate, both handshakes, then the certificate's details."""
         record = self.blank_record(plan)
         host: str | None = plan["host"]
         port: int = plan["port"]
@@ -580,6 +602,7 @@ class _TlsRun:
     async def evaluate_pem(
         self, plan: dict[str, Any], certs: list[x509.Certificate]
     ) -> dict[str, Any]:
+        """Check a pasted certificate and chain offline, against the CA bundle or the system store."""
         record = self.blank_record(plan)
         leaf, chain = certs[0], certs[1:]
         anchors = self.bundle_anchors
@@ -616,6 +639,7 @@ class _TlsRun:
         content: bytes | None = None,
         headers: dict[str, str] | None = None,
     ) -> bytes:
+        """One OCSP-related HTTP request: the body of a 200 response, capped at ``MAX_FETCH_BYTES``."""
         if self.client is None:
             raise _FetchError("OCSP client is not open")
         async with self.client.stream(method, url, content=content, headers=headers) as response:
@@ -633,6 +657,7 @@ class _TlsRun:
     async def check_ocsp(
         self, cert: x509.Certificate, candidates: list[x509.Certificate]
     ) -> dict[str, Any]:
+        """The OCSP status of ``cert``, finding its issuer among ``candidates`` or by download."""
         urls = tls_certs.ocsp_responder_urls(cert)
         if not urls:
             return tls_certs.ocsp_outcome("unavailable", "the certificate names no OCSP responder")
@@ -642,7 +667,7 @@ class _TlsRun:
             for url in tls_certs.ca_issuer_urls(cert):
                 try:
                     data = await self.fetch("GET", url)
-                except (httpx.HTTPError, _FetchError) as exc:
+                except (httpx.HTTPError, httpx.InvalidURL, _FetchError) as exc:
                     download_problem = f"; downloading {url} failed: {_http_reason(exc)}"
                     continue
                 issuer = tls_certs.find_issuer(cert, tls_certs.load_certificates_any(data))
@@ -664,7 +689,7 @@ class _TlsRun:
                     "Accept": "application/ocsp-response",
                 },
             )
-        except (httpx.HTTPError, _FetchError) as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, _FetchError) as exc:
             return tls_certs.ocsp_outcome(
                 "error", f"OCSP request to {url} failed: {_http_reason(exc)}"
             )
@@ -711,11 +736,13 @@ class _TlsRun:
 
 
 def _http_reason(exc: BaseException) -> str:
+    """A short reason for a failed OCSP-related HTTP request."""
     text = str(exc)
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 def _plural(count: int, word: str) -> str:
+    """``count`` followed by ``word``, pluralised with ``s`` unless the count is 1."""
     return f"{count} {word}" if count == 1 else f"{count} {word}s"
 
 
@@ -740,6 +767,7 @@ def summarize(records: list[dict[str, Any]], warn_days: list[int]) -> dict[str, 
 
 
 def _config_error(message: str) -> HandlerResult:
+    """A failed result for a configuration problem found at run time."""
     return HandlerResult(success=False, error=message, summary="TLS check configuration error")
 
 
@@ -752,6 +780,7 @@ def _endpoint_plans(
     target_sni = config.sni.strip() or None
 
     def _add(plan: dict[str, Any]) -> None:
+        """Append ``plan`` unless the same host, port and SNI is already planned."""
         if plan["host"]:
             host, port = tls_certs.endpoint_key(plan["host"], plan["port"])
             key = (host, port, (plan["sni"] or "").lower())
@@ -806,6 +835,7 @@ class TlsProbeHandler(BaseHandler):
     raw_config_keys = frozenset({"ca_bundle"})
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:
+        """Validate the step's fields; templated values are checked once rendered."""
         errors = super().validate_config(config)
         if errors:
             return errors
@@ -859,6 +889,7 @@ class TlsProbeHandler(BaseHandler):
         return errors
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
+        """Check every planned endpoint (or the pasted certificate) and assess the results."""
         try:
             config = TlsProbeConfig.model_validate(ctx.config)
         except ValidationError as exc:
@@ -954,6 +985,7 @@ class TlsProbeHandler(BaseHandler):
 
 
 def _evidence_name(record: dict[str, Any]) -> str:
+    """Name of the evidence record for one endpoint record."""
     if record["source"] == "pem":
         return "tls_pem"
     return f"tls_{record['host'] or record['device_name'] or 'unknown'}_{record['port']}"
@@ -962,6 +994,7 @@ def _evidence_name(record: dict[str, Any]) -> str:
 def _result(
     records: list[dict[str, Any]], config: TlsProbeConfig, *, pem_mode: bool
 ) -> HandlerResult:
+    """The step result: summary text, metrics, evidence, output and the error for failing endpoints."""
     summary = summarize(records, config.warn_days)
     min_days = summary["min_days_left"]
     failing = [record for record in records if not record["ok"]]
@@ -999,6 +1032,7 @@ def _result(
         )
 
     def _label(record: dict[str, Any]) -> str:
+        """How a failing endpoint is named in the step error."""
         if record["source"] == "pem":
             return "pem certificate"
         if record["host"]:

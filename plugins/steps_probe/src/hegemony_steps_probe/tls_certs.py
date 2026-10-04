@@ -32,6 +32,7 @@ from cryptography.x509 import ocsp
 from cryptography.x509.oid import (
     AuthorityInformationAccessOID,
     ExtendedKeyUsageOID,
+    ExtensionOID,
     NameOID,
     SignatureAlgorithmOID,
 )
@@ -82,10 +83,18 @@ def parse_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None
 
 
 def normalize_host(host: str) -> str:
-    """Comparable form of a host: compressed address, or lowercase name without a trailing dot."""
+    """Comparable form of a host: compressed address, or lowercase name without a trailing dot.
+
+    An IPv6 zone (``fe80::1%eth0``) is kept, since the same link-local
+    address on another interface is another endpoint.
+    """
     address = parse_ip(host)
     if address is not None:
-        return address.compressed
+        text = host.strip()
+        if text.startswith("[") and text.endswith("]"):
+            text = text[1:-1]
+        _, _, zone = text.partition("%")
+        return f"{address.compressed}%{zone}" if zone else address.compressed
     return host.strip().rstrip(".").lower()
 
 
@@ -118,6 +127,7 @@ def split_endpoint_entries(value: Any) -> list[str]:
 
 
 def _parse_port(entry: str, text: str | None, default_port: int) -> int:
+    """The port written in ``entry``, or ``default_port`` when none is given. Raises ``ValueError``."""
     if text is None or not text.strip():
         return default_port
     try:
@@ -215,6 +225,7 @@ def fingerprint_sha256(cert: x509.Certificate) -> str:
 
 
 def _to_ascii(name: str) -> str:
+    """``name`` in its IDNA (punycode) form, or unchanged when it cannot be encoded."""
     try:
         return name.encode("idna").decode("ascii")
     except UnicodeError:
@@ -355,10 +366,12 @@ def load_system_anchors() -> list[x509.Certificate]:
 
 
 def _iso_z(moment: datetime) -> str:
+    """``moment`` as an ISO 8601 UTC timestamp ending in ``Z``."""
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _first_attribute(name: x509.Name, oid: x509.ObjectIdentifier) -> str | None:
+    """The first value of ``oid`` in ``name`` as text, or None when absent."""
     try:
         attributes = name.get_attributes_for_oid(oid)
     except ValueError:
@@ -370,6 +383,7 @@ def _first_attribute(name: x509.Name, oid: x509.ObjectIdentifier) -> str | None:
 
 
 def _extension_value(cert: x509.Certificate, ext_type: type[Any]) -> Any:
+    """The value of the certificate's ``ext_type`` extension, or None when absent or malformed."""
     try:
         return cert.extensions.get_extension_for_class(ext_type).value
     except (x509.ExtensionNotFound, x509.DuplicateExtension, ValueError):
@@ -398,6 +412,7 @@ def is_ca(cert: x509.Certificate) -> bool:
 
 
 def _key_details(cert: x509.Certificate) -> tuple[str | None, int | None, str | None]:
+    """``(key_type, key_bits, curve_name)`` of the certificate's public key; Nones when unknown."""
     try:
         key = cert.public_key()
     except (ValueError, UnsupportedAlgorithm):
@@ -416,6 +431,7 @@ def _key_details(cert: x509.Certificate) -> tuple[str | None, int | None, str | 
 
 
 def _signature_algorithm(cert: x509.Certificate) -> str:
+    """The signature algorithm's name, or its dotted OID when the name is unknown."""
     oid = cert.signature_algorithm_oid
     name = getattr(oid, "_name", "") or ""
     return name if name and name != "Unknown OID" else oid.dotted_string
@@ -492,7 +508,14 @@ def _signed_by(cert: x509.Certificate, issuer: x509.Certificate) -> bool:
 
 
 def _may_issue(cert: x509.Certificate) -> bool:
-    """CA check as OpenSSL applies it: basicConstraints CA, or a v1 certificate."""
+    """CA check as OpenSSL applies it.
+
+    Key usage, when present, must allow certificate signing, and
+    basicConstraints must mark a CA (or the certificate be version 1).
+    """
+    usage = _extension_value(cert, x509.KeyUsage)
+    if usage is not None and not usage.key_cert_sign:
+        return False
     constraints = _extension_value(cert, x509.BasicConstraints)
     if constraints is not None:
         return bool(constraints.ca)
@@ -500,6 +523,7 @@ def _may_issue(cert: x509.Certificate) -> bool:
 
 
 def _time_error(cert: x509.Certificate, now: datetime) -> str | None:
+    """Why the certificate is outside its validity period at ``now``, or None."""
     if now < cert.not_valid_before_utc:
         return "certificate is not yet valid"
     if now > cert.not_valid_after_utc:
@@ -507,13 +531,86 @@ def _time_error(cert: x509.Certificate, now: datetime) -> str | None:
     return None
 
 
+#: Extended key usages that let a certificate serve TLS (OpenSSL's ``ssl_server``
+#: purpose: server authentication, or the legacy Netscape and Microsoft
+#: server-gated cryptography usages).
+_SERVER_USAGES = frozenset(
+    {
+        ExtendedKeyUsageOID.SERVER_AUTH,
+        x509.ObjectIdentifier("2.16.840.1.113730.4.1"),  # Netscape SGC
+        x509.ObjectIdentifier("1.3.6.1.4.1.311.10.3.3"),  # Microsoft SGC
+    }
+)
+
+#: Extensions OpenSSL's verifier understands; any other extension marked
+#: critical makes it reject the certificate ("unhandled critical extension").
+_HANDLED_CRITICAL_EXTENSIONS = frozenset(
+    {
+        "2.16.840.1.113730.1.1",  # Netscape certificate type
+        ExtensionOID.KEY_USAGE.dotted_string,
+        ExtensionOID.SUBJECT_ALTERNATIVE_NAME.dotted_string,
+        ExtensionOID.BASIC_CONSTRAINTS.dotted_string,
+        ExtensionOID.CERTIFICATE_POLICIES.dotted_string,
+        ExtensionOID.CRL_DISTRIBUTION_POINTS.dotted_string,
+        ExtensionOID.EXTENDED_KEY_USAGE.dotted_string,
+        "1.3.6.1.5.5.7.1.7",  # RFC 3779 IP address blocks
+        "1.3.6.1.5.5.7.1.8",  # RFC 3779 AS identifiers
+        ExtensionOID.OCSP_NO_CHECK.dotted_string,
+        ExtensionOID.POLICY_CONSTRAINTS.dotted_string,
+        "1.3.6.1.5.5.7.1.14",  # proxy certificate information
+        ExtensionOID.NAME_CONSTRAINTS.dotted_string,
+        ExtensionOID.POLICY_MAPPINGS.dotted_string,
+        ExtensionOID.INHIBIT_ANY_POLICY.dotted_string,
+    }
+)
+
+#: OpenSSL 3's wording when a certificate's purpose rules out a TLS server.
+_PURPOSE_ERROR = "unsuitable certificate purpose"
+
+#: A subject common name OpenSSL treats as a DNS name for name constraints.
+_CN_DNS_RE = re.compile(r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
+
+
+def _key_usage(cert: x509.Certificate) -> x509.KeyUsage | None:
+    """The certificate's key usage extension, or None when it has none."""
+    return _extension_value(cert, x509.KeyUsage)
+
+
+def _eku_error(cert: x509.Certificate) -> str | None:
+    """Why the certificate's extended key usage rules out TLS servers, or None."""
+    usages = _extension_value(cert, x509.ExtendedKeyUsage)
+    if usages is not None and _SERVER_USAGES.isdisjoint(set(usages)):
+        return _PURPOSE_ERROR
+    return None
+
+
 def _purpose_error(leaf: x509.Certificate) -> str | None:
-    usages = _extension_value(leaf, x509.ExtendedKeyUsage)
-    if usages is None:
-        return None
-    allowed = {ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.ANY_EXTENDED_KEY_USAGE}
-    if allowed.isdisjoint(set(usages)):
-        return "unsupported certificate purpose"
+    """Why the leaf cannot serve TLS, as OpenSSL's ``ssl_server`` purpose judges it, or None.
+
+    Its extended key usage, when present, must allow server authentication,
+    and its key usage, when present, must allow a digital signature, key
+    encipherment or key agreement.
+    """
+    error = _eku_error(leaf)
+    if error is not None:
+        return error
+    usage = _key_usage(leaf)
+    if usage is not None and not (
+        usage.digital_signature or usage.key_encipherment or usage.key_agreement
+    ):
+        return _PURPOSE_ERROR
+    return None
+
+
+def _critical_extension_error(cert: x509.Certificate) -> str | None:
+    """Why the certificate carries a critical extension the verifier cannot handle, or None."""
+    try:
+        extensions = list(cert.extensions)
+    except (ValueError, x509.DuplicateExtension, x509.UnsupportedGeneralNameType):
+        return "unhandled critical extension"
+    for extension in extensions:
+        if extension.critical and extension.oid.dotted_string not in _HANDLED_CRITICAL_EXTENSIONS:
+            return "unhandled critical extension"
     return None
 
 
@@ -526,23 +623,30 @@ def verify_chain_offline(
 ) -> tuple[bool, str | None]:
     """Validate ``leaf`` up to one of ``anchors`` without any network access.
 
-    The same checks a TLS client's verifier makes, minus the host name
-    (checked on its own): every certificate on the path is within its
-    validity period, each is signed by the next, every issuer may act as a
-    CA (basicConstraints, path length), the leaf may serve TLS (extended key
-    usage), and the path ends at a trust anchor. ``intermediates`` are
-    untrusted candidates. A leaf that is itself an anchor (a pinned
-    self-signed certificate) is trusted as is. Errors use OpenSSL's wording,
-    so a supplied certificate and a served one read the same.
+    The checks OpenSSL's verifier makes for a TLS server, minus the host
+    name (checked on its own): every certificate on the path is within its
+    validity period, carries no critical extension the verifier does not
+    handle, and is signed by the next; every issuer may act as a CA
+    (basicConstraints, key usage, path length) and, when untrusted, allows
+    server authentication in its extended key usage; the leaf may serve TLS
+    (extended key usage and key usage); every name below a CA with name
+    constraints satisfies them; and the path ends at a trust anchor.
+    ``intermediates`` are untrusted candidates. A leaf that is itself an
+    anchor (a pinned self-signed certificate) needs only to be current,
+    usable for TLS and free of unhandled critical extensions. Errors use
+    OpenSSL's wording, so a supplied certificate and a served one read the
+    same.
     """
     anchor_fingerprints = {fingerprint_sha256(anchor) for anchor in anchors}
     if fingerprint_sha256(leaf) in anchor_fingerprints:
-        error = _time_error(leaf, now)
+        error = _critical_extension_error(leaf) or _purpose_error(leaf) or _time_error(leaf, now)
         return (error is None, error)
-    error = _purpose_error(leaf)
+    error = _critical_extension_error(leaf) or _purpose_error(leaf)
     if error is not None:
         return False, error
-    error = _walk(leaf, list(intermediates), list(anchors), now, depth=0, used=frozenset())
+    error = _walk(
+        leaf, list(intermediates), list(anchors), now, depth=0, used=frozenset(), path=(leaf,)
+    )
     return (error is None, error)
 
 
@@ -554,8 +658,12 @@ def _walk(
     *,
     depth: int,
     used: frozenset[str],
+    path: tuple[x509.Certificate, ...],
 ) -> str | None:
-    """Depth-first issuer search; None when a path to an anchor exists, else why not."""
+    """Depth-first issuer search; None when a valid path to an anchor exists, else why not.
+
+    ``path`` holds the certificates from the leaf up to ``cert``.
+    """
     error = _time_error(cert, now)
     if error is not None:
         return error
@@ -565,7 +673,9 @@ def _walk(
     for anchor in anchors:
         if anchor.subject != cert.issuer or not _signed_by(cert, anchor):
             continue
-        problem = _issuer_problem(anchor, depth, now)
+        problem = _issuer_problem(anchor, depth, now, trusted=True) or _name_constraints_error(
+            (*path, anchor)
+        )
         if problem is None:
             return None
         first_error = first_error or problem
@@ -576,7 +686,7 @@ def _walk(
         if not _signed_by(cert, candidate):
             first_error = first_error or "certificate signature failure"
             continue
-        problem = _issuer_problem(candidate, depth, now)
+        problem = _issuer_problem(candidate, depth, now, trusted=False)
         if problem is None:
             problem = _walk(
                 candidate,
@@ -585,6 +695,7 @@ def _walk(
                 now,
                 depth=depth + 1,
                 used=used | {fingerprint},
+                path=(*path, candidate),
             )
         if problem is None:
             return None
@@ -596,18 +707,167 @@ def _walk(
     return "unable to get local issuer certificate"
 
 
-def _issuer_problem(issuer: x509.Certificate, depth: int, now: datetime) -> str | None:
+def _issuer_problem(
+    issuer: x509.Certificate, depth: int, now: datetime, *, trusted: bool
+) -> str | None:
     """Why ``issuer`` cannot sign at this depth (``depth`` intermediates below it)."""
-    error = _time_error(issuer, now)
+    error = _time_error(issuer, now) or _critical_extension_error(issuer)
     if error is not None:
         return error
     if not _may_issue(issuer):
         return "invalid CA certificate"
+    if not trusted and _eku_error(issuer) is not None:
+        return _PURPOSE_ERROR
     constraints = _extension_value(issuer, x509.BasicConstraints)
     path_length = constraints.path_length if constraints is not None else None
     if path_length is not None and depth > path_length:
         return "path length constraint exceeded"
     return None
+
+
+# --- Name constraints ---------------------------------------------------------
+
+
+#: Name types the name-constraint check understands; others are refused.
+_SUPPORTED_NAME_TYPES = (
+    x509.DNSName,
+    x509.IPAddress,
+    x509.RFC822Name,
+    x509.UniformResourceIdentifier,
+    x509.DirectoryName,
+)
+
+
+def _name_constraints_error(path: Sequence[x509.Certificate]) -> str | None:
+    """Why a certificate in ``path`` (leaf first) breaks a CA's name constraints, or None.
+
+    Each CA's constraints apply to every certificate below it, except
+    self-issued intermediates (RFC 5280, 6.1.4).
+    """
+    for index in range(1, len(path)):
+        constraints = _extension_value(path[index], x509.NameConstraints)
+        if constraints is None:
+            continue
+        for position, cert in enumerate(path[:index]):
+            if position > 0 and cert.subject == cert.issuer:
+                continue
+            error = _names_error(cert, constraints, leaf=position == 0)
+            if error is not None:
+                return error
+    return None
+
+
+def _subject_names(cert: x509.Certificate, *, leaf: bool) -> list[x509.GeneralName]:
+    """Every name name constraints apply to: the subject, its e-mail addresses, the SANs.
+
+    A leaf without DNS SANs also has its host-name-like common names
+    checked as DNS names, as OpenSSL does.
+    """
+    names: list[x509.GeneralName] = []
+    if len(cert.subject) > 0:
+        names.append(x509.DirectoryName(cert.subject))
+    for attribute in cert.subject.get_attributes_for_oid(NameOID.EMAIL_ADDRESS):
+        if isinstance(attribute.value, str):
+            names.append(x509.RFC822Name(attribute.value))
+    sans = _extension_value(cert, x509.SubjectAlternativeName)
+    if sans is not None:
+        names.extend(sans)
+    if leaf and not any(isinstance(name, x509.DNSName) for name in names):
+        for attribute in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME):
+            value = attribute.value
+            if isinstance(value, str) and _CN_DNS_RE.match(value):
+                names.append(x509.DNSName(value))
+    return names
+
+
+def _names_error(
+    cert: x509.Certificate, constraints: x509.NameConstraints, *, leaf: bool
+) -> str | None:
+    """Why one certificate's names break ``constraints``, or None."""
+    permitted = list(constraints.permitted_subtrees or [])
+    excluded = list(constraints.excluded_subtrees or [])
+    try:
+        names = _subject_names(cert, leaf=leaf)
+    except (ValueError, x509.DuplicateExtension, x509.UnsupportedGeneralNameType):
+        return "unsupported name constraint type"
+    for name in names:
+        same_type = [base for base in permitted + excluded if type(base) is type(name)]
+        if not same_type:
+            continue
+        if not isinstance(name, _SUPPORTED_NAME_TYPES):
+            return "unsupported name constraint type"
+        if any(_name_within(name, base) for base in excluded if type(base) is type(name)):
+            return "excluded subtree violation"
+        allowed = [base for base in permitted if type(base) is type(name)]
+        if allowed and not any(_name_within(name, base) for base in allowed):
+            return "permitted subtree violation"
+    return None
+
+
+def _name_within(name: x509.GeneralName, base: x509.GeneralName) -> bool:
+    """Whether ``name`` falls inside the subtree ``base`` (both of the same type)."""
+    if isinstance(name, x509.DNSName) and isinstance(base, x509.DNSName):
+        return _dns_within(name.value, base.value)
+    if isinstance(name, x509.IPAddress) and isinstance(base, x509.IPAddress):
+        network = base.value
+        address = name.value
+        if not isinstance(network, ipaddress.IPv4Network | ipaddress.IPv6Network):
+            return False
+        if not isinstance(address, ipaddress.IPv4Address | ipaddress.IPv6Address):
+            return False
+        return address.version == network.version and address in network
+    if isinstance(name, x509.RFC822Name) and isinstance(base, x509.RFC822Name):
+        return _email_within(name.value, base.value)
+    if isinstance(name, x509.UniformResourceIdentifier) and isinstance(
+        base, x509.UniformResourceIdentifier
+    ):
+        return _uri_within(name.value, base.value)
+    if isinstance(name, x509.DirectoryName) and isinstance(base, x509.DirectoryName):
+        rdns, prefix = list(name.value.rdns), list(base.value.rdns)
+        return rdns[: len(prefix)] == prefix
+    return False
+
+
+def _dns_within(name: str, base: str) -> bool:
+    """DNS subtree match as OpenSSL does it: equal, or a subdomain of ``base``."""
+    name, base = name.lower(), base.lower()
+    if not base:
+        return True
+    if len(name) > len(base):
+        if not base.startswith(".") and name[-len(base) - 1] != ".":
+            return False
+        return name.endswith(base)
+    return name == base
+
+
+def _email_within(address: str, base: str) -> bool:
+    """E-mail subtree match: one mailbox, every address at a host, or at its subdomains."""
+    local, at, domain = address.rpartition("@")
+    if not at:
+        return False
+    if "@" in base:
+        base_local, _, base_domain = base.rpartition("@")
+        return local == base_local and domain.lower() == base_domain.lower()
+    if base.startswith("."):
+        return domain.lower().endswith(base.lower())
+    return domain.lower() == base.lower()
+
+
+def _uri_within(uri: str, base: str) -> bool:
+    """URI subtree match on the URI's host: equal, or (``.domain``) a subdomain."""
+    _, separator, rest = uri.partition("://")
+    if not separator:
+        return False
+    host = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    host = host.rsplit("@", 1)[-1]
+    if host.startswith("["):
+        return False
+    host = host.split(":", 1)[0].lower()
+    if not host:
+        return False
+    if base.startswith("."):
+        return host.endswith(base.lower())
+    return host == base.lower()
 
 
 # --- Issuers and OCSP --------------------------------------------------------
@@ -624,6 +884,7 @@ def find_issuer(
 
 
 def _access_urls(cert: x509.Certificate, method: x509.ObjectIdentifier) -> list[str]:
+    """HTTP(S) URLs of the Authority Information Access entries using ``method``."""
     access = _extension_value(cert, x509.AuthorityInformationAccess)
     if access is None:
         return []
@@ -653,6 +914,7 @@ def build_ocsp_request(cert: x509.Certificate, issuer: x509.Certificate) -> byte
 
 
 def _responder_is(response: ocsp.OCSPResponse, candidate: x509.Certificate) -> bool:
+    """Whether ``candidate`` is the responder the OCSP response names, by name or key hash."""
     if response.responder_name is not None:
         return response.responder_name == candidate.subject
     if response.responder_key_hash is not None:
@@ -662,6 +924,7 @@ def _responder_is(response: ocsp.OCSPResponse, candidate: x509.Certificate) -> b
 
 
 def _delegated_signer(cert: x509.Certificate) -> bool:
+    """Whether the certificate carries the OCSP-signing extended key usage."""
     usages = _extension_value(cert, x509.ExtendedKeyUsage)
     return usages is not None and ExtendedKeyUsageOID.OCSP_SIGNING in set(usages)
 
@@ -673,6 +936,7 @@ def _verify_signature(
     hash_algorithm: hashes.HashAlgorithm | None,
     signature_oid: x509.ObjectIdentifier,
 ) -> bool:
+    """Whether ``signature`` over ``data`` verifies with ``key``; False for unsupported keys."""
     try:
         if isinstance(key, rsa.RSAPublicKey) and hash_algorithm is not None:
             if signature_oid == SignatureAlgorithmOID.RSASSA_PSS:
@@ -711,8 +975,9 @@ def evaluate_ocsp_response(
 
     The response must come from the issuer itself or from a responder the
     issuer delegated (its certificate in the response, issued by the issuer,
-    with the OCSP-signing purpose), its signature must verify, it must be
-    about this certificate, and it must be current.
+    with the OCSP-signing purpose, and within its validity period), its
+    signature must verify, it must be about this certificate (serial number,
+    issuer name hash and issuer key hash), and it must be current.
     """
     try:
         response = ocsp.load_der_ocsp_response(data)
@@ -728,6 +993,7 @@ def evaluate_ocsp_response(
                 _responder_is(response, candidate)
                 and _delegated_signer(candidate)
                 and _signed_by(candidate, issuer)
+                and _time_error(candidate, now) is None
             ):
                 signer = candidate
                 break
@@ -756,13 +1022,17 @@ def evaluate_ocsp_response(
             )
         except (ValueError, TypeError, UnsupportedAlgorithm):
             continue
-        if single.issuer_key_hash != expected.issuer_key_hash:
+        if (
+            single.issuer_key_hash != expected.issuer_key_hash
+            or single.issuer_name_hash != expected.issuer_name_hash
+        ):
             continue
         return _single_outcome(single, now)
     return ocsp_outcome("error", "response does not cover this certificate")
 
 
 def _single_outcome(single: Any, now: datetime) -> dict[str, Any]:
+    """The OCSP outcome of one single response at ``now``, after its freshness check."""
     this_update: datetime = single.this_update_utc
     next_update: datetime | None = single.next_update_utc
     if this_update - OCSP_CLOCK_SKEW > now:

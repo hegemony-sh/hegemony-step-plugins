@@ -83,13 +83,20 @@ def issue(
     issuer_url: str | None = None,
     eku: tuple[x509.ObjectIdentifier, ...] | None = (ExtendedKeyUsageOID.SERVER_AUTH,),
     basic_constraints: bool = True,
+    extensions: tuple[tuple[x509.ExtensionType, bool], ...] = (),
+    subject: x509.Name | None = None,
 ) -> x509.Certificate:
-    """A certificate for ``key``, self-signed unless an issuer is given."""
+    """A certificate for ``key``, self-signed unless an issuer is given.
+
+    ``extensions`` adds ``(extension, critical)`` pairs; ``subject`` replaces
+    the plain common-name subject.
+    """
     signer = issuer_key or key
+    subject_name = subject if subject is not None else _name(common_name)
     builder = (
         x509.CertificateBuilder()
-        .subject_name(_name(common_name))
-        .issuer_name(issuer.subject if issuer is not None else _name(common_name))
+        .subject_name(subject_name)
+        .issuer_name(issuer.subject if issuer is not None else subject_name)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(not_before or NOW - timedelta(days=1))
@@ -127,6 +134,8 @@ def issue(
         )
     if access:
         builder = builder.add_extension(x509.AuthorityInformationAccess(access), critical=False)
+    for extension, critical in extensions:
+        builder = builder.add_extension(extension, critical=critical)
     algorithm = None if isinstance(signer, ed25519.Ed25519PrivateKey) else hashes.SHA256()
     return builder.sign(signer, algorithm)
 
@@ -681,7 +690,7 @@ def test_offline_chain_checks_the_leaf_purpose(pki):
     )
     assert verify_chain_offline(client_only, [pki.inter], [pki.root], now=NOW) == (
         False,
-        "unsupported certificate purpose",
+        "unsuitable certificate purpose",
     )
 
 
@@ -1295,3 +1304,359 @@ async def test_the_step_error_names_the_first_twenty_failing_endpoints(monkeypat
     assert "192.0.2.20:443" in error and "192.0.2.21:443" not in error
     assert error.endswith(", and 3 more")
     assert len(result.output["endpoints"]) == 23
+
+
+# --- Offline validation matches the live verifier ------------------------------
+
+_UNKNOWN_CRITICAL = (
+    x509.UnrecognizedExtension(x509.ObjectIdentifier("1.3.6.1.4.1.55555.1.1"), b"\x05\x00"),
+    True,
+)
+
+
+def _key_usage(**flags: bool) -> tuple[x509.KeyUsage, bool]:
+    names = (
+        "digital_signature",
+        "content_commitment",
+        "key_encipherment",
+        "data_encipherment",
+        "key_agreement",
+        "key_cert_sign",
+        "crl_sign",
+        "encipher_only",
+        "decipher_only",
+    )
+    return x509.KeyUsage(**{name: flags.get(name, False) for name in names}), True
+
+
+_CA_USAGE = _key_usage(key_cert_sign=True, crl_sign=True)
+
+
+def _constraints(
+    permitted: list[x509.GeneralName] | None = None,
+    excluded: list[x509.GeneralName] | None = None,
+) -> tuple[x509.NameConstraints, bool]:
+    return x509.NameConstraints(permitted_subtrees=permitted, excluded_subtrees=excluded), True
+
+
+def _chain_case(
+    pki: Pki,
+    *,
+    inter_extensions: tuple[tuple[x509.ExtensionType, bool], ...] = (_CA_USAGE,),
+    leaf_extensions: tuple[tuple[x509.ExtensionType, bool], ...] = (),
+    leaf_sans: tuple[str, ...] = ("leaf.example.test",),
+    leaf_eku: tuple[x509.ObjectIdentifier, ...] | None = (ExtendedKeyUsageOID.SERVER_AUTH,),
+) -> tuple[Leaf, str]:
+    """A root -> intermediate -> leaf chain; returns the served leaf and the anchor PEM."""
+    inter_key = ec.generate_private_key(ec.SECP256R1())
+    inter = issue(
+        "Case Intermediate",
+        inter_key,
+        issuer=pki.root,
+        issuer_key=pki.root_key,
+        ca=True,
+        extensions=inter_extensions,
+    )
+    leaf_key = ec.generate_private_key(ec.SECP256R1())
+    leaf = issue(
+        "leaf.example.test",
+        leaf_key,
+        issuer=inter,
+        issuer_key=inter_key,
+        sans=leaf_sans,
+        eku=leaf_eku,
+        extensions=leaf_extensions,
+    )
+    return Leaf(leaf, leaf_key, (inter,)), pki.root_pem
+
+
+def _pinned_case() -> tuple[Leaf, str]:
+    """A self-signed client-only certificate trusted as its own anchor."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    cert = issue(
+        "pinned.example.test",
+        key,
+        sans=("pinned.example.test",),
+        eku=(ExtendedKeyUsageOID.CLIENT_AUTH,),
+    )
+    return Leaf(cert, key, ()), pem_of(cert)
+
+
+_PARITY_CASES: dict[str, tuple[Any, bool | None]] = {
+    "valid": (lambda pki: _chain_case(pki), True),
+    "issuer-key-usage": (
+        lambda pki: _chain_case(pki, inter_extensions=(_key_usage(digital_signature=True),)),
+        False,
+    ),
+    "leaf-key-usage": (
+        lambda pki: _chain_case(pki, leaf_extensions=(_key_usage(key_cert_sign=True),)),
+        False,
+    ),
+    "leaf-critical-extension": (
+        lambda pki: _chain_case(pki, leaf_extensions=(_UNKNOWN_CRITICAL,)),
+        False,
+    ),
+    "issuer-critical-extension": (
+        lambda pki: _chain_case(pki, inter_extensions=(_CA_USAGE, _UNKNOWN_CRITICAL)),
+        False,
+    ),
+    "issuer-extended-key-usage": (
+        lambda pki: _chain_case(
+            pki,
+            inter_extensions=(
+                _CA_USAGE,
+                (x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), False),
+            ),
+        ),
+        False,
+    ),
+    "leaf-any-extended-key-usage": (
+        lambda pki: _chain_case(pki, leaf_eku=(ExtendedKeyUsageOID.ANY_EXTENDED_KEY_USAGE,)),
+        None,
+    ),
+    "dns-permitted": (
+        lambda pki: _chain_case(
+            pki, inter_extensions=(_CA_USAGE, _constraints([x509.DNSName("example.test")]))
+        ),
+        True,
+    ),
+    "dns-not-permitted": (
+        lambda pki: _chain_case(
+            pki,
+            inter_extensions=(_CA_USAGE, _constraints([x509.DNSName("example.test")])),
+            leaf_sans=("leaf.other.test",),
+        ),
+        False,
+    ),
+    "dns-excluded": (
+        lambda pki: _chain_case(
+            pki,
+            inter_extensions=(
+                _CA_USAGE,
+                _constraints(excluded=[x509.DNSName("bad.example.test")]),
+            ),
+            leaf_sans=("x.bad.example.test",),
+        ),
+        False,
+    ),
+    "ip-not-permitted": (
+        lambda pki: _chain_case(
+            pki,
+            inter_extensions=(
+                _CA_USAGE,
+                _constraints([x509.IPAddress(ipaddress.ip_network("10.0.0.0/8"))]),
+            ),
+            leaf_sans=("leaf.example.test", "192.0.2.1"),
+        ),
+        False,
+    ),
+    "directory-name-not-permitted": (
+        lambda pki: _chain_case(
+            pki,
+            inter_extensions=(
+                _CA_USAGE,
+                _constraints(
+                    [
+                        x509.DirectoryName(
+                            x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Allowed")])
+                        )
+                    ]
+                ),
+            ),
+        ),
+        False,
+    ),
+    "pinned-client-certificate": (lambda pki: _pinned_case(), False),
+}
+
+
+@pytest.mark.parametrize("case", list(_PARITY_CASES))
+async def test_offline_chain_verdict_matches_the_live_verifier(pki, tmp_path, case):
+    build, expected = _PARITY_CASES[case]
+    leaf, anchors = build(pki)
+    async with tls_server(tmp_path, leaf) as port:
+        live = await run_step({"endpoints": f"127.0.0.1:{port}", "ca_bundle": anchors})
+    offline = await run_step({"pem": pem_of(leaf.cert, *leaf.chain), "ca_bundle": anchors})
+    [live_record] = live.output["endpoints"]
+    [offline_record] = offline.output["endpoints"]
+    live_verdict = (live_record["chain_ok"], live_record["chain_error"])
+    offline_verdict = (offline_record["chain_ok"], offline_record["chain_error"])
+    assert offline_verdict == live_verdict
+    if expected is not None:
+        assert live_verdict[0] is expected
+
+
+@pytest.mark.parametrize(
+    ("name", "base", "within"),
+    [
+        ("a.example.test", "example.test", True),
+        ("example.test", "example.test", True),
+        ("badexample.test", "example.test", False),
+        ("a.example.test", ".example.test", True),
+        ("example.test", ".example.test", False),
+        ("anything.test", "", True),
+    ],
+)
+def test_dns_name_constraint_matching(name, base, within):
+    assert tls_certs._dns_within(name, base) is within
+
+
+@pytest.mark.parametrize(
+    ("address", "base", "within"),
+    [
+        ("ops@example.test", "ops@example.test", True),
+        ("dev@example.test", "ops@example.test", False),
+        ("ops@EXAMPLE.test", "example.test", True),
+        ("ops@mail.example.test", "example.test", False),
+        ("ops@mail.example.test", ".example.test", True),
+        ("not-an-address", "example.test", False),
+    ],
+)
+def test_email_name_constraint_matching(address, base, within):
+    assert tls_certs._email_within(address, base) is within
+
+
+@pytest.mark.parametrize(
+    ("uri", "base", "within"),
+    [
+        ("https://example.test/path", "example.test", True),
+        ("https://user@example.test:8443/", "example.test", True),
+        ("https://www.example.test/", ".example.test", True),
+        ("https://other.test/", "example.test", False),
+        ("urn:example", "example.test", False),
+    ],
+)
+def test_uri_name_constraint_matching(uri, base, within):
+    assert tls_certs._uri_within(uri, base) is within
+
+
+# --- OCSP: responder validity and the certificate ID --------------------------
+
+
+def test_ocsp_rejects_an_expired_delegated_responder(pki):
+    leaf = pki.leaves["rsa"].cert
+    delegate_key = ec.generate_private_key(ec.SECP256R1())
+    expired_delegate = issue(
+        "Expired OCSP Signer",
+        delegate_key,
+        issuer=pki.inter,
+        issuer_key=pki.inter_key,
+        eku=(ExtendedKeyUsageOID.OCSP_SIGNING,),
+        not_before=NOW - timedelta(days=30),
+        not_after=NOW - timedelta(days=1),
+    )
+    response = _ocsp_response(
+        leaf, pki.inter, expired_delegate, delegate_key, certificates=[expired_delegate]
+    )
+    outcome = evaluate_ocsp_response(response, leaf, pki.inter, now=NOW)
+    assert outcome["ocsp"] == "error"
+    assert "not signed by the issuer" in outcome["ocsp_detail"]
+
+
+def test_ocsp_requires_the_issuer_name_hash_to_match(pki):
+    leaf = pki.leaves["rsa"].cert
+    # The real issuer's key under another name, and a certificate with the
+    # leaf's serial number issued under that name: a response about it shares
+    # the leaf's serial number and issuer key hash, and only the issuer name
+    # hash tells them apart.
+    alias = issue(
+        "Probe Test Intermediate Alias",
+        pki.inter_key,
+        issuer=pki.root,
+        issuer_key=pki.root_key,
+        ca=True,
+    )
+    twin = (
+        x509.CertificateBuilder()
+        .subject_name(_name("twin.example.test"))
+        .issuer_name(alias.subject)
+        .public_key(ec.generate_private_key(ec.SECP256R1()).public_key())
+        .serial_number(leaf.serial_number)
+        .not_valid_before(NOW - timedelta(days=1))
+        .not_valid_after(NOW + timedelta(days=30))
+        .sign(pki.inter_key, hashes.SHA256())
+    )
+    response = (
+        ocsp.OCSPResponseBuilder()
+        .add_response(
+            cert=twin,
+            issuer=alias,
+            algorithm=hashes.SHA256(),
+            cert_status=ocsp.OCSPCertStatus.GOOD,
+            this_update=NOW - timedelta(hours=2),
+            next_update=NOW + timedelta(days=1),
+            revocation_time=None,
+            revocation_reason=None,
+        )
+        .responder_id(ocsp.OCSPResponderEncoding.NAME, pki.inter)
+        .sign(pki.inter_key, hashes.SHA256())
+        .public_bytes(serialization.Encoding.DER)
+    )
+    outcome = evaluate_ocsp_response(response, leaf, pki.inter, now=NOW)
+    assert outcome == {
+        "ocsp": "error",
+        "ocsp_detail": "response does not cover this certificate",
+        "revocation_time": None,
+    }
+
+
+async def test_a_malformed_url_in_the_certificate_is_an_ocsp_error_for_that_endpoint(pki):
+    key = ec.generate_private_key(ec.SECP256R1())
+    bad_ocsp = issue(
+        "bad-ocsp.example.test",
+        key,
+        issuer=pki.inter,
+        issuer_key=pki.inter_key,
+        ocsp_url="http://ocsp.example.test:abc/",
+    )
+    result = await run_step(
+        {"pem": pem_of(bad_ocsp, pki.inter), "ca_bundle": pki.root_pem, "check_ocsp": True}
+    )
+    [record] = result.output["endpoints"]
+    assert record["ocsp"] == "error"
+    assert "failed" in record["ocsp_detail"]
+
+    bad_issuer = issue(
+        "bad-issuer.example.test",
+        key,
+        issuer=pki.inter,
+        issuer_key=pki.inter_key,
+        ocsp_url="http://ocsp.example.test/",
+        issuer_url="http://ca.example.test:abc/ca.crt",
+    )
+    result = await run_step(
+        {"pem": pem_of(bad_issuer), "ca_bundle": pki.root_pem, "check_ocsp": True}
+    )
+    [record] = result.output["endpoints"]
+    assert record["ocsp"] == "unavailable"
+    assert "downloading http://ca.example.test:abc/ca.crt failed" in record["ocsp_detail"]
+
+
+# --- Endpoint identity ----------------------------------------------------------
+
+
+def test_ipv6_zones_stay_part_of_the_endpoint_key():
+    assert tls_certs.normalize_host("[FE80::1%eth0]") == "fe80::1%eth0"
+    assert tls_certs.endpoint_key("fe80::1%eth0", 443) != tls_certs.endpoint_key(
+        "fe80::1%eth1", 443
+    )
+    assert tls_certs.endpoint_key("2001:DB8::1", 443) == tls_certs.endpoint_key("2001:db8::1", 443)
+
+
+def test_fingerprint_overrides_tell_server_names_apart():
+    config = TlsProbeConfig.model_validate(
+        {
+            "expected_fingerprint": "00" * 32,
+            "expected_fingerprints": {
+                "192.0.2.10:443:a.example.test": "aa" * 32,
+                "192.0.2.10:443:B.Example.Test.": "bb" * 32,
+                "192.0.2.10:443": "cc" * 32,
+            },
+        }
+    )
+    settings = tls_check._Settings.from_config(config)
+    assert settings.expected_for("192.0.2.10", 443, "a.example.test") == "aa" * 32
+    assert settings.expected_for("192.0.2.10", 443, "b.example.test") == "bb" * 32
+    assert settings.expected_for("192.0.2.10", 443, "c.example.test") == "cc" * 32
+    assert settings.expected_for("192.0.2.10", 443, None) == "cc" * 32
+    assert settings.expected_for("192.0.2.11", 443, "a.example.test") == "00" * 32
