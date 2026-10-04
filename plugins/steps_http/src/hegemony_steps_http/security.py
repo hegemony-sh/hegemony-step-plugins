@@ -38,10 +38,15 @@ _TEMPLATE_RE = re.compile(r"\{\{|\{%")
 #: Default port per supported scheme.
 SCHEME_PORTS = {"http": 80, "https": 443}
 
-#: Cloud instance metadata services (AWS, GCP, Azure, and others on the
-#: IPv4 link-local address; AWS's IPv6 endpoint is a unique-local address).
+#: Cloud instance metadata services: AWS, GCP, Azure and others on the IPv4
+#: link-local address, AWS's IPv6 endpoint (a unique-local address), and
+#: Alibaba Cloud's (in the shared address space 100.64.0.0/10).
 _METADATA_ADDRESSES = frozenset(
-    {ipaddress.ip_address("169.254.169.254"), ipaddress.ip_address("fd00:ec2::254")}
+    {
+        ipaddress.ip_address("169.254.169.254"),
+        ipaddress.ip_address("fd00:ec2::254"),
+        ipaddress.ip_address("100.100.100.200"),
+    }
 )
 #: "This network": Linux connects 0.0.0.0/8 to the local host.
 _THIS_NETWORK = ipaddress.ip_network("0.0.0.0/8")
@@ -56,9 +61,9 @@ DROPPED_RESPONSE_HEADERS = frozenset(
 #: Replacement for a credential found in text the step reports.
 REDACTED = "[redacted]"
 
-#: Credentials shorter than this are not searched for in reported text: a
-#: one- or two-character value would mangle everything it matches.
-_MIN_SCRUB_LENGTH = 4
+#: Credentials shorter than this could not be searched for in reported text
+#: without mangling everything they match, so the step refuses them.
+MIN_SCRUB_LENGTH = 4
 
 
 class RequestRefused(Exception):
@@ -223,7 +228,8 @@ class Scrubber:
     """Replaces known credential values in text and nested JSON-shaped data."""
 
     def __init__(self, secrets: Iterable[str] = ()) -> None:
-        unique = {s for s in secrets if isinstance(s, str) and len(s) >= _MIN_SCRUB_LENGTH}
+        """Keep the credentials worth searching for, longest first."""
+        unique = {s for s in secrets if isinstance(s, str) and len(s) >= MIN_SCRUB_LENGTH}
         # Longest first, so a value containing another is replaced whole.
         self._secrets = sorted(unique, key=len, reverse=True)
 
@@ -249,6 +255,7 @@ class Scrubber:
 
 __all__ = [
     "DROPPED_RESPONSE_HEADERS",
+    "MIN_SCRUB_LENGTH",
     "REDACTED",
     "SCHEME_PORTS",
     "RequestRefused",

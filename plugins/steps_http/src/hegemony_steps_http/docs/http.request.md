@@ -61,7 +61,10 @@ reference or a template. Turn verification off only for test endpoints.
 
 Max Response Size (default 1 MiB, at most 16 MiB) is the largest response
 body the step reads, summed over all pages. A larger body fails the step; it
-is never cut short silently.
+is never cut short silently. The step asks for uncompressed, gzip or deflate
+bodies and decompresses them itself, stopping at Max Response Size, so a
+small compressed body cannot expand past it; a body in any other encoding
+fails the step.
 
 ### Extracting values
 
@@ -79,9 +82,11 @@ Page Path to where that link sits (for example `next`), Items Path to the list
 of items (for example `results`), and Max Pages above 1 (at most 100). The
 step then follows the links with GET, the same headers and credentials, until
 the link is missing, `null` or empty, or Max Pages is reached; `more_pages`
-tells which. A relative link is resolved against the page's URL. Next pages
-must stay on the first request's scheme, host and port. Pagination needs the
-GET method, and each page must be JSON with a list at Items Path.
+tells which. A relative link is resolved against the page's URL. Next pages,
+and any redirect while paginating, must stay on the first request's scheme,
+host and port, and a link back to a page already fetched stops pagination
+with an error. Pagination needs the GET method, and each page must be JSON
+with a list at Items Path.
 
 ## Output
 
@@ -125,9 +130,9 @@ status, headers, size and SHA-256 remain. Extract cannot be combined with it.
   next pages included, passes the flow's egress policy, and a request to a
   loopback, link-local, unspecified or multicast address is refused: a literal
   IP is judged as written, a host name by every address it resolves to (it is
-  refused if any of them is such an address). That covers the cloud instance
-  metadata services at `169.254.169.254` and `fd00:ec2::254`. Private network
-  addresses are left to the egress policy.
+  refused if any of them is such an address). The cloud instance metadata
+  services at `169.254.169.254`, `fd00:ec2::254` and `100.100.100.200` are
+  refused too. Private network addresses are left to the egress policy.
 - **Worker settings.** The step ignores the worker's proxy variables, `.netrc`
   and certificate-file variables: the request goes directly to the URL, and
   trusts the public authorities or CA Bundle only.
@@ -151,11 +156,13 @@ is not `http(s)` or carries credentials, both bodies or a body on GET, HEAD or
 OPTIONS, JSON Body text that is not valid JSON once rendered, an Expected
 Status that does not parse, an invalid path, a missing Secret or Username, or
 incomplete pagination settings. It also fails when a secret reference
-resolves to nothing or CA Bundle holds no certificate.
+resolves to nothing, the secret is shorter than 4 characters (too short to
+keep reliably out of the output), or CA Bundle holds no certificate.
 
 During the request it fails on a refused destination, a DNS failure, a
 connection or TLS error, a timeout, more than 10 redirects, a response over
-Max Response Size, a status outside Expected Status (output still filled in),
-or a page that is not JSON, has no list at Items Path, or links to another
-origin. A denial by the flow's egress policy fails the step with the policy's
+Max Response Size or in an encoding the step does not decode, a status
+outside Expected Status (output still filled in), or a page that is not JSON,
+has no list at Items Path, links to another origin or back to an earlier
+page, or redirects to another origin. A denial by the flow's egress policy fails the step with the policy's
 own reason.

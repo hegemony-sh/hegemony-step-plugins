@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import hashlib
 import http.server
 import json
 import threading
+import zlib
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -710,6 +712,7 @@ async def test_a_host_without_the_egress_gate_still_runs():
         ("http://[::1]/", "loopback"),
         ("http://169.254.169.254/latest/meta-data/", "metadata"),
         ("http://[fd00:ec2::254]/", "metadata"),
+        ("http://100.100.100.200/latest/meta-data/", "metadata"),
         ("http://169.254.10.1/", "link-local"),
         ("http://[fe80::1]/", "link-local"),
         ("http://0.0.0.0/", "unspecified"),
@@ -745,6 +748,8 @@ async def test_internal_destinations_are_refused_before_any_connection(url, reas
         ("255.255.255.255", True),
         ("ff02::1", True),
         ("fe80::1%eth0", True),
+        ("100.100.100.200", True),
+        ("100.64.0.1", False),
     ],
 )
 def test_blocked_address_reason(address, blocked):
@@ -1304,3 +1309,179 @@ def test_replace_at():
     assert replace_at({"x": 1}, (), [9]) == [9]
     with pytest.raises(PathError):
         replace_at({"a": 1}, parse_path("b.c"), 1)
+
+
+# --- Review follow-ups: compression, short secrets, pagination edges ----------
+
+
+def _streamed(data: bytes, chunk: int = 4096) -> AsyncIterator[bytes]:
+    """``data`` as a streamed body, the way a network response arrives."""
+
+    async def chunks() -> AsyncIterator[bytes]:
+        for start in range(0, len(data), chunk):
+            yield data[start : start + chunk]
+
+    return chunks()
+
+
+def _gzip(data: bytes) -> bytes:
+    return gzip.compress(data)
+
+
+def _deflate(data: bytes, *, raw: bool = False) -> bytes:
+    compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS if raw else zlib.MAX_WBITS)
+    return compressor.compress(data) + compressor.flush()
+
+
+@pytest.mark.parametrize(
+    ("encoding", "encode"),
+    [
+        ("gzip", _gzip),
+        ("deflate", _deflate),
+        ("deflate", lambda data: _deflate(data, raw=True)),
+    ],
+    ids=["gzip", "deflate", "raw-deflate"],
+)
+async def test_compressed_bodies_are_decoded_by_the_step(encoding, encode):
+    payload = json.dumps({"items": list(range(50))}).encode()
+    recorder = Recorder(
+        lambda request: httpx.Response(
+            200, content=_streamed(encode(payload)), headers={"Content-Encoding": encoding}
+        )
+    )
+    result = await _handler(recorder).execute(_ctx({"url": "https://api.example.test/"}))
+    assert result.success is True, result.error
+    assert result.output["data"] == {"items": list(range(50))}
+    assert result.output["size_bytes"] == len(payload)
+    assert recorder.requests[0].headers["accept-encoding"] == "gzip, deflate"
+
+
+async def test_a_compressed_body_cannot_expand_past_the_limit(monkeypatch):
+    bomb = _gzip(b"\0" * (8 * 1024 * 1024))
+    assert len(bomb) < 64 * 1024
+    produced: list[int] = []
+    real_decompressobj = zlib.decompressobj
+
+    class Tracking:
+        """Records the size of every block the step's decompressor produces."""
+
+        def __init__(self, *args: Any) -> None:
+            self._inner = real_decompressobj(*args)
+
+        def decompress(self, data: bytes, max_length: int = 0) -> bytes:
+            out = self._inner.decompress(data, max_length)
+            produced.append(len(out))
+            return out
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(request_module.zlib, "decompressobj", Tracking)
+    recorder = Recorder(
+        lambda request: httpx.Response(
+            200, content=_streamed(bomb), headers={"Content-Encoding": "gzip"}
+        )
+    )
+    result = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/", "max_response_bytes": 4096})
+    )
+    assert result.success is False
+    assert "larger than Max Response Size (4096 bytes)" in (result.error or "")
+    # Decompression stopped at the budget instead of inflating the whole body.
+    assert produced and max(produced) <= 4097
+    assert sum(produced) <= 4097
+
+
+async def test_an_encoding_the_step_does_not_decode_fails_the_step():
+    recorder = Recorder(
+        lambda request: httpx.Response(
+            200, content=_streamed(b"xyz"), headers={"Content-Encoding": "br"}
+        )
+    )
+    result = await _handler(recorder).execute(_ctx({"url": "https://api.example.test/"}))
+    assert result.success is False
+    assert "content encoding 'br'" in (result.error or "")
+
+
+async def test_a_corrupt_compressed_body_fails_the_step():
+    recorder = Recorder(
+        lambda request: httpx.Response(
+            200, content=_streamed(b"not gzip at all"), headers={"Content-Encoding": "gzip"}
+        )
+    )
+    result = await _handler(recorder).execute(_ctx({"url": "https://api.example.test/"}))
+    assert result.success is False
+    assert "not valid gzip data" in (result.error or "")
+
+
+async def test_a_secret_too_short_to_redact_is_refused_before_sending():
+    recorder = Recorder(lambda request: httpx.Response(200))
+    result = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/", "auth_type": "bearer", "auth_secret": "abc"})
+    )
+    assert result.success is False
+    assert "shorter than 4 characters" in (result.error or "")
+    assert "abc" not in _everything(result)
+    assert recorder.requests == []
+
+
+async def test_a_blank_next_page_link_ends_pagination():
+    recorder = _pages({"/items": "   "})
+    result = await _handler(recorder).execute(
+        _ctx(
+            {
+                "url": "https://api.example.test/items",
+                "paginate_next": "next",
+                "paginate_items": "results",
+                "max_pages": 5,
+            }
+        )
+    )
+    assert result.success is True, result.error
+    assert recorder.urls == ["https://api.example.test/items"]
+    assert result.output["more_pages"] is False
+
+
+async def test_a_next_page_link_back_to_a_fetched_page_stops_pagination():
+    recorder = _pages({"/items": "/items?page=2", "/items?page=2": "/items"})
+    result = await _handler(recorder).execute(
+        _ctx(
+            {
+                "url": "https://api.example.test/items",
+                "paginate_next": "next",
+                "paginate_items": "results",
+                "max_pages": 5,
+            }
+        )
+    )
+    assert result.success is False
+    assert "page 2 links back to a page already fetched" in (result.error or "")
+    assert len(recorder.requests) == 2
+
+
+async def test_a_redirect_off_the_first_origin_is_refused_while_paginating():
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.example.test" and request.url.query:
+            return httpx.Response(302, headers={"Location": "https://other.example.test/x"})
+        if request.url.host == "other.example.test":
+            return _json_response({"next": None, "results": ["foreign"]})
+        return _json_response({"next": "/items?page=2", "results": ["first"]})
+
+    recorder = Recorder(respond)
+    result = await _handler(recorder).execute(
+        _ctx(
+            {
+                "url": "https://api.example.test/items",
+                "paginate_next": "next",
+                "paginate_items": "results",
+                "max_pages": 5,
+                "follow_redirects": True,
+                "expected_status": "200-299",
+            }
+        )
+    )
+    assert result.success is False
+    assert "refused a redirect to https://other.example.test while paginating" in (
+        result.error or ""
+    )
+    assert all(r.url.host == "api.example.test" for r in recorder.requests)

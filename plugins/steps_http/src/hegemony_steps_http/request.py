@@ -21,6 +21,7 @@ import json
 import re
 import ssl
 import time
+import zlib
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any, Literal
@@ -40,6 +41,7 @@ from hegemony_step_sdk import (
 
 from .jsonpath import PathError, get_path, parse_path, replace_at
 from .security import (
+    MIN_SCRUB_LENGTH,
     SCHEME_PORTS,
     RequestRefused,
     Scrubber,
@@ -58,6 +60,15 @@ HANDLER_ID = "http.request"
 BODYLESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 MIB = 1024 * 1024
+#: Content encodings the step decodes itself, within the size budget; it asks
+#: servers for nothing else.
+ACCEPT_ENCODING = "gzip, deflate"
+_GZIP_ENCODINGS = frozenset({"gzip", "x-gzip"})
+_IDENTITY_ENCODINGS = frozenset({"", "identity"})
+#: Raw bytes a compressed body may take beyond the decoded budget (headers,
+#: trailers and incompressible blocks), so a stream that expands to nothing
+#: cannot be read forever.
+_RAW_SLACK_BYTES = MIB
 DEFAULT_MAX_RESPONSE_BYTES = MIB
 MAX_RESPONSE_BYTES_LIMIT = 16 * MIB
 MAX_PAGES_LIMIT = 100
@@ -442,6 +453,7 @@ def _json_body(config: HttpRequestConfig) -> tuple[bool, Any]:
 
 
 def _paths_errors(config: HttpRequestConfig) -> list[str]:
+    """Errors in the Extract paths and the pagination paths (empty when valid)."""
     errors: list[str] = []
     for name, path in config.extract.items():
         if not _EXTRACT_NAME_RE.match(name):
@@ -473,6 +485,7 @@ def config_errors(config: HttpRequestConfig, *, allow_templates: bool) -> list[s
     errors: list[str] = []
 
     def unchecked(value: Any) -> bool:
+        """Whether ``value`` is left for the check after rendering."""
         return allow_templates and is_templated(value)
 
     error = _url_error(config.url, allow_templates=allow_templates)
@@ -604,6 +617,7 @@ class _Exchange:
     elapsed_ms: int = 0
 
     def record(self) -> dict[str, Any]:
+        """The exchange as recorded in the evidence."""
         return {
             "method": self.method,
             "url": self.url,
@@ -640,42 +654,112 @@ class _Page:
             return False, None
 
 
-class _ResponseTooLarge(Exception):
+class _BodyError(Exception):
+    """The response body cannot be used: too large, or not decodable."""
+
+
+class _ResponseTooLarge(_BodyError):
     """The response body exceeds the step's byte budget."""
 
 
 def _elapsed_ms(started: float) -> int:
+    """Milliseconds since ``started`` (a ``time.perf_counter()`` value), rounded."""
     return round((time.perf_counter() - started) * 1000)
 
 
-async def _read_body(response: httpx.Response, remaining: int, limit_text: str) -> bytes:
-    """The response body, read in chunks and refused once it passes ``remaining`` bytes.
+class _BoundedDecoder:
+    """Decompress a gzip or deflate body without ever producing more than the budget.
 
+    The step reads the raw body and decodes it here rather than letting httpx
+    decode it, because httpx inflates each chunk in full before the size
+    check could see it: a small compressed body could expand to gigabytes.
+    """
+
+    def __init__(self, encoding: str, too_large: str) -> None:
+        """Start decoding ``encoding``; ``too_large`` is the error once the budget is passed."""
+        self._encoding = encoding
+        self._too_large = too_large
+        self._raw_deflate = False
+        self._started = False
+        gzip = encoding in _GZIP_ENCODINGS
+        self._decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16 if gzip else zlib.MAX_WBITS)
+
+    def decode(self, data: bytes, room: int) -> bytes:
+        """The decompressed form of ``data``; raises once more than ``room`` bytes come out."""
+        out = bytearray()
+        pending = data
+        while pending and not self._decompressor.eof:
+            try:
+                chunk = self._decompressor.decompress(pending, room - len(out) + 1)
+            except zlib.error:
+                if self._encoding == "deflate" and not self._started and not self._raw_deflate:
+                    # Some servers send raw deflate without the zlib wrapper.
+                    self._raw_deflate = True
+                    self._decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+                    continue
+                raise _BodyError(f"the response body is not valid {self._encoding} data") from None
+            self._started = True
+            out.extend(chunk)
+            if len(out) > room:
+                raise _ResponseTooLarge(self._too_large)
+            tail = self._decompressor.unconsumed_tail
+            if not chunk and tail == pending:
+                break
+            pending = tail
+        return bytes(out)
+
+
+async def _read_body(response: httpx.Response, remaining: int, limit_text: str) -> bytes:
+    """The response body, decoded, and refused once it passes ``remaining`` bytes.
+
+    The raw body is read in chunks and decoded here (identity, gzip or
+    deflate), so neither the raw nor the decoded body can outgrow the budget.
     A declared Content-Length over the budget is refused before reading,
     unless the response has no body by definition (HEAD, 204, 304) or is
     compressed (the declared length is not the decoded one).
     """
+    too_large = (
+        f"the response body is larger than {limit_text}; raise Max Response Size or request less"
+    )
     declared = response.headers.get("content-length", "")
     encoding = response.headers.get("content-encoding", "identity").strip().lower()
     has_body = response.request.method != "HEAD" and response.status_code not in {204, 304}
-    if (
-        has_body
-        and encoding in {"", "identity"}
-        and declared.isdigit()
-        and int(declared) > remaining
-    ):
+    identity = encoding in _IDENTITY_ENCODINGS
+    if has_body and identity and declared.isdigit() and int(declared) > remaining:
         raise _ResponseTooLarge(
             f"the response body ({declared} bytes) is larger than {limit_text}; raise "
             "Max Response Size or request less"
         )
+    if response.is_stream_consumed:
+        # Only an in-process transport hands back a body already read (and
+        # decoded by httpx); a network response is always still a stream.
+        content = response.content
+        if len(content) > remaining:
+            raise _ResponseTooLarge(too_large)
+        return content
+    decoder: _BoundedDecoder | None = None
+    if not identity and (encoding in _GZIP_ENCODINGS or encoding == "deflate"):
+        decoder = _BoundedDecoder(encoding, too_large)
     body = bytearray()
-    async for chunk in response.aiter_bytes():
-        body.extend(chunk)
-        if len(body) > remaining:
-            raise _ResponseTooLarge(
-                f"the response body is larger than {limit_text}; raise Max Response Size or "
-                "request less"
+    raw_total = 0
+    async for raw in response.aiter_raw():
+        if not raw:
+            continue
+        if not identity and decoder is None:
+            raise _BodyError(
+                f"the response uses content encoding {encoding!r}, which this step does not "
+                f"decode (it asks for {ACCEPT_ENCODING} or none); remove any Accept-Encoding "
+                "header that asks for it"
             )
+        raw_total += len(raw)
+        if decoder is None:
+            body.extend(raw)
+        else:
+            if raw_total > remaining + _RAW_SLACK_BYTES:
+                raise _ResponseTooLarge(too_large)
+            body.extend(decoder.decode(raw, remaining - len(body)))
+        if len(body) > remaining:
+            raise _ResponseTooLarge(too_large)
     return bytes(body)
 
 
@@ -711,6 +795,7 @@ class HttpRequestHandler(BaseHandler):
     default_config = {"method": "GET", "expected_status": "200-299"}
 
     def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        """Use ``transport`` instead of the network (tests only)."""
         # Tests route the client through a mock transport; the host passes nothing.
         self._transport = transport
 
@@ -722,6 +807,7 @@ class HttpRequestHandler(BaseHandler):
         return config_errors(HttpRequestConfig.model_validate(config), allow_templates=True)
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
+        """Validate the rendered config, resolve credentials and TLS trust, then send."""
         errors = self.validate_config(ctx.config)
         config: HttpRequestConfig | None = None
         if not errors:
@@ -758,6 +844,11 @@ class HttpRequestHandler(BaseHandler):
             field="auth_secret",
             source=f"{HANDLER_ID}.auth_secret",
         )
+        if len(secret) < MIN_SCRUB_LENGTH:
+            raise ValueError(
+                f"auth_secret resolved to a value shorter than {MIN_SCRUB_LENGTH} characters, "
+                "too short to keep reliably out of the step's output; use a longer secret"
+            )
         # A basic-auth password is base64-encoded; any other secret is sent as is.
         if config.auth_type != "basic" and _header_value_error("auth_secret", secret):
             raise ValueError(
@@ -801,6 +892,7 @@ class HttpRequestHandler(BaseHandler):
         verify: Any,
         json_body: tuple[bool, Any],
     ) -> HandlerResult:
+        """Send the request (and next pages), then build the output, evidence and result."""
         scrub = Scrubber(credentials.secrets)
         ranges = parse_status_spec(config.expected_status)
         paginating = config.max_pages > 1
@@ -857,6 +949,8 @@ class HttpRequestHandler(BaseHandler):
             "follow_redirects": False,
             "timeout": httpx.Timeout(config.timeout_sec),
             "event_hooks": {"request": [gate]},
+            # Only what _read_body can decode within the size budget.
+            "headers": {"Accept-Encoding": ACCEPT_ENCODING},
         }
         if self._transport is not None:
             client_options["transport"] = self._transport
@@ -874,6 +968,7 @@ class HttpRequestHandler(BaseHandler):
             request = client.build_request(config.method, url, headers=headers, content=content)
             origin = request.url
             sent_header_names = sorted({name.lower() for name in request.headers})
+            fetched = {str(origin)}
             try:
                 while True:
                     used = sum(len(page.body) for page in pages)
@@ -885,6 +980,7 @@ class HttpRequestHandler(BaseHandler):
                         remaining=config.max_response_bytes - used,
                         limit_text=limit_text,
                         credential_header=credentials.header,
+                        stay_at=origin if paginating else None,
                     )
                     pages.append(page)
                     status = page.exchange.status or 0
@@ -912,6 +1008,8 @@ class HttpRequestHandler(BaseHandler):
                     if len(pages) == 1:
                         combined = data
                     next_link = get_path(data, next_path)
+                    if isinstance(next_link, str):
+                        next_link = next_link.strip()
                     if next_link is None or next_link == "":
                         break
                     if not isinstance(next_link, str):
@@ -924,7 +1022,7 @@ class HttpRequestHandler(BaseHandler):
                         more_pages = True
                         break
                     try:
-                        next_url = page.url.join(next_link.strip())
+                        next_url = page.url.join(next_link)
                     except (httpx.InvalidURL, ValueError) as exc:
                         failure = f"page {len(pages)} has an invalid next-page URL: {exc}"
                         break
@@ -935,10 +1033,17 @@ class HttpRequestHandler(BaseHandler):
                             "keep the first request's scheme, host and port)"
                         )
                         break
+                    if str(next_url) in fetched:
+                        failure = (
+                            f"page {len(pages)} links back to a page already fetched, so "
+                            "pagination stopped"
+                        )
+                        break
+                    fetched.add(str(next_url))
                     request = client.build_request("GET", next_url, headers=headers)
             except (
                 RequestRefused,
-                _ResponseTooLarge,
+                _BodyError,
                 httpx.HTTPError,
                 httpx.InvalidURL,
                 TimeoutError,
@@ -1033,8 +1138,13 @@ class HttpRequestHandler(BaseHandler):
         remaining: int,
         limit_text: str,
         credential_header: str | None,
+        stay_at: httpx.URL | None = None,
     ) -> _Page:
-        """Send ``request``, following redirects when configured; the final response, read."""
+        """Send ``request``, following redirects when configured; the final response, read.
+
+        With ``stay_at`` (while paginating), a redirect away from that URL's
+        scheme, host and port is refused, as a next-page link would be.
+        """
         hops = 0
         while True:
             exchange = _Exchange(method=request.method, url=str(request.url))
@@ -1072,6 +1182,12 @@ class HttpRequestHandler(BaseHandler):
                     f"refused to follow a redirect to a {next_request.url.scheme!r} URL: only "
                     "http and https are supported"
                 )
+            if stay_at is not None and not same_origin(next_request.url, stay_at):
+                raise RequestRefused(
+                    f"refused a redirect to {next_request.url.scheme}://"
+                    f"{next_request.url.netloc.decode('ascii')} while paginating (every page "
+                    "must keep the first request's scheme, host and port)"
+                )
             if not same_origin(next_request.url, request.url):
                 _strip_for_new_origin(next_request.headers, config.headers, credential_header)
             request = next_request
@@ -1079,7 +1195,7 @@ class HttpRequestHandler(BaseHandler):
 
 def _describe_error(exc: BaseException, timeout_sec: int) -> str:
     """A step error for a request that failed before a usable response."""
-    if isinstance(exc, (RequestRefused, _ResponseTooLarge)):
+    if isinstance(exc, (RequestRefused, _BodyError)):
         return str(exc)
     if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
         return f"the request timed out after {timeout_sec} s"
