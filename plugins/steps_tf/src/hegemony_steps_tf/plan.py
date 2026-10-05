@@ -53,6 +53,7 @@ from .common import (
     RUN_SCRIPT,
     SECRET_VARS_FILE,
     SHA256_RE,
+    TF_ROOT,
     VARS_FILE,
     Engine,
     LockTimeout,
@@ -85,8 +86,13 @@ from .common import (
 from .summary import plan_line, summarize_plan
 
 PLAN_EXIT_FILE = f"{OUTPUT_DIR}/plan-exitcode"
-#: ``sha256sum`` of the saved plan, taken as soon as the tool wrote it:
-#: tf.apply applies the plan only while it still matches.
+#: Where the tool saves the plan: this container's own folder, which no other
+#: step can write. The digest, the readable plan and the JSON plan all come
+#: from this one file, which is then copied to the shared working directory
+#: for tf.apply.
+PLAN_SNAPSHOT_FILE = f"{TF_ROOT}/{PLAN_FILE}"
+#: ``sha256sum`` of the saved plan: tf.apply applies the shared copy only while
+#: it still matches.
 PLAN_SHA256_FILE = f"{OUTPUT_DIR}/plan.sha256"
 PLAN_TEXT_FILE = f"{OUTPUT_DIR}/plan.txt"
 #: The JSON plan is by far the largest file, and collection shares one byte
@@ -301,7 +307,7 @@ def build_plan_script(
         "-no-color",
         "-detailed-exitcode",
         f"-lock-timeout={config.lock_timeout.strip()}",
-        f"-out={PLAN_FILE}",
+        f"-out={PLAN_SNAPSHOT_FILE}",
     ]
     if config.destroy:
         plan.append("-destroy")
@@ -349,10 +355,11 @@ def build_plan_script(
         "set -e",
         'if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi',
         f'printf "%s" "$code" > {PLAN_EXIT_FILE}',
-        f"sha256sum {PLAN_FILE} > {PLAN_SHA256_FILE}",
-        f"{run}{tf} show -no-color {PLAN_FILE} > {PLAN_TEXT_FILE}",
+        f"sha256sum {PLAN_SNAPSHOT_FILE} > {PLAN_SHA256_FILE}",
+        f"cp {PLAN_SNAPSHOT_FILE} {PLAN_FILE}",
+        f"{run}{tf} show -no-color {PLAN_SNAPSHOT_FILE} > {PLAN_TEXT_FILE}",
         f"mkdir -p {PLAN_JSON_DIR} {PLAN_OUTPUTS_DIR}",
-        f"{run}{tf} show -json {PLAN_FILE} > {PLAN_JSON_FILE}",
+        f"{run}{tf} show -json {PLAN_SNAPSHOT_FILE} > {PLAN_JSON_FILE}",
         # For a tf.apply with nothing to apply; the plan is made without them.
         f"if ! {run}{tf} output -json > {PLAN_OUTPUTS_FILE}; then rm -f {PLAN_OUTPUTS_FILE}; fi",
     ]

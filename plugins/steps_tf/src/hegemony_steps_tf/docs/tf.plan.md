@@ -99,9 +99,11 @@ plan-only flow needs no shared affinity. The saved plan contains every variable 
 included; it stays inside the run's workspace, which is deleted when the run
 ends.
 
-Every container step in the run can write the shared workspace, so the plan
-records the saved plan's SHA-256 digest as soon as the tool writes it, and
-`tf.apply` applies the plan only while it still has that digest.
+Every container step in the run can write the shared workspace, so the tool
+saves the plan in the step container's own folder first. The SHA-256 digest,
+the readable plan and the JSON plan all come from that one file, which is then
+copied to the shared workspace; `tf.apply` applies the shared copy only while
+it still has that digest.
 
 The working directory and the apply's lookup of the plan are per step, not
 per execution, so `tf.plan` and `tf.apply` cannot be in the body of a loop

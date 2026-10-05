@@ -80,6 +80,8 @@ from hegemony_steps_tf.plan import (
     PLAN_OUTPUTS_DIR,
     PLAN_OUTPUTS_FILE,
     PLAN_SHA256_FILE,
+    PLAN_SNAPSHOT_FILE,
+    PLAN_TEXT_FILE,
     TfPlanConfig,
     TfPlanHandler,
     build_plan_script,
@@ -236,7 +238,7 @@ def test_plan_script_for_backend_state():
     plan = next(line for line in script.splitlines() if line.startswith("tofu plan"))
     for part in (
         "-detailed-exitcode",
-        "-out=plan.tfplan",
+        f"-out={PLAN_SNAPSHOT_FILE}",
         "-target=aws_vpc.main",
         "-replace=aws_instance.web",
         "-var-file=/attachments/terraform/prod.tfvars",
@@ -244,7 +246,7 @@ def test_plan_script_for_backend_state():
         f"-var-file={SECRET_VARS_FILE}",
     ):
         assert part in plan
-    assert "tofu show -json plan.tfplan > /hegemony/plan-json/plan.json" in script
+    assert f"tofu show -json {PLAN_SNAPSHOT_FILE} > /hegemony/plan-json/plan.json" in script
     assert f". {SECRET_ENV_FILE}" in script
     _assert_parses(script)
 
@@ -610,8 +612,15 @@ async def test_plan_step_reports_changes(monkeypatch):
     assert 'backend "local"' in roots[BACKEND_OVERRIDE_FILE]
     assert "\nbounded tofu plan " in roots[RUN_SCRIPT]
     script = roots[RUN_SCRIPT]
-    hashed = script.index(f"\nsha256sum plan.tfplan > {PLAN_SHA256_FILE}\n")
-    assert script.index("\nbounded tofu plan ") < hashed < script.index("\nbounded tofu show ")
+    # The tool saves the plan in the container's own folder; the digest and
+    # both readable forms come from that file, and only then is it shared.
+    assert f" -out={PLAN_SNAPSHOT_FILE} " in script
+    hashed = script.index(f"\nsha256sum {PLAN_SNAPSHOT_FILE} > {PLAN_SHA256_FILE}\n")
+    shared = script.index(f"\ncp {PLAN_SNAPSHOT_FILE} plan.tfplan\n")
+    assert script.index("\nbounded tofu plan ") < hashed < shared
+    assert shared < script.index("\nbounded tofu show ")
+    assert f"\nbounded tofu show -no-color {PLAN_SNAPSHOT_FILE} > " in script
+    assert f"\nbounded tofu show -json {PLAN_SNAPSHOT_FILE} > " in script
     create = next(call for call in state["calls"] if call[1] == "create")
     assert "hegemony.handler_id=tf.plan" in create
     assert not any("resolved-" in part for part in create)
@@ -1625,8 +1634,9 @@ def test_plan_script_does_not_fail_on_its_outputs(tmp_path, output_code):
     tool.write_text(
         f"""#!/bin/sh
 case "$1" in
-  plan) echo plan > plan.tfplan; exit 2 ;;
-  show) echo '{{}}' ;;
+  plan) for arg; do case "$arg" in -out=*) out="${{arg#-out=}}" ;; esac; done
+        echo plan > "$out"; exit 2 ;;
+  show) for arg; do last="$arg"; done; cat "$last" ;;
   output) echo '{{"a": {{"value": 1}}}}'; exit {output_code} ;;
 esac
 """
@@ -1649,7 +1659,11 @@ esac
     assert done.returncode == 0, done.stderr
     assert (root / "hegemony" / "out" / "plan-exitcode").read_text() == "2"
     digest = hashlib.sha256(b"plan\n").hexdigest()
-    assert (root / PLAN_SHA256_FILE.lstrip("/")).read_text() == f"{digest}  plan.tfplan\n"
+    snapshot = root / PLAN_SNAPSHOT_FILE.lstrip("/")
+    assert (root / PLAN_SHA256_FILE.lstrip("/")).read_text() == f"{digest}  {snapshot}\n"
+    # The shared copy for tf.apply, and a readable plan of the same file.
+    assert (root / "shared" / "tf" / "plan" / "plan.tfplan").read_text() == "plan\n"
+    assert (root / PLAN_TEXT_FILE.lstrip("/")).read_text() == "plan\n"
     outputs = root / PLAN_OUTPUTS_FILE.lstrip("/")
     assert outputs.exists() is (output_code == 0)
 
