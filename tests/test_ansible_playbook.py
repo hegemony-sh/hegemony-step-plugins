@@ -1104,6 +1104,24 @@ async def test_secret_values_are_staged_as_data_not_templates(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_extra_vars_are_staged_as_data_not_templates(monkeypatch):
+    # By the time the step runs the platform has rendered the extra variables,
+    # so a run input such as this one reaches the handler as plain text.
+    injected = "{{ lookup('pipe', 'id') }}"
+    state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
+    config = {
+        "playbook": "site.yml",
+        "device_credentials": False,
+        "extra_vars": {"release": "1.2", "note": injected},
+    }
+    result = await AnsiblePlaybookHandler().execute(_ctx(config, [_device("r1")]))
+    assert result.success is True, result.error
+    staged = json.loads(state["roots"]["/hegemony/ansible/extra_vars.json"])
+    assert staged == {"release": "1.2", "note": literal(injected)}
+    assert "{{ lookup" not in state["roots"]["/hegemony/ansible/extra_vars.json"]
+
+
+@pytest.mark.asyncio
 async def test_run_scope_includes_every_role(monkeypatch):
     state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
     result = await AnsiblePlaybookHandler().execute(

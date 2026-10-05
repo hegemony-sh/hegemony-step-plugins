@@ -156,7 +156,8 @@ class AnsiblePlaybookConfig(ContainerExecutionConfig):
         title="Extra variables",
         description=(
             "NAME=value, one per line, passed as extra variables (highest precedence). "
-            "Values may use templates such as {{ inputs.service }}."
+            "Values may use templates such as {{ inputs.service }}; Ansible reads the "
+            "result as plain text and does not template it again."
         ),
         json_schema_extra={
             "x_widget": "env-vars",
@@ -804,7 +805,10 @@ class AnsiblePlaybookHandler(BaseHandler):
             vault_files[label] = path
 
         if config.extra_vars:
-            files.append(_json_file(EXTRA_VARS_FILE, config.extra_vars))
+            # Extra variables are data too: by now the platform has rendered
+            # their templates, so a value can carry a run input or another
+            # step's output, and Ansible must not template that text again.
+            files.append(_json_file(EXTRA_VARS_FILE, literal(config.extra_vars)))
         if secrets:
             # Secret values are data: escaped so Ansible never runs them.
             files.append(_json_file(SECRETS_FILE, literal(secrets)))
