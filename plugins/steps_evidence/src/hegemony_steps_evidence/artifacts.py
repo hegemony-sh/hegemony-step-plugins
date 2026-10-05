@@ -164,3 +164,21 @@ def capture_labels(keys: Iterable[CaptureKey]) -> dict[CaptureKey, str]:
             if counts[labels[key]] > 1:
                 labels[key] = render(key)
     return labels
+
+
+def capture_error(artifact: dict[str, Any]) -> str | None:
+    """The error a failed capture recorded instead of its output; None when it worked.
+
+    A collect step stores a device it could not reach as an ``error``
+    artifact, and a failed command as output whose record says
+    ``success: false``.
+    """
+    if artifact.get("kind") == "error":
+        meta = artifact.get("content_json")
+        if isinstance(meta, dict) and meta.get("error"):
+            return str(meta["error"])
+        return str(artifact.get("content_text") or "collection failed")
+    meta = _command_metadata(artifact)
+    if meta is not None and meta.get("success") is False:
+        return str(meta.get("error") or f"exit code {meta.get('exit_code')}")
+    return None

@@ -5,8 +5,10 @@
 """CompareEvidenceHandler: compare artifacts between steps."""
 
 import difflib
+import json
 import logging
 import re
+from collections.abc import Iterable
 from fnmatch import fnmatch
 from typing import Any, Literal
 
@@ -20,7 +22,13 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
-from .artifacts import capture_labels, latest_artifact, latest_by_capture
+from .artifacts import (
+    CaptureKey,
+    capture_error,
+    capture_labels,
+    latest_artifact,
+    latest_by_capture,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +38,22 @@ logger = logging.getLogger(__name__)
 # run, and cap how much text they run against.
 _MAX_IGNORE_PATTERNS = 50
 _MAX_MASK_INPUT_CHARS = 1_000_000
+
+#: How many labels an error message names before it summarizes the rest.
+_PREVIEW_LABELS = 5
+
+
+def _content(artifact: dict[str, Any]) -> Any:
+    """An artifact's content: its text (CLI output), else its JSON content."""
+    text = artifact.get("content_text")
+    return text if text is not None else artifact.get("content_json")
+
+
+def _preview(labels: list[str]) -> str:
+    """The first few labels, comma-separated, then how many more there are."""
+    shown = ", ".join(labels[:_PREVIEW_LABELS])
+    rest = len(labels) - _PREVIEW_LABELS
+    return f"{shown} and {rest} more" if rest > 0 else shown
 
 
 class CompareEvidenceConfig(BaseModel):
@@ -65,16 +89,19 @@ class CompareEvidenceConfig(BaseModel):
             "'exact': pass only when they are identical — a difference FAILS the "
             "step (drift / no-change checks). 'changed': pass only when they "
             "differ — a difference SUCCEEDS the step (confirm an intended change "
-            "actually took effect). 'subset' / 'superset' / 'json_diff' compare "
-            "structured (dict/list) evidence."
+            "actually took effect). 'subset': pass when every precheck line (or "
+            "list item, or dict key and value) is still in the postcheck. "
+            "'superset': as subset, and the postcheck adds at least one. "
+            "'json_diff': parse JSON text on both sides and compare the "
+            "structures; output that is not JSON must match exactly."
         ),
         json_schema_extra={
             "x_option_labels": {
                 "exact": "Must match — a difference fails the step",
                 "changed": "Must differ — a difference passes the step",
-                "subset": "Postcheck contains the precheck (structured)",
-                "superset": "Postcheck extends the precheck (structured)",
-                "json_diff": "Structured JSON diff (must match)",
+                "subset": "Postcheck keeps every precheck line",
+                "superset": "Postcheck keeps every precheck line and adds more",
+                "json_diff": "JSON structures must match",
             },
         },
     )
@@ -84,7 +111,7 @@ class CompareEvidenceConfig(BaseModel):
         description=(
             "Compare a single artifact by its exact name (e.g. "
             "'dc1-core-01:show running-config'). Leave blank to compare every "
-            "artifact the two steps share."
+            "precheck artifact with its postcheck pair."
         ),
         json_schema_extra={"x_placeholder": "device:command"},
     )
@@ -113,7 +140,8 @@ class CompareEvidenceConfig(BaseModel):
         default_factory=list,
         title="Ignore fields",
         description=(
-            "Structured (dict) evidence only: keys removed from both sides before comparing."
+            "Structured (dict) evidence, and JSON output in the JSON diff mode: "
+            "top-level keys removed from both sides before comparing."
         ),
     )
 
@@ -218,8 +246,8 @@ class CompareEvidenceHandler(BaseHandler):
                 summary="Missing precheck evidence",
             )
 
-        # If artifact_name is specified, filter to just that artifact
-        # Otherwise, compare all artifacts with matching names
+        # If artifact_name is specified, filter to just that artifact.
+        # Otherwise, compare every precheck artifact with its postcheck pair.
         if artifact_name:
             precheck_filtered = [a for a in precheck_artifacts if a.get("name") == artifact_name]
             postcheck_filtered = [a for a in postcheck_artifacts if a.get("name") == artifact_name]
@@ -251,22 +279,14 @@ class CompareEvidenceHandler(BaseHandler):
                     error="Failed to select artifacts for comparison",
                     summary="Missing comparison artifacts",
                 )
-            # Prefer content_text for CLI output (actual command output) over content_json (metadata)
-            precheck_text = precheck_latest.get("content_text")
-            precheck_content = (
-                precheck_text if precheck_text is not None else precheck_latest.get("content_json")
-            )
-            postcheck_text = postcheck_latest.get("content_text")
-            postcheck_content = (
-                postcheck_text
-                if postcheck_text is not None
-                else postcheck_latest.get("content_json")
-            )
-
-            passed, diff_details = self._compare(
-                precheck_content, postcheck_content, comparison_type, ignore_fields, compiled_ignore
+            passed, diff_details = self._compare_captures(
+                precheck_latest, postcheck_latest, comparison_type, ignore_fields, compiled_ignore
             )
             artifacts_compared = [artifact_name]
+            failed_labels = [] if passed else [artifact_name]
+            capture_failed = [artifact_name] if "postcheck_error" in diff_details else []
+            missing_in_postcheck: list[str] = []
+            only_in_postcheck: list[str] = []
         else:
             # Pair the two sides by device and full command (artifact names
             # shorten the command, so two commands can share one), keeping
@@ -276,40 +296,38 @@ class CompareEvidenceHandler(BaseHandler):
             postcheck_by_key = latest_by_capture(postcheck_artifacts)
             labels = capture_labels(precheck_by_key.keys() | postcheck_by_key.keys())
 
-            common_keys = sorted(
-                precheck_by_key.keys() & postcheck_by_key.keys(), key=lambda key: labels[key]
-            )
-            if not common_keys:
-                return HandlerResult(
-                    success=False,
-                    error="No matching artifacts found between precheck and postcheck steps",
-                    summary="No artifacts to compare",
-                )
+            def by_label(keys: Iterable[CaptureKey]) -> list[CaptureKey]:
+                return sorted(keys, key=lambda key: labels[key])
 
-            all_passed = True
-            all_diffs = {}
+            common_keys = by_label(precheck_by_key.keys() & postcheck_by_key.keys())
+            # A precheck item the postcheck lacks fails the comparison: the
+            # device or command it covered was not checked after the change.
+            missing_in_postcheck = [
+                labels[key] for key in by_label(precheck_by_key.keys() - postcheck_by_key.keys())
+            ]
+            only_in_postcheck = [
+                labels[key] for key in by_label(postcheck_by_key.keys() - precheck_by_key.keys())
+            ]
+
+            diff_details = {}
+            failed_labels = []
+            capture_failed = []
             for key in common_keys:
-                # Prefer content_text for CLI output (actual command output) over content_json (metadata)
-                pre_text = precheck_by_key[key].get("content_text")
-                pre_content = (
-                    pre_text if pre_text is not None else precheck_by_key[key].get("content_json")
+                item_passed, diff = self._compare_captures(
+                    precheck_by_key[key],
+                    postcheck_by_key[key],
+                    comparison_type,
+                    ignore_fields,
+                    compiled_ignore,
                 )
-                post_text = postcheck_by_key[key].get("content_text")
-                post_content = (
-                    post_text
-                    if post_text is not None
-                    else postcheck_by_key[key].get("content_json")
-                )
-                passed, diff = self._compare(
-                    pre_content, post_content, comparison_type, ignore_fields, compiled_ignore
-                )
-                all_diffs[labels[key]] = {"passed": passed, "diff": diff}
-                if not passed:
-                    all_passed = False
+                diff_details[labels[key]] = {"passed": item_passed, "diff": diff}
+                if not item_passed:
+                    failed_labels.append(labels[key])
+                if "postcheck_error" in diff:
+                    capture_failed.append(labels[key])
 
-            passed = all_passed
-            diff_details = all_diffs
             artifacts_compared = [labels[key] for key in common_keys]
+            passed = bool(common_keys) and not failed_labels and not missing_in_postcheck
 
         evidence = [
             {
@@ -317,6 +335,8 @@ class CompareEvidenceHandler(BaseHandler):
                 "name": f"compare_evidence_{precheck_step_id}_vs_{postcheck_step_id or 'current'}",
                 "content_json": {
                     "artifacts_compared": artifacts_compared,
+                    "missing_in_postcheck": missing_in_postcheck,
+                    "only_in_postcheck": only_in_postcheck,
                     "comparison_type": comparison_type,
                     "match": passed,  # UI uses 'match' for display
                     "passed": passed,
@@ -334,38 +354,63 @@ class CompareEvidenceHandler(BaseHandler):
         # would read backwards.
         changed_mode = comparison_type == "changed"
         n = len(artifacts_compared)
+        one_sided = []
+        if missing_in_postcheck:
+            one_sided.append(f"{len(missing_in_postcheck)} missing in postcheck")
+        if only_in_postcheck:
+            one_sided.append(f"{len(only_in_postcheck)} only in postcheck")
+
         if passed:
             outcome = "changed as expected" if changed_mode else "matched"
             return HandlerResult(
                 success=True,
-                summary=f"Evidence comparison passed: {n} artifact(s) {outcome}",
+                summary="; ".join(
+                    [f"Evidence comparison passed: {n} artifact(s) {outcome}", *one_sided]
+                ),
                 evidence=evidence,
             )
-        else:
-            # For a single artifact_name comparison, diff_details is one
-            # comparison dict (not the {name: {...}} map), so exactly one
-            # artifact failed. Only the multi-artifact path counts per-name.
-            failed_count = (
-                1
-                if artifact_name
-                else sum(
-                    1
-                    for d in (diff_details.values() if isinstance(diff_details, dict) else [])
-                    if isinstance(d, dict) and not d.get("passed", True)
-                )
-            )
+
+        mismatched = len(failed_labels) - len(capture_failed)
+
+        reasons = []
+        summary_parts = []
+        if mismatched:
             if changed_mode:
-                error = "Evidence comparison failed: no change detected"
-                summary = f"No change in {failed_count} of {n} artifact(s)"
+                reasons.append("no change detected")
+                summary_parts.append(f"No change in {mismatched} of {n} artifact(s)")
             else:
-                error = "Evidence comparison failed: differences found"
-                summary = f"Pre/post check mismatch in {failed_count} of {n} artifact(s)"
-            return HandlerResult(
-                success=False,
-                error=error,
-                summary=summary,
-                evidence=evidence,
-            )
+                reasons.append("differences found")
+                summary_parts.append(f"Pre/post check mismatch in {mismatched} of {n} artifact(s)")
+        if capture_failed:
+            reasons.append(f"postcheck capture failed for {_preview(capture_failed)}")
+            summary_parts.append(f"{len(capture_failed)} postcheck capture(s) failed")
+        if missing_in_postcheck:
+            reasons.append(f"missing in postcheck: {_preview(missing_in_postcheck)}")
+        if not artifacts_compared and not missing_in_postcheck:
+            reasons.append("no matching artifacts between precheck and postcheck steps")
+        summary_parts.extend(one_sided)
+        return HandlerResult(
+            success=False,
+            error="Evidence comparison failed: " + "; ".join(reasons),
+            summary="; ".join(summary_parts) or "No artifacts to compare",
+            evidence=evidence,
+        )
+
+    def _compare_captures(
+        self,
+        precheck: dict[str, Any],
+        postcheck: dict[str, Any],
+        comparison_type: str,
+        ignore_fields: list[str],
+        ignore_patterns: list[re.Pattern[str]],
+    ) -> tuple[bool, dict]:
+        """Compare two artifacts; a failed postcheck capture never passes."""
+        postcheck_error = capture_error(postcheck)
+        if postcheck_error is not None:
+            return False, {"comparison_type": comparison_type, "postcheck_error": postcheck_error}
+        return self._compare(
+            _content(precheck), _content(postcheck), comparison_type, ignore_fields, ignore_patterns
+        )
 
     def _compare(
         self,
@@ -418,27 +463,32 @@ class CompareEvidenceHandler(BaseHandler):
             diff_details["changed"] = passed
             # Always show the diff for "changed" comparison type
             diff_details["differences"] = self._find_differences(precheck, postcheck)
-        elif comparison_type == "subset":
-            # Postcheck must contain all precheck items
-            if isinstance(precheck, dict) and isinstance(postcheck, dict):
-                passed = all(postcheck.get(k) == v for k, v in precheck.items())
-            elif isinstance(precheck, list | set) and isinstance(postcheck, list | set):
-                passed = set(precheck).issubset(set(postcheck))
+        elif comparison_type in ("subset", "superset"):
+            # Subset: the postcheck still holds every precheck line, item or
+            # key. Superset: that, and it adds at least one.
+            if isinstance(precheck, str) and isinstance(postcheck, str):
+                removed, added = self._line_changes(precheck, postcheck)
+                diff_details["removed_lines"] = removed
+                diff_details["added_lines"] = added
+                kept, extended = not removed, bool(added)
+                if precheck != postcheck:
+                    diff_details["differences"] = self._find_differences(precheck, postcheck)
+            elif isinstance(precheck, dict) and isinstance(postcheck, dict):
+                kept = all(k in postcheck and postcheck[k] == v for k, v in precheck.items())
+                extended = any(k not in precheck for k in postcheck)
+            elif isinstance(precheck, list) and isinstance(postcheck, list):
+                # Membership tests, not sets: items may be dicts (unhashable).
+                kept = all(item in postcheck for item in precheck)
+                extended = any(item not in precheck for item in postcheck)
             else:
-                passed = precheck == postcheck
-        elif comparison_type == "superset":
-            # Postcheck must have all precheck items and more
-            if isinstance(precheck, dict) and isinstance(postcheck, dict):
-                passed = all(postcheck.get(k) == v for k, v in precheck.items()) and len(
-                    postcheck
-                ) > len(precheck)
-            elif isinstance(precheck, list | set) and isinstance(postcheck, list | set):
-                passed = set(precheck).issubset(set(postcheck)) and len(set(postcheck)) > len(
-                    set(precheck)
-                )
-            else:
-                passed = False
+                kept, extended = precheck == postcheck, False
+            passed = kept and (extended or comparison_type == "subset")
         elif comparison_type == "json_diff":
+            precheck, postcheck, parsed = self._parse_json_pair(precheck, postcheck)
+            diff_details["json_parsed"] = parsed
+            if isinstance(precheck, dict) and isinstance(postcheck, dict):
+                precheck = self._remove_fields(precheck, ignore_fields)
+                postcheck = self._remove_fields(postcheck, ignore_fields)
             passed, diff_details["json_diff"] = self._json_diff(precheck, postcheck)
         else:
             passed = precheck == postcheck
@@ -552,8 +602,39 @@ class CompareEvidenceHandler(BaseHandler):
 
         return differences
 
+    def _line_changes(self, before: str, after: str) -> tuple[list[str], list[str]]:
+        """Lines of ``before`` absent from ``after``, and lines new in ``after``.
+
+        Blank lines and trailing whitespace are ignored, and a line counts as
+        present wherever it appears.
+        """
+        before_lines = [line.rstrip() for line in before.splitlines() if line.strip()]
+        after_lines = [line.rstrip() for line in after.splitlines() if line.strip()]
+        before_set, after_set = set(before_lines), set(after_lines)
+        removed = [line for line in dict.fromkeys(before_lines) if line not in after_set]
+        added = [line for line in dict.fromkeys(after_lines) if line not in before_set]
+        return removed, added
+
+    def _parse_json_pair(self, a: Any, b: Any) -> tuple[Any, Any, bool]:
+        """Parse JSON text on either side; the flag says both are now structures.
+
+        When either side is not a JSON object or array, both are returned as
+        they came, so the comparison stays exact.
+        """
+        parsed = []
+        for value in (a, b):
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    return a, b, False
+            if not isinstance(value, dict | list):
+                return a, b, False
+            parsed.append(value)
+        return parsed[0], parsed[1], True
+
     def _json_diff(self, a: Any, b: Any) -> tuple[bool, dict]:
-        """Deep diff for JSON structures."""
-        # Simple implementation - returns True if equal
-        differences = self._find_differences(a, b)
-        return len(differences) == 0, {"differences": differences}
+        """Pass only when equal; list the top-level differences otherwise."""
+        if a == b:
+            return True, {"differences": []}
+        return False, {"differences": self._find_differences(a, b)}
