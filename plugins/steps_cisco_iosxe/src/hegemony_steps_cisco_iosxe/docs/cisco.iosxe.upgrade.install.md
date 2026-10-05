@@ -58,8 +58,11 @@ Later steps can read the step's result under its node id, for example
 `{{ steps.NODE_ID.summary }}`. The step's metrics contain
 `success_count`, `failure_count`, and `output_context`, a mapping keyed by
 device id whose entries hold `reboot_triggered`, `activated`, `committed`,
-`boot_config_changed` (the step set and saved the boot variable) and
-`previous_boot` (the boot entries it found) for each device.
+`boot_config_changed` and `previous_boot` (the boot entries it found) for
+each device. `boot_config_changed` is true when the step changed the boot
+setting in the running configuration, or could not undo a failed change.
+It does not mean the change was saved: the save comes after it and can
+still fail, and the device's error then says so.
 
 One evidence artifact is saved per device, named `Install: <device>` -
 success or failure; a device that could not be attempted at all (no

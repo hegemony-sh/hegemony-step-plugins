@@ -123,7 +123,10 @@ class InstallResult:
     error: str | None = None
     cli_output: str = ""
     note: str | None = None  # Optional note (e.g., "Already at target version")
-    boot_config_changed: bool = False  # The step changed the boot variable and saved it
+    # The step changed the boot setting in the running configuration, or could
+    # not undo a failed change. Not proof of a save: "write memory" comes later
+    # and can still fail, which the error then says.
+    boot_config_changed: bool = False
     previous_boot: list[str] = field(default_factory=list)  # Boot entries before the step
 
 

@@ -337,3 +337,12 @@ async def test_partly_applied_bundle_boot_change_that_cannot_be_undone_is_report
     assert result.success is False
     assert result.boot_config_changed is True
     assert "check the device's boot setting" in (result.error or "")
+
+
+async def test_boot_config_changed_does_not_mean_saved():
+    """The running boot setting changed, the save failed: the flag says changed."""
+    ssh = _device(**{"write memory": Result("Building configuration...\n")})
+    result = await _install(ssh)
+    assert result.success is False
+    assert result.boot_config_changed is True
+    assert "did not confirm the save" in (result.error or "")

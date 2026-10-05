@@ -145,7 +145,8 @@ class UpgradeInstallHandler(BaseHandler):
         install.reboot_triggered: Whether device is rebooting
         install.activated: Whether upgrade was activated
         install.committed: Whether change was committed
-        install.boot_config_changed: Whether the step changed the boot variable
+        install.boot_config_changed: Whether the step changed the running boot
+            setting (not whether it was saved)
         install.previous_boot: Boot entries before the step
 
     Note: After this handler completes, the device will be rebooting.
