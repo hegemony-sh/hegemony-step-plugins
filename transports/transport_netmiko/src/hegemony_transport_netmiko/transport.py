@@ -176,6 +176,64 @@ PLATFORM_TO_NETMIKO = {
 }
 
 
+#: Lines that open a config block. Only ``end`` closes one: ``exit`` inside a
+#: block leaves a sub-mode on the device and is sent like any config line.
+_CONFIG_ENTER_COMMANDS = ("configure terminal", "conf t", "config t")
+
+#: Error of a result for a command not run because an earlier one failed.
+_SKIPPED_ERROR = "Skipped: earlier command failed"
+
+
+def _is_mode_wrapper(command: str) -> bool:
+    """'configure terminal' / 'end': the transport switches modes itself."""
+    command_lower = command.strip().lower()
+    return command_lower in _CONFIG_ENTER_COMMANDS or command_lower == "end"
+
+
+def _is_save_command(command_lower: str) -> bool:
+    """'write ...' / 'copy run ...': always run at privilege-exec."""
+    return command_lower.startswith("write") or command_lower.startswith("copy run")
+
+
+def _plan_config_set(commands: list[str]) -> list[tuple[bool, list[int]]]:
+    """Split a config command set into ordered steps of command indexes.
+
+    A step is ``(True, indexes)`` for a config block, sent as one config set,
+    or ``(False, [index])`` for one command run at privilege-exec. A block
+    opens at 'configure terminal' and closes only at 'end'; both wrappers
+    belong to their block. A save command inside a block splits it and runs
+    between the two halves. Running the steps in turn keeps the order the
+    commands were written in.
+    """
+    steps: list[tuple[bool, list[int]]] = []
+    block: list[int] | None = None
+    in_config = False
+    for idx, cmd in enumerate(commands):
+        cmd_lower = cmd.strip().lower()
+        if cmd_lower in _CONFIG_ENTER_COMMANDS:
+            in_config = True
+        if cmd_lower == "end" and not in_config:
+            # Nothing to close: a block of one wrapper, which sends nothing.
+            steps.append((True, [idx]))
+        elif in_config and not _is_save_command(cmd_lower):
+            if block is None:
+                block = []
+                steps.append((True, block))
+            block.append(idx)
+            if cmd_lower == "end":
+                in_config = False
+                block = None
+        else:
+            block = None
+            steps.append((False, [idx]))
+    return steps
+
+
+def _skipped(command: str) -> SSHResult:
+    """Result for a command not run because an earlier one failed."""
+    return SSHResult(command=command, output="", exit_code=-1, error=_SKIPPED_ERROR)
+
+
 class SSHTransport:
     """SSH transport client for network device CLI access using Netmiko."""
 
@@ -379,12 +437,126 @@ class SSHTransport:
         """
         Check if commands are a configuration command set.
 
-        Config commands start with 'configure terminal' and end with 'end' or 'exit'.
+        A config command set starts with 'configure terminal' (or 'conf t' /
+        'config t'); see ``_plan_config_set`` for how it is run.
         """
         if not commands:
             return False
         first_cmd = commands[0].strip().lower()
-        return first_cmd in ("configure terminal", "conf t", "config t")
+        return first_cmd in _CONFIG_ENTER_COMMANDS
+
+    def _run_exec_command(self, connection, command: str) -> SSHResult:
+        """Run one command at privilege-exec; a CLI error pattern gives exit code 1."""
+        start = time.perf_counter()
+        try:
+            if not command.strip():
+                connection.write_channel("\n")
+                raw_output = connection.read_channel()
+            else:
+                raw_output = connection.send_command(
+                    command,
+                    read_timeout=self.command_timeout,
+                    strip_prompt=True,
+                    strip_command=True,
+                )
+        except Exception as e:
+            latency_ms = (time.perf_counter() - start) * 1000
+            logger.error(f"Command '{command}' failed: {e}")
+            return SSHResult(
+                command=command,
+                output="",
+                exit_code=-1,
+                error=str(e),
+                latency_ms=latency_ms,
+            )
+        latency_ms = (time.perf_counter() - start) * 1000
+
+        # Ensure output is always a string
+        output: str
+        if raw_output is None:
+            output = ""
+            logger.warning(f"Command '{command}' returned None output (connection issue?)")
+        else:
+            output = str(raw_output)
+
+        # Check for CLI error patterns in output
+        cli_error = None if not command.strip() else _detect_cli_error(output)
+        if cli_error:
+            logger.warning(f"Command '{command}' returned CLI error: {cli_error}")
+            return SSHResult(
+                command=command,
+                output=output,
+                exit_code=1,  # Non-zero for CLI error
+                error=cli_error,
+                latency_ms=latency_ms,
+            )
+        logger.info(f"Command '{command}' completed in {latency_ms:.0f}ms")
+        return SSHResult(command=command, output=output, exit_code=0, latency_ms=latency_ms)
+
+    def _run_config_block(self, connection, block: list[str]) -> list[SSHResult]:
+        """Send one config block as a single config set; one result per line.
+
+        The mode wrappers are not sent (send_config_set enters and leaves
+        config mode itself) and get an empty result.
+        """
+        sent = [cmd for cmd in block if not _is_mode_wrapper(cmd)]
+        if not sent:
+            return [SSHResult(command=cmd, output="", exit_code=0) for cmd in block]
+
+        start = time.perf_counter()
+        try:
+            output = connection.send_config_set(
+                sent,
+                read_timeout=self.command_timeout,
+                cmd_verify=False,
+            )
+        except Exception as e:
+            latency_ms = (time.perf_counter() - start) * 1000
+            logger.error(f"Config set failed: {e}")
+            return [
+                SSHResult(
+                    command=cmd,
+                    output="",
+                    exit_code=-1,
+                    error=str(e),
+                    latency_ms=latency_ms / len(block),
+                )
+                for cmd in block
+            ]
+        latency_ms = (time.perf_counter() - start) * 1000
+
+        # Guard against None output
+        if output is None:
+            output = ""
+
+        config_error = _detect_cli_error(output)
+        if config_error:
+            logger.error(f"Config set returned CLI error: {config_error}")
+        else:
+            logger.info(f"Config set executed in {latency_ms:.0f}ms: {sent}")
+
+        # Attach the full config-set session output to exactly one result —
+        # the LAST sent line — counted by position. Comparing by value
+        # (cmd == sent[-1]) is unsafe because duplicate values (e.g. blank
+        # lines from Jinja {% endif %}) all match the trailing entry and would
+        # duplicate the session text in the evidence artifact.
+        results: list[SSHResult] = []
+        remaining = len(sent)
+        for cmd in block:
+            if _is_mode_wrapper(cmd):
+                results.append(SSHResult(command=cmd, output="", exit_code=0))
+                continue
+            remaining -= 1
+            results.append(
+                SSHResult(
+                    command=cmd,
+                    output=output if remaining == 0 else "",
+                    exit_code=1 if config_error else 0,
+                    error=config_error,
+                    latency_ms=latency_ms / len(sent),
+                )
+            )
+        return results
 
     def _execute_commands_sync(self, commands: list[str]) -> list[SSHResult]:
         """
@@ -413,220 +585,27 @@ class SSHTransport:
             if self.secret:
                 connection.enable()
 
-            # Check if this is a config command set
             if self._is_config_command_set(commands):
-                # Use send_config_set for configuration commands
-                # Extract just the config commands (skip 'configure terminal' and 'end'/'write memory')
-                config_commands = []
-                config_positions: list[int] = []
-                post_commands = []
-                post_positions: list[int] = []
-                config_failed = False
-                in_config = False
-
-                for idx, cmd in enumerate(commands):
-                    cmd_lower = cmd.strip().lower()
-                    if cmd_lower in ("configure terminal", "conf t", "config t"):
-                        in_config = True
-                        continue
-                    elif cmd_lower in ("end", "exit") and in_config:
-                        in_config = False
-                        continue
-                    elif cmd_lower.startswith("write") or cmd_lower.startswith("copy run"):
-                        post_commands.append(cmd)
-                        post_positions.append(idx)
-                    elif in_config:
-                        config_commands.append(cmd)
-                        config_positions.append(idx)
+                # Config blocks and exec commands run in the order written.
+                # After the first failure nothing more runs, so a save
+                # command never stores a half-applied change.
+                failed = False
+                for is_config, indexes in _plan_config_set(commands):
+                    step = [commands[idx] for idx in indexes]
+                    if failed:
+                        results.extend(_skipped(cmd) for cmd in step)
+                    elif is_config:
+                        block_results = self._run_config_block(connection, step)
+                        results.extend(block_results)
+                        failed = any(r.exit_code != 0 for r in block_results)
                     else:
-                        post_commands.append(cmd)
-                        post_positions.append(idx)
-
-                # Execute config commands as a set
-                if config_commands:
-                    start = time.perf_counter()
-                    try:
-                        output = connection.send_config_set(
-                            config_commands,
-                            read_timeout=self.command_timeout,
-                            cmd_verify=False,
-                        )
-                        latency_ms = (time.perf_counter() - start) * 1000
-
-                        # Guard against None output
-                        if output is None:
-                            output = ""
-
-                        config_error = _detect_cli_error(output)
-                        config_failed = config_error is not None
-
-                        # Attach the full config-set session output to exactly
-                        # one result — the LAST config command — tracked by a
-                        # one-shot flag. Comparing by value (cmd == config_commands[-1])
-                        # is unsafe because duplicate values (e.g. blank lines from
-                        # Jinja {% endif %}) all match the trailing entry and would
-                        # duplicate the session text in the evidence artifact.
-                        config_seen = 0
-                        config_total = len(config_commands)
-                        config_position_set = set(config_positions)
-                        # Create results for each original command
-                        for idx, cmd in enumerate(commands):
-                            cmd_lower = cmd.strip().lower()
-                            if cmd_lower in (
-                                "configure terminal",
-                                "conf t",
-                                "config t",
-                                "end",
-                                "exit",
-                            ):
-                                results.append(
-                                    SSHResult(
-                                        command=cmd,
-                                        output="",
-                                        exit_code=0,
-                                        latency_ms=latency_ms / len(commands),
-                                    )
-                                )
-                            elif idx in config_position_set:
-                                config_seen += 1
-                                is_last_config = config_seen == config_total
-                                results.append(
-                                    SSHResult(
-                                        command=cmd,
-                                        output=(output if is_last_config else ""),
-                                        exit_code=1 if config_error else 0,
-                                        error=config_error,
-                                        latency_ms=latency_ms / len(config_commands),
-                                    )
-                                )
-                        if config_error:
-                            logger.error(f"Config set returned CLI error: {config_error}")
-                        else:
-                            logger.info(
-                                f"Config set executed in {latency_ms:.0f}ms: {config_commands}"
-                            )
-                    except Exception as e:
-                        latency_ms = (time.perf_counter() - start) * 1000
-                        post_position_set = set(post_positions)
-                        config_failed = True
-                        logger.error(f"Config set failed: {e}")
-                        for idx, cmd in enumerate(commands):
-                            if idx not in post_position_set:
-                                results.append(
-                                    SSHResult(
-                                        command=cmd,
-                                        output="",
-                                        exit_code=-1,
-                                        error=str(e),
-                                        latency_ms=latency_ms / len(commands),
-                                    )
-                                )
-
-                # Execute post-config commands (write memory, etc.)
-                if not config_failed:
-                    for cmd in post_commands:
-                        start = time.perf_counter()
-                        try:
-                            if not cmd.strip():
-                                connection.write_channel("\n")
-                                raw_output = connection.read_channel()
-                            else:
-                                raw_output = connection.send_command(
-                                    cmd,
-                                    read_timeout=self.command_timeout,
-                                    strip_prompt=True,
-                                    strip_command=True,
-                                )
-                            latency_ms = (time.perf_counter() - start) * 1000
-
-                            # Ensure output is always a string
-                            output: str = str(raw_output) if raw_output is not None else ""
-
-                            results.append(
-                                SSHResult(
-                                    command=cmd,
-                                    output=output,
-                                    exit_code=0,
-                                    latency_ms=latency_ms,
-                                )
-                            )
-                            logger.info(
-                                f"Post-config command '{cmd}' completed in {latency_ms:.0f}ms"
-                            )
-                        except Exception as e:
-                            latency_ms = (time.perf_counter() - start) * 1000
-                            results.append(
-                                SSHResult(
-                                    command=cmd,
-                                    output="",
-                                    exit_code=-1,
-                                    error=str(e),
-                                    latency_ms=latency_ms,
-                                )
-                            )
-                            logger.error(f"Post-config command '{cmd}' failed: {e}")
+                        result = self._run_exec_command(connection, step[0])
+                        results.append(result)
+                        failed = result.exit_code != 0
             else:
                 # Execute show/exec commands individually
                 for command in commands:
-                    start = time.perf_counter()
-                    try:
-                        if not command.strip():
-                            connection.write_channel("\n")
-                            raw_output = connection.read_channel()
-                        else:
-                            raw_output = connection.send_command(
-                                command,
-                                read_timeout=self.command_timeout,
-                                strip_prompt=True,
-                                strip_command=True,
-                            )
-                        latency_ms = (time.perf_counter() - start) * 1000
-
-                        # Ensure output is always a string
-                        output: str
-                        if raw_output is None:
-                            output = ""
-                            logger.warning(
-                                f"Command '{command}' returned None output (connection issue?)"
-                            )
-                        else:
-                            output = str(raw_output)
-
-                        # Check for CLI error patterns in output
-                        cli_error = None if not command.strip() else _detect_cli_error(output)
-                        if cli_error:
-                            results.append(
-                                SSHResult(
-                                    command=command,
-                                    output=output,
-                                    exit_code=1,  # Non-zero for CLI error
-                                    error=cli_error,
-                                    latency_ms=latency_ms,
-                                )
-                            )
-                            logger.warning(f"Command '{command}' returned CLI error: {cli_error}")
-                        else:
-                            results.append(
-                                SSHResult(
-                                    command=command,
-                                    output=output,
-                                    exit_code=0,
-                                    latency_ms=latency_ms,
-                                )
-                            )
-                            logger.info(f"Command '{command}' completed in {latency_ms:.0f}ms")
-                    except Exception as e:
-                        latency_ms = (time.perf_counter() - start) * 1000
-                        results.append(
-                            SSHResult(
-                                command=command,
-                                output="",
-                                exit_code=-1,
-                                error=str(e),
-                                latency_ms=latency_ms,
-                            )
-                        )
-                        logger.error(f"Command '{command}' failed: {e}")
+                    results.append(self._run_exec_command(connection, command))
 
         except NetmikoAuthenticationException as e:
             logger.error(f"Authentication failed to {self.host}: {e}")

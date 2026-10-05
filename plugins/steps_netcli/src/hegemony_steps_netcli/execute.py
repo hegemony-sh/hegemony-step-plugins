@@ -123,18 +123,13 @@ class ExecuteCLIActionHandler(BaseHandler):
 
                 # For config command sets, create a single consolidated artifact
                 if self._is_config_command_set(commands):
+                    # `exit` is a config line sent to the device (it leaves
+                    # a sub-mode), so only the block wrappers are left out.
                     config_cmds = []
                     for cmd in commands:
                         cmd_lower = cmd.strip().lower()
                         if (
-                            cmd_lower
-                            not in (
-                                "configure terminal",
-                                "conf t",
-                                "config t",
-                                "end",
-                                "exit",
-                            )
+                            cmd_lower not in ("configure terminal", "conf t", "config t", "end")
                             and not cmd_lower.startswith("write")
                             and not cmd_lower.startswith("copy run")
                         ):

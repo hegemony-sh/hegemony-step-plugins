@@ -7,7 +7,9 @@
 Covers registration under hegemony.device_transports, spec-based construction,
 and config-set result building (regression: the full send_config_set session
 output must attach to exactly one result, not every entry equal to the trailing
-command).
+command), and how a config command set runs: `exit` stays inside its block,
+blocks and exec commands run in the order written, and nothing runs after the
+first failure.
 """
 
 from __future__ import annotations
@@ -16,7 +18,11 @@ from unittest.mock import MagicMock, patch
 
 import hegemony_transport_netmiko
 from hegemony_step_sdk import DeviceConnectionSpec
-from hegemony_transport_netmiko.transport import SSHTransport, _NullCancellationRegistry
+from hegemony_transport_netmiko.transport import (
+    _SKIPPED_ERROR,
+    SSHTransport,
+    _NullCancellationRegistry,
+)
 
 
 def test_register_registers_the_netmiko_transport():
@@ -144,9 +150,11 @@ def test_config_set_cli_error_skips_post_commands():
         results = transport._execute_commands_sync(commands)
 
     assert connection.send_command.call_count == 0
-    assert all(r.command != "write memory" for r in results)
+    assert [r.command for r in results] == commands
     assert any(r.command == "vlan 75" and r.exit_code == 1 for r in results)
     assert any((r.error or "") == "% Invalid input detected at '^' marker." for r in results)
+    # The save after the failed block is reported as not run, not left out.
+    assert (results[-1].exit_code, results[-1].error) == (-1, _SKIPPED_ERROR)
 
 
 def test_config_set_exception_skips_post_commands():
@@ -165,9 +173,144 @@ def test_config_set_exception_skips_post_commands():
         results = transport._execute_commands_sync(commands)
 
     assert connection.send_command.call_count == 0
-    assert all(r.command != "write memory" for r in results)
     assert any(r.command == "hostname branch-router" and r.exit_code == -1 for r in results)
     assert any((r.error or "") == "config exploded" for r in results)
+    assert (results[-1].command, results[-1].error) == ("write memory", _SKIPPED_ERROR)
+
+
+def _run_on_connection(commands: list[str], connection: MagicMock):
+    transport = _make_transport()
+    with (
+        patch.object(
+            hegemony_transport_netmiko.transport, "ConnectHandler", return_value=connection
+        ),
+        patch.object(hegemony_transport_netmiko.transport, "_safe_disconnect"),
+    ):
+        return transport._execute_commands_sync(commands)
+
+
+def test_exit_inside_a_config_block_is_sent_as_a_config_line():
+    # Only `end` closes a config block. An ` exit` that leaves an interface
+    # sub-mode used to end the block, so the rest of it ran at the exec prompt.
+    commands = [
+        "configure terminal",
+        "interface GigabitEthernet1",
+        " description uplink",
+        " exit",
+        "interface GigabitEthernet2",
+        " no shutdown",
+        "end",
+        "write memory",
+    ]
+    connection = MagicMock()
+    connection.send_config_set.return_value = "r1(config)#end\nr1#"
+    connection.send_command.return_value = "Building configuration...\n[OK]"
+
+    results = _run_on_connection(commands, connection)
+
+    connection.send_config_set.assert_called_once()
+    assert connection.send_config_set.call_args.args[0] == commands[1:6]
+    assert [c.args[0] for c in connection.send_command.call_args_list] == ["write memory"]
+    assert [r.command for r in results] == commands
+    assert all(r.exit_code == 0 for r in results)
+
+
+def test_failed_post_command_fails_and_skips_the_rest():
+    commands = [
+        "configure terminal",
+        "hostname r1",
+        "end",
+        "show bork",
+        "write memory",
+    ]
+    connection = MagicMock()
+    connection.send_config_set.return_value = "r1(config)#end\nr1#"
+    connection.send_command.return_value = "        ^\n% Invalid input detected at '^' marker."
+
+    results = _run_on_connection(commands, connection)
+
+    assert connection.send_command.call_count == 1
+    assert [r.command for r in results] == commands
+    bork = results[3]
+    assert bork.exit_code == 1
+    assert bork.error == "% Invalid input detected at '^' marker."
+    assert (results[4].exit_code, results[4].error) == (-1, _SKIPPED_ERROR)
+
+
+def test_config_blocks_and_exec_commands_run_in_written_order():
+    commands = [
+        "configure terminal",
+        "hostname r1",
+        "end",
+        "show clock",
+        "conf t",
+        "ntp server 192.0.2.5",
+        "end",
+        "write memory",
+    ]
+    calls: list[tuple[str, object]] = []
+    connection = MagicMock()
+
+    def send_config_set(lines, **kwargs):
+        calls.append(("config", list(lines)))
+        return "r1(config)#end\nr1#"
+
+    def send_command(command, **kwargs):
+        calls.append(("exec", command))
+        return "ok"
+
+    connection.send_config_set.side_effect = send_config_set
+    connection.send_command.side_effect = send_command
+
+    results = _run_on_connection(commands, connection)
+
+    assert calls == [
+        ("config", ["hostname r1"]),
+        ("exec", "show clock"),
+        ("config", ["ntp server 192.0.2.5"]),
+        ("exec", "write memory"),
+    ]
+    assert [r.command for r in results] == commands
+    assert all(r.exit_code == 0 for r in results)
+
+
+async def test_execute_step_fails_when_a_post_command_fails():
+    """End to end: netcli.execute over this transport reports the failure."""
+    from typing import cast
+
+    from hegemony_step_sdk import HandlerContext, HandlerServices
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    transport = _make_transport()
+    connection = MagicMock()
+    connection.send_config_set.return_value = "r1(config)#end\nr1#"
+    connection.send_command.return_value = "        ^\n% Invalid input detected at '^' marker."
+
+    class _Services:
+        def connect(self, device, **kwargs):
+            return transport
+
+    ctx = HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        config={"commands": ["configure terminal", "hostname r1", "end", "write mem"]},
+        target_roles=["primary"],
+        target_devices_by_role={"primary": [{"id": "d1", "name": "r1", "mgmt_host": "192.0.2.1"}]},
+        services=cast(HandlerServices, _Services()),
+    )
+    with (
+        patch.object(
+            hegemony_transport_netmiko.transport, "ConnectHandler", return_value=connection
+        ),
+        patch.object(hegemony_transport_netmiko.transport, "_safe_disconnect"),
+    ):
+        result = await ExecuteCLIActionHandler().execute(ctx)
+
+    assert result.success is False
+    assert "% Invalid input detected" in (result.error or "")
+    assert result.evidence[0]["content_json"]["success"] is False
 
 
 # ── Jump host (bastion) hop ──────────────────────────────────────────────────
