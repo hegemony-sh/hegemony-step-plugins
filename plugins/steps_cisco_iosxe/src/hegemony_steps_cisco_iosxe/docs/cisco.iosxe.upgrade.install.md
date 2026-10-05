@@ -23,13 +23,16 @@ prompts automatically. In bundle mode it rewrites the boot system to the new
 image, keeps the previously configured image as a fallback boot entry, saves
 the configuration, and issues a reload.
 
-Uncheck Activate to prepare the upgrade without reloading: install mode omits
-the activate step, and bundle mode stops after saving the boot configuration,
-leaving the reload pending. Commit applies to install mode only and prevents
-the automatic rollback timer from reverting the upgrade. A device that is
-already running the target image is reported as success with a note and no
-reboot. Max Parallel Devices controls how many devices are upgraded
-concurrently; keep it at 1 to reload devices one at a time.
+Uncheck Activate to prepare the upgrade without reloading: install mode runs
+`install add file` only, without activate or commit, and bundle mode stops
+after saving the boot configuration, leaving the reload pending. Commit
+applies to install mode only and prevents the automatic rollback timer from
+reverting the upgrade. When the install completes without changing anything
+because the device already runs the image (for example
+`Same Image File-No Change`), the device succeeds with a note and no reboot.
+If the install also reports a failure, the device fails. Max Parallel
+Devices controls how many devices are upgraded concurrently; keep it at 1 to
+reload devices one at a time.
 
 ## Output
 
@@ -48,14 +51,19 @@ reports how many devices started installing and how many are rebooting.
 ## When It Fails
 
 The step fails when Image Filename is missing, when no upgrade driver exists
-for the configured platform and mode, or when any device fails: a missing
-management host, an install command that reports failure (for example
-`FAILED: install_...` or `Cannot activate`), or — in bundle mode — a boot
-system that does not show the new image after configuration.
+for the configured platform and mode, or when any device fails. A device
+fails when it has no management host, cannot be reached or refuses the
+login, or when the install output shows an error: `% Invalid input`,
+`%Error`, `% Incomplete command`, `% Ambiguous command`,
+`FAILED: install_...` or `Cannot activate`. In install mode the install must
+also report completion: a `SUCCESS: install_...` line, the install's
+completion message, or the device starting to reload. Without one within
+30 minutes the device fails. In bundle mode a device also fails when the
+boot system does not show the new image after configuration.
 
-Losing the SSH connection during activation is expected and is treated as
-success with `reboot_triggered` set: the device is assumed to be reloading.
-This step does not wait for devices to come back; use
+The SSH session ends when the device reloads. A session that closes counts
+as the reload only when the output already shows that activation finished or
+the reload started; a session that closes earlier fails the device. This
+step does not wait for devices to come back; use
 `cisco.iosxe.upgrade.verify` for that. The step's default timeout is 7200
-seconds, and the install command itself is given up to 30 minutes per device
-to report completion.
+seconds.

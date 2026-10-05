@@ -313,58 +313,27 @@ class UpgradeInstallHandler(BaseHandler):
                 outcome.evidence.append(evidence_item)
 
             except Exception as e:
-                error_str = str(e).lower()
-                # Connection loss is expected during reboot
-                if "connection" in error_str or "timeout" in error_str or "ssh" in error_str:
-                    logger.info(f"Connection lost for {device_name} - expected during reboot")
-                    outcome.ok = True
-                    outcome.failed_device = None
+                # connect() does not dial, and the transports report a dropped
+                # session in the command result, so an exception here is a
+                # configuration, credentials or driver error - never the reload.
+                logger.error(f"Install failed for {device_name}: {e}")
+                outcome.ok = False
+                outcome.failed_device = device_name
 
-                    outcome.context = {
-                        "reboot_triggered": True,
-                        "activated": True,
+                outcome.evidence.append(
+                    {
+                        "kind": "cli_output",
+                        "name": f"Install Error: {device_name}",
+                        "device_id": device_id,
+                        "content_text": f"Error during install:\n{str(e)}",
+                        "content_json": {
+                            "device_id": device_id,
+                            "device_name": device_name,
+                            "error": str(e),
+                            "success": False,
+                        },
                     }
-
-                    outcome.evidence.append(
-                        {
-                            "kind": "cli_output",
-                            "name": f"Install: {device_name}",
-                            "device_id": device_id,
-                            "content_text": f"Device: {device_name}\nSuccess: True\nReboot Triggered: True\nNote: Connection lost (expected during reboot)",
-                            "content_json": {
-                                "device_id": device_id,
-                                "device_name": device_name,
-                                "success": True,
-                                "reboot_triggered": True,
-                                "note": "Connection lost (expected during reboot)",
-                            },
-                        }
-                    )
-
-                    await ctx.emit_progress(
-                        f"Device {device_name} rebooting (connection closed)",
-                        device_id,
-                        {"phase": "install", "status": "rebooting"},
-                    )
-                else:
-                    logger.error(f"Install failed for {device_name}: {e}")
-                    outcome.ok = False
-                    outcome.failed_device = device_name
-
-                    outcome.evidence.append(
-                        {
-                            "kind": "cli_output",
-                            "name": f"Install Error: {device_name}",
-                            "device_id": device_id,
-                            "content_text": f"Error during install:\n{str(e)}",
-                            "content_json": {
-                                "device_id": device_id,
-                                "device_name": device_name,
-                                "error": str(e),
-                                "success": False,
-                            },
-                        }
-                    )
+                )
 
             return outcome
 

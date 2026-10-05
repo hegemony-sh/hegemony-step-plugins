@@ -328,17 +328,8 @@ class IOSXEBundleDriver(UpgradeDriver):
             )
 
         except Exception as e:
-            error_str = str(e).lower()
-            if "connection" in error_str or "timeout" in error_str or "ssh" in error_str:
-                logger.info("Connection lost after reload - expected")
-                return InstallResult(
-                    success=True,
-                    reboot_triggered=True,
-                    activated=True,
-                    committed=True,
-                    cli_output=f"Connection lost (expected during reboot): {e}",
-                )
-
+            # Transports report a dropped session in the result, not by
+            # raising, so an exception here is never the reload.
             logger.exception("IOS-XE bundle install failed")
             return InstallResult(
                 success=False,

@@ -47,6 +47,124 @@ from .iosxe_common import (
 
 logger = logging.getLogger(__name__)
 
+# Output that means the install failed: the device rejected the command, or
+# the install itself reported a failure.
+_INSTALL_FAILURE_RES = [
+    re.compile(r"^\s*%\s*Invalid input", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*%\s*Error", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"% Incomplete command", re.IGNORECASE),
+    re.compile(r"% Ambiguous command", re.IGNORECASE),
+    re.compile(r"FAILED:\s*install_", re.IGNORECASE),
+    re.compile(r"install_\w+:\s*FAILED", re.IGNORECASE),
+    re.compile(r"FAILED:\s*\[", re.IGNORECASE),
+    re.compile(r"\bInstall failed\b", re.IGNORECASE),
+    re.compile(r"\bCannot activate\b", re.IGNORECASE),
+    re.compile(r"\bCannot install\b", re.IGNORECASE),
+    re.compile(r"\bAborted\b", re.IGNORECASE),
+    re.compile(r"Failed to expand", re.IGNORECASE),
+]
+# The device starting to reload. Not the "... may require a reload ... [y/n]"
+# confirmation prompt, which appears before anything happens.
+_RELOAD_RE = re.compile(
+    r"Install will reload the system now|%SYS-5-RELOAD|Reload requested|reloading, reason",
+    re.IGNORECASE,
+)
+# Positive proof that the install command finished.
+_INSTALL_DONE_RE = re.compile(
+    r"SUCCESS:\s*install_|install_\w+:\s*SUCCESS|INSTALL_COMPLETED_INFO", re.IGNORECASE
+)
+# Activation finished: a session that drops after this is the reload.
+_ACTIVATED_RE = re.compile(r"Activate: Passed|Finished Activate", re.IGNORECASE)
+# The device already runs this image, so nothing was activated. Some releases
+# follow these with a FAILED line; errors are read first, so that install fails.
+_NO_CHANGE_RE = re.compile(
+    r"Same Image File-No Change|Nothing to activate|No package is added or removed",
+    re.IGNORECASE,
+)
+
+
+def _install_failure(output: str) -> str | None:
+    """The first line of ``output`` that reports a failed install, if any."""
+    for pattern in _INSTALL_FAILURE_RES:
+        match = pattern.search(output)
+        if match:
+            start = output.rfind("\n", 0, match.start()) + 1
+            end = output.find("\n", match.end())
+            return output[start : end if end >= 0 else len(output)].strip()
+    return None
+
+
+def _classify_install(
+    output: str, *, exit_code: int, error: str | None, activate: bool, commit: bool
+) -> InstallResult:
+    """Decide what an "install add file ..." session did, failing closed.
+
+    Errors are checked first. Success needs proof: a SUCCESS line, the
+    install's completion message, or the device starting to reload. A session
+    that dropped counts as the reload only when activation had finished or the
+    reload had started; otherwise it is a failure, as is a session that never
+    produced any output.
+    """
+    reloading = bool(_RELOAD_RE.search(output))
+
+    failure = _install_failure(output)
+    if failure:
+        return InstallResult(
+            success=False,
+            reboot_triggered=reloading,
+            error=f"Install failed: {failure}",
+            cli_output=output,
+        )
+
+    if exit_code < 0:
+        if activate and (reloading or _ACTIVATED_RE.search(output)):
+            return InstallResult(
+                success=True,
+                reboot_triggered=True,
+                activated=True,
+                committed=commit,
+                cli_output=output,
+                note="Session closed after activation - the device is reloading",
+            )
+        return InstallResult(
+            success=False,
+            error=f"Install session failed: {error or 'no output'}",
+            cli_output=output,
+        )
+
+    if exit_code != 0 or error:
+        return InstallResult(
+            success=False,
+            reboot_triggered=reloading,
+            error=f"Install failed: {error or f'exit code {exit_code}'}",
+            cli_output=output,
+        )
+
+    if not (reloading or _INSTALL_DONE_RE.search(output)):
+        return InstallResult(
+            success=False,
+            error="Install did not report completion",
+            cli_output=output,
+        )
+
+    if _NO_CHANGE_RE.search(output) and not reloading:
+        return InstallResult(
+            success=True,
+            reboot_triggered=False,
+            activated=False,
+            committed=True,  # Already committed since it's the active version
+            cli_output=output,
+            note="Already at target version - no action needed",
+        )
+
+    return InstallResult(
+        success=True,
+        reboot_triggered=reloading,
+        activated=activate,
+        committed=activate and commit,
+        cli_output=output,
+    )
+
 
 @register_driver("ios-xe", UpgradeMode.INSTALL)
 class IOSXEInstallDriver(UpgradeDriver):
@@ -265,12 +383,13 @@ class IOSXEInstallDriver(UpgradeDriver):
         except Exception as e:
             logger.warning("Failed to verify/set boot system: %s", e)
 
-        # Build install command
+        # Build install command. "commit" is a keyword of "activate", so it
+        # is only sent with it.
         install_cmd = f"install add file {dest_fs}{image_name}"
         if activate:
             install_cmd += " activate"
-        if commit:
-            install_cmd += " commit"
+            if commit:
+                install_cmd += " commit"
 
         prompts = {
             "Please confirm you have changed boot config to flash:packages.conf": "y",
@@ -282,15 +401,18 @@ class IOSXEInstallDriver(UpgradeDriver):
             "[yes/no]": "yes",
         }
 
+        # Stop waiting at the first sign that the install finished or failed.
         completion_patterns = [
-            "install_add_activate_commit: SUCCESS",
-            "install_add_activate_commit: FAILED",
             "SUCCESS: install_",
             "FAILED: install_",
+            "install_add_activate_commit: SUCCESS",
+            "install_add_activate_commit: FAILED",
             "Install will reload the system now",
             "INSTALL-5-INSTALL_COMPLETED_INFO",
             "Reload requested",
             "% Invalid input",
+            "% Incomplete command",
+            "% Ambiguous command",
             "%Error",
         ]
 
@@ -304,79 +426,20 @@ class IOSXEInstallDriver(UpgradeDriver):
                 answers=prompts,
                 wait_for_patterns=completion_patterns,
             )
-
-            output = result.output
-
-            # Check for reboot
-            reboot_patterns = [
-                "reload",
-                "reboot",
-                "restarting",
-                "disconnecting",
-                "connection closed",
-                "SUCCESS: install_activate",
-            ]
-            reboot_triggered = any(p.lower() in output.lower() for p in reboot_patterns)
-
-            # Check for "already at target version" scenario
-            # When device already has the target image active, install command returns
-            # "Same Image File-No Change" and then FAILED because there's nothing to activate
-            already_at_target = (
-                "Same Image File-No Change" in output
-                or "Nothing to activate" in output
-                or "No package is added or removed" in output
+            outcome = _classify_install(
+                result.output or "",
+                exit_code=result.exit_code,
+                error=result.error,
+                activate=activate,
+                commit=commit,
             )
-
-            if already_at_target:
-                logger.info("Device already at target version - install not needed")
-                return InstallResult(
-                    success=True,
-                    reboot_triggered=False,
-                    activated=False,
-                    committed=True,  # Already committed since it's the active version
-                    cli_output=output,
-                    note="Already at target version - no action needed",
-                )
-
-            # Check for errors
-            error_patterns = [
-                r"FAILED:\s*install_",
-                r"FAILED:\s*\[",
-                r"\bInstall failed\b",
-                r"\bCannot activate\b",
-                r"\bCannot install\b",
-                r"\bAborted\b",
-                r"Failed to expand",
-            ]
-            has_error = any(re.search(p, output, re.IGNORECASE) for p in error_patterns)
-
-            if has_error:
-                return InstallResult(
-                    success=False,
-                    reboot_triggered=reboot_triggered,
-                    error="Install command indicated failure",
-                    cli_output=output,
-                )
-
-            return InstallResult(
-                success=True,
-                reboot_triggered=reboot_triggered,
-                activated=activate,
-                committed=commit,
-                cli_output=output,
-            )
+            if outcome.success:
+                logger.info("Install finished: %s", outcome.note or "ok")
+            else:
+                logger.warning("Install failed: %s", outcome.error)
+            return outcome
 
         except Exception as e:
-            error_str = str(e).lower()
-            if "connection" in error_str or "timeout" in error_str or "ssh" in error_str:
-                logger.info("Connection lost after install - likely rebooting")
-                return InstallResult(
-                    success=True,
-                    reboot_triggered=True,
-                    activated=activate,
-                    cli_output=f"Connection lost (expected during reboot): {e}",
-                )
-
             logger.exception("IOS-XE install failed")
             return InstallResult(
                 success=False,
