@@ -218,6 +218,6 @@ in the images and are omitted from the demo manifest).
   (the host injects the options from `x_options_source`), so a probe wheel adds a
   check type with no config-model edit.
 - The `monitor.*` handlers live in `plugins/steps_monitor` and reach the host
-  monitor machinery through `services.start_monitor` / `stop_monitor`;
+  monitor machinery through `services.start_monitor`;
   MonitorManager and the engine's monitor-node semantics (until-join, run
   cleanup — keyed off the `monitor.` id prefix) remain host forever.

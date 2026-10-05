@@ -15,11 +15,9 @@ prefix `monitor`:
 | Handler id | Purpose |
 |------------|---------|
 | `monitor.connectivity` | Start a background monitor that probes targets on a schedule |
-| `monitor.start` | Internal lifecycle: start a monitor from an explicit config (hidden) |
-| `monitor.stop` | Internal lifecycle: stop a running monitor (hidden) |
 
-These handlers are thin shells. They assemble the monitor config and resolve
-targets, then hand off to `services.start_monitor` / `services.stop_monitor`.
+The handler is a thin shell. It assembles the monitor config and resolves
+targets, then hands off to `services.start_monitor`.
 The host owns the monitor machinery — `MonitorManager`, sample emission, and the
 graph engine's monitor-node semantics (until-join, run cleanup, keyed off the
 `monitor.` id prefix) stay host-side. `check_type` options are registry-driven
