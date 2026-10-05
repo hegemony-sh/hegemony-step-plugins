@@ -18,8 +18,11 @@ Evidence Step selects the collect-evidence step to read from, and the
 Evidence Output picker chooses which of its outputs to assert: a target plus
 the command that produced the output. Every device bound to that target is
 asserted separately against its own collected artifact, so one assert step
-can validate a whole role at once. When the collect step ran more than once
-(loops, retries), the newest artifact per device is the one asserted.
+can validate a whole role at once. The artifact is found by the device and
+the full command text, ignoring spaces at either end, so two long or
+multi-line commands with similar artifact names are never mixed up. When the
+collect step ran more than once (loops, retries), the newest artifact per
+device is the one asserted.
 
 The Operator (default Contains) compares the content with the Expected
 Value / Pattern. The regex operators treat the expected value as a regular
