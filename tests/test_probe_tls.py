@@ -2092,3 +2092,27 @@ async def test_ocsp_and_crl_together_download_the_issuer_once(pki, tmp_path, res
     assert record["crl"] == "unavailable"
     issuer_downloads = [r for r in responder.requests[before:] if r == "GET /issuer.der"]
     assert len(issuer_downloads) <= 1
+
+
+class _NoGateServices:
+    """A host without the egress gate: only secret resolution."""
+
+    async def resolve_secret_ref(self, ref: str | None, *, source: str) -> str | None:
+        return None
+
+
+async def test_without_an_egress_gate_only_offline_checks_run(pki):
+    services = _NoGateServices()
+    offline = await run_step(
+        {"pem": pem_of(pki.leaves["rsa"].cert, pki.inter), "ca_bundle": pki.root_pem},
+        services=services,
+    )
+    assert offline.success is True, offline.error
+    for config in (
+        {"endpoints": "127.0.0.1:443"},
+        {"pem": pem_of(pki.leaves["rsa"].cert), "check_ocsp": True},
+        {"pem": pem_of(pki.leaves["crl_good"].cert), "check_crl": True},
+    ):
+        result = await run_step(config, services=services)
+        assert result.success is False
+        assert "cannot apply the flow's network policy" in (result.error or "")

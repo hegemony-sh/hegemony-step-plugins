@@ -1079,6 +1079,13 @@ class TlsProbeHandler(BaseHandler):
         checks_revocation = config.check_ocsp or config.check_crl
         needs_network = bool(plans) or checks_revocation
         enforce = getattr(ctx.require_services(), "enforce_egress", None) if needs_network else None
+        if needs_network and enforce is None:
+            # Fail closed: the step dials every destination itself, so without
+            # the gate nothing would apply the flow's network policy.
+            return _config_error(
+                "this platform cannot apply the flow's network policy to the step's "
+                "connections; only a pasted certificate without revocation checks can run"
+            )
         run = _TlsRun(
             settings,
             now=datetime.now(UTC),

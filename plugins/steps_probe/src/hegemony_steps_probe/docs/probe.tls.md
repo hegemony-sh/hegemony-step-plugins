@@ -163,8 +163,10 @@ Configuration problems stop the step before any connection: nothing to check
 (no targets, endpoints, or certificate), a pasted certificate combined with
 targets or endpoints, a malformed endpoint, more than 500 endpoints, a
 fingerprint that is not 64 hex digits, a CA bundle or certificate PEM
-without a readable certificate, or a CA bundle reference that resolves to
-nothing.
+without a readable certificate, a CA bundle reference that resolves to
+nothing, or a platform that cannot apply the flow's network policy to the
+step's connections (only a pasted certificate without revocation checks runs
+there).
 
 Otherwise the step checks every endpoint and fails when any of them broke an
 enabled assertion, listing each failing endpoint with its reasons in the step
