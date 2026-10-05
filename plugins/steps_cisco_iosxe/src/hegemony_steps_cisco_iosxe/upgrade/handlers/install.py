@@ -82,6 +82,18 @@ class UpgradeInstallConfig(BaseModel):
         description="For install mode: commit to prevent automatic rollback",
         json_schema_extra={"x_show_when": {"field": "upgrade_mode", "value": "install"}},
     )
+    fix_boot_config: bool = Field(
+        default=False,
+        title="Fix Boot Setting",
+        description=(
+            "For install mode: when the boot variable does not point at "
+            "packages.conf on the destination filesystem, set it there and "
+            'save the configuration with "write memory" before installing. '
+            "Saving also stores any other unsaved change. When off (the "
+            "default), the device fails instead and nothing is changed."
+        ),
+        json_schema_extra={"x_show_when": {"field": "upgrade_mode", "value": "install"}},
+    )
     max_parallel_devices: int = Field(
         default=1,
         ge=1,
@@ -126,11 +138,15 @@ class UpgradeInstallHandler(BaseHandler):
         dest_fs: Filesystem where image is staged (default: "flash:")
         activate: Trigger reload immediately (default: true)
         commit: Commit change to prevent rollback (default: true)
+        fix_boot_config: Install mode: set the boot variable to packages.conf
+            and save it instead of failing (default: false)
 
     Output context:
         install.reboot_triggered: Whether device is rebooting
         install.activated: Whether upgrade was activated
         install.committed: Whether change was committed
+        install.boot_config_changed: Whether the step changed the boot variable
+        install.previous_boot: Boot entries before the step
 
     Note: After this handler completes, the device will be rebooting.
     Use cisco.iosxe.upgrade.verify in a subsequent step after device comes back up.
@@ -149,6 +165,7 @@ class UpgradeInstallHandler(BaseHandler):
         "dest_fs": "flash:",
         "activate": True,
         "commit": True,
+        "fix_boot_config": False,
     }
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
@@ -177,6 +194,7 @@ class UpgradeInstallHandler(BaseHandler):
         dest_fs = ctx.config.get("dest_fs", "flash:")
         activate = ctx.config.get("activate", True)
         commit = ctx.config.get("commit", True)
+        fix_boot_config = bool(ctx.config.get("fix_boot_config", False))
 
         # Get driver for platform
         try:
@@ -234,6 +252,7 @@ class UpgradeInstallHandler(BaseHandler):
                     dest_fs=dest_fs,
                     activate=activate,
                     commit=commit,
+                    fix_boot_config=fix_boot_config,
                 )
 
                 if result.cli_output and not getattr(ssh, "streams_timing_output", False):
@@ -274,6 +293,8 @@ class UpgradeInstallHandler(BaseHandler):
                     "reboot_triggered": result.reboot_triggered,
                     "activated": result.activated,
                     "committed": result.committed,
+                    "boot_config_changed": result.boot_config_changed,
+                    "previous_boot": result.previous_boot,
                 }
 
                 # Build evidence with proper structure for artifact saving
@@ -284,6 +305,8 @@ class UpgradeInstallHandler(BaseHandler):
                     f"Reboot Triggered: {result.reboot_triggered}",
                     f"Activated: {result.activated}",
                     f"Committed: {result.committed}",
+                    f"Boot Config Changed: {result.boot_config_changed}",
+                    f"Previous Boot: {';'.join(result.previous_boot) or 'unknown'}",
                 ]
                 if result.note:
                     content_lines.append(f"Note: {result.note}")
@@ -306,6 +329,8 @@ class UpgradeInstallHandler(BaseHandler):
                         "reboot_triggered": result.reboot_triggered,
                         "activated": result.activated,
                         "committed": result.committed,
+                        "boot_config_changed": result.boot_config_changed,
+                        "previous_boot": result.previous_boot,
                         "note": result.note,
                         "error": result.error,
                     },

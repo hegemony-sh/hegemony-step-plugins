@@ -38,10 +38,17 @@ from ..driver import (
     register_driver,
 )
 from .iosxe_common import (
+    CommandError,
     check_file_exists_in_dir,
+    has_boot_variable,
     normalize_filesystem,
+    parse_boot_statements,
     parse_free_bytes,
     parse_version_from_show_version,
+    run_checked,
+    run_config,
+    same_boot_path,
+    save_config,
     stage_image,
 )
 
@@ -292,9 +299,6 @@ class IOSXEInstallDriver(UpgradeDriver):
                     "Consider using bundle-mode upgrade instead."
                 )
 
-            # Check if running config is saved
-            config_saved = True  # Assume saved, could add check if needed
-
             success = len(errors) == 0
 
             return PreflightResult(
@@ -305,7 +309,6 @@ class IOSXEInstallDriver(UpgradeDriver):
                 image_exists=image_exists,
                 target_version_installed=target_version_installed,
                 install_mode_supported=install_mode_supported,
-                config_saved=config_saved,
                 error="; ".join(errors) if errors else None,
                 warnings=warnings,
                 cli_outputs=cli_outputs,
@@ -356,32 +359,78 @@ class IOSXEInstallDriver(UpgradeDriver):
         dest_fs: str,
         activate: bool = True,
         commit: bool = True,
+        fix_boot_config: bool = False,
     ) -> InstallResult:
         """Execute IOS-XE install command.
 
         Uses: install add file <fs><image> activate commit
         This triggers an automatic reboot.
+
+        Activation boots <fs>packages.conf, so the boot variable must point
+        there first. When it does not, the install fails before it starts,
+        unless ``fix_boot_config`` allows setting and saving it.
         """
         dest_fs = normalize_filesystem(dest_fs)
+        cli_outputs: list[str] = []
+        previous_boot: list[str] = []
+        boot_config_changed = False
 
-        # Ensure boot system is set to packages.conf
-        try:
-            boot_result = await ssh.execute_commands(["show boot"])
-            boot_output = boot_result[0].output if boot_result else ""
+        def _failed(error: str) -> InstallResult:
+            return InstallResult(
+                success=False,
+                error=error,
+                cli_output="\n".join(cli_outputs),
+                boot_config_changed=boot_config_changed,
+                previous_boot=previous_boot,
+            )
 
-            if "packages.conf" not in boot_output.lower():
-                logger.warning("Reconfiguring boot system to packages.conf")
-                config_commands = [
-                    "configure terminal",
-                    "no boot system",
-                    "boot system flash:packages.conf",
-                    "end",
-                    "write memory",
-                ]
-                await ssh.execute_commands(config_commands)
-                logger.info("Boot system configured")
-        except Exception as e:
-            logger.warning("Failed to verify/set boot system: %s", e)
+        # "install add" alone neither boots nor reloads, so only activation
+        # needs the boot variable.
+        if activate:
+            expected_boot = f"{dest_fs}packages.conf"
+            try:
+                before = await run_checked(ssh, "show boot")
+                cli_outputs.append(f"=== show boot ===\n{before}")
+                if not has_boot_variable(before):
+                    return _failed("Could not read the boot variable from show boot")
+                previous_boot = parse_boot_statements(before)
+
+                if not (previous_boot and same_boot_path(previous_boot[0], expected_boot)):
+                    current = ";".join(previous_boot) or "not set"
+                    if not fix_boot_config:
+                        return _failed(
+                            f"Boot variable is {current}, expected {expected_boot} "
+                            "(turn on fix_boot_config to set it)"
+                        )
+                    logger.warning("Setting boot variable %s (was %s)", expected_boot, current)
+                    transcript = await run_config(
+                        ssh,
+                        [
+                            "configure terminal",
+                            "no boot system",
+                            f"boot system {expected_boot}",
+                            "end",
+                        ],
+                    )
+                    boot_config_changed = True
+                    cli_outputs.append(f"=== boot configuration ===\n{transcript}")
+                    saved = await save_config(ssh)
+                    cli_outputs.append(f"=== write memory ===\n{saved}")
+                    # The boot variable follows the saved configuration, so
+                    # it is read back after the save.
+                    after = await run_checked(ssh, "show boot")
+                    cli_outputs.append(f"=== show boot (after) ===\n{after}")
+                    new_boot = parse_boot_statements(after)
+                    if not (new_boot and same_boot_path(new_boot[0], expected_boot)):
+                        return _failed(
+                            f"Boot variable is {';'.join(new_boot) or 'not set'} after the "
+                            f"change, expected {expected_boot}"
+                        )
+            except CommandError as e:
+                return _failed(str(e))
+            except Exception as e:
+                logger.exception("IOS-XE boot variable check failed")
+                return _failed(str(e))
 
         # Build install command. "commit" is a keyword of "activate", so it
         # is only sent with it.
@@ -433,6 +482,10 @@ class IOSXEInstallDriver(UpgradeDriver):
                 activate=activate,
                 commit=commit,
             )
+            cli_outputs.append(f"=== {install_cmd} ===\n{outcome.cli_output}")
+            outcome.cli_output = "\n".join(cli_outputs)
+            outcome.boot_config_changed = boot_config_changed
+            outcome.previous_boot = previous_boot
             if outcome.success:
                 logger.info("Install finished: %s", outcome.note or "ok")
             else:
@@ -441,10 +494,7 @@ class IOSXEInstallDriver(UpgradeDriver):
 
         except Exception as e:
             logger.exception("IOS-XE install failed")
-            return InstallResult(
-                success=False,
-                error=str(e),
-            )
+            return _failed(str(e))
 
     async def verify(
         self,

@@ -152,9 +152,6 @@ class IOSXEBundleDriver(UpgradeDriver):
             else:
                 warnings.append("No boot system statement found")
 
-            # Check config saved (running vs startup)
-            config_saved = True  # Could add check if needed
-
             # Bundle mode doesn't use install command
             install_mode_supported = False
 
@@ -174,7 +171,6 @@ class IOSXEBundleDriver(UpgradeDriver):
                 image_exists=image_exists,
                 target_version_installed=target_version_installed,
                 install_mode_supported=install_mode_supported,
-                config_saved=config_saved,
                 error="; ".join(errors) if errors else None,
                 warnings=warnings,
                 cli_outputs=cli_outputs,
@@ -226,6 +222,7 @@ class IOSXEBundleDriver(UpgradeDriver):
         dest_fs: str,
         activate: bool = True,
         commit: bool = True,
+        fix_boot_config: bool = False,
     ) -> InstallResult:
         """Configure boot system and trigger reload.
 
@@ -234,6 +231,9 @@ class IOSXEBundleDriver(UpgradeDriver):
         2. Set boot system to new image
         3. Save configuration
         4. Reload
+
+        Changing the boot variable is what bundle mode does, so
+        ``fix_boot_config`` (an install-mode option) does not apply.
         """
         dest_fs = normalize_filesystem(dest_fs)
         full_image_path = f"{dest_fs}{image_name}"

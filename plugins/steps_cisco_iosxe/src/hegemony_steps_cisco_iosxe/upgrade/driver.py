@@ -76,7 +76,7 @@ class PreflightResult:
     image_exists: bool | None = None  # None if not checked
     target_version_installed: bool = False  # Already running target version
     install_mode_supported: bool = True  # False for bundle-mode only devices
-    config_saved: bool = True  # Running config saved to startup
+    config_saved: bool | None = None  # Running config saved to startup; None: not checked
     error: str | None = None
     warnings: list[str] = field(default_factory=list)
     cli_outputs: dict[str, str] = field(default_factory=dict)
@@ -123,6 +123,8 @@ class InstallResult:
     error: str | None = None
     cli_output: str = ""
     note: str | None = None  # Optional note (e.g., "Already at target version")
+    boot_config_changed: bool = False  # The step changed the boot variable and saved it
+    previous_boot: list[str] = field(default_factory=list)  # Boot entries before the step
 
 
 @dataclass
@@ -237,7 +239,6 @@ class UpgradeDriver(ABC):
         - Disk space availability
         - File existence check
         - Upgrade mode support verification
-        - Running config saved check
 
         This operation is non-disruptive and safe to run at any time.
 
@@ -299,6 +300,7 @@ class UpgradeDriver(ABC):
         dest_fs: str,
         activate: bool = True,
         commit: bool = True,
+        fix_boot_config: bool = False,
     ) -> InstallResult:
         """Execute software installation.
 
@@ -314,6 +316,8 @@ class UpgradeDriver(ABC):
             dest_fs: Filesystem where file is stored
             activate: Activate the software (usually True)
             commit: Commit the software to prevent auto-rollback
+            fix_boot_config: Install mode: set and save the boot variable when
+                it does not point at packages.conf, instead of failing
 
         Returns:
             InstallResult with installation status and reboot indication

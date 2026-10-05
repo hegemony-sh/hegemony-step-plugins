@@ -13,11 +13,18 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from hegemony_step_sdk import Transport
+    from hegemony_step_sdk import CommandResult, Transport
 
 from ..driver import StageResult
 
 logger = logging.getLogger(__name__)
+
+# IOS error lines: "%Error ...", "% Invalid input ...", "% Incomplete command."
+_CLI_ERROR_RE = re.compile(
+    r"^\s*%\s*(?:Error|Invalid input|Incomplete command|Ambiguous command|Unknown command)",
+    re.MULTILINE | re.IGNORECASE,
+)
+_BOOT_LINE_RE = re.compile(r"BOOT\s+(?:variable|path-list)\s*[=:]", re.IGNORECASE)
 
 
 # ==============================================================================
@@ -121,6 +128,91 @@ def parse_boot_statements(show_boot: str) -> list[str]:
     return images
 
 
+def has_boot_variable(show_boot: str) -> bool:
+    """Whether 'show boot' output shows a BOOT variable line at all."""
+    return bool(_BOOT_LINE_RE.search(show_boot))
+
+
+def same_boot_path(entry: str, path: str) -> bool:
+    """Whether a boot entry names ``path``; flash: and bootflash: are one device."""
+
+    def _norm(value: str) -> str:
+        value = value.strip().lower()
+        return "flash:" + value[len("bootflash:") :] if value.startswith("bootflash:") else value
+
+    return _norm(entry) == _norm(path)
+
+
+# ==============================================================================
+# Command helpers
+# ==============================================================================
+
+
+class CommandError(RuntimeError):
+    """A device command failed, could not run, or gave an unusable answer."""
+
+
+def checked(result: "CommandResult | None", command: str) -> str:
+    """Return a command's output, or raise when the command did not succeed.
+
+    The transports never raise for a failed command: they return exit code -1
+    with an error for a session that failed, and exit code 1 for a CLI error.
+    Some errors ("%Error opening ...") even come back with exit code 0, so the
+    output is read too.
+    """
+    if result is None:
+        raise CommandError(f"{command}: no result")
+    if result.exit_code != 0 or result.error:
+        raise CommandError(f"{command} failed: {result.error or f'exit code {result.exit_code}'}")
+    output = result.output or ""
+    error_line = _CLI_ERROR_RE.search(output)
+    if error_line:
+        line_end = output.find("\n", error_line.start())
+        line = output[error_line.start() : line_end if line_end >= 0 else len(output)]
+        raise CommandError(f"{command} failed: {line.strip()}")
+    return output
+
+
+async def run_checked(ssh: "Transport", command: str) -> str:
+    """Run one exec command and return its output; raise if it did not succeed."""
+    results = await ssh.execute_commands([command])
+    return checked(results[0] if results else None, command)
+
+
+async def run_config(ssh: "Transport", lines: list[str]) -> str:
+    """Send config lines in one session and return its transcript.
+
+    ``lines`` starts with "configure terminal" and ends with "end", which is
+    what makes the transports send them as one config session; sent one by
+    one, each line would run in exec mode in a new session. Raises when any
+    line fails or the session did not run.
+    """
+    results = await ssh.execute_commands(lines)
+    if not results:
+        raise CommandError("configuration session returned no result")
+    transcript = []
+    for result in results:
+        output = checked(result, result.command or "configuration")
+        transcript.append(f"{result.command}\n{output}" if output else result.command)
+    return "\n".join(transcript)
+
+
+async def save_config(ssh: "Transport") -> str:
+    """Run "write memory" and return its output; raise unless the save is confirmed."""
+    result = await ssh.execute_command_timing(
+        "write memory",
+        read_timeout=120,
+        answers={"[confirm]": ""},
+        wait_for_patterns=["[OK]", "%Error", "% Invalid input", "% Incomplete command"],
+    )
+    output = checked(result, "write memory")
+    if "[OK]" not in output:
+        raise CommandError(
+            f"write memory did not confirm the save: {output.strip() or 'no output'}"
+        )
+    return output
+
+
 # ==============================================================================
 # Shared driver methods
 # ==============================================================================
@@ -132,11 +224,6 @@ def parse_boot_statements(show_boot: str) -> list[str]:
 _MD5_VERIFIED_RE = re.compile(r"^\s*Verified \((.+)\) = ([0-9a-fA-F]{32})", re.MULTILINE)
 _MD5_COMPUTED_RE = re.compile(r"Computed signature\s*[=:]?\s*([0-9a-fA-F]{32})", re.IGNORECASE)
 _MD5_RE = re.compile(r"[0-9a-f]{32}")
-# IOS error lines: "%Error ...", "% Invalid input ...", "% Incomplete command."
-_CLI_ERROR_RE = re.compile(
-    r"^\s*%\s*(?:Error|Invalid input|Incomplete command|Ambiguous command|Unknown command)",
-    re.MULTILINE | re.IGNORECASE,
-)
 
 
 @dataclass(frozen=True)
