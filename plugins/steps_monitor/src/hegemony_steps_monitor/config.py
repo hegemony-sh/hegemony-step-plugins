@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Config models for the monitor handlers (editor form schemas)."""
+"""Config model for the monitor handler (editor form schema)."""
 
 from __future__ import annotations
 
@@ -154,9 +154,3 @@ class ConnectivityMonitorConfig(BaseModel):
             "x_hide_when": {"field": "check_type", "value": "icmp_ping"},
         },
     )
-
-
-class MonitorLifecycleConfig(BaseModel):
-    """Config for the internal monitor start/stop lifecycle handlers."""
-
-    model_config = ConfigDict(extra="allow")
