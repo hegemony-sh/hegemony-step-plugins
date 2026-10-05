@@ -1,3 +1,9 @@
+## [0.13.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.13.0...v0.13.1) (2026-10-05)
+
+### Bug Fixes
+
+* **images:** patch the ansible-runner image so its release scan passes ([4ab14d6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/4ab14d642620beee9bec35fa2fe73112195a4346))
+
 ## [0.13.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.12.0...v0.13.0) (2026-10-05)
 
 ### ⚠ BREAKING CHANGES
