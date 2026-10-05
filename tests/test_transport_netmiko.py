@@ -9,7 +9,7 @@ and config-set result building (regression: the full send_config_set session
 output must attach to exactly one result, not every entry equal to the trailing
 command), and how a config command set runs: `exit` stays inside its block,
 blocks and exec commands run in the order written, and nothing runs after the
-first failure.
+first failure or a cancellation.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import hegemony_transport_netmiko
 from hegemony_step_sdk import DeviceConnectionSpec
 from hegemony_transport_netmiko.transport import (
+    _CANCELLED_ERROR,
     _SKIPPED_ERROR,
     SSHTransport,
     _NullCancellationRegistry,
@@ -272,6 +273,45 @@ def test_config_blocks_and_exec_commands_run_in_written_order():
     ]
     assert [r.command for r in results] == commands
     assert all(r.exit_code == 0 for r in results)
+
+
+class _Cancellation(_NullCancellationRegistry):
+    """Cancellation registry whose run is cancelled once ``cancelled`` is set."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def is_cancelled(self, key: str | None) -> bool:
+        return self.cancelled
+
+
+def test_commands_after_a_cancellation_say_the_run_was_cancelled():
+    cancellation = _Cancellation()
+
+    def send_config_set(lines, **kwargs):
+        # Cancelling the run closes the session under the running config set.
+        cancellation.cancelled = True
+        raise OSError("Socket is closed")
+
+    connection = MagicMock()
+    connection.send_config_set.side_effect = send_config_set
+    commands = ["configure terminal", "hostname r1", "end", "show clock", "write memory"]
+
+    transport = _make_transport()
+    transport.step_run_id = "sr-1"
+    transport._cancellation_registry = cancellation
+    with (
+        patch.object(
+            hegemony_transport_netmiko.transport, "ConnectHandler", return_value=connection
+        ),
+        patch.object(hegemony_transport_netmiko.transport, "_safe_disconnect"),
+    ):
+        results = transport._execute_commands_sync(commands)
+
+    assert connection.send_command.call_count == 0
+    assert [r.command for r in results] == commands
+    assert [r.error for r in results[:3]] == ["Socket is closed"] * 3
+    assert [(r.exit_code, r.error) for r in results[3:]] == [(-1, _CANCELLED_ERROR)] * 2
 
 
 async def test_execute_step_fails_when_a_post_command_fails():

@@ -28,6 +28,9 @@ ending the block. Each block is sent as one configuration set. Lines after
 save commands, run at the exec prompt. Everything runs in the order written.
 When a command fails, the commands after it do not run and are recorded as
 skipped, so a `write memory` never saves a change that failed part way.
+When the run is cancelled part way through, the commands that have not run
+are recorded as skipped because the run was cancelled, not because a command
+failed.
 
 A configuration session's transcript is saved as a single consolidated
 "Configuration" evidence artifact per device, and the recorded command list

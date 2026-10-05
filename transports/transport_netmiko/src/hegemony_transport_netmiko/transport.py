@@ -183,6 +183,9 @@ _CONFIG_ENTER_COMMANDS = ("configure terminal", "conf t", "config t")
 #: Error of a result for a command not run because an earlier one failed.
 _SKIPPED_ERROR = "Skipped: earlier command failed"
 
+#: Error of a result for a command not run because the run was cancelled.
+_CANCELLED_ERROR = "Skipped: the run was cancelled"
+
 
 def _is_mode_wrapper(command: str) -> bool:
     """'configure terminal' / 'end': the transport switches modes itself."""
@@ -229,9 +232,9 @@ def _plan_config_set(commands: list[str]) -> list[tuple[bool, list[int]]]:
     return steps
 
 
-def _skipped(command: str) -> SSHResult:
-    """Result for a command not run because an earlier one failed."""
-    return SSHResult(command=command, output="", exit_code=-1, error=_SKIPPED_ERROR)
+def _skipped(command: str, reason: str) -> SSHResult:
+    """Result for a command not run, with ``reason`` as its error."""
+    return SSHResult(command=command, output="", exit_code=-1, error=reason)
 
 
 class SSHTransport:
@@ -445,6 +448,17 @@ class SSHTransport:
         first_cmd = commands[0].strip().lower()
         return first_cmd in _CONFIG_ENTER_COMMANDS
 
+    def _skip_reason(self) -> str:
+        """Why the commands after a failure are not run.
+
+        Cancelling the run closes the session, so the command running then
+        fails; the rest are skipped because of the cancellation, not that
+        failure.
+        """
+        if self._cancellation_registry.is_cancelled(self.step_run_id):
+            return _CANCELLED_ERROR
+        return _SKIPPED_ERROR
+
     def _run_exec_command(self, connection, command: str) -> SSHResult:
         """Run one command at privilege-exec; a CLI error pattern gives exit code 1."""
         start = time.perf_counter()
@@ -589,19 +603,19 @@ class SSHTransport:
                 # Config blocks and exec commands run in the order written.
                 # After the first failure nothing more runs, so a save
                 # command never stores a half-applied change.
-                failed = False
+                skip_reason: str | None = None
                 for is_config, indexes in _plan_config_set(commands):
                     step = [commands[idx] for idx in indexes]
-                    if failed:
-                        results.extend(_skipped(cmd) for cmd in step)
-                    elif is_config:
-                        block_results = self._run_config_block(connection, step)
-                        results.extend(block_results)
-                        failed = any(r.exit_code != 0 for r in block_results)
+                    if skip_reason is not None:
+                        results.extend(_skipped(cmd, skip_reason) for cmd in step)
+                        continue
+                    if is_config:
+                        step_results = self._run_config_block(connection, step)
                     else:
-                        result = self._run_exec_command(connection, step[0])
-                        results.append(result)
-                        failed = result.exit_code != 0
+                        step_results = [self._run_exec_command(connection, step[0])]
+                    results.extend(step_results)
+                    if any(r.exit_code != 0 for r in step_results):
+                        skip_reason = self._skip_reason()
             else:
                 # Execute show/exec commands individually
                 for command in commands:

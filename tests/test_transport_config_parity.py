@@ -137,16 +137,18 @@ def test_both_transports_share_the_config_rules() -> None:
 
 def test_both_transports_report_a_command_not_run_alike() -> None:
     assert netmiko._SKIPPED_ERROR == scrapli._SKIPPED_ERROR
-    netmiko_result = netmiko._skipped("write memory")
-    scrapli_result = scrapli._skipped("write memory")
-    assert (
-        netmiko_result.command,
-        netmiko_result.output,
-        netmiko_result.exit_code,
-        netmiko_result.error,
-    ) == (
-        scrapli_result.command,
-        scrapli_result.output,
-        scrapli_result.exit_code,
-        scrapli_result.error,
-    )
+    assert netmiko._CANCELLED_ERROR == scrapli._CANCELLED_ERROR
+    for reason in (netmiko._SKIPPED_ERROR, netmiko._CANCELLED_ERROR):
+        netmiko_result = netmiko._skipped("write memory", reason)
+        scrapli_result = scrapli._skipped("write memory", reason)
+        assert (
+            netmiko_result.command,
+            netmiko_result.output,
+            netmiko_result.exit_code,
+            netmiko_result.error,
+        ) == (
+            scrapli_result.command,
+            scrapli_result.output,
+            scrapli_result.exit_code,
+            scrapli_result.error,
+        )

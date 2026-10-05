@@ -7,8 +7,9 @@
 Covers registration under hegemony.device_transports, spec-based construction
 and platform mapping, show/config execution paths (per-response result
 mapping, `exit` kept inside its config block, blocks and exec commands in the
-order written, nothing run after the first failure), timing-mode prompt
-answering, and the explicit NotImplementedError staging seam.
+order written, nothing run after the first failure or a cancellation),
+timing-mode prompt answering, and the explicit NotImplementedError staging
+seam.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from scrapli.exceptions import ScrapliAuthenticationFailed, ScrapliTimeout
 import hegemony_transport_scrapli
 from hegemony_step_sdk import DeviceConnectionSpec
 from hegemony_transport_scrapli.transport import (
+    _CANCELLED_ERROR,
     _SKIPPED_ERROR,
     ScrapliTransport,
     _NullCancellationRegistry,
@@ -255,6 +257,93 @@ async def test_config_blocks_and_exec_commands_run_in_written_order():
         "write memory",
     ]
     assert all(r.exit_code == 0 for r in results)
+
+
+class _Cancellation(_NullCancellationRegistry):
+    """Cancellation registry whose run is cancelled once ``cancelled`` is set."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def is_cancelled(self, key: str | None) -> bool:
+        return self.cancelled
+
+
+async def _run_with_cancellation(
+    commands: list[str], connection: MagicMock, cancellation: _Cancellation
+):
+    transport = _make_transport()
+    transport.step_run_id = "sr-1"
+    transport._cancellation_registry = cancellation
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        return await transport.execute_commands(commands)
+
+
+async def test_commands_after_a_cancellation_say_the_run_was_cancelled():
+    cancellation = _Cancellation()
+
+    async def send_command(command, **kwargs):
+        cancellation.cancelled = True  # the run is cancelled while this runs
+        return _response("10:00")
+
+    connection = _connection()
+    connection.send_configs.return_value = [_response()]
+    connection.send_command.side_effect = send_command
+
+    results = await _run_with_cancellation(
+        [
+            "configure terminal",
+            "hostname r1",
+            "end",
+            "show clock",
+            "conf t",
+            "ntp server 192.0.2.5",
+            "ntp server 192.0.2.6",
+            "end",
+            "write memory",
+        ],
+        connection,
+        cancellation,
+    )
+
+    connection.send_configs.assert_awaited_once()
+    assert connection.send_command.await_count == 1
+    assert [(r.command, r.exit_code, r.error) for r in results] == [
+        ("hostname r1", 0, None),
+        ("show clock", 0, None),
+        ("ntp server 192.0.2.5", -1, "Cancelled"),
+        ("ntp server 192.0.2.6", -1, _CANCELLED_ERROR),
+        ("write memory", -1, _CANCELLED_ERROR),
+    ]
+
+
+async def test_a_command_cut_off_by_a_cancellation_skips_the_rest_as_cancelled():
+    cancellation = _Cancellation()
+
+    async def send_configs(lines, **kwargs):
+        # Cancelling closes the session: the first line fails, and
+        # stop_on_failed leaves the rest of the block unattempted.
+        cancellation.cancelled = True
+        return [_response(failed=True)]
+
+    connection = _connection()
+    connection.send_configs.side_effect = send_configs
+
+    results = await _run_with_cancellation(
+        ["configure terminal", "hostname r1", "ntp server 192.0.2.5", "end", "write memory"],
+        connection,
+        cancellation,
+    )
+
+    assert connection.send_command.await_count == 0
+    assert [(r.command, r.exit_code) for r in results] == [
+        ("hostname r1", 1),
+        ("ntp server 192.0.2.5", -1),
+        ("write memory", -1),
+    ]
+    assert [r.error for r in results[1:]] == [_CANCELLED_ERROR, _CANCELLED_ERROR]
 
 
 async def test_auth_failure_fills_all_results():

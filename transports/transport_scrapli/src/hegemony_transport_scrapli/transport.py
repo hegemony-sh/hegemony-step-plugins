@@ -166,6 +166,9 @@ _CONFIG_ENTER_COMMANDS = ("configure terminal", "conf t", "config t")
 #: Error of a result for a command not run because an earlier one failed.
 _SKIPPED_ERROR = "Skipped: earlier command failed"
 
+#: Error of a result for a command not run because the run was cancelled.
+_CANCELLED_ERROR = "Skipped: the run was cancelled"
+
 
 def _is_sent(command: str) -> bool:
     """False for blank lines and the 'configure terminal' / 'end' wrappers.
@@ -214,9 +217,9 @@ def _plan_config_set(commands: list[str]) -> list[tuple[bool, list[str]]]:
     return [(is_config, lines) for is_config, lines in steps if lines]
 
 
-def _skipped(command: str) -> ScrapliResult:
-    """Result for a command not run because an earlier one failed."""
-    return ScrapliResult(command=command, output="", exit_code=-1, error=_SKIPPED_ERROR)
+def _skipped(command: str, reason: str) -> ScrapliResult:
+    """Result for a command not run, with ``reason`` as its error."""
+    return ScrapliResult(command=command, output="", exit_code=-1, error=reason)
 
 
 class ScrapliTransport:
@@ -415,6 +418,17 @@ class ScrapliTransport:
         first_cmd = commands[0].strip().lower()
         return first_cmd in _CONFIG_ENTER_COMMANDS
 
+    def _skip_reason(self) -> str:
+        """Why the commands after a failure are not run.
+
+        Cancelling the run closes the session, so the command running then
+        fails; the rest are skipped because of the cancellation, not that
+        failure.
+        """
+        if self._cancellation_registry.is_cancelled(self.step_run_id):
+            return _CANCELLED_ERROR
+        return _SKIPPED_ERROR
+
     @staticmethod
     def _result_from_response(command: str, response: Any) -> ScrapliResult:
         """Map one scrapli ``Response`` onto the SDK result shape."""
@@ -468,7 +482,9 @@ class ScrapliTransport:
         for result in results:
             if result.exit_code != 0:
                 logger.warning(f"Config command '{result.command}' failed: {result.error}")
-        results.extend(_skipped(cmd) for cmd in block[len(results) :])
+        if len(results) < len(block):
+            reason = self._skip_reason()
+            results.extend(_skipped(cmd, reason) for cmd in block[len(results) :])
         return results
 
     async def execute_commands(self, commands: list[str]) -> list[ScrapliResult]:
@@ -500,12 +516,12 @@ class ScrapliTransport:
 
             if self._is_config_command_set(commands):
                 # Config blocks and exec commands run in the order written.
-                # After the first failure nothing more runs, so a save
-                # command never stores a half-applied change.
-                failed = False
+                # After the first failure or a cancellation nothing more
+                # runs, so a save command never stores a half-applied change.
+                skip_reason: str | None = None
                 for is_config, step in _plan_config_set(commands):
-                    if failed:
-                        results.extend(_skipped(cmd) for cmd in step)
+                    if skip_reason is not None:
+                        results.extend(_skipped(cmd, skip_reason) for cmd in step)
                         continue
                     if self._cancellation_registry.is_cancelled(self.step_run_id):
                         results.append(
@@ -513,16 +529,16 @@ class ScrapliTransport:
                                 command=step[0], output="", exit_code=-1, error="Cancelled"
                             )
                         )
-                        results.extend(_skipped(cmd) for cmd in step[1:])
-                        failed = True
-                    elif is_config:
-                        block_results = await self._send_config_block(connection, step)
-                        results.extend(block_results)
-                        failed = any(r.exit_code != 0 for r in block_results)
+                        results.extend(_skipped(cmd, _CANCELLED_ERROR) for cmd in step[1:])
+                        skip_reason = _CANCELLED_ERROR
+                        continue
+                    if is_config:
+                        step_results = await self._send_config_block(connection, step)
                     else:
-                        result = await self._send_exec_command(connection, step[0])
-                        results.append(result)
-                        failed = result.exit_code != 0
+                        step_results = [await self._send_exec_command(connection, step[0])]
+                    results.extend(step_results)
+                    if any(r.exit_code != 0 for r in step_results):
+                        skip_reason = self._skip_reason()
             else:
                 for command in commands:
                     if not command.strip():
