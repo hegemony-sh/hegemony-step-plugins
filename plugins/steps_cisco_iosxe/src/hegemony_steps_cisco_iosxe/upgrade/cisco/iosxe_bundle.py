@@ -39,11 +39,14 @@ from ..driver import (
     register_driver,
 )
 from .iosxe_common import (
+    CommandError,
     check_file_exists_in_dir,
+    checked,
     normalize_filesystem,
     parse_boot_statements,
     parse_free_bytes,
     parse_version_from_show_version,
+    run_checked,
     stage_image,
 )
 
@@ -98,16 +101,14 @@ class IOSXEBundleDriver(UpgradeDriver):
 
         try:
             # Get current version
-            version_result = await ssh.execute_commands(["show version"])
-            version_output = version_result[0].output if version_result else ""
+            version_output = await run_checked(ssh, "show version")
             cli_outputs["show version"] = version_output
             current_version = parse_version_from_show_version(version_output)
 
             await asyncio.sleep(0.1)
 
             # Check disk space
-            dir_result = await ssh.execute_commands([f"dir {dest_fs}"])
-            dir_output = dir_result[0].output if dir_result else ""
+            dir_output = await run_checked(ssh, f"dir {dest_fs}")
             cli_outputs[f"dir {dest_fs}"] = dir_output
             free_bytes = parse_free_bytes(dir_output)
 
@@ -142,8 +143,7 @@ class IOSXEBundleDriver(UpgradeDriver):
                 )
 
             # Get current boot configuration
-            boot_result = await ssh.execute_commands(["show boot"])
-            boot_output = boot_result[0].output if boot_result else ""
+            boot_output = await run_checked(ssh, "show boot")
             cli_outputs["show boot"] = boot_output
             current_boot_images = parse_boot_statements(boot_output)
 
@@ -177,6 +177,13 @@ class IOSXEBundleDriver(UpgradeDriver):
                 extra={"current_boot_images": current_boot_images},
             )
 
+        except CommandError as e:
+            logger.warning("IOS-XE bundle preflight failed: %s", e)
+            return PreflightResult(
+                success=False,
+                error=str(e),
+                cli_outputs=cli_outputs,
+            )
         except Exception as e:
             logger.exception("IOS-XE bundle preflight failed")
             return PreflightResult(
@@ -241,8 +248,7 @@ class IOSXEBundleDriver(UpgradeDriver):
 
         try:
             # Get current boot config for rollback info
-            boot_result = await ssh.execute_commands(["show boot"])
-            boot_output = boot_result[0].output if boot_result else ""
+            boot_output = await run_checked(ssh, "show boot")
             cli_outputs.append(f"=== show boot (before) ===\n{boot_output}")
             previous_boot_images = parse_boot_statements(boot_output)
 
@@ -273,8 +279,7 @@ class IOSXEBundleDriver(UpgradeDriver):
                 await asyncio.sleep(0.2)
 
             # Verify boot config was set correctly
-            verify_result = await ssh.execute_commands(["show boot"])
-            verify_output = verify_result[0].output if verify_result else ""
+            verify_output = await run_checked(ssh, "show boot")
             cli_outputs.append(f"=== show boot (after config) ===\n{verify_output}")
 
             if image_name.lower() not in verify_output.lower():
@@ -356,8 +361,7 @@ class IOSXEBundleDriver(UpgradeDriver):
 
         try:
             # Get current version
-            version_result = await ssh.execute_commands(["show version"])
-            version_output = version_result[0].output if version_result else ""
+            version_output = await run_checked(ssh, "show version")
             cli_outputs["show version"] = version_output
             current_version = parse_version_from_show_version(version_output)
 
@@ -385,9 +389,7 @@ class IOSXEBundleDriver(UpgradeDriver):
                 )
 
             # Verify boot config
-            boot_result = await ssh.execute_commands(["show boot"])
-            boot_output = boot_result[0].output if boot_result else ""
-            cli_outputs["show boot"] = boot_output
+            cli_outputs["show boot"] = await run_checked(ssh, "show boot")
 
             # Bundle mode is always "committed" since boot system is saved
             committed = True
@@ -400,9 +402,21 @@ class IOSXEBundleDriver(UpgradeDriver):
                 version_match=version_match,
                 version_changed=version_changed,
                 committed=committed,
+                error=(
+                    None
+                    if success
+                    else f"Running version {current_version or 'unknown'} is not {target_version}"
+                ),
                 cli_outputs=cli_outputs,
             )
 
+        except CommandError as e:
+            logger.warning("IOS-XE bundle verify failed: %s", e)
+            return VerifyResult(
+                success=False,
+                error=str(e),
+                cli_outputs=cli_outputs,
+            )
         except Exception as e:
             logger.exception("IOS-XE bundle verify failed")
             return VerifyResult(
@@ -430,17 +444,31 @@ class IOSXEBundleDriver(UpgradeDriver):
 
         cli_outputs: list[str] = []
         removed_packages: list[str] = []
+        failed_deletes: list[str] = []
 
         try:
             # Get current boot config
-            boot_result = await ssh.execute_commands(["show boot"])
-            boot_output = boot_result[0].output if boot_result else ""
+            boot_output = await run_checked(ssh, "show boot")
             cli_outputs.append(f"=== show boot ===\n{boot_output}")
             current_boot_images = parse_boot_statements(boot_output)
 
-            # Get all .bin files in flash
-            dir_result = await ssh.execute_commands(["dir flash:*.bin"])
-            dir_output = dir_result[0].output if dir_result else ""
+            # With no image in the boot variable the device boots the first
+            # file it finds, so no image is known to be unused.
+            if not current_boot_images:
+                return CleanupResult(
+                    success=False,
+                    error="The boot variable names no image, so nothing was deleted",
+                    cli_output="\n".join(cli_outputs),
+                )
+
+            # Get all .bin files in flash. A wildcard that matches nothing
+            # answers "No such file", which is an empty listing.
+            dir_results = await ssh.execute_commands(["dir flash:*.bin"])
+            dir_result = dir_results[0] if dir_results else None
+            if dir_result and dir_result.exit_code >= 0 and "No such file" in dir_result.output:
+                dir_output = ""
+            else:
+                dir_output = checked(dir_result, "dir flash:*.bin")
             cli_outputs.append(f"=== dir flash:*.bin ===\n{dir_output}")
 
             # Parse .bin files from dir output
@@ -459,42 +487,49 @@ class IOSXEBundleDriver(UpgradeDriver):
                 if not is_boot_image:
                     files_to_delete.append(bin_file)
 
-            # Keep specified number of old versions (sort by name, assume version in name)
-            if len(files_to_delete) > keep_versions:
-                files_to_delete.sort()
-                files_to_delete = (
-                    files_to_delete[:-keep_versions] if keep_versions > 0 else files_to_delete
-                )
+            # Keep the newest old images (sorted by name, assume version in name)
+            files_to_delete.sort()
+            if keep_versions > 0:
+                files_to_delete = files_to_delete[:-keep_versions]
 
             # Delete files
             for filename in files_to_delete:
                 delete_cmd = f"delete /force flash:{filename}"
+                result = await ssh.execute_command_timing(
+                    delete_cmd,
+                    read_timeout=60,
+                    answers={"Delete filename": "", "[confirm]": ""},
+                )
+                cli_outputs.append(f"=== {delete_cmd} ===\n{result.output}")
                 try:
-                    result = await ssh.execute_command_timing(
-                        delete_cmd,
-                        read_timeout=60,
-                        answers={
-                            "Delete filename": "",
-                            "confirm": "",
-                            "[confirm]": "",
-                        },
-                    )
-                    cli_outputs.append(f"=== {delete_cmd} ===\n{result.output}")
-                    removed_packages.append(filename)
-                    logger.info("Deleted: %s", filename)
-                except Exception as e:
+                    checked(result, delete_cmd)
+                except CommandError as e:
                     logger.warning("Failed to delete %s: %s", filename, e)
+                    failed_deletes.append(str(e))
+                    continue
+                removed_packages.append(filename)
+                logger.info("Deleted: %s", filename)
 
             return CleanupResult(
-                success=True,
+                success=not failed_deletes,
                 removed_packages=removed_packages,
+                error="; ".join(failed_deletes) or None,
                 cli_output="\n".join(cli_outputs),
             )
 
+        except CommandError as e:
+            logger.warning("IOS-XE bundle cleanup failed: %s", e)
+            return CleanupResult(
+                success=False,
+                removed_packages=removed_packages,
+                error=str(e),
+                cli_output="\n".join(cli_outputs),
+            )
         except Exception as e:
             logger.exception("IOS-XE bundle cleanup failed")
             return CleanupResult(
                 success=False,
+                removed_packages=removed_packages,
                 error=str(e),
                 cli_output="\n".join(cli_outputs) if cli_outputs else "",
             )

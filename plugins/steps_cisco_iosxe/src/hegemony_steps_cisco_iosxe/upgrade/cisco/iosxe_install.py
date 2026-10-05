@@ -40,6 +40,7 @@ from ..driver import (
 from .iosxe_common import (
     CommandError,
     check_file_exists_in_dir,
+    checked,
     has_boot_variable,
     normalize_filesystem,
     parse_boot_statements,
@@ -88,6 +89,15 @@ _NO_CHANGE_RE = re.compile(
     r"Same Image File-No Change|Nothing to activate|No package is added or removed",
     re.IGNORECASE,
 )
+
+
+# "install remove inactive": success, nothing to do, and each deleted file.
+_REMOVE_DONE_RE = re.compile(r"SUCCESS:\s*install_remove", re.IGNORECASE)
+_NOTHING_TO_REMOVE_RE = re.compile(
+    r"nothing to (?:clean|remove|delete)|no (?:inactive|unused) (?:package|file)s?",
+    re.IGNORECASE,
+)
+_REMOVED_RE = re.compile(r"^\s*(?:Deleting file|Removing)\s+(\S+)", re.MULTILINE)
 
 
 def _install_failure(output: str) -> str | None:
@@ -222,8 +232,7 @@ class IOSXEInstallDriver(UpgradeDriver):
 
         try:
             # Get current version
-            version_result = await ssh.execute_commands(["show version"])
-            version_output = version_result[0].output if version_result else ""
+            version_output = await run_checked(ssh, "show version")
             cli_outputs["show version"] = version_output
             current_version = parse_version_from_show_version(version_output)
 
@@ -231,8 +240,7 @@ class IOSXEInstallDriver(UpgradeDriver):
             await asyncio.sleep(0.1)
 
             # Check disk space
-            dir_result = await ssh.execute_commands([f"dir {dest_fs}"])
-            dir_output = dir_result[0].output if dir_result else ""
+            dir_output = await run_checked(ssh, f"dir {dest_fs}")
             cli_outputs[f"dir {dest_fs}"] = dir_output
             free_bytes = parse_free_bytes(dir_output)
 
@@ -270,28 +278,27 @@ class IOSXEInstallDriver(UpgradeDriver):
             install_mode_supported = False
             target_version_installed = False
 
+            install_results = await ssh.execute_commands(["show install summary"])
+            result = install_results[0] if install_results else None
+            # A command that did not run says nothing about install mode; only
+            # an answer from the device (a CLI error) means it is unsupported.
+            if result is None or result.exit_code < 0:
+                reason = result.error if result else "no result"
+                raise CommandError(f"show install summary failed: {reason}")
+            cli_outputs["show install summary"] = result.output
             try:
-                install_result = await ssh.execute_commands(["show install summary"])
-                if install_result:
-                    result = install_result[0]
-                    cli_outputs["show install summary"] = result.output
+                summary_output = checked(result, "show install summary")
+            except CommandError as e:
+                logger.warning("Install mode not supported: %s", e)
+            else:
+                install_mode_supported = True
 
-                    if result.exit_code == 0 and result.error is None:
-                        install_mode_supported = True
-
-                        # Check if target version is already committed
-                        if target_version:
-                            committed_pattern = rf"\bC\s+{re.escape(target_version)}"
-                            if re.search(committed_pattern, result.output):
-                                target_version_installed = True
-                                logger.info("Target version %s already committed", target_version)
-                    else:
-                        logger.warning(
-                            "Install mode not supported: %s",
-                            result.error or "unknown error",
-                        )
-            except Exception as e:
-                logger.warning("Failed to check install mode: %s", e)
+                # Check if target version is already committed
+                if target_version:
+                    committed_pattern = rf"\bC\s+{re.escape(target_version)}"
+                    if re.search(committed_pattern, summary_output):
+                        target_version_installed = True
+                        logger.info("Target version %s already committed", target_version)
 
             if not install_mode_supported:
                 errors.append(
@@ -314,6 +321,13 @@ class IOSXEInstallDriver(UpgradeDriver):
                 cli_outputs=cli_outputs,
             )
 
+        except CommandError as e:
+            logger.warning("IOS-XE preflight failed: %s", e)
+            return PreflightResult(
+                success=False,
+                error=str(e),
+                cli_outputs=cli_outputs,
+            )
         except Exception as e:
             logger.exception("IOS-XE preflight failed")
             return PreflightResult(
@@ -515,8 +529,7 @@ class IOSXEInstallDriver(UpgradeDriver):
 
         try:
             # Get current version
-            version_result = await ssh.execute_commands(["show version"])
-            version_output = version_result[0].output if version_result else ""
+            version_output = await run_checked(ssh, "show version")
             cli_outputs["show version"] = version_output
             current_version = parse_version_from_show_version(version_output)
 
@@ -544,38 +557,34 @@ class IOSXEInstallDriver(UpgradeDriver):
                 )
 
             # Check commit status
-            committed = False
-            try:
-                summary_result = await ssh.execute_commands(["show install summary"])
-                if summary_result and summary_result[0].exit_code == 0:
-                    summary_output = summary_result[0].output
-                    cli_outputs["show install summary"] = summary_output
+            summary_output = await run_checked(ssh, "show install summary")
+            cli_outputs["show install summary"] = summary_output
+            committed = bool(re.search(r"\bC\s+\d+\.\d+", summary_output))
+            if committed:
+                logger.info("New version is committed")
+            elif auto_commit:
+                logger.warning("Version not committed, running 'install commit'")
+                commit_result = await ssh.execute_command_timing(
+                    "install commit",
+                    read_timeout=120,
+                    answers={"[y/n]": "y"},
+                )
+                cli_outputs["install commit"] = commit_result.output
+                checked(commit_result, "install commit")
 
-                    if re.search(r"\bC\s+\d+\.\d+", summary_output):
-                        committed = True
-                        logger.info("New version is committed")
-                    elif auto_commit:
-                        logger.warning("Version not committed, running 'install commit'")
-                        commit_result = await ssh.execute_command_timing(
-                            "install commit",
-                            read_timeout=120,
-                            answers={"[y/n]": "y", "Do you want to proceed": "y"},
-                        )
-                        cli_outputs["install commit"] = commit_result.output
-
-                        await asyncio.sleep(5)
-                        summary_result2 = await ssh.execute_commands(["show install summary"])
-                        if summary_result2 and summary_result2[0].exit_code == 0:
-                            cli_outputs["show install summary (after commit)"] = summary_result2[
-                                0
-                            ].output
-                            if re.search(r"\bC\s+\d+\.\d+", summary_result2[0].output):
-                                committed = True
-                                logger.info("Successfully committed")
-            except Exception as e:
-                logger.warning("Failed to check/run commit: %s", e)
+                await asyncio.sleep(5)
+                summary_output = await run_checked(ssh, "show install summary")
+                cli_outputs["show install summary (after commit)"] = summary_output
+                committed = bool(re.search(r"\bC\s+\d+\.\d+", summary_output))
+                if committed:
+                    logger.info("Successfully committed")
 
             success = version_changed and (not target_version or version_match) and committed
+            error = None
+            if target_version and not version_match:
+                error = f"Running version {current_version or 'unknown'} is not {target_version}"
+            elif not committed:
+                error = "The new software is not committed"
 
             return VerifyResult(
                 success=success,
@@ -583,9 +592,17 @@ class IOSXEInstallDriver(UpgradeDriver):
                 version_match=version_match,
                 version_changed=version_changed,
                 committed=committed,
+                error=error,
                 cli_outputs=cli_outputs,
             )
 
+        except CommandError as e:
+            logger.warning("IOS-XE verify failed: %s", e)
+            return VerifyResult(
+                success=False,
+                error=str(e),
+                cli_outputs=cli_outputs,
+            )
         except Exception as e:
             logger.exception("IOS-XE verify failed")
             return VerifyResult(
@@ -609,30 +626,39 @@ class IOSXEInstallDriver(UpgradeDriver):
             return CleanupResult(success=True)
 
         try:
-            prompts = {
-                "Do you want to remove": "y",
-                "Proceed": "y",
-                "[y/n]": "y",
-            }
-
+            # One key per prompt: each matching key sends its own answer.
             result = await ssh.execute_command_timing(
                 "install remove inactive",
                 read_timeout=300,
-                answers=prompts,
+                answers={"[y/n]": "y"},
+                wait_for_patterns=[
+                    "SUCCESS: install_remove",
+                    "FAILED: install_remove",
+                    "Nothing to",
+                    "No inactive",
+                    "No unused",
+                    "%Error",
+                    "% Invalid input",
+                    "% Incomplete command",
+                ],
             )
+            output = result.output or ""
+            removed = _REMOVED_RE.findall(output)
 
-            output = result.output
-
-            removed = []
-            for line in output.split("\n"):
-                if "Removing" in line or "removed" in line.lower():
-                    removed.append(line.strip())
-
-            success = "ERROR" not in output.upper() and "FAILED" not in output.upper()
+            # Success needs the device to say so: an empty or cut-off session
+            # proves nothing.
+            error = _install_failure(output)
+            if not error and (result.exit_code != 0 or result.error):
+                error = f"install remove inactive failed: {result.error or f'exit code {result.exit_code}'}"
+            if not error and not (
+                _REMOVE_DONE_RE.search(output) or _NOTHING_TO_REMOVE_RE.search(output)
+            ):
+                error = "install remove inactive did not report completion"
 
             return CleanupResult(
-                success=success,
+                success=error is None,
                 removed_packages=removed,
+                error=error,
                 cli_output=output,
             )
 

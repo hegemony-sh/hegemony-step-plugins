@@ -33,6 +33,9 @@ MISMATCH = (
     f"Submitted signature {EXPECTED}\n"
 )
 MISSING = "%Error opening flash:img.bin (No such file or directory)"
+LISTED = "  3   987654321 Jan 25 2026 12:19:36.0000000000 +00:00 img.bin"
+# The dir before the transfer, then the one after it.
+DIRS = [Result(MISSING), Result(LISTED)]
 
 
 async def _verify(result: Result, expected: str = EXPECTED):
@@ -109,7 +112,7 @@ async def _stage(ssh: ScriptedTransport, **overrides: Any):
 
 
 async def test_stage_fails_on_a_real_mismatch_and_records_the_computed_hash():
-    ssh = ScriptedTransport({"dir": Result(MISSING), "verify /md5": Result(MISMATCH)})
+    ssh = ScriptedTransport({"dir": DIRS, "verify /md5": Result(MISMATCH)})
     result = await _stage(ssh)
     assert result.success is False
     assert result.hash_verified is False
@@ -119,7 +122,7 @@ async def test_stage_fails_on_a_real_mismatch_and_records_the_computed_hash():
 
 
 async def test_stage_records_the_hash_the_device_confirmed():
-    ssh = ScriptedTransport({"dir": Result(MISSING), "verify /md5": Result(MATCH)})
+    ssh = ScriptedTransport({"dir": DIRS, "verify /md5": Result(MATCH)})
     result = await _stage(ssh, expected_md5=EXPECTED.upper())
     assert result.success is True
     assert result.verified_hash == EXPECTED
@@ -163,7 +166,7 @@ async def test_handler_refuses_a_malformed_md5_before_connecting():
 
 
 async def test_handler_evidence_carries_the_computed_hash():
-    ssh = ScriptedTransport({"dir": Result(MISSING), "verify /md5": Result(MISMATCH)})
+    ssh = ScriptedTransport({"dir": DIRS, "verify /md5": Result(MISMATCH)})
     ctx = make_ctx(
         {
             "source_url": "https://repo.example/img.bin",

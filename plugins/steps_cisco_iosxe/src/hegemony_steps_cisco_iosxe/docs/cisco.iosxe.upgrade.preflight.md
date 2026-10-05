@@ -55,9 +55,12 @@ while it runs.
 The step fails when no target devices are configured, when no upgrade driver
 exists for the configured platform and mode, or when any single device fails
 its checks; per-device results are still recorded in evidence. Per-device
-failure causes include a missing management host, an SSH or command error,
-insufficient free space (unless the image is already staged), and — in
-install mode — a device that does not support the install command.
+failure causes include a missing management host, a device that cannot be
+reached, a check command that fails (`show version`, `dir`, and in bundle
+mode `show boot`), insufficient free space (unless the image is already
+staged), and - in install mode - a device that does not support the install
+command. A device that answers `show install summary` with an error does
+not support install mode; a session that fails is a command error instead.
 
 All devices must pass for the step to succeed. The step's default timeout is
 7200 seconds; because the checks are read-only, rerunning after a failure is

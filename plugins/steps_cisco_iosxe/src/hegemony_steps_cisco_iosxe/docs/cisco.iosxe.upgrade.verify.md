@@ -52,8 +52,8 @@ timeout; the evidence records the last connection error. A reachable device
 fails verification when its running version does not contain the configured
 Target Version, when a known pre-upgrade version is still running (the
 version did not change), or — in install mode — when the software is not
-committed even after the auto-commit attempt. Command or SSH errors during
-verification also fail that device.
+committed even after the auto-commit attempt. A verification command that
+fails, including `install commit`, also fails that device.
 
 All devices must verify for the step to succeed; per-device evidence is
 recorded either way. The step's overall default timeout is 7200 seconds, so

@@ -29,7 +29,10 @@ class _Result:
 
 
 class _FakeTransport:
-    """Scripted SSH transport: dir listing, verify /md5 (in order), HTTP transfer."""
+    """Scripted SSH transport: dir listing, verify /md5 (in order), HTTP transfer.
+
+    After a transfer, a dir that answered "No such file" lists the file.
+    """
 
     def __init__(self, *, dir_output: str, md5_outputs: list[str] | None = None) -> None:
         self._dir_output = dir_output
@@ -39,6 +42,8 @@ class _FakeTransport:
 
     async def execute_commands(self, commands):
         self.commands.extend(commands)
+        if self.transfers and "No such file" in self._dir_output:
+            return [_Result(_EXISTS)]
         return [_Result(self._dir_output)]
 
     async def execute_command_timing(self, command, **kwargs):

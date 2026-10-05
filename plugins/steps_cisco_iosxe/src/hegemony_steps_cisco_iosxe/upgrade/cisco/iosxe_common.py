@@ -332,8 +332,9 @@ async def stage_image(
         dir_output = dir_result.output if dir_result else ""
         cli_outputs.append(f"=== dir {full_path} ===\n{dir_output}")
 
-        # A dir that did not run (no session, a dropped connection) says
-        # nothing about the file - it is an error, not "the file exists".
+        # A dir that did not run (no session, a dropped connection) or that
+        # the device rejected says nothing about the file - it is an error,
+        # not "the file exists". "No such file" is the one expected answer.
         if dir_result is None or dir_result.exit_code < 0:
             reason = dir_result.error if dir_result else "no result"
             return StageResult(
@@ -341,12 +342,18 @@ async def stage_image(
                 error=f"Could not list {full_path}: {reason}",
                 cli_output="\n".join(cli_outputs),
             )
-
-        file_exists = (
-            dir_result.exit_code == 0
-            and "No such file" not in dir_output
-            and "%Error" not in dir_output
-        )
+        if "No such file" in dir_output:
+            file_exists = False
+        else:
+            try:
+                checked(dir_result, f"dir {full_path}")
+            except CommandError as e:
+                return StageResult(
+                    success=False,
+                    error=f"Could not list {full_path}: {e}",
+                    cli_output="\n".join(cli_outputs),
+                )
+            file_exists = check_file_exists_in_dir(dir_output, dest_filename)
         actual_size = parse_file_size_from_dir(dir_output, dest_filename) if file_exists else None
         computed_hash: str | None = None
 
@@ -442,9 +449,16 @@ async def stage_image(
         transfer_elapsed = time.time() - transfer_start
 
         # Verify transferred file
-        dir_result = await ssh.execute_commands([f"dir {full_path}"])
-        dir_output = dir_result[0].output if dir_result else ""
+        dir_output = await run_checked(ssh, f"dir {full_path}")
         cli_outputs.append(f"=== dir {full_path} (after transfer) ===\n{dir_output}")
+        if not check_file_exists_in_dir(dir_output, dest_filename):
+            return StageResult(
+                success=False,
+                transfer_method=transfer_method,
+                transfer_elapsed_sec=transfer_elapsed,
+                error=f"{full_path} is not on the device after the transfer",
+                cli_output="\n".join(cli_outputs),
+            )
 
         actual_size = parse_file_size_from_dir(dir_output, dest_filename)
 
@@ -506,6 +520,13 @@ async def stage_image(
             cli_output="\n".join(cli_outputs),
         )
 
+    except CommandError as e:
+        logger.warning("IOS-XE stage failed: %s", e)
+        return StageResult(
+            success=False,
+            error=str(e),
+            cli_output="\n".join(cli_outputs),
+        )
     except Exception as e:
         logger.exception("IOS-XE stage failed")
         return StageResult(

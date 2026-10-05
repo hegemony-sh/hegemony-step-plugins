@@ -69,11 +69,11 @@ when the MD5 checksum is not 32 hexadecimal digits, when the selected
 repository file cannot be resolved to a device-reachable URL, or when no
 upgrade driver exists for the configured platform and mode.
 Per-device failures include a missing management host, a `dir` of the
-destination that cannot run, a failed HTTP transfer, a checksum the device
-does not confirm, a non-HTTP(S) source URL, a legacy `scp` or `tftp`
-transfer method, and SSH errors. Any single
-device failing fails the whole step, though per-device evidence is still
-recorded.
+destination that fails, a failed HTTP transfer, an image missing from `dir`
+after the transfer, a checksum the device does not confirm, a non-HTTP(S)
+source URL, a legacy `scp` or `tftp` transfer method, and SSH errors. Any
+single device failing fails the whole step, though per-device evidence is
+still recorded.
 
 The step's default timeout is 7200 seconds, and each device-side HTTP
 transfer is capped at one hour. Rerunning after a partial failure is cheap
