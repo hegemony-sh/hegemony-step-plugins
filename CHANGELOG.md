@@ -1,3 +1,20 @@
+## [0.12.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.11.0...v0.12.0) (2026-10-05)
+
+### ⚠ BREAKING CHANGES
+
+* **netcli:** the netcli.poll_until step handler no longer exists. A flow
+that still has a netcli.poll_until step is refused on save as an unknown
+handler, and a run that reaches such a step fails it. Replace those steps
+before upgrading.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+
+### Features
+
+* **netcli:** remove netcli.poll_until ([da5863d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/da5863df607d7c8522c7e057f6c062b1fe82884d))
+
 ## [0.11.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.10.0...v0.11.0) (2026-10-05)
 
 ### Features
