@@ -4,8 +4,8 @@
 
 """Flow orchestration step handlers for Hegemony.
 
-Platform-orchestration steps: launch nested flow runs, send on-demand
-notifications, trigger git flow-definition syncs.
+Platform-orchestration steps: launch nested flow runs and send on-demand
+notifications.
 
 Registers under the ``hegemony.step_handlers`` entry-point group; the entry
 point name is the claimed handler-id namespace prefix (``flow``).
@@ -16,12 +16,10 @@ from __future__ import annotations
 
 from hegemony_step_sdk import BaseHandler, StepHandlerRegistry
 
-from .git_sync import GitSyncRepoHandler
 from .notify import SendNotificationHandler
 from .run import RunFlowHandler
 
 ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
-    GitSyncRepoHandler,
     RunFlowHandler,
     SendNotificationHandler,
 )

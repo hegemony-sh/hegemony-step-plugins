@@ -42,7 +42,7 @@ WHEELS = [
     (hegemony_steps_evidence, "evidence", {"evidence.assert", "evidence.compare"}),
     (hegemony_steps_container, "container", {"container.run", "container.build"}),
     (hegemony_steps_shell, "shell", {"shell.execute"}),
-    (hegemony_steps_flow, "flow", {"flow.run", "flow.notify", "flow.git_sync"}),
+    (hegemony_steps_flow, "flow", {"flow.run", "flow.notify"}),
     (
         hegemony_steps_cisco_iosxe,
         "cisco.iosxe",
@@ -61,7 +61,7 @@ WHEELS = [
     ),
 ]
 
-HIDDEN_IDS = {"general.noop", "flow.git_sync", "monitor.start", "monitor.stop"}
+HIDDEN_IDS = {"general.noop", "monitor.start", "monitor.stop"}
 
 
 class RecordingRegistry:
@@ -112,7 +112,7 @@ def test_no_duplicate_ids_across_wheels():
     all_ids: list[str] = []
     for module, _ns, _expected in WHEELS:
         all_ids += [cls.handler_id for cls in module.ALL_HANDLERS]
-    assert len(all_ids) == len(set(all_ids)) == 24
+    assert len(all_ids) == len(set(all_ids)) == 23
 
 
 def test_connectivity_check_type_is_registry_driven():
