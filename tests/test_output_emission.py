@@ -277,45 +277,6 @@ class TestHandlerWiring:
         assert [e[0] for e in _output_events(events)] == ["Cisco IOS XE"]
 
     @pytest.mark.asyncio
-    async def test_poll_until_emits_each_attempt(self):
-        from hegemony_steps_netcli.poll_until import PollUntilHandler
-
-        outputs = iter(["not yet", "not yet", "READY"])
-
-        class _Result:
-            def __init__(self, output):
-                self.command = "show status"
-                self.output = output
-                self.exit_code = 0
-                self.error = None
-                self.latency_ms = 1.0
-
-        class _Transport:
-            async def execute_command(self, command):
-                return _Result(next(outputs))
-
-        class _Services:
-            def connect(self, device, *, platform=None, **kwargs):
-                return _Transport()
-
-        events = []
-        ctx = _ctx(
-            events,
-            config={
-                "command": "show status",
-                "match_string": "READY",
-                "interval_seconds": 0,
-                "max_attempts": 5,
-            },
-            target_roles=["primary"],
-            target_devices_by_role={"primary": [DEVICE]},
-            services=cast(HandlerServices, _Services()),
-        )
-        result = await PollUntilHandler().execute(ctx)
-        assert result.success is True
-        assert [e[0] for e in _output_events(events)] == ["not yet", "not yet", "READY"]
-
-    @pytest.mark.asyncio
     async def test_shell_execute_emits_stdout_and_stderr(self):
         from hegemony_steps_shell.execute import ShellExecuteHandler
 

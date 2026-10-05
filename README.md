@@ -27,7 +27,7 @@ entry-point group and the platform discovers them at startup.
   | --- | --- | --- |
   | `plugins/steps_general` | `general.` | noop (hidden), sleep |
   | `plugins/steps_probe` | `probe.` | connectivity, http, dns, wait_reachable |
-  | `plugins/steps_netcli` | `netcli.` | execute, collect_evidence, poll_until |
+  | `plugins/steps_netcli` | `netcli.` | execute, collect_evidence |
   | `plugins/steps_evidence` | `evidence.` | assert, compare |
   | `plugins/steps_container` | `container.` | run |
   | `plugins/steps_flow` | `flow.` | run, notify, git_sync (hidden) |
