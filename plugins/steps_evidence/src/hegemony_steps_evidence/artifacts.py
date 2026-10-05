@@ -94,11 +94,12 @@ def find_command_artifact(
     characters, so two long or multi-line commands can share a name. Match
     the full command (surrounding whitespace ignored) and the device that
     netcli steps record in ``content_json`` instead. Artifacts without that
-    record match by name, ``<device>:<command>`` or the shortened form.
+    record match by name, ``<device>:<command>`` (the command as given or
+    without its surrounding whitespace) or the shortened form.
     """
     wanted = command.strip()
     device_name = device.get("name")
-    names = {f"{device_name}:{command}", f"{device_name}:{command_label(command)}"}
+    names = {f"{device_name}:{name}" for name in (command, wanted, command_label(command))}
     matches = []
     for artifact in artifacts:
         if artifact.get("step_id") != step_id:

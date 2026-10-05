@@ -389,6 +389,21 @@ class TestFindCommandArtifact:
         found = find_command_artifact(artifacts, step_id="collect", device=_R1, command=_LONG_A)
         assert found is not None and found["content_text"] == "long"
 
+    def test_full_command_names_match_without_surrounding_whitespace(self) -> None:
+        # Older collect steps named an artifact after the full command. A
+        # command given with surrounding whitespace still finds it by name.
+        from hegemony_steps_evidence.artifacts import find_command_artifact
+
+        artifacts = [
+            {"step_id": "collect", "name": f"r1:{_LONG_A}", "content_text": "long"},
+            {"step_id": "collect", "name": f"r1:{_MULTI}", "content_text": "multi"},
+        ]
+        for command, output in ((_LONG_A, "long"), (_MULTI, "multi")):
+            found = find_command_artifact(
+                artifacts, step_id="collect", device=_R1, command=f"  {command}\n"
+            )
+            assert found is not None and found["content_text"] == output, command
+
 
 async def _assert_command(artifacts: list[dict], command: str, expected: str):
     from typing import cast
