@@ -44,6 +44,8 @@ from hegemony_steps_tf.common import (
     BACKEND_OVERRIDE_FILE,
     DEFAULT_IMAGES,
     DEFAULT_STOP_GRACE_SECONDS,
+    HOLD_KEPT_NOTE,
+    HOLD_NOT_ENDED_NOTE,
     HOLD_UNSUPPORTED_MESSAGE,
     KEEP_DIR,
     MAX_OUTPUT_VALUE_BYTES,
@@ -952,6 +954,101 @@ async def test_a_hold_on_a_platform_that_predates_it_fails_with_the_reason(monke
     assert old_result.success is True, old_result.error
 
 
+class _ReleasingServices(_Services):
+    """A platform that can end a run's hold on a state early."""
+
+    def __init__(self, *args: Any, released: bool = True, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.released = released
+        self.releases: list[str] = []
+
+    async def release_state_hold(self, name: str) -> bool:
+        self.releases.append(name)
+        return self.released
+
+
+_HOLD = {"state_name": "core", "hold_until_apply": True}
+
+
+@pytest.mark.asyncio
+async def test_a_plan_without_changes_ends_its_hold(monkeypatch):
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    services = _ReleasingServices()
+    progress: list[str] = []
+
+    async def emit(message, device_id=None, attrs=None):
+        progress.append(message)
+        return True
+
+    ctx = _ctx(_HOLD, services)
+    ctx._emit_progress = emit
+    result = await TfPlanHandler().execute(ctx)
+
+    assert result.success is True, result.error
+    assert services.held == ["core"]
+    assert services.releases == ["core"]
+    assert result.output["state_held"] is False
+    assert result.summary == "No changes: infrastructure matches the configuration"
+    assert "Ended the run's hold on managed state 'core': there is nothing to apply" in progress
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "code"),
+    [
+        # Changes: the apply ends the hold.
+        (_HOLD, b"2"),
+        # No hold taken, or no managed state to hold.
+        ({"state_name": "core"}, b"0"),
+        ({"state": "ephemeral", "hold_until_apply": True}, b"0"),
+    ],
+)
+async def test_a_plan_ends_only_a_hold_no_apply_will_end(monkeypatch, config, code):
+    _install_docker(monkeypatch, out={"plan-exitcode": code, "plan.txt": b"plan\n"})
+    services = _ReleasingServices()
+    result = await TfPlanHandler().execute(_ctx(config, services))
+    assert result.success is True, result.error
+    assert services.releases == []
+    assert result.output["state_held"] is (config is _HOLD)
+
+
+class _NoReleaseServices(_ReleasingServices):
+    async def release_state_hold(self, name: str) -> bool:
+        await super().release_state_hold(name)
+        raise NotImplementedError
+
+
+class _BrokenReleaseServices(_ReleasingServices):
+    async def release_state_hold(self, name: str) -> bool:
+        await super().release_state_hold(name)
+        raise RuntimeError("platform API unreachable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("services", "note"),
+    [
+        # Older than the method, or without support for it.
+        (_Services(), HOLD_KEPT_NOTE),
+        (_NoReleaseServices(), HOLD_KEPT_NOTE),
+        # A host that ended no hold (it logs why), or failed to.
+        (_ReleasingServices(released=False), HOLD_NOT_ENDED_NOTE),
+        (_BrokenReleaseServices(), HOLD_NOT_ENDED_NOTE),
+    ],
+)
+async def test_a_hold_that_cannot_be_ended_lasts_until_the_run_ends(monkeypatch, services, note):
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    result = await TfPlanHandler().execute(_ctx(_HOLD, services))
+    assert result.success is True, result.error
+    assert result.summary == "No changes: infrastructure matches the configuration" + note
+    assert result.output["summary"] == result.summary
+    # The apply tries again.
+    assert result.output["state_held"] is True
+    assert getattr(services, "releases", None) == (
+        None if type(services) is _Services else ["core"]
+    )
+
+
 @pytest.mark.asyncio
 async def test_plan_step_reports_unavailable_managed_state(monkeypatch):
     state = _install_docker(monkeypatch, out={})
@@ -1206,6 +1303,39 @@ async def test_apply_step_skips_a_plan_without_changes(monkeypatch):
         "sensitive_outputs": ["db_password"],
     }
     assert state["calls"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("plan", "releases"),
+    [
+        (
+            _plan_output(has_changes=False, state="managed", state_name="core", state_held=True),
+            ["core"],
+        ),
+        (_plan_output(has_changes=False, state="managed", state_name="core"), []),
+        (_plan_output(has_changes=False, state="managed", state_name="core", state_held=False), []),
+        (_plan_output(has_changes=False, state_held=True), []),
+    ],
+)
+async def test_apply_without_changes_ends_a_hold_the_plan_kept(monkeypatch, plan, releases):
+    state = _install_docker(monkeypatch, out={})
+    services = _ReleasingServices(plan)
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.success is True, result.error
+    assert result.summary == "Nothing to apply: the plan has no changes"
+    assert services.releases == releases
+    assert services.opened == []
+    assert state["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_apply_without_changes_succeeds_when_the_hold_cannot_be_ended(monkeypatch):
+    _install_docker(monkeypatch, out={})
+    plan = _plan_output(has_changes=False, state="managed", state_name="core", state_held=True)
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _NoReleaseServices(plan)))
+    assert result.success is True, result.error
+    assert result.summary == "Nothing to apply: the plan has no changes" + HOLD_KEPT_NOTE
 
 
 @pytest.mark.asyncio

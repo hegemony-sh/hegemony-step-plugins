@@ -69,6 +69,7 @@ from .common import (
     managed_timeout_errors,
     public_outputs,
     relative_path_error,
+    release_state_hold,
     script_header,
     secret_environment,
     shared_workspace_mounted,
@@ -151,7 +152,7 @@ class TfPlanConfig(TfContainerConfig):
             "Keep the managed state for this run from this plan until the run applies or "
             "ends: meanwhile other runs and people cannot lock or change it, so the plan "
             "stays valid while the run waits (for an approval, say). Every other flow using "
-            "the state waits that long."
+            "the state waits that long. A plan with no changes ends the hold at once."
         ),
         json_schema_extra={"x_show_when": {"field": "state", "value": "managed"}},
     )
@@ -455,7 +456,15 @@ class TfPlanHandler(BaseHandler):
             )
         if isinstance(outcome, HandlerResult):
             return outcome
-        return self._result(ctx, config, image, workdir, outcome)
+        result = self._result(ctx, config, image, workdir, outcome)
+        output = result.output
+        if state_name and result.success and output["state_held"] and not output["has_changes"]:
+            # Nothing to apply, so no apply will end the hold: end it now.
+            note = await release_state_hold(ctx, state_name)
+            output["state_held"] = bool(note)
+            result.summary += note
+            output["summary"] = result.summary
+        return result
 
     async def _files(
         self,
@@ -640,7 +649,8 @@ class TfPlanHandler(BaseHandler):
             "cache_image": config.cache_image,
             "state": config.state,
             "state_name": config.state_name.strip() if config.state == "managed" else "",
-            # The run holds the state until it applies or ends (managed state only).
+            # The run holds the state until it applies or ends (managed state
+            # only); a plan with no changes ends the hold (see execute).
             "state_held": config.state == "managed" and config.hold_until_apply,
             "working_dir": workdir,
             "apply_ready": apply_ready,

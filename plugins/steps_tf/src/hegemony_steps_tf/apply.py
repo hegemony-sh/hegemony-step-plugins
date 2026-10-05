@@ -47,6 +47,7 @@ from .common import (
     managed_state_access,
     managed_timeout_errors,
     public_outputs,
+    release_state_hold,
     script_header,
     secret_environment,
     shared_workspace_mounted,
@@ -181,6 +182,8 @@ class PlanHandoff(BaseModel):
     cache_image: bool = True
     state: StateMode
     state_name: str = ""
+    # Whether the run still holds the managed state for this plan's apply.
+    state_held: bool = False
     working_dir: str
     apply_ready: bool
     has_changes: bool
@@ -278,9 +281,13 @@ class TfApplyHandler(BaseHandler):
                 "in the plan's working directory on the same worker"
             )
         if not handoff.has_changes:
+            summary = "Nothing to apply: the plan has no changes"
+            if handoff.state_held and handoff.state == "managed" and handoff.state_name.strip():
+                # No apply will end the plan's hold on the state: end it here.
+                summary += await release_state_hold(ctx, handoff.state_name.strip())
             return HandlerResult(
                 success=True,
-                summary="Nothing to apply: the plan has no changes",
+                summary=summary,
                 # The state is as the plan found it, and so are its outputs.
                 output={
                     "applied": False,

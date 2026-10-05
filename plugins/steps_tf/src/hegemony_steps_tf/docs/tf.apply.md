@@ -28,7 +28,9 @@ apply gets its own short-lived access to the state the plan step named.
 
 When the plan has no changes, the step succeeds without starting a
 container, and its outputs are the ones the plan step read from the
-state, which nothing changed since.
+state, which nothing changed since. If the run still holds the managed
+state for that plan, the step ends the hold; when the platform cannot end
+it, the hold may last until the run ends, and the summary says so.
 
 ## Output
 
@@ -49,7 +51,8 @@ shared workspaces disabled). It also fails when the apply itself fails.
 The tool refuses
 a saved plan made stale by a state change since planning: plan again (a
 `tf.plan` with Hold the state until apply keeps others from changing a
-managed state meanwhile; this step's apply ends that hold). The
+managed state meanwhile; this step's apply ends that hold, as does a plan
+with no changes). The
 saved plan lives in the run's shared workspace; when that workspace is gone
 (for example cleaned up after a worker restart while the run waited a long
 time for approval), the step says so: plan again. The state lock is taken

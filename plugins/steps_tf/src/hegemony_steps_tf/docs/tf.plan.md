@@ -44,8 +44,10 @@ State decides where the state lives:
   the run until the run applies or ends: meanwhile other runs and people
   cannot lock or change it (they wait, or fail after their Lock timeout,
   naming the run), so the plan stays valid however long an approval takes.
-  Every other flow using the state waits that long. An admin can end the
-  hold with Force unlock on the state's page.
+  Every other flow using the state waits that long. A plan with no changes
+  ends the hold at once, since there is nothing to apply; when the platform
+  cannot end it, the hold may last until the run ends, and the summary says
+  so. An admin can end the hold with Force unlock on the state's page.
 - `backend`: the configuration's own backend block, such as S3, Azure
   Storage, GCS, Consul, or PostgreSQL. Backend settings fill a partial block
   (bucket, key, and so on) from a file. A configuration without a backend
@@ -124,8 +126,8 @@ non-sensitive output values as the state held them when the plan was made
 not fail the plan: they are then empty. `handler` (`tf.plan`) marks the
 output for `tf.apply`, which refuses a step output without it. Branch on
 `steps.NODE_ID.output.has_changes`, or show the summary in an approval
-message. `state_held` is true when the step holds a managed state for the
-run until it applies. `image` is the image the plan ran, and `image_digest`
+message. `state_held` is true when the run still holds the managed state
+for the apply. `image` is the image the plan ran, and `image_digest`
 the same image by digest (empty when it has none).
 
 ## When It Fails
