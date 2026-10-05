@@ -18,9 +18,12 @@ Select the Precheck Step and Postcheck Step that collected the evidence.
 Leaving the postcheck empty makes the step look at its own artifacts, which
 a compare step does not normally have — in practice, select both steps.
 
-By default every artifact name the two steps share is compared; names
-present on only one side are skipped, and the newest artifact per name is
-used when a step ran more than once. "Only this artifact" narrows the
+By default every artifact the two steps share is compared. Command output
+is paired by device and full command text, so two long or multi-line
+commands with similar artifact names are compared separately; other
+artifacts are paired by name. Artifacts present on only one side are
+skipped, and the newest artifact of each pair is used when a step ran more
+than once. "Only this artifact" narrows the
 comparison to one exact artifact name, and "Only artifacts matching" filters
 names with a glob (ignored when the exact name is set) so volatile outputs
 such as routing or neighbor tables can be left out.

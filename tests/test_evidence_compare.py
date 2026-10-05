@@ -234,3 +234,65 @@ async def test_execute_single_artifact_failure_counts_one_of_one(
     )
     assert result.success is False
     assert "1 of 1" in (result.summary or "")
+
+
+# ── Pairing by device and full command (netcli.collect_evidence artifacts) ───
+
+# An artifact name keeps the command's first line, cut to 80 characters, so
+# each pair below shares one artifact name.
+_LONG_A = (
+    "show ip bgp vpnv4 vrf CUSTOMER-PRODUCTION-BLUE-DC1 neighbors 192.168.100.100 "
+    "advertised-routes | include 10."
+)
+_LONG_B = (
+    "show ip bgp vpnv4 vrf CUSTOMER-PRODUCTION-BLUE-DC1 neighbors 192.168.100.100 "
+    "advertised-routes | include 172."
+)
+_MULTI = "show run | section bgp\nshow ip bgp summary"
+_SHORT = "show run | section bgp"
+
+
+def _collected(outputs: dict[str, str], device_name: str = "r1") -> list[dict]:
+    """Artifacts shaped as netcli.collect_evidence stores them."""
+    from hegemony_step_sdk import command_label
+
+    return [
+        {
+            "kind": "cli_output",
+            "name": f"{device_name}:{command_label(command)}",
+            "content_text": output,
+            "content_json": {
+                "device_id": f"id-{device_name}",
+                "device_name": device_name,
+                "command": command,
+                "success": True,
+                "exit_code": 0,
+                "error": None,
+            },
+        }
+        for command, output in outputs.items()
+    ]
+
+
+@pytest.mark.parametrize(("unchanged", "changed"), [(_LONG_A, _LONG_B), (_SHORT, _MULTI)])
+async def test_commands_sharing_an_artifact_name_are_compared_separately(
+    monkeypatch: pytest.MonkeyPatch, unchanged: str, changed: str
+) -> None:
+    pre = _collected({changed: "neighbor up", unchanged: "same"})
+    post = _collected({changed: "neighbor down", unchanged: "same"})
+    handler = _handler_with(pre, post, monkeypatch)
+    result = await handler.execute(
+        _ctx(precheck_step_id="precheck", postcheck_step_id="postcheck", comparison_type="exact")
+    )
+    assert result.success is False
+    content = result.evidence[0]["content_json"]
+    assert len(content["artifacts_compared"]) == 2
+    assert sorted(entry["passed"] for entry in content["diff"].values()) == [False, True]
+
+
+def test_capture_labels_read_like_artifact_names_and_stay_unique() -> None:
+    from hegemony_steps_evidence.artifacts import capture_key, capture_labels
+
+    artifacts = _collected({_LONG_A: "", _LONG_B: "", "show version": ""})
+    labels = capture_labels(capture_key(artifact) for artifact in artifacts)
+    assert sorted(labels.values()) == sorted(["r1:show version", f"r1:{_LONG_A}", f"r1:{_LONG_B}"])

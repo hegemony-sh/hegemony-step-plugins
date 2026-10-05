@@ -20,7 +20,7 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
-from .artifacts import latest_artifact
+from .artifacts import capture_labels, latest_artifact, latest_by_capture
 
 logger = logging.getLogger(__name__)
 
@@ -268,21 +268,18 @@ class CompareEvidenceHandler(BaseHandler):
             )
             artifacts_compared = [artifact_name]
         else:
-            # Compare all matching artifacts by name, keeping only the newest
-            # per name (steps that ran more than once leave older duplicates).
-            precheck_by_name = {
-                name: artifact
-                for name in {a["name"] for a in precheck_artifacts if a.get("name")}
-                if (artifact := latest_artifact(precheck_artifacts, name=name)) is not None
-            }
-            postcheck_by_name = {
-                name: artifact
-                for name in {a["name"] for a in postcheck_artifacts if a.get("name")}
-                if (artifact := latest_artifact(postcheck_artifacts, name=name)) is not None
-            }
+            # Pair the two sides by device and full command (artifact names
+            # shorten the command, so two commands can share one), keeping
+            # only the newest artifact per pair (steps that ran more than
+            # once leave older duplicates).
+            precheck_by_key = latest_by_capture(precheck_artifacts)
+            postcheck_by_key = latest_by_capture(postcheck_artifacts)
+            labels = capture_labels(precheck_by_key.keys() | postcheck_by_key.keys())
 
-            common_names = set(precheck_by_name.keys()) & set(postcheck_by_name.keys())
-            if not common_names:
+            common_keys = sorted(
+                precheck_by_key.keys() & postcheck_by_key.keys(), key=lambda key: labels[key]
+            )
+            if not common_keys:
                 return HandlerResult(
                     success=False,
                     error="No matching artifacts found between precheck and postcheck steps",
@@ -291,28 +288,28 @@ class CompareEvidenceHandler(BaseHandler):
 
             all_passed = True
             all_diffs = {}
-            for name in sorted(common_names):
+            for key in common_keys:
                 # Prefer content_text for CLI output (actual command output) over content_json (metadata)
-                pre_text = precheck_by_name[name].get("content_text")
+                pre_text = precheck_by_key[key].get("content_text")
                 pre_content = (
-                    pre_text if pre_text is not None else precheck_by_name[name].get("content_json")
+                    pre_text if pre_text is not None else precheck_by_key[key].get("content_json")
                 )
-                post_text = postcheck_by_name[name].get("content_text")
+                post_text = postcheck_by_key[key].get("content_text")
                 post_content = (
                     post_text
                     if post_text is not None
-                    else postcheck_by_name[name].get("content_json")
+                    else postcheck_by_key[key].get("content_json")
                 )
                 passed, diff = self._compare(
                     pre_content, post_content, comparison_type, ignore_fields, compiled_ignore
                 )
-                all_diffs[name] = {"passed": passed, "diff": diff}
+                all_diffs[labels[key]] = {"passed": passed, "diff": diff}
                 if not passed:
                     all_passed = False
 
             passed = all_passed
             diff_details = all_diffs
-            artifacts_compared = list(common_names)
+            artifacts_compared = [labels[key] for key in common_keys]
 
         evidence = [
             {

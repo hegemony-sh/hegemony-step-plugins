@@ -17,9 +17,10 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     StepKind,
+    command_label,
 )
 
-from .artifacts import latest_artifact
+from .artifacts import find_command_artifact, latest_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -210,13 +211,14 @@ class AssertHandler(BaseHandler):
             "step_run_id": ctx.step_run_id,
         }
 
-        # Build artifact names from target_role + command. The target role is
-        # resolved to device names because collect_evidence artifacts are named
-        # "<device_name>:<command>".
+        # One lookup per artifact to check: target_role + command resolves to
+        # each device bound to the target, whose output is found by the
+        # device and full command; artifact_name is matched by name. The
+        # label names the artifact in messages and evidence.
         target_role = ctx.config.get("target_role")
         command = ctx.config.get("command")
         artifact_name = ctx.config.get("artifact_name")
-        artifact_names: list[str] = []
+        lookups: list[tuple[str, dict | None, str]] = []
 
         if target_role and command:
             role_devices = ctx.target_devices_by_role.get(target_role, [])
@@ -247,11 +249,11 @@ class AssertHandler(BaseHandler):
                         error=f"Device for target '{target_role}' has no name",
                         summary=f"Invalid device configuration for target: {target_role}",
                     )
-                artifact_names.append(f"{device_name}:{command}")
+                lookups.append((f"{device_name}:{command_label(command)}", device, command))
         elif artifact_name:
-            artifact_names = [artifact_name]
+            lookups = [(artifact_name, None, "")]
 
-        if not artifact_names:
+        if not lookups:
             logger.error(
                 "assert_artifact_names_unresolved",
                 extra={
@@ -271,8 +273,13 @@ class AssertHandler(BaseHandler):
         assertion_evidence = []
         failed_messages = []
 
-        for name in artifact_names:
-            artifact_content = await self._get_artifact_data(ctx, artifact_step_id, name)
+        for name, device, device_command in lookups:
+            if device is None:
+                artifact_content = await self._get_artifact_data(ctx, artifact_step_id, name)
+            else:
+                artifact_content = await self._get_command_output(
+                    ctx, artifact_step_id, device, device_command
+                )
             if artifact_content is None:
                 logger.warning(
                     "assert_artifact_fetch_failed",
@@ -296,7 +303,7 @@ class AssertHandler(BaseHandler):
             assertion_evidence.append(
                 {
                     "kind": "assertion_result",
-                    "name": "assertion" if len(artifact_names) == 1 else f"assertion:{name}",
+                    "name": "assertion" if len(lookups) == 1 else f"assertion:{name}",
                     "content_json": {
                         "artifact_step_id": artifact_step_id,
                         "artifact_name": name,
@@ -313,13 +320,13 @@ class AssertHandler(BaseHandler):
             return HandlerResult(
                 success=True,
                 summary=message
-                or f"Assertion passed for {len(artifact_names)} artifact(s): {operator} '{expected}'",
+                or f"Assertion passed for {len(lookups)} artifact(s): {operator} '{expected}'",
                 evidence=assertion_evidence,
             )
         return HandlerResult(
             success=False,
             error=message or "; ".join(failed_messages),
-            summary=f"Assertion failed for {len(failed_messages)}/{len(artifact_names)} artifact(s)",
+            summary=f"Assertion failed for {len(failed_messages)}/{len(lookups)} artifact(s)",
             evidence=assertion_evidence,
         )
 
@@ -335,10 +342,51 @@ class AssertHandler(BaseHandler):
             return None
         return await self._fetch_artifact_content(ctx, artifact_step_id, artifact_name)
 
+    async def _get_command_output(
+        self,
+        ctx: HandlerContext,
+        artifact_step_id: str | None,
+        device: dict,
+        command: str,
+    ) -> str | None:
+        """Get the output a previous step collected for ``device`` and ``command``."""
+        if not artifact_step_id:
+            logger.error("assert requires artifact_step_id")
+            return None
+        artifacts = await self._fetch_run_artifacts(ctx)
+        if artifacts is None:
+            return None
+        # Newest match: see _fetch_artifact_content.
+        artifact = find_command_artifact(
+            artifacts, step_id=artifact_step_id, device=device, command=command
+        )
+        if artifact is None:
+            logger.error(
+                f"No output of '{command_label(command)}' for device "
+                f"'{device.get('name')}' in step '{artifact_step_id}'"
+            )
+            return None
+        return self._artifact_content(artifact)
+
     async def _fetch_artifact_content(
         self, ctx: HandlerContext, step_id: str, artifact_name: str
     ) -> str | None:
         """Fetch artifact content from API."""
+        artifacts = await self._fetch_run_artifacts(ctx)
+        if artifacts is None:
+            return None
+        # Pick the NEWEST matching artifact — a collect step inside a loop (or
+        # retried) appends one per iteration under the same step_id + name,
+        # and asserting the first match would re-check stale first-iteration
+        # evidence forever.
+        artifact = latest_artifact(artifacts, step_id=step_id, name=artifact_name)
+        if artifact is None:
+            logger.error(f"Artifact '{artifact_name}' not found in step '{step_id}'")
+            return None
+        return self._artifact_content(artifact)
+
+    async def _fetch_run_artifacts(self, ctx: HandlerContext) -> list[dict] | None:
+        """Fetch the run's artifacts from the API; None when the fetch fails."""
         run_id = ctx.run_id
         async with ctx.require_services().open_api_client(timeout=30) as client:
             try:
@@ -350,31 +398,23 @@ class AssertHandler(BaseHandler):
                 if response.status_code != 200:
                     logger.error(f"Failed to fetch run {run_id}: {response.status_code}")
                     return None
-
-                run_data = response.json()
-                artifacts = run_data.get("artifacts", [])
-
-                # Pick the NEWEST matching artifact — a collect step inside a
-                # loop (or retried) appends one per iteration under the same
-                # step_id + name, and asserting the first match would re-check
-                # stale first-iteration evidence forever.
-                artifact = latest_artifact(artifacts, step_id=step_id, name=artifact_name)
-                if artifact is not None:
-                    # Prefer content_text (actual output) over content_json;
-                    # "" is valid empty output, so only None falls through.
-                    content_text = artifact.get("content_text")
-                    if content_text is not None:
-                        return content_text
-                    content_json = artifact.get("content_json")
-                    if content_json is None:
-                        return None
-                    return json.dumps(content_json, ensure_ascii=False)
-
-                logger.error(f"Artifact '{artifact_name}' not found in step '{step_id}'")
-                return None
+                return response.json().get("artifacts", [])
             except Exception as e:
                 logger.error(f"Failed to fetch artifact: {e}")
                 return None
+
+    @staticmethod
+    def _artifact_content(artifact: dict) -> str | None:
+        """An artifact's text, else its JSON content serialized; None when it has neither."""
+        # Prefer content_text (actual output) over content_json; "" is valid
+        # empty output, so only None falls through.
+        content_text = artifact.get("content_text")
+        if content_text is not None:
+            return content_text
+        content_json = artifact.get("content_json")
+        if content_json is None:
+            return None
+        return json.dumps(content_json, ensure_ascii=False)
 
     def _assert_content(
         self,
