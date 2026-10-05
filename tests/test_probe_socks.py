@@ -49,6 +49,8 @@ class _FakeSocks5Server:
         self.force_no_auth = force_no_auth
         self.upstream_response = upstream_response
         self.authed = False
+        # The tunneled request's lines (request line and headers), as sent.
+        self.request_lines: list[str] = []
         self.requested: tuple[str, int] | None = None
         self.requested_atyp: int | None = None
         self._server: asyncio.AbstractServer | None = None
@@ -138,6 +140,7 @@ class _FakeSocks5Server:
                     line = await reader.readline()
                     if line in (b"\r\n", b""):
                         break
+                    self.request_lines.append(line.decode("latin-1").rstrip("\r\n"))
                 writer.write(self.upstream_response)
                 await writer.drain()
         except (asyncio.IncompleteReadError, ConnectionError, asyncio.CancelledError):
@@ -298,6 +301,27 @@ async def test_http_health_tunnels_the_request():
     assert result.ok is True
     assert result.metrics["http_status"] == 204
     assert server.requested == ("10.9.9.9", 8080)
+    assert server.request_lines[0] == "GET /healthz HTTP/1.1"
+    assert "Host: 10.9.9.9:8080" in server.request_lines
+
+
+async def test_http_health_tunnels_to_an_ipv6_target_with_a_bracketed_host():
+    # The CONNECT carries the bare address; the Host header needs it
+    # bracketed, with the port, or the target sees a malformed header.
+    server = _FakeSocks5Server(upstream_response=b"HTTP/1.1 200 OK\r\n\r\n")
+    await server.start()
+    try:
+        result = await HttpHealthProbe().execute(
+            "2001:db8::7",
+            {"port": 8080, "timeout_ms": 3000, "socks_proxy": f"socks5://127.0.0.1:{server.port}"},
+        )
+    finally:
+        await server.stop()
+
+    assert result.ok is True, result.error_detail
+    assert server.requested == ("2001:db8::7", 8080)
+    assert server.requested_atyp == 0x04
+    assert "Host: [2001:db8::7]:8080" in server.request_lines
 
 
 async def test_http_health_times_out_when_target_withholds_response():
@@ -381,6 +405,11 @@ class TestSocksProxyParsing:
     def test_out_of_range_port_is_rejected(self) -> None:
         with pytest.raises(SocksError):
             parse_socks_proxy("socks5://dind:99999")
+
+    def test_an_ipv6_proxy_is_dialled_without_its_brackets(self) -> None:
+        proxy = parse_socks_proxy("socks5://u:p@[fd00::1]:1080")
+        assert (proxy.host, proxy.port) == ("fd00::1", 1080)
+        assert (proxy.username, proxy.password) == ("u", "p")
 
     def test_credential_less_and_socks5h_forms(self) -> None:
         plain = parse_socks_proxy("socks5://dind:1080")

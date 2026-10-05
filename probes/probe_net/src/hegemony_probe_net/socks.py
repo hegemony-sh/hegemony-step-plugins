@@ -60,6 +60,10 @@ def parse_socks_proxy(value: str) -> SocksProxy:
         raise SocksError(f"unsupported socks_proxy scheme {scheme!r} (use socks5:// or socks5h://)")
     userinfo, _, hostport = authority.rpartition("@")
     host, _, port_text = hostport.rpartition(":")
+    # An IPv6 proxy is written bracketed (socks5://[fd00::1]:1080); the dial
+    # needs the bare address.
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
     try:
         port = int(port_text)
     except ValueError:

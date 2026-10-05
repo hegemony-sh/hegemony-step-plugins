@@ -24,10 +24,12 @@ provides, and the value is validated when the step runs.
 
 Port (default 22) applies to the port-based checks and is ignored by ICMP
 Ping and DNS Resolve. URL Path applies only to the HTTP Health check and
-falls back to `/health` when omitted; Hostname to Resolve applies only to
-the DNS Resolve check. Timeout (sec) bounds each attempt (default 10), and
-Attempts (default 1, up to 10) retries a failing target with a half-second
-pause between tries — one success ends the retries for that target.
+falls back to `/health` when omitted. HTTP Health passes on any status
+below 400 and does not follow redirects, so a redirect counts as a healthy
+answer. Hostname to Resolve applies only to the DNS Resolve check. Timeout
+(sec) bounds each attempt (default 10), and Attempts (default 1, up to 10)
+retries a failing target with a half-second pause between tries — one
+success ends the retries for that target.
 
 The optional SOCKS5 Proxy routes the TCP-based checks through a
 `socks5://user:pass@host:port` proxy (credentials optional; `socks5h://`

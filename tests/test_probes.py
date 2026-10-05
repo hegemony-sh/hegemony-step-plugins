@@ -4,7 +4,10 @@
 
 """Registration and behavior tests for the hegemony-probe-net wheel."""
 
+import httpx
+
 import hegemony_probe_net
+from hegemony_probe_net import http_health
 from hegemony_step_sdk import BaseProbe, ProbeResult
 
 EXPECTED_PROBE_IDS = {"tcp_connect", "icmp_ping", "http_health", "dns_resolve"}
@@ -58,3 +61,49 @@ async def test_dns_resolve_localhost():
     result = await DnsResolveProbe().execute("localhost", {"timeout_ms": 2000})
     assert result.ok is True
     assert result.metrics.get("addresses", 0) >= 1
+
+
+def _route_http_health_to(monkeypatch, answer) -> None:
+    """Send the probe's direct requests to ``answer`` instead of the network."""
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        kwargs["transport"] = httpx.MockTransport(answer)
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(http_health.httpx, "AsyncClient", client_with_mock_transport)
+
+
+async def test_http_health_brackets_an_ipv6_target(monkeypatch):
+    from hegemony_probe_net.http_health import HttpHealthProbe
+
+    seen: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200)
+
+    _route_http_health_to(monkeypatch, answer)
+    probe = HttpHealthProbe()
+    for port in (8080, None):
+        result = await probe.execute("2001:db8::7", {"port": port, "timeout_ms": 1000})
+        assert result.ok is True, result.error_detail
+    assert seen == ["http://[2001:db8::7]:8080/health", "http://[2001:db8::7]/health"]
+
+
+async def test_http_health_does_not_follow_a_redirect(monkeypatch):
+    """The egress gate saw only the first target, so a redirect is the answer:
+    a 3xx is below 400 and already counts as healthy."""
+    from hegemony_probe_net.http_health import HttpHealthProbe
+
+    seen: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(302, headers={"location": "http://198.51.100.99/elsewhere"})
+
+    _route_http_health_to(monkeypatch, answer)
+    result = await HttpHealthProbe().execute("192.0.2.7", {"timeout_ms": 1000})
+    assert result.ok is True, result.error_detail
+    assert result.metrics["http_status"] == 302
+    assert seen == ["http://192.0.2.7/health"]
