@@ -55,6 +55,15 @@ async def test_tcp_connect_connection_refused():
     assert result.error_kind in {"connection_refused", "timeout", "network_error"}
 
 
+async def test_tcp_connect_handles_an_ipv6_literal_without_raising():
+    """An IPv6 target is a reachability question, not a crash, also on hosts
+    whose kernel lacks IPv6 entirely."""
+    from hegemony_probe_net.tcp_connect import TcpConnectProbe
+
+    result = await TcpConnectProbe().execute("2001:db8::7", {"port": 22, "timeout_ms": 200})
+    assert result.ok is False
+
+
 async def test_dns_resolve_localhost():
     from hegemony_probe_net.dns_resolve import DnsResolveProbe
 

@@ -27,7 +27,7 @@ from hegemony_step_sdk import (
     max_parallel_from_config,
 )
 
-from .checks import PORT_CHECKS, default_port
+from .checks import CHECK_TYPE_LABELS, PORT_CHECKS, CheckUnavailable, default_port
 from .targets import (
     DEFAULT_MAX_PARALLEL_TARGETS,
     TargetOutcome,
@@ -36,10 +36,6 @@ from .targets import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class _CheckUnavailable(Exception):
-    """``run_probe`` has no probe for the check type (it raised KeyError)."""
 
 
 class ConnectivityCheckConfig(BaseModel):
@@ -63,12 +59,7 @@ class ConnectivityCheckConfig(BaseModel):
         json_schema_extra={
             "x_widget": "select",
             "x_options_source": "probes",
-            "x_option_labels": {
-                "tcp_connect": "TCP Connect",
-                "icmp_ping": "ICMP Ping",
-                "http_health": "HTTP Health",
-                "dns_resolve": "DNS Resolve",
-            },
+            "x_option_labels": CHECK_TYPE_LABELS,
         },
     )
     port: int | None = Field(
@@ -189,9 +180,9 @@ class ConnectivityCheckHandler(BaseHandler):
         timeout_sec = ctx.config.get("timeout_sec", 10)
         attempts = min(ctx.config.get("attempts", 1), 10)
 
-        # Build check options based on type. An unregistered check type is
-        # reported per-device below when run_probe raises KeyError — validity is
-        # the host probe registry, not a hardcoded allowlist here.
+        # Build check options based on type. An unregistered check type fails
+        # the step below when run_probe raises KeyError — validity is the host
+        # probe registry, not a hardcoded allowlist here.
         options: dict[str, Any] = {"timeout_ms": timeout_sec * 1000}
         if check_type in PORT_CHECKS:
             options["port"] = port
@@ -228,7 +219,7 @@ class ConnectivityCheckHandler(BaseHandler):
                 try:
                     result = await services.run_probe(check_type, host, options)
                 except KeyError:
-                    raise _CheckUnavailable from None
+                    raise CheckUnavailable from None
                 best_result = result
                 if result.ok:
                     break
@@ -289,7 +280,7 @@ class ConnectivityCheckHandler(BaseHandler):
                     ctx.config, default=DEFAULT_MAX_PARALLEL_TARGETS
                 ),
             )
-        except _CheckUnavailable:
+        except CheckUnavailable:
             return HandlerResult(
                 success=False,
                 error=f"Check type '{check_type}' is not available on this worker",

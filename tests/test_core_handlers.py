@@ -10,6 +10,7 @@ suite pins what the wheels themselves own: per-wheel handler sets, namespace
 discipline, metadata, and config schemas.
 """
 
+import asyncio
 import json
 from typing import Any, cast
 
@@ -24,7 +25,7 @@ import hegemony_steps_monitor
 import hegemony_steps_netcli
 import hegemony_steps_probe
 import hegemony_steps_shell
-from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerServices, StepKind
+from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerServices, ProbeResult, StepKind
 
 # module, claimed namespace prefix (= entry-point name), expected handler ids
 WHEELS = [
@@ -450,27 +451,50 @@ async def test_dns_probe_refuses_a_resolver_that_is_not_an_ip(monkeypatch, resol
     assert "must be a nameserver IP address" in (result.error or "")
 
 
-async def test_wait_reachable_accepts_ip_targets(monkeypatch):
+class _FakeProbes:
+    """services.run_probe stand-in: records each call and gives one answer."""
+
+    def __init__(self, answer: ProbeResult | BaseException | None = None) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.answer = answer if answer is not None else ProbeResult(ok=True)
+
+    async def run_probe(self, check_type, address, options):
+        self.calls.append((check_type, address, dict(options)))
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        return self.answer
+
+
+#: A wait that succeeds on the second poll, about a second in.
+_QUICK_WAIT = {"max_wait_seconds": 10, "stable_seconds": 1, "poll_interval": 1}
+
+
+def _device_and_ip_ctx(config: dict[str, Any], services: Any) -> HandlerContext:
+    """One device with an inventory mgmt_port, and one direct-IP target."""
+    return HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        config=config,
+        target_roles=["primary"],
+        target_devices_by_role={
+            "primary": [{"id": "d1", "name": "r1", "mgmt_host": "192.0.2.1", "mgmt_port": 2222}]
+        },
+        step_target_ips=["2001:db8::7"],
+        services=cast(HandlerServices, services),
+    )
+
+
+async def test_wait_reachable_accepts_ip_targets():
     """Reachability needs an address, not a device record."""
     from hegemony_steps_probe.wait_reachable import WaitReachableHandler
 
-    handler = WaitReachableHandler()
-
-    async def always_up(host, port, timeout):
-        assert host == "192.0.2.7"
-        return True
-
-    monkeypatch.setattr(handler, "_check_tcp", always_up)
-    # Bare services: no enforce_egress bound, as in a host without the gate.
-    # stable_seconds stays within the config model's ge=1 bound so the test
-    # exercises a config real step validation would accept.
-    ctx = _ip_target_ctx(
-        {"max_wait_seconds": 10, "stable_seconds": 1, "poll_interval": 1},
-        ["192.0.2.7"],
-        services=type("_Services", (), {})(),
-    )
-    result = await handler.execute(ctx)
+    probes = _FakeProbes()
+    ctx = _ip_target_ctx(dict(_QUICK_WAIT), ["192.0.2.7"], services=probes)
+    result = await WaitReachableHandler().execute(ctx)
     assert result.success is True, result.error
+    assert {call[1] for call in probes.calls} == {"192.0.2.7"}
     assert [e["device_id"] for e in result.evidence] == [None]
     assert "target(s) stable" in (result.summary or "")
 
@@ -488,32 +512,19 @@ def test_wait_reachable_declares_its_connect_timeout():
 
 
 @pytest.mark.parametrize(
-    ("config", "expected"),
-    [({}, 5), ({"connect_timeout_seconds": 3}, 3), ({"connect_timeout": "2"}, 2)],
+    ("config", "expected_ms"),
+    [({"connect_timeout_seconds": 3}, 3000), ({"connect_timeout": "2"}, 2000)],
 )
-async def test_wait_reachable_polls_with_the_validated_connect_timeout(
-    monkeypatch, config, expected
-):
+async def test_wait_reachable_polls_with_the_validated_connect_timeout(config, expected_ms):
     """A string timeout used to reach asyncio.wait_for, whose TypeError the
     check swallowed: every target stayed "unreachable" until the deadline."""
     from hegemony_steps_probe.wait_reachable import WaitReachableHandler
 
-    handler = WaitReachableHandler()
-    timeouts: list[float] = []
-
-    async def always_up(host, port, timeout):
-        timeouts.append(timeout)
-        return True
-
-    monkeypatch.setattr(handler, "_check_tcp", always_up)
-    ctx = _ip_target_ctx(
-        {"max_wait_seconds": 10, "stable_seconds": 1, "poll_interval": 1, **config},
-        ["192.0.2.7"],
-        services=type("_Services", (), {})(),
-    )
-    result = await handler.execute(ctx)
+    probes = _FakeProbes()
+    ctx = _ip_target_ctx({**_QUICK_WAIT, **config}, ["192.0.2.7"], services=probes)
+    result = await WaitReachableHandler().execute(ctx)
     assert result.success is True, result.error
-    assert set(timeouts) == {expected}
+    assert {call[2]["timeout_ms"] for call in probes.calls} == {expected_ms}
 
 
 async def test_wait_reachable_refuses_an_invalid_config():
@@ -525,18 +536,108 @@ async def test_wait_reachable_refuses_an_invalid_config():
     assert "Invalid probe.wait_reachable config" in (result.error or "")
 
 
-async def test_check_tcp_handles_an_ipv6_literal_without_raising():
-    """An IPv6 direct target is a reachability question, not a crash.
+def test_wait_reachable_check_type_is_registry_driven():
+    from hegemony_steps_probe.wait_reachable import WaitReachableConfig
 
-    The old AF_INET socket raised on a v6 literal before the connect ever
-    ran; the family-agnostic path must return a plain bool even on hosts
-    whose kernel lacks IPv6 entirely.
-    """
+    props = WaitReachableConfig.model_json_schema()["properties"]
+    assert props["check_type"]["default"] == "tcp_connect"
+    assert "enum" not in props["check_type"]  # the host injects the probe ids
+    assert props["check_type"]["x_options_source"] == "probes"
+    assert props["port"]["x_hide_when"] == {"field": "check_type", "value": "icmp_ping"}
+    assert props["socks_proxy"]["default"] == ""
+
+
+async def test_wait_reachable_defaults_poll_tcp_on_the_management_port():
+    """Without the new settings a poll is today's TCP connect: a device on
+    its inventory mgmt_port, a direct IP (IPv6 too) on 22."""
     from hegemony_steps_probe.wait_reachable import WaitReachableHandler
 
-    handler = WaitReachableHandler()
-    reachable = await handler._check_tcp("2001:db8::7", 22, 0.2)
-    assert reachable is False
+    probes = _FakeProbes()
+    result = await WaitReachableHandler().execute(_device_and_ip_ctx(dict(_QUICK_WAIT), probes))
+    assert result.success is True, result.error
+    first_round = probes.calls[:2]
+    assert first_round == [
+        ("tcp_connect", "192.0.2.1", {"timeout_ms": 5000, "port": 2222}),
+        ("tcp_connect", "2001:db8::7", {"timeout_ms": 5000, "port": 22}),
+    ]
+    assert [
+        (e["content_json"]["check_type"], e["content_json"]["port"]) for e in result.evidence
+    ] == [
+        ("tcp_connect", 2222),
+        ("tcp_connect", 22),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("config", "device_options", "ip_options"),
+    [
+        ({"port": 443}, {"port": 443}, {"port": 443}),
+        ({"check_type": "http_health"}, {"port": 80}, {"port": 80}),
+        ({"check_type": "icmp_ping", "port": 443}, {"count": 1}, {"count": 1}),
+        (
+            {"socks_proxy": " socks5://jump:pw@dind:1080 "},
+            {"port": 2222, "socks_proxy": "socks5://jump:pw@dind:1080"},
+            {"port": 22, "socks_proxy": "socks5://jump:pw@dind:1080"},
+        ),
+    ],
+)
+async def test_wait_reachable_polls_with_the_check_type_port_and_proxy(
+    config, device_options, ip_options
+):
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    probes = _FakeProbes()
+    ctx = _device_and_ip_ctx({**_QUICK_WAIT, **config}, probes)
+    result = await WaitReachableHandler().execute(ctx)
+    assert result.success is True, result.error
+    check_type = config.get("check_type", "tcp_connect")
+    assert probes.calls[:2] == [
+        (check_type, "192.0.2.1", {"timeout_ms": 5000, **device_options}),
+        (check_type, "2001:db8::7", {"timeout_ms": 5000, **ip_options}),
+    ]
+    ports = [e["content_json"]["port"] for e in result.evidence]
+    assert ports == [device_options.get("port"), ip_options.get("port")]
+
+
+async def test_wait_reachable_fails_on_the_first_poll_of_a_denied_target():
+    """run_probe applies the egress gate; a denial ends the wait at once."""
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    class _Denied(Exception):
+        pass
+
+    probes = _FakeProbes(_Denied("probe to 192.0.2.7 refused by the flow egress policy"))
+    ctx = _ip_target_ctx({"max_wait_seconds": 300}, ["192.0.2.7"], services=probes)
+    with pytest.raises(_Denied):
+        await asyncio.wait_for(WaitReachableHandler().execute(ctx), timeout=5)
+    assert len(probes.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("answer", "error"),
+    [
+        (KeyError("tcp_connect"), "Check type 'tcp_connect' is not available on this worker"),
+        (
+            ProbeResult(
+                ok=False,
+                error_kind="config_error",
+                error_detail="icmp_ping cannot use socks_proxy",
+            ),
+            "tcp_connect cannot run against 192.0.2.7: icmp_ping cannot use socks_proxy",
+        ),
+    ],
+)
+async def test_wait_reachable_fails_at_once_when_the_check_cannot_run(answer, error):
+    """An unknown check type or refused options fail every poll the same
+    way, so the step says so instead of polling until the deadline."""
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    probes = _FakeProbes(answer)
+    ctx = _ip_target_ctx({"max_wait_seconds": 300}, ["192.0.2.7"], services=probes)
+    result = await asyncio.wait_for(WaitReachableHandler().execute(ctx), timeout=5)
+    assert result.success is False
+    assert result.error == error
+    assert len(probes.calls) == 1
 
 
 async def test_http_probe_brackets_ipv6_literals_and_gates_every_hop(monkeypatch):

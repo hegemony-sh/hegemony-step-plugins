@@ -448,39 +448,36 @@ class TestProbeHandlerParallelism:
         assert [e["content_json"]["answers"] for e in result.evidence] == [[ip] for ip in _IPS]
         assert list(result.metrics) == [f"r{i}_ms" for i in range(1, 7)]
 
-    async def test_wait_reachable_polls_a_round_concurrently(self, monkeypatch):
+    async def test_wait_reachable_polls_a_round_concurrently(self):
         from hegemony_steps_probe.wait_reachable import WaitReachableHandler
 
-        handler = WaitReachableHandler()
         flight = _InFlight()
 
-        async def check(host, port, timeout):
-            await flight.hold(_index(host))
-            return True
+        class _Services:
+            async def run_probe(self, check_type, address, options):
+                await flight.hold(_index(address))
+                return ProbeResult(ok=True)
 
-        monkeypatch.setattr(handler, "_check_tcp", check)
         config = {"max_wait_seconds": 10, "stable_seconds": 1, "poll_interval": 1}
-        result = await handler.execute(
-            _probe_ctx({**config, "max_parallel_devices": 3}, type("_Services", (), {})())
-        )
+        ctx = _probe_ctx({**config, "max_parallel_devices": 3}, _Services())
+        result = await WaitReachableHandler().execute(ctx)
         assert result.success is True, result.error
         assert 1 < flight.peak <= 3
         assert [e["content_json"]["host"] for e in result.evidence] == _IPS
 
-    async def test_wait_reachable_keeps_its_deadline(self, monkeypatch):
+    async def test_wait_reachable_keeps_its_deadline(self):
         """Six hanging targets, two at a time, a 5 s connect timeout: the step
         still ends at its 1 s deadline instead of after 6 x 5 s."""
         from hegemony_steps_probe.wait_reachable import WaitReachableHandler
 
-        handler = WaitReachableHandler()
-        timeouts: list[float] = []
+        timeouts_ms: list[int] = []
 
-        async def hang(host, port, timeout):
-            timeouts.append(timeout)
-            await asyncio.sleep(timeout)
-            return False
+        class _Services:
+            async def run_probe(self, check_type, address, options):
+                timeouts_ms.append(options["timeout_ms"])
+                await asyncio.sleep(30)  # ignores its timeout: the cap must hold
+                return ProbeResult(ok=True)  # pragma: no cover - always cut off
 
-        monkeypatch.setattr(handler, "_check_tcp", hang)
         config = {
             "max_wait_seconds": 1,
             "stable_seconds": 1,
@@ -490,8 +487,8 @@ class TestProbeHandlerParallelism:
         }
         loop = asyncio.get_running_loop()
         started = loop.time()
-        result = await handler.execute(_probe_ctx(config, type("_Services", (), {})()))
+        result = await WaitReachableHandler().execute(_probe_ctx(config, _Services()))
         assert loop.time() - started < 1.5
         assert result.success is False
         assert (result.error or "").startswith("Timeout waiting for targets")
-        assert timeouts and max(timeouts) <= 1
+        assert timeouts_ms and max(timeouts_ms) <= 1000
