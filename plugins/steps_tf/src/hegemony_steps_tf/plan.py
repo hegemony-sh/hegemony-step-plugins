@@ -247,11 +247,11 @@ class TfPlanConfig(TfContainerConfig):
         title="Image",
         description=(
             "Container image with the tool, run as root with a POSIX sh. Leave empty for "
-            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.13 for OpenTofu, "
+            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.14 for OpenTofu, "
             "hashicorp/terraform at a pinned version for Terraform."
         ),
         json_schema_extra={
-            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.13",
+            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.14",
             "x_advanced": True,
         },
     )

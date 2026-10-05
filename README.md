@@ -30,7 +30,7 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_netcli` | `netcli.` | execute, collect_evidence |
   | `plugins/steps_evidence` | `evidence.` | assert, compare |
   | `plugins/steps_container` | `container.` | run |
-  | `plugins/steps_flow` | `flow.` | run, notify, git_sync (hidden) |
+  | `plugins/steps_flow` | `flow.` | run, notify |
   | `plugins/steps_cisco_iosxe` | `cisco.iosxe.` | upgrade.preflight/stage/install/verify/cleanup (opt-in) |
   | `plugins/steps_shell` | `shell.` | execute (opt-in) |
   | `plugins/steps_ansible` | `ansible.` | playbook (built on `container.run`'s runner) |

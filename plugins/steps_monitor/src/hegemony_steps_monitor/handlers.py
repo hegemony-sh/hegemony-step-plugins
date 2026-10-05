@@ -2,12 +2,12 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Connectivity monitor handlers (monitor.connectivity / .start / .stop).
+"""Connectivity monitor handler (monitor.connectivity).
 
-Thin shells over the host monitor machinery: they assemble the monitor config
-and resolve targets (pure), then hand off to ``services.start_monitor`` /
-``services.stop_monitor``. The host owns ``MonitorManager`` and the engine's
-until-join / run-cleanup semantics (keyed off the ``monitor.`` id prefix).
+A thin shell over the host monitor machinery: it assembles the monitor config
+and resolves targets (pure), then hands off to ``services.start_monitor``. The
+host owns ``MonitorManager`` and the engine's until-join / run-cleanup
+semantics (keyed off the ``monitor.`` id prefix).
 """
 
 from __future__ import annotations
@@ -15,145 +15,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, HandlerTargeting, StepKind
+from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, StepKind
 
-from .config import ConnectivityMonitorConfig, MonitorLifecycleConfig
-from .targets import extract_ip_addresses, resolve_targets
+from .config import ConnectivityMonitorConfig
+from .targets import extract_ip_addresses
 
 logger = logging.getLogger(__name__)
-
-
-class ConnectivityMonitorStartHandler(BaseHandler):
-    """Handler to start a connectivity monitor (internal lifecycle)."""
-
-    handler_id = "monitor.start"
-    supported_kinds = [StepKind.CHECK]
-    display_name = "Connectivity Monitor: Start"
-    description = "Internal: start a background connectivity monitor."
-    category = "Checks"
-    hidden = True
-    targeting = HandlerTargeting(roles=False, ips=False)
-    config_model = MonitorLifecycleConfig
-
-    async def execute(self, ctx: HandlerContext) -> HandlerResult:
-        config = ctx.config.get("monitor")
-        if not config:
-            return HandlerResult(
-                success=False,
-                error="No monitor configuration provided",
-                summary="Missing monitor config",
-            )
-
-        monitor_id = config.get("monitor_id")
-        if not monitor_id:
-            return HandlerResult(
-                success=False, error="monitor_id is required", summary="Missing monitor_id"
-            )
-
-        check_id_str = config.get("check_id")
-        if not check_id_str:
-            return HandlerResult(
-                success=False, error="check_id is required", summary="Missing check_id"
-            )
-
-        services = ctx.require_services()
-        if not services.is_check_registered(check_id_str):
-            return HandlerResult(
-                success=False,
-                error=f"Check {check_id_str} is not registered",
-                summary=f"Unknown check: {check_id_str}",
-            )
-
-        try:
-            resolved = resolve_targets(config, ctx.target_devices_by_role)
-        except ValueError as exc:
-            return HandlerResult(
-                success=False, error=str(exc), summary="Invalid monitor target config"
-            )
-        if not resolved:
-            return HandlerResult(
-                success=False,
-                error="No targets resolved from selectors",
-                summary="No targets found",
-            )
-
-        try:
-            db_id = await services.start_monitor(
-                config,
-                resolved,
-                run_id=ctx.run_id,
-                step_id=ctx.step_id,
-                step_run_id=ctx.step_run_id,
-                phase=ctx.tags.get("phase"),
-            )
-        except Exception as e:  # noqa: BLE001 - surfaced as a step failure
-            logger.exception("Failed to start monitor %s", monitor_id)
-            return HandlerResult(
-                success=False, error=str(e), summary=f"Failed to start monitor: {e}"
-            )
-
-        return HandlerResult(
-            success=True,
-            summary=f"Started monitor {monitor_id} with {len(resolved)} targets",
-            metrics={"monitor_db_id": db_id, "target_count": len(resolved)},
-            evidence=[
-                {
-                    "kind": "transport_meta",
-                    "name": f"monitor_started_{monitor_id}",
-                    "content_json": {
-                        "monitor_id": monitor_id,
-                        "check_id": check_id_str,
-                        "target_count": len(resolved),
-                        "resolved_targets": [
-                            {"address": t["address"], "role": t.get("role")} for t in resolved
-                        ],
-                    },
-                }
-            ],
-        )
-
-
-class ConnectivityMonitorStopHandler(BaseHandler):
-    """Handler to stop a connectivity monitor (internal lifecycle)."""
-
-    handler_id = "monitor.stop"
-    supported_kinds = [StepKind.CHECK]
-    display_name = "Connectivity Monitor: Stop"
-    description = "Internal: stop a background connectivity monitor."
-    category = "Checks"
-    hidden = True
-    targeting = HandlerTargeting(roles=False, ips=False)
-    config_model = MonitorLifecycleConfig
-
-    async def execute(self, ctx: HandlerContext) -> HandlerResult:
-        monitor_id = ctx.config.get("monitor_id")
-        if not monitor_id:
-            return HandlerResult(
-                success=False, error="monitor_id is required", summary="Missing monitor_id"
-            )
-
-        reason = ctx.config.get("reason", "step_requested")
-        services = ctx.require_services()
-        stopped = await services.stop_monitor(monitor_id, reason=reason)
-
-        if not stopped:
-            return HandlerResult(
-                success=False,
-                error=f"Monitor {monitor_id} not found or already stopped",
-                summary=f"Monitor {monitor_id} not found",
-            )
-
-        return HandlerResult(
-            success=True,
-            summary=f"Stopped monitor {monitor_id}",
-            evidence=[
-                {
-                    "kind": "transport_meta",
-                    "name": f"monitor_stopped_{monitor_id}",
-                    "content_json": {"monitor_id": monitor_id, "reason": reason},
-                }
-            ],
-        )
 
 
 class ConnectivityMonitorHandler(BaseHandler):

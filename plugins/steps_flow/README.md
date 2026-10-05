@@ -6,10 +6,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 # hegemony-steps-flow
 
-Platform-orchestration steps: launch nested flow runs, send on-demand
-notifications, trigger git flow-definition syncs.
+Platform-orchestration steps: launch nested flow runs and send on-demand
+notifications.
 
-Handlers: `flow.run`, `flow.notify`, `flow.git_sync` (hidden).
+Handlers: `flow.run`, `flow.notify`.
 
 Namespace prefix (= entry-point name): `flow.` — see the repo-level
 `CONVENTIONS.md` for the naming rules.

@@ -1,3 +1,35 @@
+## [0.14.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.13.1...v0.14.0) (2026-10-05)
+
+### ⚠ BREAKING CHANGES
+
+* **monitor:** the monitor.start and monitor.stop step handlers no
+longer exist. A flow that still has one of these steps is refused on
+save as an unknown handler, and a run that reaches such a step fails it.
+Use monitor.connectivity instead before upgrading.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+* **flow:** the flow.git_sync step handler no longer exists. A flow
+that still has a flow.git_sync step is refused on save as an unknown
+handler, and a run that reaches such a step fails it. Remove those steps
+before upgrading.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+
+### Features
+
+* **flow:** remove the flow.git_sync step handler ([5652ee5](https://github.com/hegemony-sh/hegemony-step-plugins/commit/5652ee50b1e0ebf05db8c88e33087e2c73d0b9cf))
+* **monitor:** remove the monitor.start and monitor.stop step handlers ([070765a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/070765a0349e6204c1bea70d33bf4d70d5b8b01b))
+
+## [0.13.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.13.0...v0.13.1) (2026-10-05)
+
+### Bug Fixes
+
+* **images:** patch the ansible-runner image so its release scan passes ([4ab14d6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/4ab14d642620beee9bec35fa2fe73112195a4346))
+
 ## [0.13.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.12.0...v0.13.0) (2026-10-05)
 
 ### ⚠ BREAKING CHANGES
