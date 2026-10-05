@@ -31,6 +31,11 @@ another, higher values run up to that many devices concurrently (capped at
 32). Command output reaches the step's live log per device, once that
 device's whole command batch has finished.
 
+Command timeout (30 seconds by default, at most 3600) limits how long one
+command may run on a device; a command that runs longer fails. Raise it for
+slow commands. The step's own timeout still applies to the whole step, so
+it must leave time for every command on every device.
+
 ## Output
 
 The step adds no custom chainable output keys; what it produces lives in
@@ -51,5 +56,5 @@ Per device, it counts as failed when the device has no management host,
 when connecting or executing raises an error, or when any command returns a
 non-zero exit code. Collection continues on the remaining devices either
 way, and all collected evidence is kept — but if any device failed, the
-step fails and its error names the failing devices. The handler imposes no
-timeout of its own on command execution.
+step fails and its error names the failing devices. A command that runs
+past Command timeout counts as failed.

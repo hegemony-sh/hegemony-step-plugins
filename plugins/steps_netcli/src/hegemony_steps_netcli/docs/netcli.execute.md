@@ -42,6 +42,12 @@ concurrently (capped at 32). Results are always aggregated in device order.
 Command output reaches the step's live log per device, once that device's
 whole command batch has finished.
 
+Command timeout (30 seconds by default, at most 3600) limits how long one
+command may run on a device; a command that runs longer fails. With the
+netmiko transport each configuration block is sent as one command, so the
+limit covers the whole block. The step's own timeout still applies to the
+whole step, so it must leave time for every command on every device.
+
 ## Output
 
 Later steps can read `steps.NODE_ID.stdout` — the combined output of all
@@ -64,5 +70,5 @@ counts as a failed command. One failing device does not stop the others:
 every device is still processed and its evidence kept, but all devices must
 succeed for the step to succeed. In a configuration session the error
 text lists each failing device with its first failure detail; in show/exec
-mode every failing command contributes its own entry. The handler imposes no timeout of its own on
-command execution.
+mode every failing command contributes its own entry. A command that runs
+past Command timeout counts as failed.

@@ -643,3 +643,24 @@ def test_netcli_steps_target_roles_only(handler: BaseHandler):
     # A device session needs the login details only inventory devices carry,
     # so the editor offers no additional-IP list for these steps.
     assert handler.targeting.roles is True and handler.targeting.ips is False
+
+
+@pytest.mark.parametrize("handler", _netcli_handlers(), ids=lambda h: h.handler_id)
+@pytest.mark.parametrize(
+    ("config", "expected"), [({}, 30.0), ({"command_timeout_seconds": 600}, 600.0)]
+)
+async def test_netcli_command_timeout_reaches_connect(
+    handler: BaseHandler, config: dict[str, Any], expected: float
+):
+    services = _RecordingConnects()
+    result = await handler.execute(_netcli_ctx(services, **config))
+    assert result.success is True, result.error
+    assert [call["command_timeout"] for call in services.calls] == [expected]
+
+
+@pytest.mark.parametrize("handler", _netcli_handlers(), ids=lambda h: h.handler_id)
+def test_netcli_command_timeout_is_bounded(handler: BaseHandler):
+    config = {"commands": ["show version"]}
+    assert handler.validate_config({**config, "command_timeout_seconds": 3600}) == []
+    assert handler.validate_config({**config, "command_timeout_seconds": 0})
+    assert handler.validate_config({**config, "command_timeout_seconds": 3601})

@@ -24,6 +24,8 @@ from hegemony_step_sdk import (
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_COMMAND_TIMEOUT_SECONDS = 30
+
 
 class ExecuteCliConfig(BaseModel):
     """Config for ``netcli.execute``."""
@@ -47,6 +49,18 @@ class ExecuteCliConfig(BaseModel):
         le=MAX_PARALLEL_DEVICES_LIMIT,
         title="Max Parallel Devices",
         description="Devices processed concurrently (1 = sequential)",
+    )
+    command_timeout_seconds: int = Field(
+        _DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        ge=1,
+        le=3600,
+        title="Command timeout (seconds)",
+        description=(
+            "How long one command may run on a device before it fails. With the "
+            "netmiko transport a configuration block is sent as one command, so "
+            "the limit covers the whole block. The step timeout must still cover "
+            "every command on every device. Defaults to 30 seconds."
+        ),
     )
 
 
@@ -105,6 +119,9 @@ class ExecuteCLIActionHandler(BaseHandler):
             )
 
         services = ctx.require_services()
+        command_timeout = float(
+            ctx.config.get("command_timeout_seconds") or _DEFAULT_COMMAND_TIMEOUT_SECONDS
+        )
 
         async def _process_device(device: dict) -> _DeviceOutcome:
             outcome = _DeviceOutcome()
@@ -120,7 +137,10 @@ class ExecuteCLIActionHandler(BaseHandler):
                 # step_run_id registers the session, so cancelling the run
                 # closes it.
                 ssh = services.connect(
-                    device, platform=device.get("platform"), step_run_id=ctx.step_run_id
+                    device,
+                    platform=device.get("platform"),
+                    command_timeout=command_timeout,
+                    step_run_id=ctx.step_run_id,
                 )
                 # Execute all commands together so config mode detection works
                 results = await ssh.execute_commands(commands)
