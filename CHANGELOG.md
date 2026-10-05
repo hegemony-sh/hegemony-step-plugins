@@ -1,3 +1,32 @@
+## [0.12.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.11.0...v0.12.0) (2026-10-05)
+
+### ⚠ BREAKING CHANGES
+
+* **netcli:** the netcli.poll_until step handler no longer exists. A flow
+that still has a netcli.poll_until step is refused on save as an unknown
+handler, and a run that reaches such a step fails it. Replace those steps
+before upgrading.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+
+### Features
+
+* **netcli:** remove netcli.poll_until ([da5863d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/da5863df607d7c8522c7e057f6c062b1fe82884d))
+
+## [0.11.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.10.0...v0.11.0) (2026-10-05)
+
+### Features
+
+* **container:** build without the platform registry, or push to another registry ([609ce0e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/609ce0e1b674b77330388450e31c82917526bce5))
+* **sdk:** let a build step build without the platform registry or push elsewhere ([67f2235](https://github.com/hegemony-sh/hegemony-step-plugins/commit/67f2235c712eacdf68702afca708117f1cb1a248))
+
+### Bug Fixes
+
+* **container:** drop pushed-elsewhere names as the build ends, lowercase hosts ([748c69b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/748c69b1c7e38ec7f5a26734b1979803bfe1e9f8))
+* **container:** refuse the platform registry named with a default port ([6ad6126](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6ad61267fb6406d03fa168510811dedbc140c678))
+
 ## [0.10.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.9.2...v0.10.0) (2026-10-03)
 
 ### Features

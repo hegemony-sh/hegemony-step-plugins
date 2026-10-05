@@ -4,8 +4,8 @@
 
 """Network-device CLI step handlers for Hegemony.
 
-Network-device CLI paradigm: execute command lines, collect outputs as
-evidence, poll until output matches. Vendor-neutral by design — platform
+Network-device CLI paradigm: execute command lines and collect outputs as
+evidence. Vendor-neutral by design — platform
 dialects and transports (netmiko/scrapli, ssh) are resolved beneath the
 handler layer from device access config.
 
@@ -20,12 +20,10 @@ from hegemony_step_sdk import BaseHandler, StepHandlerRegistry
 
 from .collect_evidence import CollectEvidenceHandler
 from .execute import ExecuteCLIActionHandler
-from .poll_until import PollUntilHandler
 
 ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
     CollectEvidenceHandler,
     ExecuteCLIActionHandler,
-    PollUntilHandler,
 )
 
 
