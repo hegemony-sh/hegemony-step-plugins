@@ -822,6 +822,17 @@ class HttpRequestHandler(BaseHandler):
             )
 
         services = ctx.require_services()
+        if getattr(services, "enforce_egress", None) is None:
+            # Fail closed: the step dials the URL itself, so without the gate
+            # nothing would apply the flow's network policy.
+            return HandlerResult(
+                success=False,
+                error=(
+                    "this platform cannot apply the flow's network policy to the request, "
+                    "so it was not sent"
+                ),
+                summary="Config error",
+            )
         try:
             credentials = await self._credentials(services, config)
             verify = await self._tls_verify(services, config)

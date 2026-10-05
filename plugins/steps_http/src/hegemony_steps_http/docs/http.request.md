@@ -157,7 +157,8 @@ OPTIONS, JSON Body text that is not valid JSON once rendered, an Expected
 Status that does not parse, an invalid path, a missing Secret or Username, or
 incomplete pagination settings. It also fails when a secret reference
 resolves to nothing, the secret is shorter than 4 characters (too short to
-keep reliably out of the output), or CA Bundle holds no certificate.
+keep reliably out of the output), CA Bundle holds no certificate, or the
+platform cannot apply the flow's network policy to the request.
 
 During the request it fails on a refused destination, a DNS failure, a
 connection or TLS error, a timeout, more than 10 redirects, a response over

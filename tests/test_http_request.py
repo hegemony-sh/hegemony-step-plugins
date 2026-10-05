@@ -697,12 +697,14 @@ async def test_a_redirect_cannot_launder_a_denied_destination():
     assert recorder.urls == ["https://api.example.test/"]
 
 
-async def test_a_host_without_the_egress_gate_still_runs():
+async def test_a_host_without_the_egress_gate_sends_nothing():
     recorder = Recorder(lambda request: httpx.Response(200))
     result = await _handler(recorder).execute(
         _ctx({"url": "https://api.example.test/"}, ServicesWithoutEgress())
     )
-    assert result.success is True, result.error
+    assert result.success is False
+    assert "cannot apply the flow's network policy" in (result.error or "")
+    assert recorder.urls == []
 
 
 @pytest.mark.parametrize(
