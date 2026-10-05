@@ -1,3 +1,15 @@
+## [0.11.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.10.0...v0.11.0) (2026-10-05)
+
+### Features
+
+* **container:** build without the platform registry, or push to another registry ([609ce0e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/609ce0e1b674b77330388450e31c82917526bce5))
+* **sdk:** let a build step build without the platform registry or push elsewhere ([67f2235](https://github.com/hegemony-sh/hegemony-step-plugins/commit/67f2235c712eacdf68702afca708117f1cb1a248))
+
+### Bug Fixes
+
+* **container:** drop pushed-elsewhere names as the build ends, lowercase hosts ([748c69b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/748c69b1c7e38ec7f5a26734b1979803bfe1e9f8))
+* **container:** refuse the platform registry named with a default port ([6ad6126](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6ad61267fb6406d03fa168510811dedbc140c678))
+
 ## [0.10.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.9.2...v0.10.0) (2026-10-03)
 
 ### Features

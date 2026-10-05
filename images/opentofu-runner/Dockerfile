@@ -31,7 +31,7 @@
 # release tag vX.Y.Z as ghcr.io/hegemony-sh/opentofu-runner:X.Y.Z and :X.Y. The
 # steps' default names X.Y (DEFAULT_IMAGES in
 # plugins/steps_tf/src/hegemony_steps_tf/common.py), currently
-# ghcr.io/hegemony-sh/opentofu-runner:0.10. For another OpenTofu version, build
+# ghcr.io/hegemony-sh/opentofu-runner:0.11. For another OpenTofu version, build
 # and push it under your own tag and set the plan step's Image:
 #
 #   docker build --build-arg OPENTOFU_VERSION=<version> \
