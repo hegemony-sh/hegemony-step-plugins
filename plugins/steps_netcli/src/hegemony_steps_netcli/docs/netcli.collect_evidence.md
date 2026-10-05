@@ -20,6 +20,8 @@ List the commands one per line, typically show/exec commands such as
 templates for flow inputs and earlier step results, resolved before the
 step runs. On each device all commands are executed together in one
 session, in order, and each command's output becomes its own artifact.
+Targets are chosen with the role-based target picker; there is no
+additional-IP list for this step.
 
 Leaving the command list empty is not an error: as long as at least one
 target device is configured, the step succeeds with a "No commands

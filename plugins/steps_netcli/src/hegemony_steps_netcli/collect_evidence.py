@@ -14,6 +14,7 @@ from hegemony_step_sdk import (
     BaseHandler,
     HandlerContext,
     HandlerResult,
+    HandlerTargeting,
     StepKind,
     command_label,
     for_each_target_device,
@@ -75,6 +76,8 @@ class CollectEvidenceHandler(BaseHandler):
     display_name = "Collect Evidence"
     description = "Capture CLI command outputs from devices as evidence."
     category = "Checks"
+    # Devices come from roles only: an additional IP has no login details.
+    targeting = HandlerTargeting(roles=True, ips=False)
     config_model = CollectEvidenceConfig
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:

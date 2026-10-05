@@ -636,3 +636,10 @@ async def test_netcli_sessions_register_for_cancellation(handler: BaseHandler):
     result = await handler.execute(_netcli_ctx(services))
     assert result.success is True, result.error
     assert [call["step_run_id"] for call in services.calls] == ["sr"]
+
+
+@pytest.mark.parametrize("handler", _netcli_handlers(), ids=lambda h: h.handler_id)
+def test_netcli_steps_target_roles_only(handler: BaseHandler):
+    # A device session needs the login details only inventory devices carry,
+    # so the editor offers no additional-IP list for these steps.
+    assert handler.targeting.roles is True and handler.targeting.ips is False
