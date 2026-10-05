@@ -18,7 +18,9 @@ Targets come from the step's target picker: each selected role resolves to
 its devices, polled on their management address and management port (22 when
 the inventory sets none); explicit IP selectors add literal addresses polled
 on port 22. IPv4 and IPv6 targets both work. Each poll attempts a plain TCP
-connection with a five-second connection timeout — no credentials, no login.
+connection — no credentials, no login. Connect Timeout (sec) bounds each
+connection attempt (default 5, up to 60); a target that does not answer in
+time counts as unreachable for that poll.
 
 Three timings shape the wait. Poll Interval (sec) is the pause between polls
 (default 5). Stable (sec) is the stability window (default 30): a target
@@ -46,8 +48,9 @@ the stability window it met. On timeout only the `attempts` and
 ## When It Fails
 
 The step fails immediately when no target devices or IPs are configured,
-when any device has no management address (waiting would only time out), or
-when an egress policy denies a target. Otherwise the only failure is the
+when a setting is out of range or of the wrong type, when any device has no
+management address (waiting would only time out), or when an egress policy
+denies a target. Otherwise the only failure is the
 deadline: after Max Wait (sec) the step fails, naming the targets that were
 unreachable at the last poll - a target that was reachable but still
 partway through its stability window caused the failure too, without being

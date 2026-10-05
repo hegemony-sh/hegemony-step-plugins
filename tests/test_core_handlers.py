@@ -475,6 +475,56 @@ async def test_wait_reachable_accepts_ip_targets(monkeypatch):
     assert "target(s) stable" in (result.summary or "")
 
 
+def test_wait_reachable_declares_its_connect_timeout():
+    """connect_timeout was read but never declared, so nothing validated it."""
+    from hegemony_steps_probe.wait_reachable import WaitReachableConfig, WaitReachableHandler
+
+    prop = WaitReachableConfig.model_json_schema()["properties"]["connect_timeout_seconds"]
+    assert (prop["default"], prop["minimum"], prop["maximum"]) == (5, 1, 60)
+    # Steps saved with the old key keep their value.
+    assert WaitReachableConfig.model_validate({"connect_timeout": "7"}).connect_timeout_seconds == 7
+    assert WaitReachableHandler().validate_config({"connect_timeout": "abc"})
+    assert WaitReachableHandler().validate_config({"connect_timeout_seconds": 61})
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [({}, 5), ({"connect_timeout_seconds": 3}, 3), ({"connect_timeout": "2"}, 2)],
+)
+async def test_wait_reachable_polls_with_the_validated_connect_timeout(
+    monkeypatch, config, expected
+):
+    """A string timeout used to reach asyncio.wait_for, whose TypeError the
+    check swallowed: every target stayed "unreachable" until the deadline."""
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    handler = WaitReachableHandler()
+    timeouts: list[float] = []
+
+    async def always_up(host, port, timeout):
+        timeouts.append(timeout)
+        return True
+
+    monkeypatch.setattr(handler, "_check_tcp", always_up)
+    ctx = _ip_target_ctx(
+        {"max_wait_seconds": 10, "stable_seconds": 1, "poll_interval": 1, **config},
+        ["192.0.2.7"],
+        services=type("_Services", (), {})(),
+    )
+    result = await handler.execute(ctx)
+    assert result.success is True, result.error
+    assert set(timeouts) == {expected}
+
+
+async def test_wait_reachable_refuses_an_invalid_config():
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    ctx = _ip_target_ctx({"connect_timeout": "soon"}, ["192.0.2.7"])
+    result = await WaitReachableHandler().execute(ctx)
+    assert result.success is False
+    assert "Invalid probe.wait_reachable config" in (result.error or "")
+
+
 async def test_check_tcp_handles_an_ipv6_literal_without_raising():
     """An IPv6 direct target is a reachability question, not a crash.
 

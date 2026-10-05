@@ -9,7 +9,7 @@ import contextlib
 import logging
 from datetime import UTC, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     BaseHandler,
@@ -57,6 +57,20 @@ class WaitReachableConfig(BaseModel):
         description="Seconds to wait between reachability polls. Defaults to 5.",
         json_schema_extra={"x_legacy_keys": ["check_interval"]},
     )
+    connect_timeout_seconds: int = Field(
+        default=5,
+        ge=1,
+        le=60,
+        # Steps saved before the field was declared carry connect_timeout.
+        validation_alias=AliasChoices("connect_timeout_seconds", "connect_timeout"),
+        title="Connect Timeout (sec)",
+        description=(
+            "Time limit for each poll of a target, in seconds. A target that "
+            "does not answer in time counts as unreachable for that poll. "
+            "Defaults to 5."
+        ),
+        json_schema_extra={"x_legacy_keys": ["connect_timeout"]},
+    )
 
 
 class WaitReachableHandler(BaseHandler):
@@ -80,10 +94,20 @@ class WaitReachableHandler(BaseHandler):
                 summary="Missing targets",
             )
 
-        max_wait_seconds = ctx.config.get("max_wait_seconds", 300)
-        stable_seconds = ctx.config.get("stable_seconds", 30)
-        poll_interval = ctx.config.get("poll_interval", 5)
-        connect_timeout = ctx.config.get("connect_timeout", 5)
+        # The validated model, not raw config gets: a value of the wrong type
+        # (a string timeout) used to make every poll fail as "unreachable".
+        errors = self.validate_config(ctx.config)
+        if errors:
+            return HandlerResult(
+                success=False,
+                error=f"Invalid probe.wait_reachable config: {'; '.join(errors)}",
+                summary="Config validation failed",
+            )
+        config = WaitReachableConfig.model_validate(ctx.config)
+        max_wait_seconds = config.max_wait_seconds
+        stable_seconds = config.stable_seconds
+        poll_interval = config.poll_interval
+        connect_timeout = config.connect_timeout_seconds
 
         # Fail fast if any device is missing mgmt_host — waiting would always time out
         for device in target_devices:
