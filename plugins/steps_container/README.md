@@ -13,7 +13,8 @@ simply don't install it.
 
 Handlers: `container.run` (run a container) and `container.build` (build an
 image from the flow's attachments and push it to the organization's namespace
-of the platform registry).
+of the platform registry or to another registry, or keep it in the sandbox
+when the platform runs no registry).
 
 Namespace prefix (= entry-point name): `container.` — see the repo-level
 `CONVENTIONS.md` for the naming rules.

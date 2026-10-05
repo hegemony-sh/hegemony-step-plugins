@@ -2,18 +2,29 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""``container.build``: build an image on the sandbox and push it to the platform registry.
+"""``container.build``: build an image on the sandbox and push it to a registry, or keep it there.
 
 The build context is a folder among the flow's attachments, the files
 ``tf.plan`` and ``ansible.playbook`` read their sources from too (a flow
 synced from git brings them from the repository). The worker writes that
-folder into a private directory and runs ``docker buildx build --push``
-against the sandbox daemon (BuildKit, Docker driver) with the step's Docker
-configuration, so the push authenticates with the step's registry token. The
-image lands at ``<registry>/orgs/<slug>/<name>``
-(:class:`~hegemony_step_sdk.ImageBuild`), tagged ``run-<short run id>`` plus
-the step's extra tags, and carries the labels ``org.opencontainers.image.created``,
-``sh.hegemony.run`` and ``sh.hegemony.step``.
+folder into a private directory and runs ``docker buildx build`` against the
+sandbox daemon (BuildKit, Docker driver) with the step's Docker configuration,
+which holds the organization's registry logins and, with a platform registry,
+the step's registry token. Where the image goes depends on its name and on
+the platform (:class:`~hegemony_step_sdk.ImageBuild`):
+
+- a name without a registry host (``tools/netbox-sync``) lands at
+  ``<registry>/orgs/<slug>/<name>``: pushed to the platform registry when the
+  platform runs one, and otherwise built into the sandbox daemon only, under
+  that same name;
+- a name with its own registry host (``ghcr.io/acme/netbox-sync``) is pushed
+  there, with the organization's login for that host when one is saved, and
+  only when the host allows the step to push outside the platform. Its name
+  is then dropped from the sandbox daemon, which every organization shares.
+
+Every image is tagged ``run-<short run id>`` plus the step's extra tags, and
+carries the labels ``org.opencontainers.image.created``, ``sh.hegemony.run``
+and ``sh.hegemony.step``.
 
 What a build may reach and use is decided here, never by the Dockerfile:
 
@@ -50,6 +61,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -62,9 +74,11 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    ImageBuild,
     StepKind,
 )
 
+from .image_cache import login_for, parse_reference
 from .pull_progress import require_docker_host
 from .run import RunContainerHandler, _docker_env, repo_digest_for
 from .runner import container_config_from, resolve_secret_values, secret_map_errors
@@ -103,6 +117,10 @@ RESERVED_LABEL_PREFIX = "sh.hegemony."
 #: platform registry's own rule).
 _NAME_COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
 _IMAGE_NAME_RE = re.compile(rf"^{_NAME_COMPONENT}(?:/{_NAME_COMPONENT})*$")
+#: A registry host in an image reference: DNS labels joined by dots, and an
+#: optional port (the reference grammar Docker follows).
+_HOST_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+_REGISTRY_HOST_RE = re.compile(rf"^{_HOST_LABEL}(?:\.{_HOST_LABEL})*(?::[0-9]{{1,5}})?$")
 MAX_IMAGE_NAME_LENGTH = 200
 #: A full reference (registry, namespace, name and tag) Docker accepts.
 MAX_REFERENCE_LENGTH = 255
@@ -145,27 +163,65 @@ def _templated(value: object) -> bool:
     return isinstance(value, str) and bool(_TEMPLATE_RE.search(value))
 
 
+def registry_host_of(name: str) -> str | None:
+    """The registry host ``name`` starts with, read the way Docker reads a reference, or None.
+
+    A first segment with a dot or a colon, or ``localhost``, is a registry
+    host when another segment follows it: ``ghcr.io/acme/x`` and
+    ``registry.example.com:5000/x`` name one, ``tools/x`` and ``x`` do not.
+    """
+    first, separator, _rest = name.partition("/")
+    if separator and ("." in first or ":" in first or first == "localhost"):
+        return first
+    return None
+
+
 def image_name_error(name: object, *, allow_template: bool = False) -> str | None:
-    """Why ``name`` cannot name a built image under the organization's namespace, or None."""
+    """Why ``name`` cannot name a built image, or None.
+
+    Either a name under the organization's namespace (``tools/netbox-sync``)
+    or one with its own registry host in front (``ghcr.io/acme/netbox-sync``);
+    never a tag, which the step's tags give.
+    """
     if not isinstance(name, str) or not name.strip():
-        return "'image' is required: the image's name under the organization, e.g. tools/netbox"
+        return (
+            "'image' is required: a name such as tools/netbox, or one with its registry in "
+            "front, such as ghcr.io/acme/netbox"
+        )
     if allow_template and _templated(name):
         return None
     name = name.strip()
     if len(name) > MAX_IMAGE_NAME_LENGTH:
         return f"'image' must be at most {MAX_IMAGE_NAME_LENGTH} characters"
+    host = registry_host_of(name)
+    if host is not None:
+        if not _REGISTRY_HOST_RE.match(host):
+            return f"'image' {name!r} starts with {host!r}, which is not a valid registry host"
+        if host.partition(":")[0].lower() == "localhost":
+            return (
+                f"'image' {name!r} names localhost, which is the sandbox itself, not a registry "
+                "to push to"
+            )
+        if not _IMAGE_NAME_RE.match(name.partition("/")[2]):
+            return (
+                f"'image' {name!r} is not a valid image name: after the registry host, "
+                "lowercase letters and digits, separated by '.', '_', '__' or '-', in segments "
+                "joined by '/' (ghcr.io/acme/netbox-sync), without a tag"
+            )
+        return None
     if not _IMAGE_NAME_RE.match(name):
         return (
             f"'image' {name!r} is not a valid image name: lowercase letters and digits, "
             "separated by '.', '_', '__' or '-', in segments joined by '/' (tools/netbox-sync), "
-            "without a registry host or a tag"
+            "without a tag"
         )
     first = name.split("/", 1)[0]
     if looks_like_host(first):
         return (
             f"'image' {name!r} starts with {first!r}, which has the shape of a registry host "
             "(a dot, or localhost): such names are reserved for the platform's cached copies "
-            "of upstream images. Name the image without a registry, e.g. tools/netbox-sync"
+            "of upstream images. Name the image without one, e.g. tools/netbox-sync, or put "
+            "its registry in front, e.g. ghcr.io/acme/netbox-sync"
         )
     return None
 
@@ -240,6 +296,100 @@ def run_tag(run_id: str) -> str:
     return f"{RUN_TAG_PREFIX}{short or 'unknown'}"
 
 
+#: Where a build's image goes (``output.destination``): the platform registry,
+#: the sandbox daemon only, or another registry.
+DESTINATION_PLATFORM = "platform"
+DESTINATION_LOCAL = "local"
+DESTINATION_REMOTE = "remote"
+
+
+@dataclass(frozen=True, slots=True)
+class BuildDestination:
+    """Where one build's image goes: its repository, and the registry it is pushed to."""
+
+    kind: str
+    repository: str
+    # The registry host the push goes to; empty for an image the step keeps
+    # in the sandbox.
+    host: str = ""
+
+    @property
+    def push(self) -> bool:
+        return self.kind != DESTINATION_LOCAL
+
+
+class BuildRefused(Exception):
+    """The image cannot go where its name says: the step's error and summary."""
+
+    def __init__(self, error: str, summary: str) -> None:
+        super().__init__(error)
+        self.error = error
+        self.summary = summary
+
+
+#: Ports a registry host may carry that still name the same registry: Docker
+#: reaches a registry on 443 (or 80 when it is insecure) when none is given.
+_DEFAULT_REGISTRY_PORTS = (":443", ":80")
+
+
+def same_registry_host(host: str, registry: str) -> bool:
+    """Whether ``host`` names ``registry``, in any case and with or without a default port.
+
+    ``registry.hegemony.internal:80`` and ``REGISTRY.hegemony.internal`` are
+    the platform registry; ``registry.hegemony.internal:5000`` is another one.
+    """
+
+    def bare(value: str) -> str:
+        value = value.lower()
+        for port in _DEFAULT_REGISTRY_PORTS:
+            if value.endswith(port):
+                return value[: -len(port)]
+        return value
+
+    return bare(host) == bare(registry)
+
+
+def build_destination(name: str, target: ImageBuild) -> BuildDestination:
+    """Where the image named ``name`` goes, by its name and what the host allows.
+
+    Pure, for testing; ``name`` has passed :func:`image_name_error`. A name
+    without a registry host goes under the organization's namespace, pushed
+    when the platform registry takes it and kept in the sandbox otherwise. A
+    name with its own host is pushed there, when the host lets the step push
+    outside the platform; the platform registry's own host is refused, since
+    its names are the namespace's to give. Raises :class:`BuildRefused`.
+    """
+    host = registry_host_of(name)
+    if host is None:
+        if not target.registry or not target.namespace:
+            raise BuildRefused(
+                "The platform gave this step no image namespace to build under",
+                "Image build unavailable",
+            )
+        repository = f"{target.registry}/{target.namespace}/{name}"
+        if target.push:
+            return BuildDestination(DESTINATION_PLATFORM, repository, target.registry)
+        return BuildDestination(DESTINATION_LOCAL, repository)
+    if target.registry and same_registry_host(host, target.registry):
+        raise BuildRefused(
+            f"'image' {name!r} names the platform registry itself: give the name without "
+            "it, and the step puts the image under this organization's namespace",
+            "Config validation failed",
+        )
+    if not target.external_push:
+        raise BuildRefused(
+            f"This step may not push to {host}: the sandbox daemon pushes to registries "
+            "other than the platform's outside the egress policy the step's containers are "
+            "held to, so the platform allows it only when the step's egress policy is open "
+            "(open mode, no Deny rules)",
+            "Push not allowed",
+        )
+    # Host names know no case, and Docker looks a login up by the host as
+    # written: the lowercase spelling is the one logins are saved under.
+    host = host.lower()
+    return BuildDestination(DESTINATION_REMOTE, f"{host}/{name.partition('/')[2]}", host)
+
+
 class BuildImageConfig(BaseModel):
     """Config for ``container.build``.
 
@@ -253,10 +403,12 @@ class BuildImageConfig(BaseModel):
         min_length=1,
         title="Image name",
         description=(
-            "Name of the image under this organization's namespace of the platform registry, "
-            "e.g. tools/netbox-sync: the step pushes "
-            "registry.hegemony.internal/orgs/ORG/tools/netbox-sync. Lowercase, without a "
-            "registry host or a tag; a first segment with a dot is reserved for cached copies."
+            "A name such as tools/netbox-sync goes under this organization's namespace "
+            "(registry.hegemony.internal/orgs/ORG/tools/netbox-sync): pushed to the platform "
+            "registry when the platform runs one, otherwise built into the sandbox only. A "
+            "name with its registry in front, such as ghcr.io/acme/netbox-sync, is pushed "
+            "there with the organization's saved login for that registry. Lowercase, "
+            "without a tag."
         ),
         json_schema_extra={"x_placeholder": "tools/netbox-sync"},
     )
@@ -264,8 +416,8 @@ class BuildImageConfig(BaseModel):
         default_factory=list,
         title="Extra tags",
         description=(
-            "Tags to push besides run-SHORT_RUN_ID, which every build gets; one per line, "
-            "e.g. latest or {{ inputs.version }}."
+            "Tags to give the image besides run-SHORT_RUN_ID, which every build gets; one per "
+            "line, e.g. latest or {{ inputs.version }}."
         ),
         json_schema_extra={
             "x_widget": "commands",
@@ -412,13 +564,15 @@ def buildx_argv(
     target: str = "",
     platform: str = "",
     cache_namespace: str = "",
+    push: bool = True,
 ) -> list[str]:
     """The ``docker`` arguments of one build (without the docker binary itself).
 
     Pure, for testing. ``secret_files`` maps a secret id to the private file
     holding its value; the value itself never reaches the argument list.
     ``cache_namespace`` prefixes the id of every cache mount the Dockerfile
-    declares.
+    declares. ``push`` pushes the references; without it the image is loaded
+    into the sandbox daemon under them, and goes nowhere else.
     """
     args = [
         "buildx",
@@ -455,7 +609,7 @@ def buildx_argv(
         args += ["--secret", f"id={secret_id},src={path}"]
     for reference in references:
         args += ["--tag", reference]
-    args += ["--push", context]
+    args += ["--push" if push else "--load", context]
     return args
 
 
@@ -565,14 +719,15 @@ class _BuildLog:
 
 
 class BuildImageHandler(BaseHandler):
-    """Build an image from flow attachments and push it into the organization's namespace."""
+    """Build an image from flow attachments; push it to a registry, or keep it in the sandbox."""
 
     handler_id = HANDLER_ID
     supported_kinds = [StepKind.ACTION, StepKind.EXECUTE]
     display_name = "Build Image"
     description = (
         "Build a container image from the flow's attachments on the Docker-in-Docker "
-        "sandbox and push it to the organization's namespace of the platform registry."
+        "sandbox and push it to the organization's namespace of the platform registry, or "
+        "to another registry; without a platform registry, keep it in the sandbox."
     )
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
@@ -654,19 +809,24 @@ class BuildImageHandler(BaseHandler):
         target = runtime.image_build
         if target is None:
             return _failure(
-                "This step cannot push the image it builds: the platform runs no container "
-                "registry, or did not grant the step access to it (see the step's events)",
-                "Platform registry unavailable",
+                "This step cannot build here: the platform gave it no build settings (it could "
+                "not grant the step access to its registry, see the step's events, or it is "
+                "older than this step)",
+                "Image build unavailable",
             )
         try:
             docker_host = require_docker_host(runtime.docker_host or "")
         except ValueError as exc:
             return _failure(str(exc), "Container sandbox not configured")
+        try:
+            destination = build_destination(config.image.strip(), target)
+        except BuildRefused as exc:
+            return _failure(exc.error, exc.summary)
 
         network = (
             BUILD_NETWORK_DEFAULT if target.network == BUILD_NETWORK_DEFAULT else BUILD_NETWORK_NONE
         )
-        repository = f"{target.registry}/{target.namespace}/{config.image.strip()}"
+        repository = destination.repository
         tags = list(dict.fromkeys([run_tag(ctx.run_id), *(t.strip() for t in config.tags)]))
         references = [f"{repository}:{tag}" for tag in tags]
         too_long = [ref for ref in references if len(ref) > MAX_REFERENCE_LENGTH]
@@ -697,9 +857,16 @@ class BuildImageHandler(BaseHandler):
 
         docker_bin = runtime.docker_bin
         env = build_environment(docker_host, getattr(runtime, "docker_config_dir", "") or "")
+        # Whether the organization saved a login for the registry the image
+        # goes to: the push reads it from the step's Docker configuration.
+        saved_login = destination.kind == DESTINATION_REMOTE and (
+            login_for(parse_reference(repository).host, env) is not None
+        )
         started = time.monotonic()
         deadline = started + max(int(ctx.timeout_seconds or 0), 1)
         workdir = tempfile.mkdtemp(prefix="hegemony-build-")
+        built = False
+        names_dropped = False
         try:
             context_root = os.path.join(workdir, "context")
             os.mkdir(context_root)
@@ -739,6 +906,7 @@ class BuildImageHandler(BaseHandler):
                 target=config.target.strip(),
                 platform=config.platform.strip(),
                 cache_namespace=f"hegemony-build-{uuid.uuid4().hex}",
+                push=destination.push,
             )
             source = f"attachments/{context_dir}" if context_dir else "the attachments root"
             network_note = (
@@ -746,20 +914,56 @@ class BuildImageHandler(BaseHandler):
                 if network == BUILD_NETWORK_DEFAULT
                 else "RUN instructions have no network (the step's egress policy is not open)"
             )
+            if destination.kind == DESTINATION_PLATFORM:
+                destination_note = "pushing to the platform registry"
+            elif destination.kind == DESTINATION_LOCAL:
+                destination_note = (
+                    "keeping it in the sandbox, unpushed (the platform runs no registry)"
+                )
+            elif saved_login:
+                destination_note = (
+                    f"pushing to {destination.host} with the organization's saved login for it"
+                )
+            else:
+                destination_note = (
+                    f"pushing to {destination.host} without a login: the organization saved "
+                    "none for it"
+                )
             await emit(
-                f"Building {repository} from {source} ({staged} file(s), {dockerfile}); "
-                f"{network_note}",
+                f"Building {repository} from {source} ({staged} file(s), {dockerfile}), "
+                f"{destination_note}; {network_note}",
                 attrs={
                     "milestone": "build_start",
                     "image": repository,
                     "tags": tags,
                     "network": network,
+                    "destination": destination.kind,
+                    **(
+                        {"saved_login": saved_login}
+                        if destination.kind == DESTINATION_REMOTE
+                        else {}
+                    ),
                 },
             )
 
             log = _BuildLog(ctx.emit_progress)
+            built = True
             exit_code = await self._run_build(docker_bin, argv, env, log, deadline)
+            # The digest first (the daemon's fallback reads it through the
+            # names), then an image pushed to another registry loses its names
+            # on the shared sandbox at once: nothing below needs them.
+            digest = ""
+            if exit_code == 0 and destination.push:
+                digest = self._metadata_digest(metadata_file) or await self._daemon_digest(
+                    docker_bin, env, references[0]
+                )
+            cleanup_problem = None
+            if destination.kind == DESTINATION_REMOTE:
+                names_dropped = True
+                cleanup_problem = await self._drop_names(docker_bin, env, references)
             await log.flush()
+            if cleanup_problem:
+                await self._report_names_left(emit, references, cleanup_problem)
             duration = round(time.monotonic() - started, 2)
             if exit_code is None:
                 timeout = int(ctx.timeout_seconds or 0)
@@ -797,48 +1001,71 @@ class BuildImageHandler(BaseHandler):
                     },
                 )
 
-            digest = self._metadata_digest(metadata_file) or await self._daemon_digest(
-                docker_bin, env, references[0]
-            )
-            if not digest:
-                # Later steps run output.reference; a tag in its place could
-                # move to another image after this step reported success.
-                reason = (
-                    f"The image was pushed as {', '.join(tags)}, but its digest could not be "
-                    "read (neither from the build's metadata nor from the sandbox daemon), so "
-                    "the step cannot report the exact image it built"
-                )
+            if destination.push:
+                if not digest:
+                    # Later steps run output.reference; a tag in its place could
+                    # move to another image after this step reported success.
+                    reason = (
+                        f"The image was pushed as {', '.join(tags)}, but its digest could not "
+                        "be read (neither from the build's metadata nor from the sandbox "
+                        "daemon), so the step cannot report the exact image it built"
+                    )
+                    await emit(
+                        reason,
+                        attrs={
+                            "milestone": "build_failed",
+                            "image": repository,
+                            "references": references,
+                        },
+                    )
+                    return _failure(
+                        reason,
+                        "Image digest unavailable",
+                        evidence=[self._log_artifact(ctx, log, 0, repository, "", duration)],
+                        metrics={
+                            "exit_code": 0,
+                            "duration_seconds": duration,
+                            "image": repository,
+                        },
+                    )
+                reference = f"{repository}@{digest}"
                 await emit(
-                    reason,
+                    f"Pushed {reference} as {', '.join(tags)} in {duration:.1f}s",
                     attrs={
-                        "milestone": "build_failed",
+                        "milestone": "image_pushed",
                         "image": repository,
+                        "digest": digest,
                         "references": references,
+                        "destination": destination.kind,
+                        "duration_seconds": duration,
                     },
                 )
-                return _failure(
-                    reason,
-                    "Image digest unavailable",
-                    evidence=[self._log_artifact(ctx, log, 0, repository, "", duration)],
-                    metrics={"exit_code": 0, "duration_seconds": duration, "image": repository},
+            else:
+                # No registry holds the image, so no manifest digest names it:
+                # the run tag does. No other run's build takes that tag (only
+                # another build of the same name in this run would).
+                digest = ""
+                reference = references[0]
+                await emit(
+                    f"Built {reference} in {duration:.1f}s and kept it in the sandbox, "
+                    "unpushed (the platform runs no registry)",
+                    attrs={
+                        "milestone": "image_built",
+                        "image": repository,
+                        "references": references,
+                        "destination": destination.kind,
+                        "duration_seconds": duration,
+                    },
                 )
-            pinned = f"{repository}@{digest}"
-            await emit(
-                f"Pushed {pinned} as {', '.join(tags)} in {duration:.1f}s",
-                attrs={
-                    "milestone": "image_pushed",
-                    "image": repository,
-                    "digest": digest,
-                    "references": references,
-                    "duration_seconds": duration,
-                },
-            )
             details = {
                 "repository": repository,
                 "digest": digest,
-                "reference": pinned,
+                "reference": reference,
                 "tags": tags,
                 "references": references,
+                "destination": destination.kind,
+                "pushed": destination.push,
+                **({"saved_login": saved_login} if destination.kind == DESTINATION_REMOTE else {}),
                 "context": source,
                 "dockerfile": dockerfile,
                 "target": config.target.strip(),
@@ -849,14 +1076,22 @@ class BuildImageHandler(BaseHandler):
                 "build_args": sorted(config.build_args),
                 "secrets": sorted(secrets),
             }
-            summary_lines = [
-                f"Image: {repository}",
-                f"Digest: {digest}",
-                *(f"Pushed: {reference}" for reference in references),
-            ]
+            if destination.push:
+                summary_lines = [
+                    f"Image: {repository}",
+                    f"Digest: {digest}",
+                    *(f"Pushed: {ref}" for ref in references),
+                ]
+                summary = f"Built and pushed {repository} ({', '.join(tags)})"
+            else:
+                summary_lines = [
+                    f"Image: {repository}",
+                    *(f"Kept in the sandbox: {ref}" for ref in references),
+                ]
+                summary = f"Built {repository} ({', '.join(tags)}), kept in the sandbox"
             return HandlerResult(
                 success=True,
-                summary=f"Built and pushed {repository} ({', '.join(tags)})",
+                summary=summary,
                 metrics={
                     "exit_code": 0,
                     "duration_seconds": duration,
@@ -865,7 +1100,7 @@ class BuildImageHandler(BaseHandler):
                     "tag_count": len(tags),
                 },
                 evidence=[
-                    self._log_artifact(ctx, log, 0, pinned, digest, duration),
+                    self._log_artifact(ctx, log, 0, reference, digest, duration),
                     {
                         "kind": "step_result",
                         "name": f"image_build_{ctx.step_id}",
@@ -876,13 +1111,22 @@ class BuildImageHandler(BaseHandler):
                 output={
                     "image": repository,
                     "digest": digest,
-                    "reference": pinned,
+                    "reference": reference,
                     "tags": tags,
                     "references": references,
+                    "destination": destination.kind,
+                    "pushed": destination.push,
                 },
             )
         finally:
-            shutil.rmtree(workdir, ignore_errors=True)
+            try:
+                # A build cut short by cancellation or an error still loses them.
+                if built and destination.kind == DESTINATION_REMOTE and not names_dropped:
+                    problem = await self._drop_names(docker_bin, env, references)
+                    if problem:
+                        await self._report_names_left(emit, references, problem)
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
 
     async def _stage_context(
         self, ctx: HandlerContext, context_root: str, context_dir: str, dockerfile: str
@@ -1019,6 +1263,56 @@ class BuildImageHandler(BaseHandler):
             raise
 
     @staticmethod
+    async def _drop_names(
+        docker_bin: str, env: dict[str, str], references: list[str]
+    ) -> str | None:
+        """Take the names of an image pushed to another registry off the sandbox daemon.
+
+        Every organization's steps share the sandbox daemon, and a step that
+        runs an image already there (``docker run`` or containerlab inside a
+        step) would take one left under a name outside this organization's
+        namespace in place of the image that name stands for elsewhere. Run
+        whatever the build got to, so a failed push leaves no name behind
+        either. The names still exist from the build's export to the end of
+        its push, which a step running one in that window could see; the
+        caller drops them as soon as the build ends. Removing a name only
+        untags an image another name or a container still holds; ``--force``
+        keeps a container from blocking it. Returns what went wrong, or None.
+        """
+        try:
+            proc = await RunContainerHandler._run_docker(
+                docker_bin,
+                ["image", "rm", "--force", *references],
+                env=env,
+                timeout=_PROBE_TIMEOUT_SECONDS,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            problem = str(exc)
+        else:
+            output = (proc.stderr or "").strip()
+            # A name the build never set (it failed before tagging) is fine.
+            leftover = [
+                line
+                for line in output.splitlines()
+                if line.strip() and "no such image" not in line.lower()
+            ]
+            if proc.returncode == 0 or not leftover:
+                return None
+            problem = "; ".join(leftover)[:300]
+        logger.warning("Could not remove built image names from the sandbox: %s", problem)
+        return problem
+
+    @staticmethod
+    async def _report_names_left(
+        emit: Callable[..., Awaitable[None]], references: list[str], problem: str
+    ) -> None:
+        """Say in the step's log that names :meth:`_drop_names` could not remove remain."""
+        await emit(
+            f"Could not remove {', '.join(references)} from the sandbox after the build: {problem}",
+            attrs={"milestone": "build_cleanup_failed", "references": references},
+        )
+
+    @staticmethod
     def _metadata_digest(path: str) -> str:
         """The pushed manifest's digest from buildx's metadata file, or ""."""
         try:
@@ -1078,16 +1372,24 @@ class _ContextError(Exception):
 
 __all__ = [
     "CREATED_LABEL",
+    "DESTINATION_LOCAL",
+    "DESTINATION_PLATFORM",
+    "DESTINATION_REMOTE",
     "HANDLER_ID",
     "RUN_LABEL",
     "STEP_LABEL",
+    "BuildDestination",
     "BuildImageConfig",
     "BuildImageHandler",
+    "BuildRefused",
+    "build_destination",
     "build_environment",
     "buildx_argv",
     "frontend_error",
     "image_name_error",
     "looks_like_host",
+    "registry_host_of",
     "run_tag",
+    "same_registry_host",
     "tag_error",
 ]
