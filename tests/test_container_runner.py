@@ -20,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -595,6 +596,22 @@ def test_bounded_runs_the_command_unbounded_without_timeout(tmp_path):
     assert code == 5
 
 
+def _mark_ready(ready: Path) -> str:
+    """Shell lines (for a single-quoted ``sh -c``) that write ``ready`` once the
+    command's parent sleeps.
+
+    GNU timeout loses a SIGTERM that lands after its fork() but before it has
+    noted the command's process id: it exits with 143 and the command runs on,
+    never signalled. That window is timeout's, not ``bounded``'s, so the test's
+    stop request waits until the parent sleeps in its wait (where BusyBox's
+    timeout, which runs the command in its own process, leaves the script).
+    """
+    return (
+        'while read -r _ _ state _ < /proc/$PPID/stat && [ "$state" != S ]; do sleep 0.01; done; '
+        f": > {ready}"
+    )
+
+
 def test_bounded_passes_a_stop_request_on_to_the_command(tmp_path):
     """``docker stop`` signals the script (PID 1); the tool must get it, not wait for SIGKILL.
 
@@ -605,7 +622,7 @@ def test_bounded_passes_a_stop_request_on_to_the_command(tmp_path):
     ready = tmp_path / "ready"
     tool = (
         'sh -c \'trap "echo tool: saved; exit 7" TERM; '
-        f": > {ready}; i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done; exit 0'"
+        f"{_mark_ready(ready)}; i=0; while [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done; exit 0'"
     )
     script = "\n".join(
         [
@@ -685,7 +702,7 @@ def test_bounded_passes_on_only_the_first_stop_request(tmp_path):
     ready = tmp_path / "ready"
     terms = tmp_path / "terms"
     tool = (
-        f'sh -c \'trap "echo TERM >> {terms}" TERM; : > {ready}; '
+        f'sh -c \'trap "echo TERM >> {terms}" TERM; {_mark_ready(ready)}; '
         "i=0; while [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; exit 9'"
     )
     script = "\n".join(
