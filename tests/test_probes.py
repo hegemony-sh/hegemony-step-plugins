@@ -88,6 +88,25 @@ async def test_dns_resolve_refuses_an_ip_target_without_a_hostname():
     assert result.ok is True, result.error_detail
 
 
+async def test_dns_resolve_refuses_an_ip_address_as_the_hostname():
+    """The hostname option is handed back unasked too when it is an IP
+    address. A bracketed IPv6 address counts as one rather than failing as
+    a name that does not resolve."""
+    from hegemony_probe_net.dns_resolve import DnsResolveProbe
+
+    probe = DnsResolveProbe()
+    for address in ("localhost", "192.0.2.7"):
+        for hostname in ("192.0.2.9", " 192.0.2.9 ", "2001:db8::9", "[2001:db8::9]"):
+            options = {"hostname": hostname, "timeout_ms": 2000}
+            result = await probe.execute(address, options)
+            assert result.ok is False, (address, hostname)
+            assert result.error_kind == "config_error", (address, hostname)
+            assert result.error_detail == (
+                f"dns_resolve needs a hostname to look up: the hostname "
+                f"{hostname.strip()} is an IP address"
+            )
+
+
 def _route_http_health_to(monkeypatch, answer) -> None:
     """Send the probe's direct requests to ``answer`` instead of the network."""
     real_client = httpx.AsyncClient

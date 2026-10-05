@@ -5,10 +5,10 @@
 """DNS resolution probe.
 
 Resolves a hostname (the ``hostname`` option, falling back to the target
-address) via the system resolver. An IP address target needs the option: the
-resolver hands an address back without a lookup. Record types, custom
-resolvers, and expected-answer assertions live in the ``probe.dns`` step
-handler.
+address) via the system resolver. The name looked up must not be an IP
+address, so an IP address target needs the option: the resolver hands an
+address back without a lookup. Record types, custom resolvers, and
+expected-answer assertions live in the ``probe.dns`` step handler.
 """
 
 from __future__ import annotations
@@ -26,7 +26,14 @@ logger = logging.getLogger(__name__)
 
 
 def _is_ip_address(value: str) -> bool:
-    """Is this target an address literal rather than a name to look up?"""
+    """Is this an address literal rather than a name to look up?
+
+    A bracketed IPv6 address, as written in a URL, counts as one: the
+    resolver would fail it as a name that does not resolve, which hides
+    that no name was given.
+    """
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
     try:
         ipaddress.ip_address(value)
     except ValueError:
@@ -38,8 +45,8 @@ class DnsResolveProbe(BaseProbe):
     """DNS resolution probe using the system resolver.
 
     Options:
-        hostname: Name to resolve (default: the target address; required
-            when the target is an IP address)
+        hostname: Name to resolve, never an IP address (default: the
+            target address; required when the target is an IP address)
         timeout_ms: Resolution timeout in milliseconds (default: 5000)
 
     Metrics produced:
@@ -68,19 +75,20 @@ class DnsResolveProbe(BaseProbe):
             )
 
         hostname = (options.get("hostname") or "").strip()
-        if not hostname:
-            # getaddrinfo returns an IP literal as it is, so falling back to
-            # an IP target would pass without asking any DNS server.
-            if _is_ip_address(address):
-                return ProbeResult(
-                    ok=False,
-                    error_kind="config_error",
-                    error_detail=(
-                        f"dns_resolve needs a hostname to look up: the target "
-                        f"{address} is an IP address"
-                    ),
-                )
-            hostname = address
+        source = "hostname" if hostname else "target"
+        hostname = hostname or address
+        # getaddrinfo returns an IP literal as it is, so an IP address, given
+        # as the option or as the target it falls back to, would pass without
+        # asking any DNS server.
+        if _is_ip_address(hostname):
+            return ProbeResult(
+                ok=False,
+                error_kind="config_error",
+                error_detail=(
+                    f"dns_resolve needs a hostname to look up: the {source} "
+                    f"{hostname} is an IP address"
+                ),
+            )
         timeout_sec = options.get("timeout_ms", 5000) / 1000.0
 
         loop = asyncio.get_running_loop()

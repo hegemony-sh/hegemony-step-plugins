@@ -36,7 +36,8 @@ follow redirects, so a redirect counts as a healthy answer. Hostname to
 Resolve applies only to the DNS Resolve check: the worker's system resolver
 looks the name up once per target, and the target itself is not asked. Left
 empty, each target's own name is looked up, so an IP address target fails
-unless Hostname to Resolve is set.
+unless Hostname to Resolve is set. An IP address in Hostname to Resolve fails
+the check too: the resolver hands an address back without a lookup.
 
 The optional SOCKS5 Proxy routes the TCP-based checks through a
 `socks5://user:pass@host:port` proxy (credentials optional; `socks5h://`
