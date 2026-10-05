@@ -4,14 +4,14 @@
 
 [project]
 name = "hegemony-steps-flow"
-version = "0.13.1"
+version = "0.14.0"
 description = "Flow orchestration step handlers for Hegemony"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.13.1",
+    "hegemony-step-sdk==0.14.0",
     "httpx>=0.27.0",
 ]
 
