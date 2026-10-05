@@ -19,7 +19,9 @@ The step targets devices by role and connects to each one over SSH. Upgrade
 Mode selects the workflow being validated: install mode (modern devices using
 the `install` command) additionally verifies that `show install summary`
 works on the device, while bundle mode inspects the boot configuration
-instead. Devices that only support bundle mode fail the install-mode check.
+instead. Devices that only support bundle mode fail the install-mode check,
+and a device that boots packages.conf runs in install mode and fails the
+bundle-mode check.
 
 Image Filename is optional; when set, the step looks for that file on the
 destination filesystem. If the image is already present, a shortfall against

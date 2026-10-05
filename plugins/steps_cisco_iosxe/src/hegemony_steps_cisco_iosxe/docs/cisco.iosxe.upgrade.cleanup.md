@@ -16,7 +16,8 @@ What gets removed depends on Upgrade Mode. In install mode the step runs
 `install remove inactive`, letting the device delete packages that are not
 part of the running software; confirmation prompts are answered
 automatically. In bundle mode the step lists the `.bin` images on flash,
-keeps every image referenced by the boot configuration, keeps the newest
+keeps every image the boot variables name (for the current boot and the
+next reload), keeps the newest
 old images up to Versions to Keep (default 1, sorted by filename), and
 deletes the rest with `delete /force`. When the boot variable names no
 image, the device boots the first image it finds, so the step deletes

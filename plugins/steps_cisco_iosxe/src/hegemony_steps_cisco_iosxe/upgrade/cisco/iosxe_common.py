@@ -25,6 +25,9 @@ _CLI_ERROR_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 _BOOT_LINE_RE = re.compile(r"BOOT\s+(?:variable|path-list)\s*[=:]", re.IGNORECASE)
+# The value stays on its line: an empty BOOT variable must not take the next
+# line ("CONFIG_FILE variable = ...") as its value.
+_BOOT_VALUE_RE = re.compile(r"BOOT\s+(?:variable|path-list)[ \t]*[=:][ \t]*(.*)", re.IGNORECASE)
 
 
 # ==============================================================================
@@ -104,28 +107,44 @@ def parse_file_size_from_dir(dir_output: str, filename: str) -> int | None:
     return None
 
 
-def parse_boot_statements(show_boot: str) -> list[str]:
-    """Parse boot system statements from show boot output.
+def _boot_entries(value: str) -> list[str]:
+    """Split a BOOT variable value into images.
 
-    Returns list of boot images in order.
+    Entries end with ";" and may carry a boot attempt count after a comma
+    ("bootflash:image.bin,12;"); the count is not an image.
     """
-    images = []
+    entries = []
+    for item in re.split(r"[;,]", value):
+        item = item.strip()
+        if item and item.lower() != "not set" and not item.isdigit():
+            entries.append(item)
+    return entries
+
+
+def parse_boot_statements(show_boot: str) -> list[str]:
+    """Parse the boot images from 'show boot' output, in boot order.
+
+    Some platforms list the current boot variables and then those for the
+    next reload; the next reload's are the ones the device will use.
+    """
     # Common patterns:
-    # "BOOT variable = flash:image.bin"
+    # "BOOT variable = flash:image.bin;"
     # "BOOT path-list      : flash:image.bin"
-    boot_match = re.search(
-        r"(?:BOOT\s+(?:variable|path-list)\s*[=:]\s*)(.+)",
-        show_boot,
-        re.IGNORECASE,
-    )
-    if boot_match:
-        # Could be semicolon or comma separated
-        boot_str = boot_match.group(1).strip()
-        for item in re.split(r"[;,]", boot_str):
-            item = item.strip()
-            if item and item.lower() != "not set":
-                images.append(item)
-    return images
+    next_reload = re.search(r"next reload", show_boot, re.IGNORECASE)
+    boot_match = None
+    if next_reload:
+        boot_match = _BOOT_VALUE_RE.search(show_boot, next_reload.end())
+    boot_match = boot_match or _BOOT_VALUE_RE.search(show_boot)
+    return _boot_entries(boot_match.group(1)) if boot_match else []
+
+
+def all_boot_images(show_boot: str) -> list[str]:
+    """Every image any BOOT line of 'show boot' names, current and next reload."""
+    return [
+        entry
+        for match in _BOOT_VALUE_RE.finditer(show_boot)
+        for entry in _boot_entries(match.group(1))
+    ]
 
 
 def has_boot_variable(show_boot: str) -> bool:
@@ -152,6 +171,15 @@ class CommandError(RuntimeError):
     """A device command failed, could not run, or gave an unusable answer."""
 
 
+def cli_error_line(output: str) -> str | None:
+    """The first IOS error line in ``output`` ("%Error ...", "% Invalid input ..."), if any."""
+    match = _CLI_ERROR_RE.search(output)
+    if not match:
+        return None
+    line_end = output.find("\n", match.start())
+    return output[match.start() : line_end if line_end >= 0 else len(output)].strip()
+
+
 def checked(result: "CommandResult | None", command: str) -> str:
     """Return a command's output, or raise when the command did not succeed.
 
@@ -165,11 +193,9 @@ def checked(result: "CommandResult | None", command: str) -> str:
     if result.exit_code != 0 or result.error:
         raise CommandError(f"{command} failed: {result.error or f'exit code {result.exit_code}'}")
     output = result.output or ""
-    error_line = _CLI_ERROR_RE.search(output)
+    error_line = cli_error_line(output)
     if error_line:
-        line_end = output.find("\n", error_line.start())
-        line = output[error_line.start() : line_end if line_end >= 0 else len(output)]
-        raise CommandError(f"{command} failed: {line.strip()}")
+        raise CommandError(f"{command} failed: {error_line}")
     return output
 
 

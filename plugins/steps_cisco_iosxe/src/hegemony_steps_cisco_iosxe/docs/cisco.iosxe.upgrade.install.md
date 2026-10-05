@@ -18,9 +18,14 @@ are combined into the full path used by the install commands. Upgrade Mode
 must match how the device boots. In install mode the step runs
 `install add file` with the activate and commit keywords according to the
 Activate and Commit options, answering the confirmation prompts
-automatically. In bundle mode it rewrites the boot system to the new image,
-keeps the previously configured image as a fallback boot entry, saves the
-configuration, and issues a reload.
+automatically.
+
+In bundle mode the step sends `no boot system`, `boot system` with the new
+image, and `boot system` with the first previously configured image as a
+fallback, all in one configuration session. It saves with `write memory`,
+which must answer `[OK]`, checks that `show boot` now lists the new image
+first, and issues `reload`, answering `no` to saving the configuration
+again and confirming the reload.
 
 An install-mode activation boots packages.conf, so with Activate on the step
 first reads `show boot`. The first boot entry must be packages.conf on the
@@ -73,12 +78,14 @@ error: `% Invalid input`, `%Error`, `% Incomplete command`,
 install mode the install must
 also report completion: a `SUCCESS: install_...` line, the install's
 completion message, or the device starting to reload. Without one within
-30 minutes the device fails. In bundle mode a device also fails when the
-boot system does not show the new image after configuration.
+30 minutes the device fails. In bundle mode a device also fails when a
+configuration line or the save fails, when `show boot` does not list the new
+image first after the save, or when the device does not ask to confirm the
+reload.
 
 The SSH session ends when the device reloads. A session that closes counts
 as the reload only when the output already shows that activation finished or
-the reload started; a session that closes earlier fails the device. This
+the reload was confirmed; a session that closes earlier fails the device. This
 step does not wait for devices to come back; use
 `cisco.iosxe.upgrade.verify` for that. The step's default timeout is 7200
 seconds.
