@@ -142,6 +142,25 @@ Apply in order:
    arrives later, it is the same paradigm over a different transport, same
    namespace.
 
+## Rendered values are data
+
+The host renders a step's `{{ }}` templates before `execute` runs, so a
+config value can carry a run input, another step's output or a device
+attribute. A handler that hands such a value to something that interprets
+text again must keep it data:
+
+- **Shell command lines.** Refuse unquoted values before they are rendered:
+  override `template_errors(config)`, which the host calls with the step's
+  config as written on every run and fails the step on (`shell.execute`
+  requires every `{{ }}` value in a command to end with the host's `| quote`
+  filter). Prefer passing values as quoted environment variables.
+- **Text another template engine reads** (Ansible variable files): escape it,
+  as `ansible.playbook` does with `literal()` for inventory, secrets and extra
+  variables.
+- **Destinations.** A host, nameserver or URL the handler dials itself goes
+  through `services.enforce_egress` first, and must be an address the policy
+  can evaluate (`probe.dns` accepts only an IP address as its resolver).
+
 ## Wheel granularity
 
 One wheel = one namespace prefix = `hegemony-steps-<prefix-with-dashes>`.
