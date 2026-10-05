@@ -6,9 +6,9 @@
 
 Everything here is pure (no sockets, no event loop), so the rules the step
 applies - endpoint syntax, hostname matching, fingerprint normalisation,
-chain validation of a supplied certificate, and the OCSP request/response
-handling - are unit-testable on their own. The handler in ``tls_check``
-does the network work and calls into this module.
+chain validation of a supplied certificate, the OCSP request/response
+handling, and the CRL checks - are unit-testable on their own. The handler
+in ``tls_check`` does the network work and calls into this module.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from cryptography.hazmat.primitives.serialization import pkcs7
 from cryptography.x509 import ocsp
 from cryptography.x509.oid import (
     AuthorityInformationAccessOID,
+    CRLEntryExtensionOID,
     ExtendedKeyUsageOID,
     ExtensionOID,
     NameOID,
@@ -45,6 +46,9 @@ MAX_CHAIN_DEPTH = 10
 
 #: Clock skew tolerated on OCSP ``thisUpdate``/``nextUpdate``.
 OCSP_CLOCK_SKEW = timedelta(minutes=5)
+
+#: Clock skew tolerated on CRL ``thisUpdate``/``nextUpdate``.
+CRL_CLOCK_SKEW = OCSP_CLOCK_SKEW
 
 _ENTRY_SPLIT_RE = re.compile(r"[\r\n,]+")
 _HOST_RE = re.compile(r"^[^\s/@\[\]:]+$")
@@ -382,8 +386,10 @@ def _first_attribute(name: x509.Name, oid: x509.ObjectIdentifier) -> str | None:
     return value if isinstance(value, str) else value.decode("utf-8", "replace")
 
 
-def _extension_value(cert: x509.Certificate, ext_type: type[Any]) -> Any:
-    """The value of the certificate's ``ext_type`` extension, or None when absent or malformed."""
+def _extension_value(
+    cert: x509.Certificate | x509.CertificateRevocationList, ext_type: type[Any]
+) -> Any:
+    """The value of a certificate's or CRL's ``ext_type`` extension; None when absent or malformed."""
     try:
         return cert.extensions.get_extension_for_class(ext_type).value
     except (x509.ExtensionNotFound, x509.DuplicateExtension, ValueError):
@@ -1050,3 +1056,237 @@ def _single_outcome(single: Any, now: datetime) -> dict[str, Any]:
             detail += f" (reason: {reason.name})"
         return ocsp_outcome("revoked", detail, _iso_z(revoked_at) if revoked_at else None)
     return ocsp_outcome("unknown", "responder does not know this certificate")
+
+
+# --- CRLs -----------------------------------------------------------------------
+
+
+#: Extensions a CRL may mark critical and still be used: the issuing
+#: distribution point, whose scope :func:`crl_status` checks.
+_HANDLED_CRITICAL_CRL_EXTENSIONS = frozenset({ExtensionOID.ISSUING_DISTRIBUTION_POINT})
+
+#: Entry extensions a CRL entry may mark critical and still be read. The
+#: certificate issuer extension belongs to indirect CRLs, which are refused.
+_HANDLED_CRITICAL_ENTRY_EXTENSIONS = frozenset(
+    {CRLEntryExtensionOID.CRL_REASON, CRLEntryExtensionOID.INVALIDITY_DATE}
+)
+
+
+#: Public key types that can sign a CRL.
+_SIGNING_KEY_TYPES = (
+    rsa.RSAPublicKey,
+    ec.EllipticCurvePublicKey,
+    ed25519.Ed25519PublicKey,
+    ed448.Ed448PublicKey,
+    dsa.DSAPublicKey,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CrlLocation:
+    """One HTTP(S) address a certificate's CRL is published at.
+
+    ``names`` holds every name of the distribution point the address came
+    from, for the scope check against the CRL's issuing distribution point.
+    """
+
+    url: str
+    names: frozenset[x509.GeneralName]
+
+
+def crl_locations(cert: x509.Certificate) -> tuple[list[CrlLocation], str | None]:
+    """The certificate's HTTP(S) CRL addresses in order, or none and why.
+
+    Only distribution points the issuer publishes directly and for every
+    revocation reason count: one naming a separate CRL issuer (an indirect
+    CRL), covering only some reasons, or named relative to the issuer is
+    skipped. Other URL schemes (``ldap://``) are skipped too.
+    """
+    points = _extension_value(cert, x509.CRLDistributionPoints)
+    if points is None:
+        return [], "the certificate names no CRL distribution point"
+    locations: list[CrlLocation] = []
+    seen: set[str] = set()
+    unsupported = False
+    for point in points:
+        if point.full_name is None or point.crl_issuer is not None or point.reasons is not None:
+            unsupported = True
+            continue
+        names = frozenset(point.full_name)
+        for name in point.full_name:
+            if not isinstance(name, x509.UniformResourceIdentifier):
+                continue
+            url = name.value
+            if url.lower().startswith(("http://", "https://")) and url not in seen:
+                seen.add(url)
+                locations.append(CrlLocation(url, names))
+    if locations:
+        return locations, None
+    if unsupported:
+        return [], (
+            "the certificate's CRL distribution points need an indirect CRL, partial "
+            "reasons or a relative name, which this check does not support"
+        )
+    return [], "the certificate's CRL distribution points name no HTTP address"
+
+
+def load_crl(data: bytes) -> x509.CertificateRevocationList:
+    """A downloaded CRL, DER or PEM. Raises ``ValueError`` when it is neither."""
+    if b"-----BEGIN X509 CRL-----" in data:
+        return x509.load_pem_x509_crl(data)
+    return x509.load_der_x509_crl(data)
+
+
+def crl_outcome(
+    status: str,
+    detail: str | None,
+    *,
+    url: str | None = None,
+    next_update: str | None = None,
+    revocation_time: str | None = None,
+) -> dict[str, Any]:
+    """The five CRL keys every endpoint record carries."""
+    return {
+        "crl": status,
+        "crl_detail": detail,
+        "crl_url": url,
+        "crl_next_update": next_update,
+        "crl_revocation_time": revocation_time,
+    }
+
+
+def crl_signature_problem(
+    crl: x509.CertificateRevocationList, issuer: x509.Certificate
+) -> str | None:
+    """Why ``crl`` is not a complete list ``issuer`` signed, or None.
+
+    The CRL must name the issuer, the issuer's key usage (when present) must
+    allow signing CRLs, the signature must verify with the issuer's key, and
+    the CRL must be a complete one (not a delta) without a critical extension
+    the check does not handle. None of this depends on the certificate looked
+    up, so the handler checks it once per list and issuer.
+    """
+    if crl.issuer != issuer.subject:
+        return "CRL is not issued by the certificate's issuer"
+    usage = _key_usage(issuer)
+    if usage is not None and not usage.crl_sign:
+        return "the issuer's key usage does not allow signing CRLs"
+    try:
+        key = issuer.public_key()
+        valid = isinstance(key, _SIGNING_KEY_TYPES) and crl.is_signature_valid(key)
+    except (ValueError, TypeError, UnsupportedAlgorithm):
+        valid = False
+    if not valid:
+        return "CRL signature does not verify with the issuer's key"
+    try:
+        extensions = list(crl.extensions)
+    except (ValueError, x509.DuplicateExtension, x509.UnsupportedGeneralNameType):
+        return "CRL extensions cannot be parsed"
+    for extension in extensions:
+        if extension.oid == ExtensionOID.DELTA_CRL_INDICATOR:
+            return "the address serves a delta CRL, not a complete one"
+        if extension.critical and extension.oid not in _HANDLED_CRITICAL_CRL_EXTENSIONS:
+            return "CRL has an unhandled critical extension"
+    return None
+
+
+def _crl_scope_problem(
+    crl: x509.CertificateRevocationList,
+    cert: x509.Certificate,
+    names: frozenset[x509.GeneralName],
+) -> str | None:
+    """Why the CRL's issuing distribution point leaves ``cert`` out of scope, or None."""
+    scope = _extension_value(crl, x509.IssuingDistributionPoint)
+    if scope is None:
+        return None
+    if scope.indirect_crl:
+        return "CRL is an indirect CRL, which this check does not support"
+    if scope.only_some_reasons is not None:
+        return "CRL covers only some revocation reasons"
+    if scope.only_contains_attribute_certs:
+        return "CRL does not cover this certificate (it lists attribute certificates only)"
+    if scope.only_contains_ca_certs and not is_ca(cert):
+        return "CRL does not cover this certificate (it lists CA certificates only)"
+    if scope.only_contains_user_certs and is_ca(cert):
+        return "CRL does not cover this certificate (it lists end-entity certificates only)"
+    if scope.relative_name is not None:
+        return (
+            "CRL scope uses a relative distribution point name, which this check does not support"
+        )
+    if scope.full_name is not None and names.isdisjoint(scope.full_name):
+        return "CRL does not cover this certificate (it is for another distribution point)"
+    return None
+
+
+def crl_status(
+    crl: x509.CertificateRevocationList,
+    cert: x509.Certificate,
+    *,
+    url: str,
+    names: frozenset[x509.GeneralName],
+    now: datetime,
+) -> dict[str, Any]:
+    """Look ``cert`` up in a ``crl`` that already passed :func:`crl_signature_problem`.
+
+    The list must be current (``thisUpdate`` not in the future, ``nextUpdate``
+    not past) and cover the certificate (its issuing distribution point, when
+    present, names the distribution point it was fetched from and does not
+    leave this kind of certificate out). Good means the certificate is not
+    listed; revoked carries the reason and time the CRL gives.
+    """
+    next_update: datetime | None = crl.next_update_utc
+    found = {"url": url, "next_update": _iso_z(next_update) if next_update else None}
+    this_update: datetime = crl.last_update_utc
+    if this_update - CRL_CLOCK_SKEW > now:
+        return crl_outcome("error", f"CRL is not valid until {_iso_z(this_update)}", **found)
+    if next_update is not None and next_update + CRL_CLOCK_SKEW < now:
+        return crl_outcome(
+            "error", f"CRL is stale (next update was {_iso_z(next_update)})", **found
+        )
+    problem = _crl_scope_problem(crl, cert, names)
+    if problem is not None:
+        return crl_outcome("error", problem, **found)
+    try:
+        entry = crl.get_revoked_certificate_by_serial_number(cert.serial_number)
+        extensions = list(entry.extensions) if entry is not None else []
+    except (ValueError, x509.DuplicateExtension, x509.UnsupportedGeneralNameType):
+        return crl_outcome("error", "the CRL entry for this certificate cannot be parsed", **found)
+    if entry is None:
+        return crl_outcome("good", "certificate is not on the CRL", **found)
+    reason: x509.ReasonFlags | None = None
+    for extension in extensions:
+        if isinstance(extension.value, x509.CRLReason):
+            reason = extension.value.reason
+        elif extension.critical and extension.oid not in _HANDLED_CRITICAL_ENTRY_EXTENSIONS:
+            return crl_outcome(
+                "error",
+                "the CRL entry for this certificate has an unhandled critical extension",
+                **found,
+            )
+    if reason == x509.ReasonFlags.remove_from_crl:
+        return crl_outcome("good", "certificate was removed from the CRL", **found)
+    detail = "certificate is revoked"
+    if reason is not None:
+        detail += f" (reason: {reason.name})"
+    return crl_outcome(
+        "revoked", detail, revocation_time=_iso_z(entry.revocation_date_utc), **found
+    )
+
+
+def evaluate_crl(
+    crl: x509.CertificateRevocationList,
+    cert: x509.Certificate,
+    issuer: x509.Certificate,
+    *,
+    url: str,
+    names: frozenset[x509.GeneralName],
+    now: datetime,
+) -> dict[str, Any]:
+    """Judge ``cert`` against a downloaded ``crl``: good, revoked, or error.
+
+    :func:`crl_signature_problem` and then :func:`crl_status`.
+    """
+    problem = crl_signature_problem(crl, issuer)
+    if problem is not None:
+        return crl_outcome("error", problem, url=url)
+    return crl_status(crl, cert, url=url, names=names, now=now)

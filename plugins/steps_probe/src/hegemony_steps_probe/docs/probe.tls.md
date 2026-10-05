@@ -8,9 +8,10 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 `probe.tls` connects to TLS endpoints and reports the certificate each one
 serves: who it was issued to and by, when it expires, its key and
-fingerprint, whether it chains to a trusted CA, and whether it matches the
-name it was reached by. Use it to catch certificates before they expire, to
-confirm a renewal reached every node, or to pin the exact certificate an
+fingerprint, whether it chains to a trusted CA, whether it matches the name
+it was reached by, and, on request, whether it has been revoked. Use it to
+catch certificates before they expire, to confirm a renewal reached every
+node, to confirm a revocation took effect, or to pin the exact certificate an
 endpoint must present. It observes from outside, without device credentials,
 and it can also evaluate a pasted certificate without connecting anywhere.
 
@@ -64,9 +65,27 @@ downloaded from the address the certificate names. A response counts only
 when the issuer, or a responder the issuer authorised whose own certificate
 is currently valid, signed it, and only when it names this certificate.
 
+Check CRL downloads the certificate revocation list (CRL) the certificate
+names in its CRL distribution points and looks the certificate up in it.
+HTTP and HTTPS addresses are tried in order until one gives an answer;
+others, such as `ldap://`, are skipped. A list counts only when it is a
+complete CRL (not a delta CRL) from the certificate's own issuer, its
+signature verifies with the issuer's key, the issuer's key usage allows CRL
+signing, its next update has not passed, and its scope covers the
+certificate: an issuing distribution point on the list, when present, must
+name the distribution point the list came from and must not leave this kind
+of certificate out. Indirect CRLs and lists that cover only some revocation
+reasons are reported as errors. The issuer certificate comes from the same
+places as for OCSP. Each list is downloaded once per step, up to 20 MiB, and
+shared by every endpoint that names it. Like Check OCSP, it checks the
+server certificate, not the CAs above it; `crl_next_update` says when the
+issuer publishes its next list, which a flow can watch to catch a CA that
+stopped publishing.
+
 Parallel checks (default 10, up to 50) sets how many endpoints are checked at
 once. When the flow runs under an egress policy, every connection the step
-makes, OCSP requests and issuer downloads included, is checked against it.
+makes, OCSP requests, CRL downloads and issuer downloads included, is checked
+against it.
 
 ### Assertions
 
@@ -86,6 +105,9 @@ The step fails when an endpoint breaks an enabled assertion:
   without applies to every server name on that host and port.
 - Require OCSP good, with Check OCSP on: the responder reported the
   certificate good.
+- Require CRL good, with Check CRL on: a current CRL that counts (see above)
+  leaves the certificate off. A revoked certificate, a stale or unverifiable
+  list, or no list fails.
 
 With Require reachable off, an endpoint that cannot be reached passes; the
 certificate assertions apply only to endpoints that presented a certificate.
@@ -101,7 +123,11 @@ Later steps read the results as `steps.NODE_ID.output.KEY`:
   sent, empty for an IP address), `device_id`, `device_name`, `reachable`,
   `error`, `tls_version`, `cipher`, `chain_ok`, `chain_error`, `hostname_ok`,
   `matches_expected`, `ocsp` (`good`, `revoked`, `unknown`, `error`, or
-  `unavailable`), `ocsp_detail`, and `revocation_time`. The certificate is
+  `unavailable`), `ocsp_detail`, and `revocation_time` (from OCSP); `crl`
+  (`good`, `revoked`, `error`, or `unavailable`), `crl_detail`, `crl_url`
+  (the list used), `crl_next_update` (when the issuer publishes its next
+  list, set once the list's signature verified), and `crl_revocation_time`.
+  The certificate is
   described by `subject_cn`, `sans`, `issuer_cn`, `issuer`, `serial`,
   `fingerprint_sha256`, `not_before`, `not_after`, `days_left`, `expired`,
   `key_type` (`rsa`, `ec`, `ed25519`, `ed448`, or `dsa`), `key_bits`,
@@ -109,8 +135,8 @@ Later steps read the results as `steps.NODE_ID.output.KEY`:
   Include certificate PEM is on. Finally `ok` and `failures` say whether the
   endpoint passed and, if not, why.
 - `summary`: the counts `total`, `reachable`, `unreachable`, `expired`,
-  `chain_failures`, `hostname_failures`, `mismatches`, `ocsp_revoked`, and
-  `failed`, one `warn_N` per warning window (such as `warn_30`: certificates
+  `chain_failures`, `hostname_failures`, `mismatches`, `ocsp_revoked`,
+  `crl_revoked`, and `failed`, one `warn_N` per warning window (such as `warn_30`: certificates
   with fewer than 30 days left, expired ones included), and `min_days_left`.
 - `all_ok`: whether every endpoint passed every enabled assertion.
 - `min_days_left`: the fewest days left over all certificates, empty when no

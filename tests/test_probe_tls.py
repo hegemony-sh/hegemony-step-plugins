@@ -6,7 +6,8 @@
 
 The PKI is generated here (a root, an intermediate, and leaves for each
 case), served by local TLS servers on 127.0.0.1, with a local OCSP responder
-answering for them. Nothing leaves the machine.
+answering for them and publishing the intermediate's CRL. Nothing leaves the
+machine.
 """
 
 from __future__ import annotations
@@ -81,6 +82,7 @@ def issue(
     not_after: datetime | None = None,
     ocsp_url: str | None = None,
     issuer_url: str | None = None,
+    crl_url: str | None = None,
     eku: tuple[x509.ObjectIdentifier, ...] | None = (ExtendedKeyUsageOID.SERVER_AUTH,),
     basic_constraints: bool = True,
     extensions: tuple[tuple[x509.ExtensionType, bool], ...] = (),
@@ -134,6 +136,17 @@ def issue(
         )
     if access:
         builder = builder.add_extension(x509.AuthorityInformationAccess(access), critical=False)
+    if crl_url:
+        builder = builder.add_extension(
+            x509.CRLDistributionPoints(
+                [
+                    x509.DistributionPoint(
+                        [x509.UniformResourceIdentifier(crl_url)], None, None, None
+                    )
+                ]
+            ),
+            critical=False,
+        )
     for extension, critical in extensions:
         builder = builder.add_extension(extension, critical=critical)
     algorithm = None if isinstance(signer, ed25519.Ed25519PrivateKey) else hashes.SHA256()
@@ -159,12 +172,17 @@ class _OcspEntry:
 
 @dataclass
 class OcspResponder:
-    """A local OCSP responder plus the caIssuers download it serves."""
+    """A local OCSP responder plus the caIssuers and CRL downloads it serves."""
 
     port: int
     entries: dict[int, _OcspEntry] = field(default_factory=dict)
     issuer_der: bytes = b""
+    crl_der: bytes = b""
     requests: list[str] = field(default_factory=list)
+
+    @property
+    def crl_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/inter.crl"
 
     @property
     def url(self) -> str:
@@ -218,14 +236,19 @@ def responder() -> Iterator[OcspResponder]:
 
         def do_GET(self) -> None:
             state.requests.append(f"GET {self.path}")
-            if self.path != "/issuer.der":
+            downloads = {
+                "/issuer.der": ("application/pkix-cert", state.issuer_der),
+                "/inter.crl": ("application/pkix-crl", state.crl_der),
+            }
+            if self.path not in downloads:
                 self.send_error(404)
                 return
+            content_type, body = downloads[self.path]
             self.send_response(200)
-            self.send_header("Content-Type", "application/pkix-cert")
-            self.send_header("Content-Length", str(len(state.issuer_der)))
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(state.issuer_der)
+            self.wfile.write(body)
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib signature
             return
@@ -338,7 +361,56 @@ def pki(responder: OcspResponder) -> Pki:
         status=ocsp.OCSPCertStatus.GOOD,
         ocsp_url=responder.url,
     )
+    with_crl: dict[str, Any] = {"crl_url": responder.crl_url, "issuer_url": responder.issuer_url}
+    leaf("crl_good", ec.generate_private_key(ec.SECP256R1()), sans=("127.0.0.1",), **with_crl)
+    leaf("crl_revoked", ec.generate_private_key(ec.SECP256R1()), sans=("127.0.0.1",), **with_crl)
+    responder.crl_der = make_crl(
+        inter,
+        inter_key,
+        revoked={leaves["crl_revoked"].cert.serial_number: x509.ReasonFlags.key_compromise},
+    ).public_bytes(serialization.Encoding.DER)
     return Pki(root, root_key, inter, inter_key, leaves)
+
+
+#: When the test CRLs list a certificate as revoked.
+CRL_REVOKED_AT = (NOW - timedelta(days=1)).replace(microsecond=0)
+
+
+def make_crl(
+    issuer: x509.Certificate,
+    issuer_key: SigningKey,
+    *,
+    revoked: dict[int, x509.ReasonFlags | None] | None = None,
+    this_update: datetime | None = None,
+    next_update: datetime | None = None,
+    issuer_name: x509.Name | None = None,
+    extensions: tuple[tuple[x509.ExtensionType, bool], ...] = (),
+    entry_extensions: tuple[tuple[x509.ExtensionType, bool], ...] = (),
+) -> x509.CertificateRevocationList:
+    """A CRL ``issuer`` signs, listing ``revoked`` serial numbers with their reasons.
+
+    ``entry_extensions`` are added to every entry; ``issuer_name`` replaces
+    the issuer's subject as the CRL's issuer.
+    """
+    builder = (
+        x509.CertificateRevocationListBuilder()
+        .issuer_name(issuer_name or issuer.subject)
+        .last_update(this_update or NOW - timedelta(hours=1))
+        .next_update(next_update or NOW + timedelta(days=7))
+    )
+    for serial, reason in (revoked or {}).items():
+        entry = (
+            x509.RevokedCertificateBuilder().serial_number(serial).revocation_date(CRL_REVOKED_AT)
+        )
+        if reason is not None:
+            entry = entry.add_extension(x509.CRLReason(reason), critical=False)
+        for extension, critical in entry_extensions:
+            entry = entry.add_extension(extension, critical=critical)
+        builder = builder.add_revoked_certificate(entry.build())
+    for extension, critical in extensions:
+        builder = builder.add_extension(extension, critical=critical)
+    algorithm = None if isinstance(issuer_key, ed25519.Ed25519PrivateKey) else hashes.SHA256()
+    return builder.sign(issuer_key, algorithm)
 
 
 @contextlib.asynccontextmanager
@@ -805,6 +877,7 @@ async def test_device_target_reports_the_served_certificate(pki, tmp_path):
     assert record["hostname_ok"] is True  # IP SAN 127.0.0.1
     assert record["matches_expected"] is None
     assert record["ocsp"] is None
+    assert record["crl"] is None and record["crl_url"] is None
     assert record["subject_cn"] == "rsa.example.test"
     assert record["sans"] == ["leaf.example.test", "127.0.0.1"]
     assert record["issuer_cn"] == "Probe Test Intermediate"
@@ -824,6 +897,7 @@ async def test_device_target_reports_the_served_certificate(pki, tmp_path):
         "hostname_failures": 0,
         "mismatches": 0,
         "ocsp_revoked": 0,
+        "crl_revoked": 0,
         "failed": 0,
         "warn_30": 0,
         "warn_14": 0,
@@ -1253,7 +1327,15 @@ def test_every_config_field_is_documented_and_the_page_meets_the_contract():
     assert "probe.tls" in bundle
     assert check_page("probe.tls", bundle["probe.tls"]) == []
     page = bundle["probe.tls"]
-    for key in ("chain_ok", "hostname_ok", "matches_expected", "min_days_left", "warn_30"):
+    for key in (
+        "chain_ok",
+        "hostname_ok",
+        "matches_expected",
+        "min_days_left",
+        "warn_30",
+        "crl_next_update",
+        "crl_revoked",
+    ):
         assert key in page, key
 
 
@@ -1660,3 +1742,353 @@ def test_fingerprint_overrides_tell_server_names_apart():
     assert settings.expected_for("192.0.2.10", 443, "c.example.test") == "cc" * 32
     assert settings.expected_for("192.0.2.10", 443, None) == "cc" * 32
     assert settings.expected_for("192.0.2.11", 443, "a.example.test") == "00" * 32
+
+
+# --- CRL: addresses and evaluation ------------------------------------------------
+
+
+def _distribution_points(*points: x509.DistributionPoint) -> tuple[x509.ExtensionType, bool]:
+    return x509.CRLDistributionPoints(list(points)), False
+
+
+def _point(*urls: str, **kwargs: Any) -> x509.DistributionPoint:
+    names = [x509.UniformResourceIdentifier(url) for url in urls]
+    return x509.DistributionPoint(names, None, kwargs.get("reasons"), kwargs.get("crl_issuer"))
+
+
+def _leaf_with(pki: Pki, *extensions: tuple[x509.ExtensionType, bool]) -> x509.Certificate:
+    return issue(
+        "crl-case.example.test",
+        ec.generate_private_key(ec.SECP256R1()),
+        issuer=pki.inter,
+        issuer_key=pki.inter_key,
+        extensions=extensions,
+    )
+
+
+def test_crl_locations_keep_http_addresses_and_say_why_there_are_none(pki):
+    assert tls_certs.crl_locations(pki.leaves["no_aia"].cert) == (
+        [],
+        "the certificate names no CRL distribution point",
+    )
+
+    both = _leaf_with(
+        pki,
+        _distribution_points(
+            _point("ldap://ca.example.test/cn=crl", "http://ca.example.test/a.crl"),
+            _point("HTTPS://ca.example.test/b.crl", "http://ca.example.test/a.crl"),
+        ),
+    )
+    locations, missing = tls_certs.crl_locations(both)
+    assert missing is None
+    assert [location.url for location in locations] == [
+        "http://ca.example.test/a.crl",
+        "HTTPS://ca.example.test/b.crl",
+    ]
+    assert x509.UniformResourceIdentifier("ldap://ca.example.test/cn=crl") in locations[0].names
+
+    ldap_only = _leaf_with(pki, _distribution_points(_point("ldap://ca.example.test/cn=crl")))
+    assert tls_certs.crl_locations(ldap_only) == (
+        [],
+        "the certificate's CRL distribution points name no HTTP address",
+    )
+
+    indirect = _leaf_with(
+        pki,
+        _distribution_points(
+            _point("http://ca.example.test/a.crl", crl_issuer=[x509.DirectoryName(_name("Other"))]),
+            _point(
+                "http://ca.example.test/b.crl", reasons=frozenset({x509.ReasonFlags.key_compromise})
+            ),
+        ),
+    )
+    locations, missing = tls_certs.crl_locations(indirect)
+    assert locations == []
+    assert missing is not None and "does not support" in missing
+
+
+def test_load_crl_reads_der_and_pem(pki):
+    crl = make_crl(pki.inter, pki.inter_key)
+    der = crl.public_bytes(serialization.Encoding.DER)
+    pem = crl.public_bytes(serialization.Encoding.PEM)
+    assert tls_certs.load_crl(der) == crl
+    assert tls_certs.load_crl(b"published by the test CA\n" + pem) == crl
+    with pytest.raises(ValueError):
+        tls_certs.load_crl(b"not a crl")
+
+
+def _evaluate(
+    crl: x509.CertificateRevocationList,
+    cert: x509.Certificate,
+    issuer: x509.Certificate,
+    names: tuple[str, ...] = ("http://ca.example.test/inter.crl",),
+) -> dict[str, Any]:
+    return tls_certs.evaluate_crl(
+        crl,
+        cert,
+        issuer,
+        url="http://ca.example.test/inter.crl",
+        names=frozenset(x509.UniformResourceIdentifier(name) for name in names),
+        now=NOW,
+    )
+
+
+def test_crl_reports_good_revoked_and_removed(pki):
+    leaf = pki.leaves["crl_revoked"].cert
+    next_update = (NOW + timedelta(days=7)).replace(microsecond=0)
+    listed = make_crl(
+        pki.inter,
+        pki.inter_key,
+        revoked={leaf.serial_number: x509.ReasonFlags.key_compromise},
+        next_update=next_update,
+    )
+    assert _evaluate(listed, leaf, pki.inter) == {
+        "crl": "revoked",
+        "crl_detail": "certificate is revoked (reason: key_compromise)",
+        "crl_url": "http://ca.example.test/inter.crl",
+        "crl_next_update": next_update.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "crl_revocation_time": CRL_REVOKED_AT.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    good = _evaluate(listed, pki.leaves["crl_good"].cert, pki.inter)
+    assert (good["crl"], good["crl_detail"]) == ("good", "certificate is not on the CRL")
+    assert good["crl_revocation_time"] is None
+
+    no_reason = make_crl(pki.inter, pki.inter_key, revoked={leaf.serial_number: None})
+    assert _evaluate(no_reason, leaf, pki.inter)["crl_detail"] == "certificate is revoked"
+
+    held = make_crl(
+        pki.inter, pki.inter_key, revoked={leaf.serial_number: x509.ReasonFlags.certificate_hold}
+    )
+    assert _evaluate(held, leaf, pki.inter)["crl"] == "revoked"
+
+    removed = make_crl(
+        pki.inter, pki.inter_key, revoked={leaf.serial_number: x509.ReasonFlags.remove_from_crl}
+    )
+    assert _evaluate(removed, leaf, pki.inter)["crl"] == "good"
+
+
+def test_crl_problems_are_errors(pki):
+    leaf = pki.leaves["crl_good"].cert
+    cases: list[tuple[x509.CertificateRevocationList, x509.Certificate, str]] = [
+        (
+            make_crl(pki.inter, pki.root_key),
+            pki.inter,
+            "CRL signature does not verify with the issuer's key",
+        ),
+        (
+            make_crl(pki.inter, pki.inter_key, issuer_name=_name("Someone Else")),
+            pki.inter,
+            "CRL is not issued by the certificate's issuer",
+        ),
+        (
+            make_crl(pki.inter, pki.inter_key, next_update=NOW - timedelta(hours=1)),
+            pki.inter,
+            "CRL is stale (next update was ",
+        ),
+        (
+            make_crl(
+                pki.inter,
+                pki.inter_key,
+                this_update=NOW + timedelta(hours=1),
+                next_update=NOW + timedelta(days=2),
+            ),
+            pki.inter,
+            "CRL is not valid until ",
+        ),
+        (
+            make_crl(pki.inter, pki.inter_key, extensions=((x509.DeltaCRLIndicator(7), True),)),
+            pki.inter,
+            "the address serves a delta CRL, not a complete one",
+        ),
+        (
+            make_crl(pki.inter, pki.inter_key, extensions=(_UNKNOWN_CRITICAL,)),
+            pki.inter,
+            "CRL has an unhandled critical extension",
+        ),
+        (
+            make_crl(
+                pki.inter,
+                pki.inter_key,
+                revoked={leaf.serial_number: None},
+                entry_extensions=(
+                    (x509.CertificateIssuer([x509.DirectoryName(pki.inter.subject)]), True),
+                ),
+            ),
+            pki.inter,
+            "the CRL entry for this certificate has an unhandled critical extension",
+        ),
+    ]
+    for crl, issuer, expected in cases:
+        outcome = _evaluate(crl, leaf, issuer)
+        assert outcome["crl"] == "error", expected
+        assert outcome["crl_detail"].startswith(expected), outcome["crl_detail"]
+
+    # An issuer whose key usage rules out CRL signing.
+    no_crl_sign_key = ec.generate_private_key(ec.SECP256R1())
+    no_crl_sign = issue(
+        "No CRL Sign CA",
+        no_crl_sign_key,
+        issuer=pki.root,
+        issuer_key=pki.root_key,
+        ca=True,
+        extensions=(_key_usage(key_cert_sign=True),),
+    )
+    issued = issue(
+        "issued.example.test",
+        ec.generate_private_key(ec.SECP256R1()),
+        issuer=no_crl_sign,
+        issuer_key=no_crl_sign_key,
+    )
+    outcome = _evaluate(make_crl(no_crl_sign, no_crl_sign_key), issued, no_crl_sign)
+    assert outcome["crl_detail"] == "the issuer's key usage does not allow signing CRLs"
+    # Only a list that verified reports when it is next updated.
+    assert outcome["crl_next_update"] is None
+
+
+def _scoped(pki: Pki, **kwargs: Any) -> x509.CertificateRevocationList:
+    options: dict[str, Any] = {
+        "full_name": None,
+        "relative_name": None,
+        "only_contains_user_certs": False,
+        "only_contains_ca_certs": False,
+        "only_some_reasons": None,
+        "indirect_crl": False,
+        "only_contains_attribute_certs": False,
+        **kwargs,
+    }
+    scope = x509.IssuingDistributionPoint(**options)
+    return make_crl(pki.inter, pki.inter_key, extensions=((scope, True),))
+
+
+def test_crl_scope_follows_the_issuing_distribution_point(pki):
+    leaf = pki.leaves["crl_good"].cert
+    own = [x509.UniformResourceIdentifier("http://ca.example.test/inter.crl")]
+    other = [x509.UniformResourceIdentifier("http://ca.example.test/other.crl")]
+    assert _evaluate(_scoped(pki, full_name=own), leaf, pki.inter)["crl"] == "good"
+    assert _evaluate(_scoped(pki, only_contains_user_certs=True), leaf, pki.inter)["crl"] == "good"
+    expectations = [
+        ({"full_name": other}, "it is for another distribution point"),
+        ({"only_contains_ca_certs": True}, "it lists CA certificates only"),
+        ({"indirect_crl": True}, "CRL is an indirect CRL"),
+        (
+            {"only_some_reasons": frozenset({x509.ReasonFlags.key_compromise})},
+            "CRL covers only some revocation reasons",
+        ),
+    ]
+    for options, fragment in expectations:
+        outcome = _evaluate(_scoped(pki, **options), leaf, pki.inter)
+        assert outcome["crl"] == "error"
+        assert fragment in outcome["crl_detail"], outcome["crl_detail"]
+        assert outcome["crl_next_update"] is not None
+
+
+# --- The handler: CRL ------------------------------------------------------------
+
+
+async def test_crl_good_and_revoked_share_one_download(pki, tmp_path, responder):
+    services = FakeServices()
+    before = len(responder.requests)
+    async with (
+        tls_server(tmp_path, pki.leaves["crl_good"]) as good_port,
+        tls_server(tmp_path, pki.leaves["crl_revoked"]) as revoked_port,
+    ):
+        result = await run_step(
+            {
+                "endpoints": [f"127.0.0.1:{good_port}", f"127.0.0.1:{revoked_port}"],
+                "ca_bundle": pki.root_pem,
+                "check_crl": True,
+                "require_crl_good": True,
+            },
+            services=services,
+        )
+    assert result.success is False
+    good, revoked = result.output["endpoints"]
+    assert (good["crl"], good["crl_detail"]) == ("good", "certificate is not on the CRL")
+    assert good["crl_url"] == responder.crl_url
+    assert good["crl_next_update"] is not None
+    assert good["ok"] is True
+    assert revoked["crl"] == "revoked"
+    assert revoked["crl_revocation_time"] == CRL_REVOKED_AT.strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert revoked["failures"] == ["CRL revoked: certificate is revoked (reason: key_compromise)"]
+    assert result.output["summary"]["crl_revoked"] == 1
+    assert "CRL revoked: certificate is revoked" in (result.error or "")
+    # Both endpoints share one issuer download and one CRL download.
+    downloads = [request for request in responder.requests[before:] if request.startswith("GET")]
+    assert sorted(downloads) == ["GET /inter.crl", "GET /issuer.der"]
+    kinds = {entry[3] for entry in services.egress if entry[1] == responder.port}
+    assert kinds == {"crl download", "issuer download"}
+
+
+async def test_crl_unavailable_and_download_errors(pki, responder):
+    async def crl_record(cert: x509.Certificate) -> dict[str, Any]:
+        result = await run_step(
+            {"pem": pem_of(cert, pki.inter), "ca_bundle": pki.root_pem, "check_crl": True}
+        )
+        assert result.success is True, result.error  # nothing requires a good answer
+        [record] = result.output["endpoints"]
+        return record
+
+    record = await crl_record(pki.leaves["no_aia"].cert)
+    assert (record["crl"], record["crl_detail"]) == (
+        "unavailable",
+        "the certificate names no CRL distribution point",
+    )
+
+    dead = f"http://127.0.0.1:{closed_port()}/inter.crl"
+    record = await crl_record(_leaf_with(pki, _distribution_points(_point(dead))))
+    assert record["crl"] == "error"
+    assert record["crl_detail"].startswith("downloading the CRL failed: ConnectError")
+    assert record["crl_url"] == dead
+
+    missing = f"http://127.0.0.1:{responder.port}/missing.crl"
+    record = await crl_record(_leaf_with(pki, _distribution_points(_point(missing))))
+    assert record["crl_detail"] == f"downloading the CRL failed: HTTP 404 from {missing}"
+
+    not_a_crl = f"http://127.0.0.1:{responder.port}/issuer.der"
+    record = await crl_record(_leaf_with(pki, _distribution_points(_point(not_a_crl))))
+    assert record["crl_detail"].startswith("the CRL cannot be parsed")
+
+
+async def test_crl_tries_the_next_address_after_a_failure(pki, responder):
+    dead = f"http://127.0.0.1:{closed_port()}/inter.crl"
+    leaf = _leaf_with(pki, _distribution_points(_point(dead), _point(responder.crl_url)))
+    result = await run_step(
+        {
+            "pem": pem_of(leaf, pki.inter),
+            "ca_bundle": pki.root_pem,
+            "check_crl": True,
+            "require_crl_good": True,
+        }
+    )
+    assert result.success is True, result.error
+    [record] = result.output["endpoints"]
+    assert (record["crl"], record["crl_url"]) == ("good", responder.crl_url)
+
+
+async def test_a_crl_download_the_egress_policy_denies_is_the_step_error(pki):
+    services = FakeServices(deny=("127.0.0.1",))
+    leaf = pki.leaves["crl_good"].cert
+    with pytest.raises(Denied, match="crl download"):
+        await run_step(
+            {"pem": pem_of(leaf, pki.inter), "ca_bundle": pki.root_pem, "check_crl": True},
+            services=services,
+        )
+    assert [entry[3] for entry in services.egress] == ["crl download"]
+
+
+async def test_ocsp_and_crl_together_download_the_issuer_once(pki, tmp_path, responder):
+    before = len(responder.requests)
+    async with tls_server(tmp_path, pki.leaves["rsa"]) as port:
+        result = await run_step(
+            {
+                "endpoints": f"127.0.0.1:{port}",
+                "ca_bundle": pki.root_pem,
+                "check_ocsp": True,
+                "check_crl": True,
+            }
+        )
+    [record] = result.output["endpoints"]
+    assert record["ocsp"] == "good", record["ocsp_detail"]
+    assert record["crl"] == "unavailable"
+    issuer_downloads = [r for r in responder.requests[before:] if r == "GET /issuer.der"]
+    assert len(issuer_downloads) <= 1

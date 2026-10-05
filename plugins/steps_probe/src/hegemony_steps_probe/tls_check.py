@@ -9,7 +9,8 @@ server presents (certificate, protocol version, cipher), and once with a
 verifying context to learn whether the chain validates. The host name is
 checked locally against the certificate, so a chain verdict and a name
 verdict never mask each other. A pasted certificate is evaluated offline the
-same way. The X.509 rules themselves live in :mod:`.tls_certs`.
+same way. Revocation is checked on request, through OCSP and through the
+issuer's CRL. The X.509 rules themselves live in :mod:`.tls_certs`.
 """
 
 from __future__ import annotations
@@ -42,6 +43,12 @@ MAX_PARALLEL_LIMIT = 50
 
 #: Largest OCSP response or issuer certificate download the step reads.
 MAX_FETCH_BYTES = 1024 * 1024
+
+#: Largest CRL the step downloads.
+MAX_CRL_BYTES = 20 * 1024 * 1024
+
+#: Request extension that names what an HTTP request is for, in egress checks.
+_EGRESS_KIND = "hegemony.egress_kind"
 
 #: Endpoints named one by one in the step error before the rest are counted.
 MAX_ERROR_ENDPOINTS = 20
@@ -122,7 +129,7 @@ class TlsProbeConfig(BaseModel):
         title="Timeout (sec)",
         description=(
             "Time limit for each connection and handshake, and for each OCSP "
-            "request, in seconds. Defaults to 10."
+            "request and download, in seconds. Defaults to 10."
         ),
     )
     require_reachable: bool = Field(
@@ -215,6 +222,25 @@ class TlsProbeConfig(BaseModel):
             "certificate good (revoked, unknown, or no answer fails)."
         ),
         json_schema_extra={"x_show_when": {"field": "check_ocsp", "value": True}},
+    )
+    check_crl: bool = Field(
+        default=False,
+        title="Check CRL",
+        description=(
+            "Download each certificate's certificate revocation list (CRL) from the "
+            "address the certificate names and look the certificate up in it. Needs "
+            "the worker to reach that address."
+        ),
+    )
+    require_crl_good: bool = Field(
+        default=False,
+        title="Require CRL good",
+        description=(
+            "With Check CRL on, fail the step unless a current CRL signed by the issuer "
+            "leaves every certificate off (revoked, a stale or unverifiable list, or no "
+            "list fails)."
+        ),
+        json_schema_extra={"x_show_when": {"field": "check_crl", "value": True}},
     )
     warn_days: list[int] = Field(
         default_factory=lambda: [30, 14, 7],
@@ -398,7 +424,7 @@ def describe_dial_error(exc: BaseException, timeout: float) -> str:
 
 
 class _FetchError(Exception):
-    """An HTTP fetch for OCSP that returned something unusable."""
+    """An OCSP request or a download that returned something unusable."""
 
 
 @dataclass
@@ -445,7 +471,7 @@ def _sni_key(sni: str | None) -> str:
 
 
 class _TlsRun:
-    """One step execution: shared contexts, trust anchors, and the OCSP client."""
+    """One step execution: shared contexts, trust anchors, and the revocation client."""
 
     def __init__(
         self,
@@ -467,6 +493,11 @@ class _TlsRun:
         self.client: httpx.AsyncClient | None = None
         self._observe: ssl.SSLContext | None = None
         self._verify: ssl.SSLContext | None = None
+        # Endpoints often share an issuer and its CRL: each is downloaded,
+        # parsed and checked against an issuer once per run.
+        self._downloads: dict[str, asyncio.Future[bytes]] = {}
+        self._crls: dict[str, asyncio.Future[x509.CertificateRevocationList]] = {}
+        self._crl_problems: dict[tuple[str, str], str | None] = {}
 
     # --- records ---------------------------------------------------------
 
@@ -490,6 +521,11 @@ class _TlsRun:
             "ocsp": None,
             "ocsp_detail": None,
             "revocation_time": None,
+            "crl": None,
+            "crl_detail": None,
+            "crl_url": None,
+            "crl_next_update": None,
+            "crl_revocation_time": None,
             **tls_certs.empty_certificate_fields(),
         }
         if self.config.include_pem:
@@ -520,6 +556,8 @@ class _TlsRun:
             record["matches_expected"] = record["fingerprint_sha256"] == expected
         if self.config.check_ocsp:
             record.update(await self.check_ocsp(leaf, issuer_candidates))
+        if self.config.check_crl:
+            record.update(await self.check_crl(leaf, issuer_candidates))
 
     # --- live endpoints --------------------------------------------------
 
@@ -622,37 +660,96 @@ class _TlsRun:
         )
         return record
 
-    # --- OCSP ------------------------------------------------------------
+    # --- revocation: shared HTTP ------------------------------------------
 
     async def _authorize(self, request: httpx.Request) -> None:
-        """Walk every OCSP-related request past the flow's egress gate."""
+        """Walk every revocation-related request past the flow's egress gate."""
         if self.enforce is None:
             return
         port = request.url.port or (443 if request.url.scheme == "https" else 80)
-        await self.enforce(request.url.host, port, proto="tcp", kind="ocsp check")
+        kind = str(request.extensions.get(_EGRESS_KIND) or "connection")
+        await self.enforce(request.url.host, port, proto="tcp", kind=kind)
 
     async def fetch(
         self,
         method: str,
         url: str,
         *,
+        kind: str,
+        limit: int = MAX_FETCH_BYTES,
         content: bytes | None = None,
         headers: dict[str, str] | None = None,
     ) -> bytes:
-        """One OCSP-related HTTP request: the body of a 200 response, capped at ``MAX_FETCH_BYTES``."""
+        """One revocation-related HTTP request: the body of a 200 response, capped at ``limit``.
+
+        ``kind`` names the request in the egress check (``ocsp check``,
+        ``issuer download``, ``crl download``).
+        """
         if self.client is None:
-            raise _FetchError("OCSP client is not open")
-        async with self.client.stream(method, url, content=content, headers=headers) as response:
+            raise _FetchError("the revocation client is not open")
+        async with self.client.stream(
+            method, url, content=content, headers=headers, extensions={_EGRESS_KIND: kind}
+        ) as response:
             if response.status_code != 200:
                 raise _FetchError(f"HTTP {response.status_code} from {url}")
             chunks: list[bytes] = []
             total = 0
             async for chunk in response.aiter_bytes():
                 total += len(chunk)
-                if total > MAX_FETCH_BYTES:
-                    raise _FetchError(f"response from {url} exceeds {MAX_FETCH_BYTES} bytes")
+                if total > limit:
+                    raise _FetchError(f"response from {url} exceeds {limit} bytes")
                 chunks.append(chunk)
         return b"".join(chunks)
+
+    async def _once(
+        self,
+        cache: dict[str, asyncio.Future[Any]],
+        key: str,
+        make: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """``await make()`` once per ``key`` and run; later callers share its result or error.
+
+        The shared work is shielded, so one endpoint's cancellation does not
+        cancel it for the others.
+        """
+        future = cache.get(key)
+        if future is None:
+            future = asyncio.ensure_future(make())
+            cache[key] = future
+        return await asyncio.shield(future)
+
+    def close(self) -> None:
+        """Cancel shared downloads nobody waits for any more."""
+        for cache in (self._downloads, self._crls):
+            for future in cache.values():
+                if not future.done():
+                    future.cancel()
+
+    async def issuer_of(
+        self, cert: x509.Certificate, candidates: list[x509.Certificate]
+    ) -> tuple[x509.Certificate | None, str]:
+        """The issuer of ``cert`` from ``candidates`` or downloaded, else None and why not."""
+        issuer = tls_certs.find_issuer(cert, candidates)
+        if issuer is not None:
+            return issuer, ""
+        problem = ""
+        for url in tls_certs.ca_issuer_urls(cert):
+            try:
+                data = await self._once(
+                    self._downloads,
+                    url,
+                    lambda url=url: self.fetch("GET", url, kind="issuer download"),
+                )
+            except (httpx.HTTPError, httpx.InvalidURL, _FetchError) as exc:
+                problem = f"; downloading {url} failed: {_http_reason(exc)}"
+                continue
+            issuer = tls_certs.find_issuer(cert, tls_certs.load_certificates_any(data))
+            if issuer is not None:
+                return issuer, ""
+            problem = f"; {url} did not hold the issuer"
+        return None, "the issuer certificate is not available" + problem
+
+    # --- OCSP ------------------------------------------------------------
 
     async def check_ocsp(
         self, cert: x509.Certificate, candidates: list[x509.Certificate]
@@ -661,28 +758,15 @@ class _TlsRun:
         urls = tls_certs.ocsp_responder_urls(cert)
         if not urls:
             return tls_certs.ocsp_outcome("unavailable", "the certificate names no OCSP responder")
-        issuer = tls_certs.find_issuer(cert, candidates)
-        download_problem = ""
+        issuer, problem = await self.issuer_of(cert, candidates)
         if issuer is None:
-            for url in tls_certs.ca_issuer_urls(cert):
-                try:
-                    data = await self.fetch("GET", url)
-                except (httpx.HTTPError, httpx.InvalidURL, _FetchError) as exc:
-                    download_problem = f"; downloading {url} failed: {_http_reason(exc)}"
-                    continue
-                issuer = tls_certs.find_issuer(cert, tls_certs.load_certificates_any(data))
-                if issuer is not None:
-                    break
-                download_problem = f"; {url} did not hold the issuer"
-        if issuer is None:
-            return tls_certs.ocsp_outcome(
-                "unavailable", "the issuer certificate is not available" + download_problem
-            )
+            return tls_certs.ocsp_outcome("unavailable", problem)
         url = urls[0]
         try:
             data = await self.fetch(
                 "POST",
                 url,
+                kind="ocsp check",
                 content=tls_certs.build_ocsp_request(cert, issuer),
                 headers={
                     "Content-Type": "application/ocsp-request",
@@ -694,6 +778,56 @@ class _TlsRun:
                 "error", f"OCSP request to {url} failed: {_http_reason(exc)}"
             )
         return tls_certs.evaluate_ocsp_response(data, cert, issuer, now=self.now)
+
+    # --- CRL -------------------------------------------------------------
+
+    async def _load_crl(self, url: str) -> x509.CertificateRevocationList:
+        """Download and parse the CRL at ``url`` (parsed off the event loop: CRLs can be large)."""
+        data = await self.fetch("GET", url, kind="crl download", limit=MAX_CRL_BYTES)
+        return await asyncio.to_thread(tls_certs.load_crl, data)
+
+    async def check_crl(
+        self, cert: x509.Certificate, candidates: list[x509.Certificate]
+    ) -> dict[str, Any]:
+        """The CRL status of ``cert``: looked up in the issuer's list from the address it names.
+
+        Each address is tried in turn until one gives an answer (good or
+        revoked); otherwise the first address's problem is reported.
+        """
+        locations, missing = tls_certs.crl_locations(cert)
+        if not locations:
+            return tls_certs.crl_outcome("unavailable", missing)
+        issuer, problem = await self.issuer_of(cert, candidates)
+        if issuer is None:
+            return tls_certs.crl_outcome("unavailable", problem)
+        outcomes: list[dict[str, Any]] = []
+        for location in locations:
+            outcome = await self._crl_outcome(location, cert, issuer)
+            if outcome["crl"] in ("good", "revoked"):
+                return outcome
+            outcomes.append(outcome)
+        return outcomes[0]
+
+    async def _crl_outcome(
+        self, location: tls_certs.CrlLocation, cert: x509.Certificate, issuer: x509.Certificate
+    ) -> dict[str, Any]:
+        """``cert`` judged against the CRL at one address."""
+        url = location.url
+        try:
+            crl = await self._once(self._crls, url, lambda: self._load_crl(url))
+        except (httpx.HTTPError, httpx.InvalidURL, _FetchError) as exc:
+            return tls_certs.crl_outcome(
+                "error", f"downloading the CRL failed: {_http_reason(exc)}", url=url
+            )
+        except ValueError as exc:
+            return tls_certs.crl_outcome("error", f"the CRL cannot be parsed: {exc}", url=url)
+        key = (url, tls_certs.fingerprint_sha256(issuer))
+        if key not in self._crl_problems:
+            self._crl_problems[key] = tls_certs.crl_signature_problem(crl, issuer)
+        problem = self._crl_problems[key]
+        if problem is not None:
+            return tls_certs.crl_outcome("error", problem, url=url)
+        return tls_certs.crl_status(crl, cert, url=url, names=location.names, now=self.now)
 
     # --- verdicts --------------------------------------------------------
 
@@ -731,13 +865,17 @@ class _TlsRun:
                 reasons.append("fingerprint does not match the expected one")
             if config.check_ocsp and config.require_ocsp_good and record["ocsp"] != "good":
                 reasons.append(f"OCSP {record['ocsp']}: {record['ocsp_detail']}")
+            if config.check_crl and config.require_crl_good and record["crl"] != "good":
+                reasons.append(f"CRL {record['crl']}: {record['crl_detail']}")
         record["failures"] = reasons
         record["ok"] = not reasons
 
 
 def _http_reason(exc: BaseException) -> str:
-    """A short reason for a failed OCSP-related HTTP request."""
+    """A short reason for a failed revocation-related HTTP request."""
     text = str(exc)
+    if isinstance(exc, _FetchError):
+        return text
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
@@ -758,6 +896,7 @@ def summarize(records: list[dict[str, Any]], warn_days: list[int]) -> dict[str, 
         "hostname_failures": sum(record["hostname_ok"] is False for record in records),
         "mismatches": sum(record["matches_expected"] is False for record in records),
         "ocsp_revoked": sum(record["ocsp"] == "revoked" for record in records),
+        "crl_revoked": sum(record["crl"] == "revoked" for record in records),
         "failed": sum(not record["ok"] for record in records),
     }
     for window in sorted(set(warn_days), reverse=True):
@@ -937,7 +1076,8 @@ class TlsProbeHandler(BaseHandler):
             return _config_error("Invalid CA bundle: no PEM certificate found")
         bundle_pem = tls_certs.certificates_to_pem(bundle_anchors) if bundle_anchors else None
 
-        needs_network = bool(plans) or config.check_ocsp
+        checks_revocation = config.check_ocsp or config.check_crl
+        needs_network = bool(plans) or checks_revocation
         enforce = getattr(ctx.require_services(), "enforce_egress", None) if needs_network else None
         run = _TlsRun(
             settings,
@@ -953,7 +1093,7 @@ class TlsProbeHandler(BaseHandler):
                 return _config_error(f"Invalid CA bundle: {exc}")
 
         async with contextlib.AsyncExitStack() as stack:
-            if config.check_ocsp:
+            if checks_revocation:
                 run.client = await stack.enter_async_context(
                     httpx.AsyncClient(
                         trust_env=False,
@@ -962,6 +1102,8 @@ class TlsProbeHandler(BaseHandler):
                         event_hooks={"request": [run._authorize]},
                     )
                 )
+            # Registered after the client, so it runs before the client closes.
+            stack.callback(run.close)
             if supplied:
                 pem_plan = {
                     "source": "pem",
