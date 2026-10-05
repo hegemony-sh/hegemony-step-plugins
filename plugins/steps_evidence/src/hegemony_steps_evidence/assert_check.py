@@ -273,12 +273,15 @@ class AssertHandler(BaseHandler):
         assertion_evidence = []
         failed_messages = []
 
+        # One fetch of the run's artifacts serves every lookup.
+        artifacts = await self._fetch_run_artifacts(ctx) if artifact_step_id else None
+
         for name, device, device_command in lookups:
             if device is None:
-                artifact_content = await self._get_artifact_data(ctx, artifact_step_id, name)
+                artifact_content = self._get_artifact_data(artifacts, artifact_step_id, name)
             else:
-                artifact_content = await self._get_command_output(
-                    ctx, artifact_step_id, device, device_command
+                artifact_content = self._get_command_output(
+                    artifacts, artifact_step_id, device, device_command
                 )
             if artifact_content is None:
                 logger.warning(
@@ -330,33 +333,48 @@ class AssertHandler(BaseHandler):
             evidence=assertion_evidence,
         )
 
-    async def _get_artifact_data(
+    def _get_artifact_data(
         self,
-        ctx: HandlerContext,
+        artifacts: list[dict] | None,
         artifact_step_id: str | None = None,
         artifact_name: str | None = None,
     ) -> str | None:
-        """Get artifact content from a previous step."""
+        """Get the content of a previous step's artifact by its name.
+
+        ``artifacts`` is the run's artifact list, None when the fetch failed.
+        """
         if not artifact_step_id or not artifact_name:
             logger.error("assert requires artifact_step_id and artifact_name")
             return None
-        return await self._fetch_artifact_content(ctx, artifact_step_id, artifact_name)
+        if artifacts is None:
+            return None
+        # Pick the NEWEST matching artifact — a collect step inside a loop (or
+        # retried) appends one per iteration under the same step_id + name,
+        # and asserting the first match would re-check stale first-iteration
+        # evidence forever.
+        artifact = latest_artifact(artifacts, step_id=artifact_step_id, name=artifact_name)
+        if artifact is None:
+            logger.error(f"Artifact '{artifact_name}' not found in step '{artifact_step_id}'")
+            return None
+        return self._artifact_content(artifact)
 
-    async def _get_command_output(
+    def _get_command_output(
         self,
-        ctx: HandlerContext,
+        artifacts: list[dict] | None,
         artifact_step_id: str | None,
         device: dict,
         command: str,
     ) -> str | None:
-        """Get the output a previous step collected for ``device`` and ``command``."""
+        """Get the output a previous step collected for ``device`` and ``command``.
+
+        ``artifacts`` is the run's artifact list, None when the fetch failed.
+        """
         if not artifact_step_id:
             logger.error("assert requires artifact_step_id")
             return None
-        artifacts = await self._fetch_run_artifacts(ctx)
         if artifacts is None:
             return None
-        # Newest match: see _fetch_artifact_content.
+        # Newest match: see _get_artifact_data.
         artifact = find_command_artifact(
             artifacts, step_id=artifact_step_id, device=device, command=command
         )
@@ -365,23 +383,6 @@ class AssertHandler(BaseHandler):
                 f"No output of '{command_label(command)}' for device "
                 f"'{device.get('name')}' in step '{artifact_step_id}'"
             )
-            return None
-        return self._artifact_content(artifact)
-
-    async def _fetch_artifact_content(
-        self, ctx: HandlerContext, step_id: str, artifact_name: str
-    ) -> str | None:
-        """Fetch artifact content from API."""
-        artifacts = await self._fetch_run_artifacts(ctx)
-        if artifacts is None:
-            return None
-        # Pick the NEWEST matching artifact — a collect step inside a loop (or
-        # retried) appends one per iteration under the same step_id + name,
-        # and asserting the first match would re-check stale first-iteration
-        # evidence forever.
-        artifact = latest_artifact(artifacts, step_id=step_id, name=artifact_name)
-        if artifact is None:
-            logger.error(f"Artifact '{artifact_name}' not found in step '{step_id}'")
             return None
         return self._artifact_content(artifact)
 

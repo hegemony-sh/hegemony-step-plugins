@@ -157,8 +157,8 @@ class CompareEvidenceHandler(BaseHandler):
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = CompareEvidenceConfig
 
-    async def _fetch_artifacts_for_step(self, ctx: HandlerContext, step_id: str) -> list[dict]:
-        """Fetch artifacts from API for a specific step."""
+    async def _fetch_run_artifacts(self, ctx: HandlerContext) -> list[dict]:
+        """Fetch the run's artifacts from the API; empty when the fetch fails."""
         run_id = ctx.run_id
         async with ctx.require_services().open_api_client(timeout=30) as client:
             try:
@@ -167,15 +167,9 @@ class CompareEvidenceHandler(BaseHandler):
                 if response.status_code != 200:
                     logger.error(f"Failed to fetch run {run_id}: {response.status_code}")
                     return []
-
-                run_data = response.json()
-                artifacts = run_data.get("artifacts", [])
-
-                # Filter artifacts for the specified step
-                step_artifacts = [a for a in artifacts if a.get("step_id") == step_id]
-                return step_artifacts
+                return response.json().get("artifacts", [])
             except Exception as e:
-                logger.error(f"Failed to fetch artifacts for step {step_id}: {e}")
+                logger.error(f"Failed to fetch artifacts of run {run_id}: {e}")
                 return []
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
@@ -197,12 +191,12 @@ class CompareEvidenceHandler(BaseHandler):
                 summary="Comparison configuration error",
             )
 
-        # Fetch artifacts from API for both steps
-        precheck_artifacts = await self._fetch_artifacts_for_step(ctx, precheck_step_id)
-        postcheck_artifacts = await self._fetch_artifacts_for_step(
-            ctx,
-            postcheck_step_id or ctx.step_id,  # Use current step if postcheck not specified
-        )
+        # One fetch of the run's artifacts serves both steps.
+        run_artifacts = await self._fetch_run_artifacts(ctx)
+        # Use the current step if no postcheck step is specified.
+        postcheck_step = postcheck_step_id or ctx.step_id
+        precheck_artifacts = [a for a in run_artifacts if a.get("step_id") == precheck_step_id]
+        postcheck_artifacts = [a for a in run_artifacts if a.get("step_id") == postcheck_step]
 
         # Restrict to artifacts whose name matches the glob, so volatile outputs
         # (routing/neighbor tables with counters) can be excluded and only the
@@ -232,8 +226,7 @@ class CompareEvidenceHandler(BaseHandler):
                 return HandlerResult(
                     success=False,
                     error=(
-                        f"No artifacts in postcheck step "
-                        f"'{postcheck_step_id or ctx.step_id}' match "
+                        f"No artifacts in postcheck step '{postcheck_step}' match "
                         f"pattern '{artifact_name_pattern}'"
                     ),
                     summary="No artifacts matched pattern",

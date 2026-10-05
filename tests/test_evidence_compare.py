@@ -119,13 +119,15 @@ def _ctx(**config):
 def _handler_with(
     pre: list[dict], post: list[dict], monkeypatch: pytest.MonkeyPatch
 ) -> CompareEvidenceHandler:
-    """A handler whose artifact fetch returns canned pre/post lists by step id."""
+    """A handler whose run fetch returns ``pre`` and ``post`` as the two steps' artifacts."""
     handler = _handler()
 
-    async def fake_fetch(ctx: object, step_id: str) -> list[dict]:
-        return pre if step_id == "precheck" else post
+    async def fake_fetch(ctx: object) -> list[dict]:
+        return [{**a, "step_id": "precheck"} for a in pre] + [
+            {**a, "step_id": "postcheck"} for a in post
+        ]
 
-    monkeypatch.setattr(handler, "_fetch_artifacts_for_step", fake_fetch)
+    monkeypatch.setattr(handler, "_fetch_run_artifacts", fake_fetch)
     return handler
 
 
@@ -385,6 +387,58 @@ async def test_nothing_in_common_still_records_both_sides(monkeypatch: pytest.Mo
     assert content["artifacts_compared"] == []
     assert content["missing_in_postcheck"] == ["r1:show ip route"]
     assert content["only_in_postcheck"] == ["r1:connection_error"]
+
+
+class _RunApi:
+    """Host services whose API serves one run's artifacts and counts the fetches."""
+
+    status_code = 200
+
+    def __init__(self, artifacts: list[dict]) -> None:
+        self.artifacts = artifacts
+        self.fetches = 0
+
+    def open_api_client(self, timeout: float = 30) -> _RunApi:
+        return self
+
+    async def __aenter__(self) -> _RunApi:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def get(self, url: str) -> _RunApi:
+        self.fetches += 1
+        return self
+
+    def json(self) -> dict:
+        return {"artifacts": self.artifacts}
+
+
+async def test_execute_fetches_the_run_artifacts_once() -> None:
+    from typing import cast
+
+    from hegemony_step_sdk import HandlerContext, HandlerServices
+
+    outputs = {"show ip route": _ROUTES, "show clock": "10:00"}
+    captures = _collected(outputs, "r1") + _collected(outputs, "r2")
+    api = _RunApi(
+        [{**artifact, "step_id": "precheck"} for artifact in captures]
+        + [{**artifact, "step_id": "postcheck"} for artifact in captures]
+        + [{**_artifact("r1:show ip route", "other step"), "step_id": "other"}]
+    )
+    ctx = HandlerContext(
+        run_id="run-1",
+        flow_id="f",
+        step_run_id="sr-1",
+        step_id="cur",
+        config={"precheck_step_id": "precheck", "postcheck_step_id": "postcheck"},
+        services=cast(HandlerServices, api),
+    )
+    result = await _handler().execute(ctx)
+    assert result.success is True, result.error
+    assert len(result.evidence[0]["content_json"]["artifacts_compared"]) == 4
+    assert api.fetches == 1
 
 
 # ── Subset, superset and JSON modes on text ──────────────────────────────────

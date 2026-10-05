@@ -405,30 +405,35 @@ class TestFindCommandArtifact:
             assert found is not None and found["content_text"] == output, command
 
 
-async def _assert_command(artifacts: list[dict], command: str, expected: str):
+class _RunApi:
+    """Host services whose API serves one run's artifacts and counts the fetches."""
+
+    def __init__(self, artifacts: list[dict], status_code: int = 200) -> None:
+        self.artifacts = artifacts
+        self.status_code = status_code
+        self.fetches = 0
+
+    def open_api_client(self, timeout: float = 30) -> _RunApi:
+        return self
+
+    async def __aenter__(self) -> _RunApi:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def get(self, url: str) -> _RunApi:
+        self.fetches += 1
+        return self
+
+    def json(self) -> dict:
+        return {"artifacts": self.artifacts}
+
+
+async def _run_assert(api: _RunApi, command: str, expected: str, devices: list[dict]):
     from typing import cast
 
     from hegemony_step_sdk import HandlerContext, HandlerServices
-
-    class _Response:
-        status_code = 200
-
-        def json(self) -> dict:
-            return {"artifacts": artifacts}
-
-    class _Client:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc) -> bool:
-            return False
-
-        async def get(self, url: str) -> _Response:
-            return _Response()
-
-    class _Services:
-        def open_api_client(self, timeout: float = 30) -> _Client:
-            return _Client()
 
     ctx = HandlerContext(
         run_id="run-1",
@@ -443,10 +448,14 @@ async def _assert_command(artifacts: list[dict], command: str, expected: str):
             "expected": expected,
         },
         target_roles=["core"],
-        target_devices_by_role={"core": [_R1]},
-        services=cast(HandlerServices, _Services()),
+        target_devices_by_role={"core": devices},
+        services=cast(HandlerServices, api),
     )
     return await _handler().execute(ctx)
+
+
+async def _assert_command(artifacts: list[dict], command: str, expected: str):
+    return await _run_assert(_RunApi(artifacts), command, expected, [_R1])
 
 
 async def test_assert_reads_the_output_of_the_full_command() -> None:
@@ -465,3 +474,27 @@ async def test_assert_fails_when_the_command_was_not_collected() -> None:
     result = await _assert_command(_collected("collect", {_LONG_A: "x"}), _LONG_B, "x")
     assert result.success is False
     assert "could not fetch artifact content" in (result.error or "")
+
+
+_DEVICES = [{"id": f"d{n}", "name": f"r{n}"} for n in (1, 2, 3)]
+
+
+async def test_assert_fetches_the_run_artifacts_once_for_all_devices() -> None:
+    artifacts = [
+        artifact
+        for device in _DEVICES
+        for artifact in _collected("collect", {_SHORT: f"{device['name']} bgp"}, device=device)
+    ]
+    api = _RunApi(artifacts)
+    result = await _run_assert(api, _SHORT, "bgp", _DEVICES)
+    assert result.success is True, result.error
+    assert [e["content_json"]["actual"] for e in result.evidence] == ["r1 bgp", "r2 bgp", "r3 bgp"]
+    assert api.fetches == 1
+
+
+async def test_assert_fails_every_device_when_the_run_fetch_fails() -> None:
+    api = _RunApi([], status_code=500)
+    result = await _run_assert(api, _SHORT, "bgp", _DEVICES)
+    assert result.success is False
+    assert (result.error or "").count("could not fetch artifact content") == 3
+    assert api.fetches == 1
