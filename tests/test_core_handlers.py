@@ -327,6 +327,93 @@ async def test_dns_probe_refuses_a_bare_ip_target_without_a_query_name(monkeypat
     assert result.success is True, result.error
 
 
+async def test_dns_probe_puts_a_chosen_resolver_through_the_egress_gate(monkeypatch):
+    """A chosen nameserver is a destination the policy must see, on UDP and TCP."""
+    from hegemony_steps_probe import dns_check
+    from hegemony_steps_probe.dns_check import DnsProbeHandler
+
+    gated: list[tuple[str, int, str, str]] = []
+    asked: list[str] = []
+
+    class _Services:
+        async def enforce_egress(self, host, port, *, proto, kind):
+            gated.append((host, port, proto, kind))
+
+    async def fake_resolve(query_name, record_type, *, resolver_ip="", timeout_sec=5.0):
+        asked.append(resolver_ip)
+        return ["192.0.2.7"]
+
+    monkeypatch.setattr(dns_check, "resolve_records", fake_resolve)
+    config = {"query_name": "device.example.com", "resolver": "2001:db8::53"}
+    ctx = _ip_target_ctx(config, ["192.0.2.7"], services=_Services())
+    result = await DnsProbeHandler().execute(ctx)
+    assert result.success is True, result.error
+    assert gated == [
+        ("2001:db8::53", 53, "udp", "dns query"),
+        ("2001:db8::53", 53, "tcp", "dns query"),
+    ]
+    assert asked == ["2001:db8::53"]
+
+
+async def test_dns_probe_does_not_ask_a_resolver_the_policy_denies(monkeypatch):
+    from hegemony_steps_probe import dns_check
+    from hegemony_steps_probe.dns_check import DnsProbeHandler
+
+    class _Denied(Exception):
+        pass
+
+    class _Services:
+        async def enforce_egress(self, host, port, *, proto, kind):
+            raise _Denied(f"{kind} to {host} refused by the flow egress policy")
+
+    async def fail_resolve(*args, **kwargs):
+        raise AssertionError("the denied resolver was asked")
+
+    monkeypatch.setattr(dns_check, "resolve_records", fail_resolve)
+    config = {"query_name": "device.example.com", "resolver": "198.51.100.53"}
+    ctx = _ip_target_ctx(config, ["192.0.2.7"], services=_Services())
+    with pytest.raises(_Denied):
+        await DnsProbeHandler().execute(ctx)
+
+
+async def test_dns_probe_refuses_a_resolver_when_no_gate_can_check_it(monkeypatch):
+    """Fail closed: a host without enforce_egress cannot apply the policy."""
+    from hegemony_steps_probe import dns_check
+    from hegemony_steps_probe.dns_check import DnsProbeHandler
+
+    async def fail_resolve(*args, **kwargs):
+        raise AssertionError("an unchecked resolver was asked")
+
+    monkeypatch.setattr(dns_check, "resolve_records", fail_resolve)
+    config = {"query_name": "device.example.com", "resolver": "192.0.2.53"}
+    for services in (None, type("_Services", (), {})()):
+        result = await DnsProbeHandler().execute(
+            _ip_target_ctx(config, ["192.0.2.7"], services=services)
+        )
+        assert result.success is False
+        assert "cannot apply the flow's network policy" in (result.error or "")
+
+
+@pytest.mark.parametrize(
+    "resolver", ["dns.google", "1.2.3.4:53", "https://dns.google/dns-query", "tls://1.1.1.1"]
+)
+async def test_dns_probe_refuses_a_resolver_that_is_not_an_ip(monkeypatch, resolver):
+    from hegemony_steps_probe import dns_check
+    from hegemony_steps_probe.dns_check import DnsProbeConfig, DnsProbeHandler
+
+    async def fail_resolve(*args, **kwargs):
+        raise AssertionError("an invalid resolver was asked")
+
+    monkeypatch.setattr(dns_check, "resolve_records", fail_resolve)
+    config = {"query_name": "device.example.com", "resolver": resolver}
+    assert DnsProbeHandler().validate_config(config)
+    with pytest.raises(ValueError):
+        DnsProbeConfig.model_validate(config)
+    result = await DnsProbeHandler().execute(_ip_target_ctx(config, ["192.0.2.7"]))
+    assert result.success is False
+    assert "must be a nameserver IP address" in (result.error or "")
+
+
 async def test_wait_reachable_accepts_ip_targets(monkeypatch):
     """Reachability needs an address, not a device record."""
     from hegemony_steps_probe.wait_reachable import WaitReachableHandler
