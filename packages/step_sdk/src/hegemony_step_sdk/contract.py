@@ -370,11 +370,13 @@ class BaseHandler(ABC):
     # what the container may do there is limited by the short-lived token it
     # gets from ``services.open_state_backend``.
     platform_api_access: bool = False
-    # True for container-backed handlers that build an image and push it into
-    # the organization's namespace of the platform registry (container.build).
-    # The host then asks for the step's registry token with push rights on the
-    # organization's own image names, decides the network the build's RUN
-    # instructions get from the flow's egress policy, and serves both as
+    # True for container-backed handlers that build an image (container.build)
+    # and push it into the organization's namespace of the platform registry,
+    # to another registry, or nowhere. The host then asks for the step's
+    # registry token with push rights on the organization's own image names
+    # when it runs a registry, decides from the flow's egress policy the
+    # network the build's RUN instructions get and whether the step may push
+    # to other registries, and serves all of it as
     # ``ContainerRuntime.image_build``.
     builds_images: bool = False
     # True for handlers that store values in the run organization's secret

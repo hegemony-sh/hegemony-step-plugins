@@ -375,7 +375,10 @@ def test_container_runtime_image_build_defaults_to_none():
     A host older than the field constructs the runtime without it, and a
     building handler then fails with a clear message instead of pushing
     somewhere it was not granted. The network defaults to none: a host that
-    names no network gives the build none (fail closed).
+    names no network gives the build none (fail closed). A host older than
+    ``push`` served the value only with a push grant, so it defaults to True;
+    one older than ``external_push`` allowed no other registry, so that
+    defaults to False (fail closed).
     """
     field = next(f for f in dataclasses.fields(sdk.ContainerRuntime) if f.name == "image_build")
     assert field.default is None
@@ -391,10 +394,14 @@ def test_container_runtime_image_build_defaults_to_none():
     build = sdk.ImageBuild(registry="registry.hegemony.internal", namespace="orgs/acme")
     assert build.network == sdk.BUILD_NETWORK_NONE == "none"
     assert sdk.BUILD_NETWORK_DEFAULT == "default"
+    assert build.push is True
+    assert build.external_push is False
     assert [f.name for f in dataclasses.fields(sdk.ImageBuild)] == [
         "registry",
         "namespace",
         "network",
+        "push",
+        "external_push",
     ]
     with_build = dataclasses.replace(runtime, image_build=build)
     assert with_build.image_build is build
