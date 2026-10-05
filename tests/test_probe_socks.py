@@ -261,20 +261,56 @@ async def test_client_refuses_unauthenticated_proxy_when_credentials_configured(
 
 
 async def test_tcp_connect_reports_socks_error_for_unreachable_proxy():
+    # A valid setting whose proxy does not answer may answer a later attempt:
+    # a socks_error, not a config_error.
     result = await TcpConnectProbe().execute(
         "10.9.9.9",
-        {"port": 22, "timeout_ms": 1000, "socks_proxy": "socks5://127.0.0.1:1/"},
+        {"port": 22, "timeout_ms": 1000, "socks_proxy": "socks5://127.0.0.1:1"},
     )
     assert result.ok is False
     assert result.error_kind in {"socks_error", "timeout"}
 
 
-async def test_tcp_connect_rejects_bad_proxy_url():
-    result = await TcpConnectProbe().execute(
-        "10.9.9.9", {"port": 22, "socks_proxy": "http://nope:8080"}
-    )
+#: socks_proxy values no poll can ever dial: a wrong scheme, no port, a bad
+#: port, credentials longer than RFC 1929 can carry.
+_INVALID_PROXIES = [
+    pytest.param("http://nope:8080", id="scheme"),
+    pytest.param("socks5://user:s3cr3t@dind", id="no-port"),
+    pytest.param("socks5://dind:notaport", id="port-not-a-number"),
+    pytest.param("socks5://dind:0", id="port-zero"),
+    pytest.param(f"socks5://{'u' * 256}:s3cr3t@dind:1080", id="long-username"),
+    pytest.param(f"socks5://user:{'p' * 256}@dind:1080", id="long-password"),
+]
+
+
+@pytest.mark.parametrize("probe_class", [TcpConnectProbe, HttpHealthProbe])
+@pytest.mark.parametrize("proxy", _INVALID_PROXIES)
+async def test_an_invalid_proxy_setting_is_a_config_error(probe_class, proxy):
+    """A setting that can never work is a config_error, which callers such as
+    probe.wait_reachable stop on, not a socks_error they poll again."""
+    result = await probe_class().execute("10.9.9.9", {"port": 22, "socks_proxy": proxy})
+    assert result.ok is False
+    assert result.error_kind == "config_error"
+    assert "socks_proxy" in (result.error_detail or "")
+    assert "s3cr3t" not in (result.error_detail or "")
+
+
+async def test_http_health_keeps_socks_error_for_a_failed_handshake():
+    """Only the setting is a config_error: a proxy that will not authenticate
+    us is a socks_error, which a later poll may get past."""
+    server = _FakeSocks5Server(force_no_auth=True)
+    await server.start()
+    try:
+        result = await HttpHealthProbe().execute(
+            "10.9.9.9",
+            {"timeout_ms": 3000, "socks_proxy": f"socks5://u:p@127.0.0.1:{server.port}"},
+        )
+    finally:
+        await server.stop()
+
     assert result.ok is False
     assert result.error_kind == "socks_error"
+    assert "unauthenticated" in (result.error_detail or "")
 
 
 # ── http_health through the proxy ─────────────────────────────────────────────
@@ -405,6 +441,18 @@ class TestSocksProxyParsing:
     def test_out_of_range_port_is_rejected(self) -> None:
         with pytest.raises(SocksError):
             parse_socks_proxy("socks5://dind:99999")
+
+    def test_credentials_rfc_1929_cannot_carry_are_rejected(self) -> None:
+        # Known from the setting alone, so refused before any dial. Multi-byte
+        # characters count in bytes, as they go on the wire.
+        for userinfo in ("u" * 256 + ":s3cr3t", "user:" + "p" * 256, "é" * 128 + ":s3cr3t"):
+            with pytest.raises(SocksError) as exc_info:
+                parse_socks_proxy(f"socks5://{userinfo}@dind:1080")
+            assert "RFC 1929" in str(exc_info.value)
+            assert "s3cr3t" not in str(exc_info.value)
+        # At the limit still parses.
+        proxy = parse_socks_proxy(f"socks5://{'u' * 255}:{'p' * 255}@dind:1080")
+        assert (len(proxy.username or ""), len(proxy.password or "")) == (255, 255)
 
     def test_an_ipv6_proxy_is_dialled_without_its_brackets(self) -> None:
         proxy = parse_socks_proxy("socks5://u:p@[fd00::1]:1080")

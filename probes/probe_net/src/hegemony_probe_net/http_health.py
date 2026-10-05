@@ -137,9 +137,18 @@ class HttpHealthProbe(BaseProbe):
         netloc = authority if port in (None, 80) else f"{authority}:{port}"
         url = f"http://{netloc}{url_path}"
 
+        transport: _SocksAsyncTransport | None = None
+        if socks_proxy:
+            # A value that does not parse fails every attempt the same way:
+            # a config_error, which callers stop on. A socks_error is a
+            # handshake failure that a later attempt may get past.
+            try:
+                transport = _SocksAsyncTransport(socks_proxy, timeout_sec)
+            except SocksError as exc:
+                return ProbeResult(ok=False, error_kind="config_error", error_detail=str(exc))
+
         start = time.perf_counter()
         try:
-            transport = _SocksAsyncTransport(socks_proxy, timeout_sec) if socks_proxy else None
             async with httpx.AsyncClient(
                 timeout=timeout_sec, follow_redirects=False, transport=transport
             ) as client:

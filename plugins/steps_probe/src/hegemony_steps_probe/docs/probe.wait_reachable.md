@@ -75,10 +75,12 @@ when a setting is out of range or of the wrong type, or when any device has
 no management address (waiting would only time out). It fails on the first
 poll when an egress policy denies a target, when the check type is not
 registered on the worker, or when the check refuses its settings, such as
-ICMP Ping with a SOCKS5 Proxy or DNS Resolve of an IP address: no later poll
-could pass. Otherwise the only failure is the deadline: after Max Wait (sec)
-the step fails, naming the targets that were unreachable at the last poll -
-a target that was reachable but still partway through its stability window
-caused the failure too, without being named. Momentary failures never fail
-the step by themselves — an unreachable poll just resets that target's
-stability window and the polling continues until the deadline.
+ICMP Ping with a SOCKS5 Proxy, a SOCKS5 Proxy that is not a `socks5://` or
+`socks5h://` URL with a host and port, or DNS Resolve of an IP address: no
+later poll could pass. Otherwise the only failure is the deadline: after Max
+Wait (sec) the step fails, naming the targets that were unreachable at the
+last poll - a target that was reachable but still partway through its
+stability window caused the failure too, without being named. Momentary
+failures never fail the step by themselves — an unreachable poll, including
+one through a proxy that does not answer or refuses the login, just resets
+that target's stability window and the polling continues until the deadline.

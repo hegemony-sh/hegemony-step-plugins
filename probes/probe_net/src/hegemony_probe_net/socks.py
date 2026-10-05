@@ -26,7 +26,18 @@ from urllib.parse import unquote
 
 
 class SocksError(Exception):
-    """The SOCKS5 handshake failed (unreachable proxy, auth, or CONNECT reply)."""
+    """The SOCKS5 handshake failed (unreachable proxy, auth, or CONNECT reply).
+
+    :func:`parse_socks_proxy` raises it too, for a ``socks_proxy`` value no
+    handshake could use; the probes report that one as a ``config_error``.
+    """
+
+
+#: RFC 1929 length-prefixes each field with a single byte.
+_CREDENTIALS_TOO_LONG = (
+    "socks_proxy credentials do not fit SOCKS5 username/password auth "
+    "(RFC 1929: username 1-255 bytes, password up to 255)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +64,9 @@ def parse_socks_proxy(value: str) -> SocksProxy:
     values arrive already resolved from a secret, a parse detail is a
     credential detail: every error raised here names only the shape expected,
     never the input.
+
+    Credentials too long for RFC 1929 are refused here as well, before any
+    dial: like a malformed URL, they could never complete a handshake.
     """
     text = value.strip()
     scheme, separator, authority = text.partition("://")
@@ -73,13 +87,18 @@ def parse_socks_proxy(value: str) -> SocksProxy:
     if not host or not 1 <= port <= 65535:
         raise SocksError("socks_proxy requires host and port (e.g. socks5://user:pass@dind:1080)")
     username, _, password = userinfo.partition(":")
-    return SocksProxy(
+    proxy = SocksProxy(
         host=host,
         port=port,
         username=unquote(username) if username else None,
         password=unquote(password) if password else None,
         remote_dns=scheme == "socks5h",
     )
+    if proxy.username is not None and (
+        len(proxy.username.encode()) > 255 or len((proxy.password or "").encode()) > 255
+    ):
+        raise SocksError(_CREDENTIALS_TOO_LONG)
+    return proxy
 
 
 _SOCKS_REPLY_ERRORS = {
@@ -126,10 +145,7 @@ async def _negotiate_auth(
         # message would escape the "never echo the input" rule the parser
         # above follows. UNAME must also be non-empty.
         if not 1 <= len(user) <= 255 or len(password) > 255:
-            raise SocksError(
-                "socks_proxy credentials do not fit SOCKS5 username/password auth "
-                "(RFC 1929: username 1-255 bytes, password up to 255)"
-            )
+            raise SocksError(_CREDENTIALS_TOO_LONG)
         writer.write(bytes([0x01, len(user)]) + user + bytes([len(password)]) + password)
         await writer.drain()
         _auth_ver, status = await reader.readexactly(2)

@@ -640,6 +640,34 @@ async def test_wait_reachable_fails_at_once_when_the_check_cannot_run(answer, er
     assert len(probes.calls) == 1
 
 
+@pytest.mark.parametrize("check_type", ["tcp_connect", "http_health"])
+async def test_wait_reachable_stops_at_once_on_an_invalid_proxy(check_type):
+    """The bundled probes report a SOCKS5 Proxy that is no socks5:// URL as
+    a config_error, so the wait ends on the first poll instead of polling a
+    setting that cannot work until Max Wait (sec)."""
+    from hegemony_probe_net.http_health import HttpHealthProbe
+    from hegemony_probe_net.tcp_connect import TcpConnectProbe
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    probes = {"tcp_connect": TcpConnectProbe(), "http_health": HttpHealthProbe()}
+
+    class _BundledProbes(_FakeProbes):
+        async def run_probe(self, check_type, address, options):
+            self.calls.append((check_type, address, dict(options)))
+            return await probes[check_type].execute(address, options)
+
+    services = _BundledProbes()
+    config = {"check_type": check_type, "max_wait_seconds": 300, "socks_proxy": "socks5://dind"}
+    ctx = _ip_target_ctx(config, ["192.0.2.7"], services=services)
+    result = await asyncio.wait_for(WaitReachableHandler().execute(ctx), timeout=5)
+    assert result.success is False
+    assert result.error == (
+        f"{check_type} cannot run against 192.0.2.7: socks_proxy requires host and port "
+        "(e.g. socks5://user:pass@dind:1080)"
+    )
+    assert len(services.calls) == 1
+
+
 async def test_wait_reachable_measures_each_target_up_to_its_own_answer():
     """A slow poll of one target must not count toward another's window.
 
