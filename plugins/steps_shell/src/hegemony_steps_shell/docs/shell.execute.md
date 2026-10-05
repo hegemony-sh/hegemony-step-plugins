@@ -24,13 +24,22 @@ step results, resolved before the step runs. A rendered value becomes part of
 the remote shell's command line, so every `{{ }}` value must end with the
 `quote` filter, which turns it into one literal word:
 `systemctl restart {{ inputs.service | quote }}`. Without it, an input such as
-`nginx; rm -rf ~` would run a second command. The step refuses to run a line
-with an unquoted value. The other safe way in is an environment variable:
-set `SERVICE={{ inputs.service }}` under Environment Variables and write
-`systemctl restart "$SERVICE"` in the command. `{% %}` statements such as
-`{% if inputs.force %}--force{% endif %}` need no filter. `{{ device.* }}`
-refers to the first target only, so with several targets use values that are
-the same for every host.
+`nginx; rm -rf ~` would run a second command. The quoted value must also
+stand where the shell reads words, not inside `'...'` or `"..."`, a `#`
+comment, backticks or a here-document: there the quoting does not hold, and
+`echo "{{ inputs.msg | quote }}"` would let a value containing `"` end the
+string. `{% if %}` and `{% for %}` statements are fine where a value would
+be (`{% if inputs.force %}--force{% endif %}`); `{% filter %}`,
+`{% include %}`, imports and macros are not supported. The step refuses to
+run a line that breaks these rules, before anything is rendered. Quoting
+keeps a value one word; a command that runs its argument as code (`eval`,
+`sh -c`, `ssh host`) still runs it.
+
+The other safe way in is an environment variable: set
+`SERVICE={{ inputs.service }}` under Environment Variables and write
+`systemctl restart "$SERVICE"` in the command. `{{ device.* }}` refers to
+the first target only, so with several targets use values that are the same
+for every host.
 
 The Interpreter field controls how each line is wrapped on the remote host.
 The default runs the line as-is in the account's login shell. `sh` and `bash`
@@ -72,7 +81,8 @@ Metrics record `command_count` (configured commands), `device_count`, and
 ## When It Fails
 
 The step fails immediately — before contacting any host — when a command
-line inserts a `{{ }}` value without `| quote`, when no target devices or no
+line inserts a `{{ }}` value without `| quote` or inside quotes, a comment,
+backticks or a here-document, when no target devices or no
 commands are configured, or when environment variables are combined with the
 `pwsh` interpreter. Per host, it fails when the device has
 no management host, when the shell connection cannot be opened, when a command

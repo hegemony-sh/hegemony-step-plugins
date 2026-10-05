@@ -152,8 +152,10 @@ text again must keep it data:
 - **Shell command lines.** Refuse unquoted values before they are rendered:
   override `template_errors(config)`, which the host calls with the step's
   config as written on every run and fails the step on (`shell.execute`
-  requires every `{{ }}` value in a command to end with the host's `| quote`
-  filter). Prefer passing values as quoted environment variables.
+  parses each command with Jinja and a shell-quoting scanner and requires
+  every `{{ }}` value to end with the host's `| quote` filter and stand in an
+  unquoted word position). Prefer passing values as quoted environment
+  variables.
 - **Text another template engine reads** (Ansible variable files): escape it,
   as `ansible.playbook` does with `literal()` for inventory, secrets and extra
   variables.

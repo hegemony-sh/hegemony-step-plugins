@@ -12,7 +12,6 @@ implements it) is resolved from ``device.access_config`` via
 """
 
 import logging
-import re
 import shlex
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -32,37 +31,31 @@ from hegemony_step_sdk import (
     max_parallel_from_config,
 )
 
+from .templates import command_template_problem
+
 logger = logging.getLogger(__name__)
 
 #: Interpreters that accept the sh-style ``env``/``-c`` wrapping.
 _SH_FAMILY = frozenset({"sh", "bash"})
 
-#: One ``{{ ... }}`` expression (whitespace-control dashes included) and the
-#: ``| quote`` filter that must end it.
-_EXPRESSION_RE = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
-_QUOTED_RE = re.compile(r"\|\s*quote\s*-?\s*$")
 
+def command_template_errors(commands: Any) -> list[str]:
+    """One error per command line that could let a rendered value become shell syntax.
 
-def unquoted_template_lines(commands: Any) -> list[int]:
-    """1-based numbers of the command lines with a ``{{ }}`` value not ending in ``| quote``.
-
-    A rendered value lands in the remote shell's command line, so an unquoted
-    one is parsed as shell syntax: an input of ``x; rm -rf ~`` runs a second
-    command. ``| quote`` (the platform's shell-quoting filter) makes the value
-    one literal word. ``{% %}`` statements insert no values of their own and
-    are not checked.
+    A rendered value lands in the remote shell's command line, so an input of
+    ``x; rm -rf ~`` would run a second command. See :mod:`.templates` for what
+    a line must look like: every value ``| quote``-d and standing unquoted.
     """
     if not isinstance(commands, list):
         return []
-    lines: list[int] = []
+    errors: list[str] = []
     for number, command in enumerate(commands, start=1):
         if not isinstance(command, str):
             continue
-        for match in _EXPRESSION_RE.finditer(command):
-            if not _QUOTED_RE.search(match.group(1)):
-                lines.append(number)
-                break
-    return lines
+        problem = command_template_problem(command)
+        if problem:
+            errors.append(f"commands line {number}: {problem}")
+    return errors
 
 
 def build_command(
@@ -112,8 +105,9 @@ class ShellExecuteConfig(BaseModel):
         title="Commands (one per line)",
         description=(
             "Each line runs as its own exec-channel command with its own exit code. "
-            "A {{ }} value must end with | quote, e.g. {{ inputs.service | quote }}, "
-            "or come in through Environment Variables."
+            "A {{ }} value must end with | quote and stand outside quotes, e.g. "
+            "systemctl restart {{ inputs.service | quote }}, or come in through "
+            "Environment Variables."
         ),
         json_schema_extra={
             "x_widget": "commands",
@@ -204,16 +198,8 @@ class ShellExecuteHandler(BaseHandler):
     default_config = {"shell": "default", "fail_fast": True, "command_timeout_sec": 60}
 
     def template_errors(self, config: dict[str, Any]) -> list[str]:
-        """Refuse command lines that insert a ``{{ }}`` value without ``| quote``."""
-        lines = unquoted_template_lines(config.get("commands"))
-        if not lines:
-            return []
-        numbers = ", ".join(str(number) for number in lines)
-        return [
-            f"commands line {numbers}: a {{{{ }}}} value inserted into a shell command "
-            "must end with | quote, e.g. {{ inputs.name | quote }}, or be passed in "
-            'Environment Variables and read as "$NAME"'
-        ]
+        """Refuse command lines whose ``{{ }}`` values would not be single literal words."""
+        return command_template_errors(config.get("commands"))
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         target_devices = ctx.get_target_devices()
