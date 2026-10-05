@@ -337,7 +337,7 @@ class UpgradeStageHandler(BaseHandler):
             await ctx.emit_progress(f"Staging file on {device_name}", device_id)
 
             try:
-                ssh = services.connect(device, platform=platform)
+                ssh = services.connect(device, platform=platform, step_run_id=ctx.step_run_id)
                 result = await driver.stage(
                     ssh,
                     source_url=source_url,

@@ -240,7 +240,7 @@ class UpgradeInstallHandler(BaseHandler):
             )
 
             try:
-                ssh = services.connect(device, platform=platform)
+                ssh = services.connect(device, platform=platform, step_run_id=ctx.step_run_id)
                 await ctx.emit_progress(
                     f"Executing install command on {device_name}",
                     device_id,

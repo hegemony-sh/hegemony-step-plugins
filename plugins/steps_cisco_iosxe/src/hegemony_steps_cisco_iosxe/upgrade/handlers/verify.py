@@ -223,7 +223,9 @@ class UpgradeVerifyHandler(BaseHandler):
                     attempts += 1
                     try:
                         # Create transport and test with a simple command
-                        ssh = services.connect(device, platform=platform)
+                        ssh = services.connect(
+                            device, platform=platform, step_run_id=ctx.step_run_id
+                        )
                         # Test connectivity with a simple command
                         test_result = await ssh.execute_command("show clock")
                         if test_result.exit_code == 0:
@@ -241,7 +243,7 @@ class UpgradeVerifyHandler(BaseHandler):
                         await asyncio.sleep(retry_interval)
 
                 # Run verification (create fresh transport for verification commands)
-                ssh = services.connect(device, platform=platform)
+                ssh = services.connect(device, platform=platform, step_run_id=ctx.step_run_id)
                 result = await driver.verify(
                     ssh,
                     target_version=target_version,
