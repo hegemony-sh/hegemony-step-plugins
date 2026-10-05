@@ -374,6 +374,24 @@ async def test_dns_probe_does_not_ask_a_resolver_the_policy_denies(monkeypatch):
         await DnsProbeHandler().execute(ctx)
 
 
+async def test_dns_probe_refuses_a_resolver_when_no_gate_can_check_it(monkeypatch):
+    """Fail closed: a host without enforce_egress cannot apply the policy."""
+    from hegemony_steps_probe import dns_check
+    from hegemony_steps_probe.dns_check import DnsProbeHandler
+
+    async def fail_resolve(*args, **kwargs):
+        raise AssertionError("an unchecked resolver was asked")
+
+    monkeypatch.setattr(dns_check, "resolve_records", fail_resolve)
+    config = {"query_name": "device.example.com", "resolver": "192.0.2.53"}
+    for services in (None, type("_Services", (), {})()):
+        result = await DnsProbeHandler().execute(
+            _ip_target_ctx(config, ["192.0.2.7"], services=services)
+        )
+        assert result.success is False
+        assert "cannot apply the flow's network policy" in (result.error or "")
+
+
 @pytest.mark.parametrize(
     "resolver", ["dns.google", "1.2.3.4:53", "https://dns.google/dns-query", "tls://1.1.1.1"]
 )

@@ -171,10 +171,19 @@ class DnsProbeHandler(BaseHandler):
             # a destination like any other the step dials, so the flow's
             # egress policy decides whether the queries may reach it. A denial
             # raises out of the step with the policy's reason.
+            # Fail closed: without the gate nothing would apply the policy.
             enforce = getattr(ctx.services, "enforce_egress", None)
-            if enforce is not None:
-                for proto in DNS_PROTOCOLS:
-                    await enforce(resolver_ip, DNS_PORT, proto=proto, kind="dns query")
+            if enforce is None:
+                return HandlerResult(
+                    success=False,
+                    error=(
+                        "this platform cannot apply the flow's network policy to a "
+                        "chosen Resolver; leave it empty to use the system resolver"
+                    ),
+                    summary="DNS check configuration error",
+                )
+            for proto in DNS_PROTOCOLS:
+                await enforce(resolver_ip, DNS_PORT, proto=proto, kind="dns query")
 
         all_evidence: list[dict[str, Any]] = []
         all_metrics: dict[str, Any] = {}

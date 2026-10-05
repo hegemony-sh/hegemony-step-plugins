@@ -63,6 +63,8 @@ def test_template_errors_accepts_quoted_unquoted_position_values(command):
         'echo {{ "| quote }}" ~ inputs.msg }}',
         'echo {{ inputs.msg ~ "" | quote }}',
         "{{ 'constant' }}",
+        # Every branch must be quoted: the filter binds to the else branch only.
+        "echo {{ inputs.a if inputs.c else inputs.b | quote }}",
         "{{ inputs.msg | quote(1) }}",
     ],
 )

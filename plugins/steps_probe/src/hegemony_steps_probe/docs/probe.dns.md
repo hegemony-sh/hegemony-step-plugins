@@ -48,7 +48,8 @@ text when resolution failed.
 
 The step fails when no target devices or IPs are configured, when Resolver
 is not an IP address, and when the flow's network policy does not allow the
-resolver; the policy's reason is then the step error. A target fails
+resolver (the policy's reason is then the step error) or the platform cannot
+apply the policy to it. A target fails
 when the lookup errors (NXDOMAIN, refusal, or timeout — the timeout applies
 per attempt, not to the step as a whole), when any Expected Value is missing
 from the answers, when the target has no name to resolve, or when it is a
