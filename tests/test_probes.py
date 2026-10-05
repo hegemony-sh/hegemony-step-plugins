@@ -4,7 +4,14 @@
 
 """Registration and behavior tests for the hegemony-probe-net wheel."""
 
+import asyncio
+import contextlib
+import os
+import signal
+import sys
+
 import httpx
+import pytest
 
 import hegemony_probe_net
 from hegemony_probe_net import http_health
@@ -151,3 +158,35 @@ async def test_http_health_does_not_follow_a_redirect(monkeypatch):
     assert result.ok is True, result.error_detail
     assert result.metrics["http_status"] == 302
     assert seen == ["http://192.0.2.7/health"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX shell script as ping")
+async def test_icmp_ping_kills_and_reaps_ping_when_cancelled(tmp_path, monkeypatch):
+    """A caller's deadline cancels the probe while ping still runs; the
+    child must not outlive it."""
+    from hegemony_probe_net.icmp_ping import IcmpPingProbe
+
+    pid_file = tmp_path / "ping.pid"
+    fake_ping = tmp_path / "ping"
+    fake_ping.write_text(f'#!/bin/sh\necho $$ > "{pid_file}"\nexec sleep 30\n')
+    fake_ping.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    task = asyncio.ensure_future(
+        IcmpPingProbe().execute("192.0.2.7", {"count": 1, "timeout_ms": 1000})
+    )
+    for _ in range(500):
+        if pid_file.exists() and pid_file.read_text().strip():
+            break
+        await asyncio.sleep(0.01)
+    pid = int(pid_file.read_text())
+    try:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Killed and reaped: a zombie would still accept signal 0.
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
