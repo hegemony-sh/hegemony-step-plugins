@@ -284,6 +284,44 @@ async def test_connectivity_probe_unions_devices_and_ips():
     assert result.summary == "tcp_connect: 2/2 targets OK"
 
 
+async def test_connectivity_port_defaults_by_check_type():
+    """An empty Port is 80 for HTTP Health, and 22 for the others as it always was."""
+    from hegemony_step_sdk import ProbeResult
+    from hegemony_steps_probe.connectivity import (
+        ConnectivityCheckConfig,
+        ConnectivityCheckHandler,
+    )
+
+    calls: list[tuple[str, int | None]] = []
+
+    class _Services:
+        async def run_probe(self, check_type, address, options):
+            calls.append((check_type, options.get("port")))
+            return ProbeResult(ok=True)
+
+    handler = ConnectivityCheckHandler()
+    # A new step starts without a port, so the check's own default applies.
+    assert "port" not in handler.default_config
+    assert ConnectivityCheckConfig().port is None
+    configs: list[dict[str, Any]] = [
+        {},
+        {"check_type": "http_health"},
+        {"check_type": "http_health", "port": None},
+        {"check_type": "http_health", "port": 8080},
+        {"check_type": "tcp_connect", "port": 443},
+    ]
+    for config in configs:
+        result = await handler.execute(_ip_target_ctx(config, ["192.0.2.7"], services=_Services()))
+        assert result.success is True, (config, result.error)
+    assert calls == [
+        ("tcp_connect", 22),
+        ("http_health", 80),
+        ("http_health", 80),
+        ("http_health", 8080),
+        ("tcp_connect", 443),
+    ]
+
+
 async def test_probe_handlers_fail_the_same_way_without_any_target():
     """All four probe handlers speak with one voice when nothing is targeted."""
     from hegemony_steps_probe.connectivity import ConnectivityCheckHandler

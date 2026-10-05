@@ -24,6 +24,7 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
+from .checks import PORT_CHECKS, default_port
 from .targets import all_probe_targets
 
 logger = logging.getLogger(__name__)
@@ -58,14 +59,18 @@ class ConnectivityCheckConfig(BaseModel):
             },
         },
     )
-    port: int = Field(
-        default=22,
+    port: int | None = Field(
+        default=None,
         ge=1,
         le=65535,
         title="Port",
-        description="For TCP/TLS/SSH checks",
+        description=(
+            "Port the port-based checks connect to. When empty, HTTP Health "
+            "uses 80 and the other checks 22. Ignored by ICMP Ping and DNS "
+            "Resolve."
+        ),
         json_schema_extra={
-            "x_placeholder": "22",
+            "x_placeholder": "22, or 80 for HTTP Health",
             "x_hide_when": {"field": "check_type", "value": "icmp_ping"},
         },
     )
@@ -132,7 +137,7 @@ class ConnectivityCheckHandler(BaseHandler):
 
     Config:
         check_type: str - Type of check (default: tcp_connect)
-        port: int - Target port (default: 22)
+        port: int - Target port (default: 80 for http_health, else 22)
         timeout_sec: int - Timeout per attempt (default: 10)
         attempts: int - Number of attempts (default: 1)
         url_path: str - For http_health, the URL path (default: /health)
@@ -145,7 +150,7 @@ class ConnectivityCheckHandler(BaseHandler):
     description = "One-shot connectivity probes (TCP/ICMP/HTTP/DNS) against targets."
     category = "Checks"
     config_model = ConnectivityCheckConfig
-    default_config = {"check_type": "tcp_connect", "port": 22, "timeout_sec": 10, "attempts": 1}
+    default_config = {"check_type": "tcp_connect", "timeout_sec": 10, "attempts": 1}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Run connectivity check against all targets (devices and direct IPs)."""
@@ -158,7 +163,9 @@ class ConnectivityCheckHandler(BaseHandler):
             )
 
         check_type = ctx.config.get("check_type", "tcp_connect")
-        port = ctx.config.get("port", 22)
+        # An empty Port means the check's own default: 80 for HTTP Health,
+        # 22 (the old fixed default) for the rest.
+        port = ctx.config.get("port") or default_port(check_type)
         timeout_sec = ctx.config.get("timeout_sec", 10)
         attempts = min(ctx.config.get("attempts", 1), 10)
 
@@ -166,13 +173,10 @@ class ConnectivityCheckHandler(BaseHandler):
         # reported per-device below when run_probe raises KeyError — validity is
         # the host probe registry, not a hardcoded allowlist here.
         options: dict[str, Any] = {"timeout_ms": timeout_sec * 1000}
-        if check_type == "tcp_connect":
+        if check_type in PORT_CHECKS:
             options["port"] = port
-        elif check_type == "http_health":
-            options["port"] = port
+        if check_type == "http_health":
             options["url_path"] = ctx.config.get("url_path", "/health")
-        elif check_type in ("tls_handshake", "ssh_banner"):
-            options["port"] = port
         elif check_type == "icmp_ping":
             options["count"] = 1
         elif check_type == "dns_resolve":
