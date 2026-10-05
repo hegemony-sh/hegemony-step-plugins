@@ -276,12 +276,12 @@ async def test_verify_reports_an_uncommitted_install():
 
 
 async def test_verify_fails_when_install_commit_fails(monkeypatch):
-    import hegemony_steps_cisco_iosxe.upgrade.cisco.iosxe_install as install_module
-
     async def _no_sleep(_seconds):
         return None
 
-    monkeypatch.setattr(install_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(
+        "hegemony_steps_cisco_iosxe.upgrade.cisco.iosxe_install.asyncio.sleep", _no_sleep
+    )
     ssh = ScriptedTransport(
         {
             "show version": Result("Cisco IOS XE Software, Version 17.09.04a"),
