@@ -435,6 +435,21 @@ class BaseHandler(ABC):
             ]
         return []
 
+    def template_errors(self, config: dict[str, Any]) -> list[str]:
+        """Refuse template uses in ``config`` that would be unsafe once rendered.
+
+        The host calls this with the step's config as written, before it renders
+        any ``{{ }}`` template, every time the step runs, and fails the step on
+        any error. Override it when a rendered value could change what the step
+        does, e.g. a value spliced unquoted into a shell command line. The
+        messages are stored with the step's result, so they should name the
+        field and line, not quote the template.
+
+        Returns:
+            List of error messages (empty if the templates are acceptable)
+        """
+        return []
+
 
 def command_label(command: str, max_len: int = 80) -> str:
     """Short single-line display label for a command-derived artifact name.

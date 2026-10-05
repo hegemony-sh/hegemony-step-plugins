@@ -16,18 +16,43 @@ stderr, which makes it the right step for Linux/Unix hosts.
 
 Write the commands one per line. Each line is sent as its own exec-channel
 command, in order, on every target device, and succeeds or fails on its own
-exit code. Command lines accept `{{ variable }}` templates for flow inputs and
-earlier step results, resolved before the step runs. Targets are chosen with
-the role-based target picker; there is no additional-IP list for this step.
+exit code. Targets are chosen with the role-based target picker; there is no
+additional-IP list for this step.
+
+Command lines accept `{{ variable }}` templates for flow inputs and earlier
+step results, resolved before the step runs. A rendered value becomes part of
+the remote shell's command line, so every `{{ }}` value must end with the
+`quote` filter, which turns it into one literal word:
+`systemctl restart {{ inputs.service | quote }}`. Without it, an input such as
+`nginx; rm -rf ~` would run a second command. The quoted value must also
+stand where the shell reads words, not inside `'...'` or `"..."`, a `#`
+comment, backticks or a here-document: there the quoting does not hold, and
+`echo "{{ inputs.msg | quote }}"` would let a value containing `"` end the
+string. `{% if %}` and `{% for %}` statements are fine where a value would
+be (`{% if inputs.force %}--force{% endif %}`); `{% filter %}`,
+`{% include %}`, imports and macros are not supported. The step refuses to
+run a line that breaks these rules, before anything is rendered. Quoting
+keeps a value one word; a command that runs its argument as code (`eval`,
+`sh -c`, `ssh host`) still runs it.
+
+The other safe way in is an environment variable: set
+`SERVICE={{ inputs.service }}` under Environment Variables and write
+`systemctl restart "$SERVICE"` in the command. `{{ device.* }}` refers to
+the first target only, so with several targets use values that are the same
+for every host.
 
 The Interpreter field controls how each line is wrapped on the remote host.
 The default runs the line as-is in the account's login shell. `sh` and `bash`
 quote the line into `sh -c '...'` or `bash -c '...'`, which keeps pipelines
 and quoting predictable regardless of the login shell. `pwsh` wraps the line
 in `pwsh -NoProfile -Command '...'` for PowerShell hosts. Environment
-variables are prefixed with `env KEY=VALUE` on POSIX remotes; they cannot be
-combined with the `pwsh` interpreter — that combination is rejected before
-anything runs.
+variables are quoted and set for every command: with the default interpreter
+they are exported in the login shell first (`export KEY=VALUE; ...`, so a
+POSIX login shell is needed), with `sh` and `bash` they are prefixed as
+`env KEY=VALUE`. Either way `"$KEY"` works anywhere in the line. Their values
+appear on the remote command line (for example in the host's process list),
+so they are not a place for secrets. They cannot be combined with the `pwsh`
+interpreter — that combination is rejected before anything runs.
 
 "Stop on first failure" (on by default) skips a device's remaining commands
 after the first non-zero exit code; turn it off to run every command and
@@ -55,9 +80,11 @@ Metrics record `command_count` (configured commands), `device_count`, and
 
 ## When It Fails
 
-The step fails immediately — before contacting any host — when no target
-devices or no commands are configured, or when environment variables are
-combined with the `pwsh` interpreter. Per host, it fails when the device has
+The step fails immediately — before contacting any host — when a command
+line inserts a `{{ }}` value without `| quote` or inside quotes, a comment,
+backticks or a here-document, when no target devices or no
+commands are configured, or when environment variables are combined with the
+`pwsh` interpreter. Per host, it fails when the device has
 no management host, when the shell connection cannot be opened, when a command
 exits non-zero, or when a command times out or the transport raises an error
 (which also skips that host's remaining commands). One failing host does not

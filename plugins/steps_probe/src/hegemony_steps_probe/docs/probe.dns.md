@@ -23,7 +23,10 @@ question, and such a target fails with a clear message otherwise.
 
 Record Type picks the query (A by default; AAAA, CNAME, MX, NS, and TXT are
 also available). Resolver optionally directs the query at a specific
-nameserver IP; when empty the worker's system resolver is used. Expected
+nameserver IP address; when empty the worker's system resolver is used. A
+resolver is a destination the step dials, so the flow's network policy must
+allow it on port 53 for both UDP and TCP (DNS falls back to TCP for large
+answers); host names, ports and URLs are refused. Expected
 Values lists answers, one per line, that must all appear in the response —
 comparison is normalized, so case, trailing dots, and surrounding quotes do
 not matter, and extra answers beyond the expected ones are fine. With no
@@ -43,7 +46,10 @@ text when resolution failed.
 
 ## When It Fails
 
-The step fails when no target devices or IPs are configured. A target fails
+The step fails when no target devices or IPs are configured, when Resolver
+is not an IP address, and when the flow's network policy does not allow the
+resolver (the policy's reason is then the step error) or the platform cannot
+apply the policy to it. A target fails
 when the lookup errors (NXDOMAIN, refusal, or timeout — the timeout applies
 per attempt, not to the step as a whole), when any Expected Value is missing
 from the answers, when the target has no name to resolve, or when it is a
