@@ -335,6 +335,15 @@ def test_a_name_with_its_registry_is_pushed_there_when_allowed(push: bool) -> No
     assert destination.push
 
 
+def test_a_registry_host_is_spelled_in_lowercase() -> None:
+    """Host names know no case; Docker looks a login up by the host as written."""
+    destination = build_destination(
+        "Registry.Example.com:5000/team/tool", _target(external_push=True)
+    )
+    assert destination.repository == "registry.example.com:5000/team/tool"
+    assert destination.host == "registry.example.com:5000"
+
+
 def test_another_registry_needs_the_hosts_permission() -> None:
     with pytest.raises(BuildRefused) as refused:
         build_destination("ghcr.io/acme/x", _target())
@@ -788,6 +797,91 @@ async def test_a_name_with_its_registry_is_pushed_there_with_the_saved_login(fak
     assert details["content_json"]["saved_login"] is True
     # The name is taken off the shared sandbox once the push is done.
     assert _removals(fake_docker) == [["image", "rm", "--force", *references]]
+
+
+@pytest.mark.asyncio
+async def test_an_uppercase_registry_host_finds_the_saved_login(fake_docker) -> None:
+    _save_login(fake_docker["config_dir"], "registry.example.com")
+    services = _Services(
+        fake_docker["bin"], fake_docker["config_dir"], build=_target(external_push=True)
+    )
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(
+        _ctx(
+            {"image": "Registry.Example.com/team/tool", "context_dir": "images/tool"},
+            services,
+            events,
+        )
+    )
+    assert result.success, result.error
+    assert events[0][1]["saved_login"] is True
+    assert result.output["image"] == "registry.example.com/team/tool"
+
+
+@pytest.mark.asyncio
+async def test_names_pushed_elsewhere_come_off_the_sandbox_as_the_build_ends(
+    fake_docker, monkeypatch
+) -> None:
+    """Before the step reports anything, once the digest is read (through the names)."""
+    monkeypatch.setenv("FAKE_DOCKER_MODE", "no-metadata")
+    services = _Services(
+        fake_docker["bin"], fake_docker["config_dir"], build=_target(external_push=True)
+    )
+    removed_before: list[int] = []
+
+    async def emit(message: str, device_id: str | None = None, attrs: dict | None = None) -> bool:
+        if (attrs or {}).get("milestone") == "image_pushed":
+            removed_before.append(len(_removals(fake_docker)))
+        return True
+
+    ctx = HandlerContext(
+        run_id=RUN_ID,
+        flow_id="flow-1",
+        step_run_id="step-run-1",
+        step_id="build_tool",
+        config={"image": "ghcr.io/acme/tool", "context_dir": "images/tool"},
+        timeout_seconds=60,
+        services=cast(HandlerServices, services),
+        _emit_progress=emit,
+    )
+    result = await BuildImageHandler().execute(ctx)
+    assert result.success, result.error
+    assert result.output["digest"] == DIGEST
+    order = [call["argv"][:2] for call in fake_docker["calls"]()]
+    assert order == [["buildx", "build"], ["image", "inspect"], ["image", "rm"]]
+    # Removed once, before the push was reported.
+    assert removed_before == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_push_elsewhere_loses_its_names_once(fake_docker, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_DOCKER_MODE", "slow")
+    services = _Services(
+        fake_docker["bin"], fake_docker["config_dir"], build=_target(external_push=True)
+    )
+    result = await BuildImageHandler().execute(
+        _ctx({"image": "ghcr.io/acme/tool", "context_dir": "images/tool"}, services, [], timeout=1)
+    )
+    assert result.summary == "Build timed out"
+    assert _removals(fake_docker) == [["image", "rm", "--force", "ghcr.io/acme/tool:run-1a2b3c4d"]]
+
+
+@pytest.mark.asyncio
+async def test_a_push_elsewhere_cut_short_still_loses_its_names(fake_docker, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_DOCKER_MODE", "slow")
+
+    async def broken_add(self, raw: bytes) -> None:
+        raise RuntimeError("log sink broke")
+
+    monkeypatch.setattr(_BuildLog, "add", broken_add)
+    services = _Services(
+        fake_docker["bin"], fake_docker["config_dir"], build=_target(external_push=True)
+    )
+    with pytest.raises(RuntimeError, match="log sink broke"):
+        await BuildImageHandler().execute(
+            _ctx({"image": "ghcr.io/acme/tool", "context_dir": "images/tool"}, services, [])
+        )
+    assert _removals(fake_docker) == [["image", "rm", "--force", "ghcr.io/acme/tool:run-1a2b3c4d"]]
 
 
 @pytest.mark.asyncio

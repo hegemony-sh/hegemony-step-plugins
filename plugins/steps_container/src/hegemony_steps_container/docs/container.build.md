@@ -32,7 +32,8 @@ with a segment that looks like a registry host (a dot, or `localhost`): those
 names are reserved for the platform's cached copies of upstream images. A
 name with a registry in front may not name `localhost` (the sandbox itself)
 or the platform registry: give the platform registry's images their short
-name, and the step puts them under the organization's namespace.
+name, and the step puts them under the organization's namespace. The registry
+host is used in lowercase, the spelling its saved login goes by.
 
 Every build is tagged `run-` and the run's short id (the first eight
 characters of the run id, as the run pages show it), so each run's image stays

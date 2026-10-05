@@ -362,7 +362,10 @@ def build_destination(name: str, target: ImageBuild) -> BuildDestination:
             "(open mode, no Deny rules)",
             "Push not allowed",
         )
-    return BuildDestination(DESTINATION_REMOTE, name, host)
+    # Host names know no case, and Docker looks a login up by the host as
+    # written: the lowercase spelling is the one logins are saved under.
+    host = host.lower()
+    return BuildDestination(DESTINATION_REMOTE, f"{host}/{name.partition('/')[2]}", host)
 
 
 class BuildImageConfig(BaseModel):
@@ -841,6 +844,7 @@ class BuildImageHandler(BaseHandler):
         deadline = started + max(int(ctx.timeout_seconds or 0), 1)
         workdir = tempfile.mkdtemp(prefix="hegemony-build-")
         built = False
+        names_dropped = False
         try:
             context_root = os.path.join(workdir, "context")
             os.mkdir(context_root)
@@ -923,7 +927,21 @@ class BuildImageHandler(BaseHandler):
             log = _BuildLog(ctx.emit_progress)
             built = True
             exit_code = await self._run_build(docker_bin, argv, env, log, deadline)
+            # The digest first (the daemon's fallback reads it through the
+            # names), then an image pushed to another registry loses its names
+            # on the shared sandbox at once: nothing below needs them.
+            digest = ""
+            if exit_code == 0 and destination.push:
+                digest = self._metadata_digest(metadata_file) or await self._daemon_digest(
+                    docker_bin, env, references[0]
+                )
+            cleanup_problem = None
+            if destination.kind == DESTINATION_REMOTE:
+                names_dropped = True
+                cleanup_problem = await self._drop_names(docker_bin, env, references)
             await log.flush()
+            if cleanup_problem:
+                await self._report_names_left(emit, references, cleanup_problem)
             duration = round(time.monotonic() - started, 2)
             if exit_code is None:
                 timeout = int(ctx.timeout_seconds or 0)
@@ -962,9 +980,6 @@ class BuildImageHandler(BaseHandler):
                 )
 
             if destination.push:
-                digest = self._metadata_digest(metadata_file) or await self._daemon_digest(
-                    docker_bin, env, references[0]
-                )
                 if not digest:
                     # Later steps run output.reference; a tag in its place could
                     # move to another image after this step reported success.
@@ -1083,8 +1098,11 @@ class BuildImageHandler(BaseHandler):
             )
         finally:
             try:
-                if built and destination.kind == DESTINATION_REMOTE:
-                    await self._drop_names(docker_bin, env, references, emit)
+                # A build cut short by cancellation or an error still loses them.
+                if built and destination.kind == DESTINATION_REMOTE and not names_dropped:
+                    problem = await self._drop_names(docker_bin, env, references)
+                    if problem:
+                        await self._report_names_left(emit, references, problem)
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
 
@@ -1224,11 +1242,8 @@ class BuildImageHandler(BaseHandler):
 
     @staticmethod
     async def _drop_names(
-        docker_bin: str,
-        env: dict[str, str],
-        references: list[str],
-        emit: Callable[..., Awaitable[None]],
-    ) -> None:
+        docker_bin: str, env: dict[str, str], references: list[str]
+    ) -> str | None:
         """Take the names of an image pushed to another registry off the sandbox daemon.
 
         Every organization's steps share the sandbox daemon, and a step that
@@ -1237,9 +1252,10 @@ class BuildImageHandler(BaseHandler):
         namespace in place of the image that name stands for elsewhere. Run
         whatever the build got to, so a failed push leaves no name behind
         either. The names still exist from the build's export to the end of
-        its push, which a step running one in that window could see. Removing
-        a name only untags an image another name or a container still holds;
-        ``--force`` keeps a container from blocking it.
+        its push, which a step running one in that window could see; the
+        caller drops them as soon as the build ends. Removing a name only
+        untags an image another name or a container still holds; ``--force``
+        keeps a container from blocking it. Returns what went wrong, or None.
         """
         try:
             proc = await RunContainerHandler._run_docker(
@@ -1259,9 +1275,16 @@ class BuildImageHandler(BaseHandler):
                 if line.strip() and "no such image" not in line.lower()
             ]
             if proc.returncode == 0 or not leftover:
-                return
+                return None
             problem = "; ".join(leftover)[:300]
         logger.warning("Could not remove built image names from the sandbox: %s", problem)
+        return problem
+
+    @staticmethod
+    async def _report_names_left(
+        emit: Callable[..., Awaitable[None]], references: list[str], problem: str
+    ) -> None:
+        """Say in the step's log that names :meth:`_drop_names` could not remove remain."""
         await emit(
             f"Could not remove {', '.join(references)} from the sandbox after the build: {problem}",
             attrs={"milestone": "build_cleanup_failed", "references": references},
