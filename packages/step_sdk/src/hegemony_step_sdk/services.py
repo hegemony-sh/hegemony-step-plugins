@@ -144,21 +144,28 @@ BUILD_NETWORK_NONE = "none"
 
 @dataclass(frozen=True, slots=True)
 class ImageBuild:
-    """Where a step that builds an image pushes it, and the network its build gets.
+    """How a step that builds an image names it, where it may push it, and its build's network.
 
     Served inside :class:`ContainerRuntime` to handlers that declare
-    ``builds_images`` (``container.build``), when the platform runs its own
-    registry and granted the step push access to its organization's image
-    names. The image goes to ``<registry>/<namespace>/<name>:<tag>``; the
-    host writes the step's registry login (a short-lived token whose grant
-    covers those names) into the step's Docker configuration
-    (``ContainerRuntime.docker_config_dir``), which the build's push reads.
+    ``builds_images`` (``container.build``). An image the step names without
+    a registry host goes under ``<registry>/<namespace>/<name>:<tag>``. With
+    ``push`` the platform runs its registry and granted the step push access
+    to its organization's image names: the host writes the step's registry
+    login (a short-lived token whose grant covers those names) into the step's
+    Docker configuration (``ContainerRuntime.docker_config_dir``), which the
+    build's push reads. Without it the platform runs no registry, and the
+    image is built into the sandbox daemon only, under the name it would have
+    there. An image named with its own registry host (``ghcr.io/acme/tool``)
+    is pushed to that registry with the organization's login for the host
+    from the same Docker configuration, and only when ``external_push`` says
+    the step may.
     """
 
     # Host name image references use for the platform registry
-    # (``registry.hegemony.internal``).
+    # (``registry.hegemony.internal``), also when the platform runs none: the
+    # images built into the sandbox then carry the name they would have there.
     registry: str
-    # Repository prefix the image is pushed under (``orgs/acme``). The name the
+    # Repository prefix the image goes under (``orgs/acme``). The name the
     # step gives goes after it; a first segment shaped like a registry host
     # (a dot, or ``localhost``) is reserved for cached copies and refused.
     namespace: str
@@ -167,6 +174,17 @@ class ImageBuild:
     # otherwise. The host decides; the handler only applies it. Fail closed:
     # anything but ``default`` builds without network.
     network: str = BUILD_NETWORK_NONE
+    # Whether the platform registry takes the image: False when the platform
+    # runs none, and the image stays in the sandbox daemon, unpushed. True by
+    # default because a host older than the field serves this value only with
+    # a push grant.
+    push: bool = True
+    # Whether the step may push to a registry other than the platform's (an
+    # image named with its own registry host). The sandbox daemon pushes it,
+    # outside the egress policy the step's containers are held to, so a host
+    # allows it only when that policy lets the step reach the network (as for
+    # ``network``). Fail closed: a host older than the field allows none.
+    external_push: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,10 +233,12 @@ class ContainerRuntime:
     # are pulled from their own registry every time, as before, and a step's
     # ``cache_image`` option has no effect.
     image_cache: ImageCache | None = None
-    # Where a step that builds an image pushes it (see :class:`ImageBuild`).
-    # None means the step cannot push a built image: the platform has no
-    # registry, the handler does not declare ``builds_images``, or the host
-    # could not grant the step push access. A building handler fails then.
+    # How a step that builds an image names it and where it may push it (see
+    # :class:`ImageBuild`). None means the step may not build: the handler
+    # does not declare ``builds_images``, the host could not grant the step
+    # access to the platform registry it runs, or the host predates builds
+    # without a registry (it served the value only with one). A building
+    # handler fails then.
     image_build: ImageBuild | None = None
 
 
@@ -375,8 +395,8 @@ class HandlerServices(Protocol):
         """Describe the platform's container-execution environment (docker binary, workspaces).
 
         For a handler declaring ``builds_images`` the runtime also carries
-        :attr:`ContainerRuntime.image_build` when the step may push what it
-        builds.
+        :attr:`ContainerRuntime.image_build`: how the step names what it builds
+        and where it may push it.
         """
         ...
 

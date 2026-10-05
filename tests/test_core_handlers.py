@@ -38,7 +38,7 @@ WHEELS = [
     (
         hegemony_steps_netcli,
         "netcli",
-        {"netcli.execute", "netcli.collect_evidence", "netcli.poll_until"},
+        {"netcli.execute", "netcli.collect_evidence"},
     ),
     (hegemony_steps_evidence, "evidence", {"evidence.assert", "evidence.compare"}),
     (hegemony_steps_container, "container", {"container.run", "container.build"}),
@@ -114,7 +114,7 @@ def test_no_duplicate_ids_across_wheels():
     all_ids: list[str] = []
     for module, _ns, _expected in WHEELS:
         all_ids += [cls.handler_id for cls in module.ALL_HANDLERS]
-    assert len(all_ids) == len(set(all_ids)) == 26
+    assert len(all_ids) == len(set(all_ids)) == 25
 
 
 def test_connectivity_check_type_is_registry_driven():
