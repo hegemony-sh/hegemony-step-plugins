@@ -32,15 +32,21 @@ from hegemony_step_sdk import (
 from hegemony_steps_container import ALL_HANDLERS
 from hegemony_steps_container.build import (
     CREATED_LABEL,
+    DESTINATION_LOCAL,
+    DESTINATION_PLATFORM,
+    DESTINATION_REMOTE,
     RUN_LABEL,
     STEP_LABEL,
     BuildImageHandler,
+    BuildRefused,
     _BuildLog,
+    build_destination,
     build_environment,
     buildx_argv,
     frontend_error,
     image_name_error,
     looks_like_host,
+    registry_host_of,
     run_tag,
     tag_error,
 )
@@ -53,7 +59,22 @@ REGISTRY = "registry.hegemony.internal"
 # ── Names, tags and the Dockerfile frontend ─────────────────────────────────
 
 
-@pytest.mark.parametrize("name", ["tools/netbox-sync", "app", "a/b/c", "my_app", "team/tools.v2"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "tools/netbox-sync",
+        "app",
+        "a/b/c",
+        "my_app",
+        "team/tools.v2",
+        # With their registry in front: pushed there.
+        "ghcr.io/acme/netbox-sync",
+        "docker.io/acme/tool",
+        "registry.example.com:5000/team/tool",
+        "Registry.Example.com/team/tool",
+        "tools.v2/net",
+    ],
+)
 def test_valid_image_names(name: str) -> None:
     assert image_name_error(name) is None
 
@@ -66,17 +87,31 @@ def test_valid_image_names(name: str) -> None:
         ("tools/x:1.0", "not a valid image name"),
         ("/tools", "not a valid image name"),
         ("tools//x", "not a valid image name"),
-        ("ghcr.io/x/y", "registry host"),
-        ("tools.v2/net", "registry host"),
-        ("localhost/x", "registry host"),
+        ("tools.v2", "registry host"),
         ("localhost_5000/x", "registry host"),
-        ("registry.hegemony.internal/orgs/acme/x", "registry host"),
+        ("localhost/x", "the sandbox itself"),
+        ("localhost:5000/x", "the sandbox itself"),
+        ("ghcr.io/acme/x:1.0", "without a tag"),
+        ("ghcr.io/Acme/x", "after the registry host"),
+        ("ghcr.io/acme//x", "after the registry host"),
+        ("bad_host.io/x", "not a valid registry host"),
+        ("-bad.io/x", "not a valid registry host"),
         ("a" * 201, "at most 200"),
     ],
 )
 def test_invalid_image_names(name: str, fragment: str) -> None:
     error = image_name_error(name)
     assert error is not None and fragment in error
+
+
+def test_registry_hosts_are_read_the_way_docker_reads_them() -> None:
+    assert registry_host_of("ghcr.io/acme/x") == "ghcr.io"
+    assert registry_host_of("registry.example.com:5000/x") == "registry.example.com:5000"
+    assert registry_host_of("localhost/x") == "localhost"
+    assert registry_host_of("host:5000/x") == "host:5000"
+    assert registry_host_of("tools/x") is None
+    assert registry_host_of("tools.v2") is None
+    assert registry_host_of("x") is None
 
 
 def test_host_rule_mirrors_the_platform() -> None:
@@ -159,7 +194,8 @@ def test_templated_values_wait_for_the_run() -> None:
 @pytest.mark.parametrize(
     ("config", "fragment"),
     [
-        ({"image": "ghcr.io/x"}, "registry host"),
+        ({"image": "localhost/x"}, "the sandbox itself"),
+        ({"image": "ghcr.io/acme/x:1"}, "without a tag"),
         ({"tags": ["sha256_" + "0" * 64]}, "digest tag"),
         ({"context_dir": "/abs"}, "relative path"),
         ({"context_dir": "a/../.."}, "'..'"),
@@ -255,6 +291,72 @@ def test_build_environment_selects_the_sandbox_and_drops_inherited_buildx_settin
     assert env["BUILDX_METADATA_PROVENANCE"] == "disabled"
 
 
+def test_buildx_argv_without_push_loads_the_image_into_the_sandbox() -> None:
+    argv = buildx_argv(
+        context="/tmp/ctx",
+        dockerfile="/tmp/ctx/Dockerfile",
+        references=[f"{REGISTRY}/orgs/acme/x:run-1"],
+        network=BUILD_NETWORK_NONE,
+        metadata_file="/tmp/meta.json",
+        push=False,
+    )
+    assert argv[-2:] == ["--load", "/tmp/ctx"]
+    assert "--push" not in argv
+    # Base images are still pulled and nothing comes from the shared build cache.
+    assert "--pull" in argv and "--no-cache" in argv
+
+
+# ── Where the image goes ────────────────────────────────────────────────────
+
+
+def test_a_short_name_goes_under_the_namespace_and_to_the_platform_registry() -> None:
+    destination = build_destination("tools/x", _target())
+    assert destination.kind == DESTINATION_PLATFORM
+    assert destination.repository == f"{REGISTRY}/orgs/acme/tools/x"
+    assert destination.host == REGISTRY
+    assert destination.push
+
+
+def test_without_a_platform_registry_a_short_name_stays_in_the_sandbox() -> None:
+    destination = build_destination("tools/x", _target(push=False))
+    assert destination.kind == DESTINATION_LOCAL
+    # The name it would have in the platform registry, so a flow reads the same.
+    assert destination.repository == f"{REGISTRY}/orgs/acme/tools/x"
+    assert destination.host == ""
+    assert not destination.push
+
+
+@pytest.mark.parametrize("push", [True, False])
+def test_a_name_with_its_registry_is_pushed_there_when_allowed(push: bool) -> None:
+    destination = build_destination("ghcr.io/acme/x", _target(push=push, external_push=True))
+    assert destination.kind == DESTINATION_REMOTE
+    assert destination.repository == "ghcr.io/acme/x"
+    assert destination.host == "ghcr.io"
+    assert destination.push
+
+
+def test_another_registry_needs_the_hosts_permission() -> None:
+    with pytest.raises(BuildRefused) as refused:
+        build_destination("ghcr.io/acme/x", _target())
+    assert refused.value.summary == "Push not allowed"
+    assert "ghcr.io" in refused.value.error and "egress policy is open" in refused.value.error
+
+
+@pytest.mark.parametrize("name", [f"{REGISTRY}/orgs/acme/x", f"{REGISTRY.upper()}/orgs/other/x"])
+def test_the_platform_registry_is_named_by_short_names_only(name: str) -> None:
+    """Its names are the namespace's to give: no step picks another organization's."""
+    with pytest.raises(BuildRefused) as refused:
+        build_destination(name, _target(external_push=True))
+    assert refused.value.summary == "Config validation failed"
+    assert "platform registry itself" in refused.value.error
+
+
+def test_a_short_name_needs_a_namespace() -> None:
+    with pytest.raises(BuildRefused) as refused:
+        build_destination("tools/x", ImageBuild(registry=REGISTRY, namespace="", push=False))
+    assert refused.value.summary == "Image build unavailable"
+
+
 # ── A build end to end, against a fake docker ───────────────────────────────
 
 _FAKE_DOCKER = r"""
@@ -273,6 +375,17 @@ if args[:2] == ["buildx", "version"]:
         print("docker: 'buildx' is not a docker command.", file=sys.stderr)
         sys.exit(1)
     print("github.com/docker/buildx v0.37.2 2d379c0")
+    sys.exit(0)
+
+if args[:2] == ["image", "rm"]:
+    save({"argv": args})
+    if mode == "rm-fails":
+        print("Error response from daemon: conflict: unable to delete", file=sys.stderr)
+        sys.exit(1)
+    if mode in ("rm-missing", "fail"):
+        for ref in args[3:]:
+            print("Error response from daemon: No such image: " + ref, file=sys.stderr)
+        sys.exit(1)
     sys.exit(0)
 
 if args[:2] == ["image", "inspect"]:
@@ -416,8 +529,26 @@ def _ctx(
     )
 
 
-def _target(network: str = BUILD_NETWORK_NONE) -> ImageBuild:
-    return ImageBuild(registry=REGISTRY, namespace="orgs/acme", network=network)
+def _target(
+    network: str = BUILD_NETWORK_NONE, *, push: bool = True, external_push: bool = False
+) -> ImageBuild:
+    return ImageBuild(
+        registry=REGISTRY,
+        namespace="orgs/acme",
+        network=network,
+        push=push,
+        external_push=external_push,
+    )
+
+
+def _removals(fake_docker: dict[str, Any]) -> list[list[str]]:
+    return [call["argv"] for call in fake_docker["calls"]() if call["argv"][:2] == ["image", "rm"]]
+
+
+def _save_login(config_dir: str, host: str) -> None:
+    os.makedirs(config_dir, exist_ok=True)
+    with open(os.path.join(config_dir, "config.json"), "w", encoding="utf-8") as handle:
+        json.dump({"auths": {host: {"auth": "dXNlcjpwYXNz"}}}, handle)
 
 
 def _builds(fake_docker: dict[str, Any]) -> list[dict[str, Any]]:
@@ -456,6 +587,8 @@ async def test_a_build_pushes_the_run_tag_and_the_extra_tags(fake_docker) -> Non
         "reference": f"{repository}@{DIGEST}",
         "tags": ["run-1a2b3c4d", "latest", "1.2"],
         "references": references,
+        "destination": "platform",
+        "pushed": True,
     }
     assert result.metrics["image_digest"] == DIGEST
     assert result.metrics["tag_count"] == 3
@@ -512,7 +645,11 @@ async def test_a_build_pushes_the_run_tag_and_the_extra_tags(fake_docker) -> Non
     assert details["content_json"]["digest"] == DIGEST
     assert details["content_json"]["secrets"] == ["pypi_token"]
     assert details["content_json"]["build_args"] == ["VERSION"]
+    assert details["content_json"]["destination"] == "platform"
+    assert "saved_login" not in details["content_json"]
     assert "pypi-secret-value" not in json.dumps(result.evidence)
+    # The platform registry's names belong to this organization: they stay.
+    assert _removals(fake_docker) == []
 
 
 @pytest.mark.asyncio
@@ -570,13 +707,146 @@ async def test_an_unknown_network_value_builds_without_network(fake_docker) -> N
 
 
 @pytest.mark.asyncio
-async def test_without_a_build_grant_nothing_is_built(fake_docker) -> None:
+async def test_without_build_settings_nothing_is_built(fake_docker) -> None:
     services = _Services(fake_docker["bin"], fake_docker["config_dir"], build=None)
     result = await BuildImageHandler().execute(
         _ctx({"image": "tools/x", "context_dir": "images/tool"}, services, [])
     )
     assert not result.success
-    assert result.error is not None and "cannot push the image it builds" in result.error
+    assert result.summary == "Image build unavailable"
+    assert result.error is not None and "no build settings" in result.error
+    assert fake_docker["calls"]() == []
+
+
+@pytest.mark.asyncio
+async def test_without_a_platform_registry_the_image_stays_in_the_sandbox(fake_docker) -> None:
+    services = _Services(fake_docker["bin"], fake_docker["config_dir"], build=_target(push=False))
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(
+        _ctx(
+            {"image": "tools/x", "context_dir": "images/tool", "tags": ["latest"]}, services, events
+        )
+    )
+
+    assert result.success, result.error
+    repository = f"{REGISTRY}/orgs/acme/tools/x"
+    references = [f"{repository}:run-1a2b3c4d", f"{repository}:latest"]
+    # No registry holds it, so the run tag names it: no other run's build takes that.
+    assert result.output == {
+        "image": repository,
+        "digest": "",
+        "reference": f"{repository}:run-1a2b3c4d",
+        "tags": ["run-1a2b3c4d", "latest"],
+        "references": references,
+        "destination": "local",
+        "pushed": False,
+    }
+    assert result.summary == f"Built {repository} (run-1a2b3c4d, latest), kept in the sandbox"
+    (build,) = _builds(fake_docker)
+    assert build["argv"][-2] == "--load"
+    assert "--push" not in build["argv"]
+    assert [value for flag, value in _pairs(build["argv"]) if flag == "--tag"] == references
+    # Nothing was pushed, so no digest is looked up, and the names stay.
+    calls = [call["argv"][:2] for call in fake_docker["calls"]()]
+    assert ["image", "inspect"] not in calls
+    assert _removals(fake_docker) == []
+    assert "keeping it in the sandbox, unpushed" in events[0][0]
+    assert events[0][1]["destination"] == "local"
+    assert events[-1][1]["milestone"] == "image_built"
+    details = {artifact["name"]: artifact for artifact in result.evidence}["image_build_build_tool"]
+    assert details["content_json"]["pushed"] is False
+    assert "Kept in the sandbox: " + references[0] in details["content_text"]
+
+
+@pytest.mark.asyncio
+async def test_a_name_with_its_registry_is_pushed_there_with_the_saved_login(fake_docker) -> None:
+    _save_login(fake_docker["config_dir"], "ghcr.io")
+    services = _Services(
+        fake_docker["bin"],
+        fake_docker["config_dir"],
+        build=_target(BUILD_NETWORK_DEFAULT, push=False, external_push=True),
+    )
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(
+        _ctx({"image": "ghcr.io/acme/tool", "context_dir": "images/tool"}, services, events)
+    )
+
+    assert result.success, result.error
+    references = ["ghcr.io/acme/tool:run-1a2b3c4d"]
+    assert result.output["reference"] == f"ghcr.io/acme/tool@{DIGEST}"
+    assert result.output["destination"] == "remote"
+    assert result.output["pushed"] is True
+    (build,) = _builds(fake_docker)
+    assert build["argv"][-2] == "--push"
+    assert [value for flag, value in _pairs(build["argv"]) if flag == "--tag"] == references
+    # The push reads the login from the step's Docker configuration.
+    assert build["env"]["DOCKER_CONFIG"] == fake_docker["config_dir"]
+    assert "with the organization's saved login" in events[0][0]
+    assert events[0][1]["saved_login"] is True
+    details = {artifact["name"]: artifact for artifact in result.evidence}["image_build_build_tool"]
+    assert details["content_json"]["saved_login"] is True
+    # The name is taken off the shared sandbox once the push is done.
+    assert _removals(fake_docker) == [["image", "rm", "--force", *references]]
+
+
+@pytest.mark.asyncio
+async def test_a_push_elsewhere_without_a_saved_login_says_so(fake_docker) -> None:
+    _save_login(fake_docker["config_dir"], "other.example.com")
+    services = _Services(
+        fake_docker["bin"], fake_docker["config_dir"], build=_target(external_push=True)
+    )
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(
+        _ctx({"image": "docker.io/acme/tool", "context_dir": "images/tool"}, services, events)
+    )
+    assert result.success, result.error
+    assert "pushing to docker.io without a login" in events[0][0]
+    assert events[0][1]["saved_login"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_failed_push_elsewhere_leaves_no_name_in_the_sandbox(
+    fake_docker, monkeypatch
+) -> None:
+    monkeypatch.setenv("FAKE_DOCKER_MODE", "fail")
+    services = _Services(
+        fake_docker["bin"], fake_docker["config_dir"], build=_target(external_push=True)
+    )
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(
+        _ctx({"image": "ghcr.io/acme/tool", "context_dir": "images/tool"}, services, events)
+    )
+    assert not result.success
+    assert _removals(fake_docker) == [["image", "rm", "--force", "ghcr.io/acme/tool:run-1a2b3c4d"]]
+    # A name the build never set is not a problem worth an event.
+    assert all(attrs.get("milestone") != "build_cleanup_failed" for _message, attrs in events)
+
+
+@pytest.mark.asyncio
+async def test_a_name_left_in_the_sandbox_is_reported(fake_docker, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_DOCKER_MODE", "rm-fails")
+    services = _Services(
+        fake_docker["bin"], fake_docker["config_dir"], build=_target(external_push=True)
+    )
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(
+        _ctx({"image": "ghcr.io/acme/tool", "context_dir": "images/tool"}, services, events)
+    )
+    assert result.success, result.error
+    (cleanup,) = [
+        attrs for _message, attrs in events if attrs.get("milestone") == "build_cleanup_failed"
+    ]
+    assert cleanup["references"] == ["ghcr.io/acme/tool:run-1a2b3c4d"]
+
+
+@pytest.mark.asyncio
+async def test_a_push_elsewhere_the_host_does_not_allow_builds_nothing(fake_docker) -> None:
+    services = _Services(fake_docker["bin"], fake_docker["config_dir"], build=_target())
+    result = await BuildImageHandler().execute(
+        _ctx({"image": "ghcr.io/acme/tool", "context_dir": "images/tool"}, services, [])
+    )
+    assert not result.success
+    assert result.summary == "Push not allowed"
     assert fake_docker["calls"]() == []
 
 
