@@ -27,6 +27,7 @@ from typing import Any, cast
 
 import pytest
 from cryptography import x509
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.hazmat.primitives.serialization import pkcs7
@@ -2116,3 +2117,80 @@ async def test_without_an_egress_gate_only_offline_checks_run(pki):
         result = await run_step(config, services=services)
         assert result.success is False
         assert "cannot apply the flow's network policy" in (result.error or "")
+
+
+# --- Unreadable revocation data stays with its endpoint ---------------------------
+
+
+class _Unreadable:
+    """A real OCSP response or CRL, with one attribute that raises when read."""
+
+    def __init__(self, real: Any, name: str, error: Exception) -> None:
+        self._real = real
+        self._name = name
+        self._error = error
+
+    def __getattr__(self, name: str) -> Any:
+        if name == self._name:
+            raise self._error
+        return getattr(self._real, name)
+
+
+def test_an_ocsp_response_with_an_unknown_algorithm_is_an_ocsp_error(pki, monkeypatch):
+    leaf = pki.leaves["rsa"].cert
+    data = _ocsp_response(leaf, pki.inter, pki.inter, pki.inter_key)
+    real_loader = ocsp.load_der_ocsp_response
+    unknown = UnsupportedAlgorithm("Signature algorithm OID: 1.2.3.4 not recognized")
+    monkeypatch.setattr(
+        ocsp,
+        "load_der_ocsp_response",
+        lambda raw: _Unreadable(real_loader(raw), "signature_hash_algorithm", unknown),
+    )
+    outcome = evaluate_ocsp_response(data, leaf, pki.inter, now=NOW)
+    assert outcome["ocsp"] == "error"
+    assert outcome["ocsp_detail"] == f"response cannot be checked: {unknown}"
+
+
+async def test_an_unreadable_ocsp_response_fails_only_its_endpoint(pki, responder, monkeypatch):
+    rsa_leaf, ec_leaf = pki.leaves["rsa"].cert, pki.leaves["ec"].cert
+    served = {"192.0.2.81": rsa_leaf, "192.0.2.82": ec_leaf}
+
+    async def fake_handshake(host, port, server_name, context, timeout):
+        chain = [
+            cert.public_bytes(serialization.Encoding.DER) for cert in (served[host], pki.inter)
+        ]
+        return tls_check._Handshake(der=chain[0], version="TLSv1.3", cipher="X", chain_der=chain)
+
+    real_loader = ocsp.load_der_ocsp_response
+
+    def loader(raw: bytes) -> Any:
+        response = real_loader(raw)
+        if response.serial_number != rsa_leaf.serial_number:
+            return response
+        return _Unreadable(response, "signature_hash_algorithm", UnsupportedAlgorithm("unknown"))
+
+    monkeypatch.setattr(tls_check, "tls_handshake", fake_handshake)
+    monkeypatch.setattr(ocsp, "load_der_ocsp_response", loader)
+    result = await run_step({"endpoints": ["192.0.2.81:443", "192.0.2.82:443"], "check_ocsp": True})
+    unreadable, readable = result.output["endpoints"]
+    assert (unreadable["ocsp"], unreadable["ocsp_detail"]) == (
+        "error",
+        "response cannot be checked: unknown",
+    )
+    assert readable["ocsp"] == "good", readable["ocsp_detail"]
+
+
+def test_an_unreadable_crl_is_a_crl_error(pki):
+    leaf = pki.leaves["crl_good"].cert
+    crl = make_crl(pki.inter, pki.inter_key)
+    bad_name = cast(
+        x509.CertificateRevocationList, _Unreadable(crl, "issuer", ValueError("bad name"))
+    )
+    assert tls_certs.crl_signature_problem(bad_name, pki.inter) == "CRL cannot be checked: bad name"
+    bad_date = cast(
+        x509.CertificateRevocationList, _Unreadable(crl, "next_update_utc", ValueError("bad date"))
+    )
+    outcome = tls_certs.crl_status(
+        bad_date, leaf, url="http://ca.example.test/inter.crl", names=frozenset(), now=NOW
+    )
+    assert (outcome["crl"], outcome["crl_detail"]) == ("error", "CRL cannot be read: bad date")

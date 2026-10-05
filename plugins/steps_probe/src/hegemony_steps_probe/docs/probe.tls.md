@@ -80,7 +80,9 @@ places as for OCSP. Each list is downloaded once per step, up to 20 MiB, and
 shared by every endpoint that names it. Like Check OCSP, it checks the
 server certificate, not the CAs above it; `crl_next_update` says when the
 issuer publishes its next list, which a flow can watch to catch a CA that
-stopped publishing.
+stopped publishing. An OCSP response or CRL the step cannot read, such as one
+signed with an algorithm it does not know, is an `error` for that endpoint
+only; the other endpoints keep their results.
 
 Parallel checks (default 10, up to 50) sets how many endpoints are checked at
 once. When the flow runs under an egress policy, every connection the step

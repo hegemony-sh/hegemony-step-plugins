@@ -50,6 +50,16 @@ OCSP_CLOCK_SKEW = timedelta(minutes=5)
 #: Clock skew tolerated on CRL ``thisUpdate``/``nextUpdate``.
 CRL_CLOCK_SKEW = OCSP_CLOCK_SKEW
 
+#: What reading an unusual or malformed certificate, OCSP response or CRL can
+#: raise: an unknown algorithm, key type or name form, or a bad encoding.
+_UNREADABLE = (
+    ValueError,
+    TypeError,
+    UnsupportedAlgorithm,
+    x509.DuplicateExtension,
+    x509.UnsupportedGeneralNameType,
+)
+
 _ENTRY_SPLIT_RE = re.compile(r"[\r\n,]+")
 _HOST_RE = re.compile(r"^[^\s/@\[\]:]+$")
 _PEM_BLOCK_RE = re.compile(rb"-----BEGIN CERTIFICATE-----\s.*?-----END CERTIFICATE-----", re.DOTALL)
@@ -983,8 +993,25 @@ def evaluate_ocsp_response(
     issuer delegated (its certificate in the response, issued by the issuer,
     with the OCSP-signing purpose, and within its validity period), its
     signature must verify, it must be about this certificate (serial number,
-    issuer name hash and issuer key hash), and it must be current.
+    issuer name hash and issuer key hash), and it must be current. Never
+    raises: a response the checks cannot read (an unknown signature
+    algorithm, an unsupported responder key) is an error for this
+    certificate alone.
     """
+    try:
+        return _judge_ocsp_response(data, cert, issuer, now=now)
+    except _UNREADABLE as exc:
+        return ocsp_outcome("error", f"response cannot be checked: {exc}")
+
+
+def _judge_ocsp_response(
+    data: bytes,
+    cert: x509.Certificate,
+    issuer: x509.Certificate,
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    """:func:`evaluate_ocsp_response` without the guard against unreadable responses."""
     try:
         response = ocsp.load_der_ocsp_response(data)
     except ValueError as exc:
@@ -1164,8 +1191,17 @@ def crl_signature_problem(
     allow signing CRLs, the signature must verify with the issuer's key, and
     the CRL must be a complete one (not a delta) without a critical extension
     the check does not handle. None of this depends on the certificate looked
-    up, so the handler checks it once per list and issuer.
+    up, so the handler checks it once per list and issuer. Never raises: a
+    list the checks cannot read is a problem like any other.
     """
+    try:
+        return _crl_list_problem(crl, issuer)
+    except _UNREADABLE as exc:
+        return f"CRL cannot be checked: {exc}"
+
+
+def _crl_list_problem(crl: x509.CertificateRevocationList, issuer: x509.Certificate) -> str | None:
+    """:func:`crl_signature_problem` without the guard against unreadable lists."""
     if crl.issuer != issuer.subject:
         return "CRL is not issued by the certificate's issuer"
     usage = _key_usage(issuer)
@@ -1232,8 +1268,24 @@ def crl_status(
     not past) and cover the certificate (its issuing distribution point, when
     present, names the distribution point it was fetched from and does not
     leave this kind of certificate out). Good means the certificate is not
-    listed; revoked carries the reason and time the CRL gives.
+    listed; revoked carries the reason and time the CRL gives. Never raises:
+    a list the checks cannot read is an error for this certificate.
     """
+    try:
+        return _crl_lookup(crl, cert, url=url, names=names, now=now)
+    except _UNREADABLE as exc:
+        return crl_outcome("error", f"CRL cannot be read: {exc}", url=url)
+
+
+def _crl_lookup(
+    crl: x509.CertificateRevocationList,
+    cert: x509.Certificate,
+    *,
+    url: str,
+    names: frozenset[x509.GeneralName],
+    now: datetime,
+) -> dict[str, Any]:
+    """:func:`crl_status` without the guard against unreadable lists."""
     next_update: datetime | None = crl.next_update_utc
     found = {"url": url, "next_update": _iso_z(next_update) if next_update else None}
     this_update: datetime = crl.last_update_utc
