@@ -26,7 +26,12 @@ FROM python:3.12-slim-bookworm
 
 ARG ANSIBLE_CORE_VERSION=2.19.13
 
+# The base image carries Debian's fixes only once it is rebuilt, so upgrade its
+# packages first: a fix Debian has already published (libpcre2-8-0
+# 10.42-1+deb12u2 for CVE-2026-103111, say) would otherwise fail the Images
+# workflow's scan until the base image caught up.
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends openssh-client sshpass git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
