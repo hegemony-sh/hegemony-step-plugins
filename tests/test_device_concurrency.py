@@ -121,6 +121,16 @@ class TestMaxParallelFromConfig:
     def test_garbage_degrades_to_sequential(self):
         assert max_parallel_from_config({"max_parallel_devices": "lots"}) == 1
         assert max_parallel_from_config({"max_parallel_devices": None}) == 1
+        assert max_parallel_from_config({"max_parallel_devices": ""}) == 1
+
+    def test_a_handler_default_fills_only_an_unset_value(self):
+        assert max_parallel_from_config({}, default=10) == 10
+        assert max_parallel_from_config({"max_parallel_devices": None}, default=10) == 10
+        assert max_parallel_from_config({"max_parallel_devices": ""}, default=10) == 10
+        assert max_parallel_from_config({"max_parallel_devices": 2}, default=10) == 2
+        assert max_parallel_from_config({"max_parallel_devices": 0}, default=10) == 1
+        assert max_parallel_from_config({"max_parallel_devices": "lots"}, default=10) == 1
+        assert max_parallel_from_config({}, default=100) == MAX_PARALLEL_DEVICES_LIMIT
 
 
 class TestHandlerParallelism:
