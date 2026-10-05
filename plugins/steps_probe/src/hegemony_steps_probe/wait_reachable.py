@@ -277,7 +277,6 @@ class WaitReachableHandler(BaseHandler):
                     error=f"{check_type} cannot run against {exc}",
                     summary=f"Check cannot run: {check_type}",
                 )
-            now = loop.time()
             all_stable = True
 
             for index, (device, answered_at) in enumerate(
@@ -294,10 +293,13 @@ class WaitReachableHandler(BaseHandler):
                     stable_since[index] = answered_at
                     logger.info(f"Device {device_name} became reachable, starting stability window")
                     all_stable = False  # Just became reachable, not yet stable
-                elif now - since < stable_seconds:
+                # A target is stable for the span of its own answers. The
+                # round's end would credit it with time spent polling the
+                # other targets, when nothing was asked of it.
+                elif answered_at - since < stable_seconds:
                     all_stable = False
                 else:
-                    logger.info(f"Device {device_name} stable for {now - since:.1f}s")
+                    logger.info(f"Device {device_name} stable for {answered_at - since:.1f}s")
 
             if all_stable:
                 all_evidence = []

@@ -640,6 +640,36 @@ async def test_wait_reachable_fails_at_once_when_the_check_cannot_run(answer, er
     assert len(probes.calls) == 1
 
 
+async def test_wait_reachable_measures_each_target_up_to_its_own_answer():
+    """A slow poll of one target must not count toward another's window.
+
+    Polled one after another, both targets answer at 0 s. In the second
+    round 192.0.2.7 answers at 1 s and 192.0.2.8 at 2.5 s. The round ends
+    2.5 s after the first answers, but 192.0.2.7's answers span only 1 s of
+    the 2 s window, so the wait needs a third round.
+    """
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    class _SlowSecondPoll(_FakeProbes):
+        async def run_probe(self, check_type, address, options):
+            polls = sum(1 for call in self.calls if call[1] == address)
+            if address == "192.0.2.8" and polls == 1:
+                await asyncio.sleep(1.5)
+            return await super().run_probe(check_type, address, options)
+
+    probes = _SlowSecondPoll()
+    config = {
+        "max_wait_seconds": 10,
+        "stable_seconds": 2,
+        "poll_interval": 1,
+        "max_parallel_devices": 1,
+    }
+    ctx = _ip_target_ctx(config, ["192.0.2.7", "192.0.2.8"], services=probes)
+    result = await WaitReachableHandler().execute(ctx)
+    assert result.success is True, result.error
+    assert result.metrics["attempts"] == 3
+
+
 async def test_http_probe_brackets_ipv6_literals_and_gates_every_hop(monkeypatch):
     """IPv6 authorities are bracketed, and each request walks the egress gate."""
     import httpx

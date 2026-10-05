@@ -38,8 +38,8 @@ Resolve cannot use a proxy and reject a configured one.
 
 Three timings shape the wait. Poll Interval (sec) is the pause between polls
 (default 5). Stable (sec) is the stability window (default 30): a target
-must answer every poll for this long, and a target that stops answering has
-its window reset to zero. Max Wait (sec) is the overall deadline (default
+must answer every poll for this long, counted from its first answer to its
+latest, and a target that stops answering has its window reset to zero. Max Wait (sec) is the overall deadline (default
 300): the step fails once it passes without every target completing its
 window. The step succeeds at the first moment all targets have been stable
 for the full window; expect it to take at least Stable (sec) even when
