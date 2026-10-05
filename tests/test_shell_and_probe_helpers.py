@@ -15,9 +15,50 @@ def test_build_command_default_passthrough():
     assert build_command("uname -a") == "uname -a"
 
 
-def test_build_command_env_prefix_is_quoted():
-    composed = build_command("echo $APP", env={"APP": "a b", "B": "1"})
-    assert composed == "env APP='a b' B=1 echo $APP"
+def test_build_command_default_exports_quoted_env():
+    composed = build_command("cd /tmp && echo $APP", env={"APP": "a b", "B": "1"})
+    assert composed == "export APP='a b' B=1; cd /tmp && echo $APP"
+
+
+def test_build_command_sh_family_keeps_env_prefix():
+    composed = build_command("echo $APP", shell="sh", env={"APP": "a b"})
+    assert composed == "env APP='a b' sh -c 'echo $APP'"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "uname -a",
+        "systemctl restart {{ inputs.service | quote }}",
+        "echo {{- inputs.msg|quote -}} done",
+        "{% if inputs.force %}rm -f /tmp/x{% endif %}",
+        "cp {{ inputs.src | quote }} {{ inputs.dst | quote }}",
+    ],
+)
+def test_template_errors_accepts_quoted_values(command):
+    assert ShellExecuteHandler().template_errors({"commands": [command]}) == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "systemctl restart {{ inputs.service }}",
+        "echo {{ inputs.msg | quote | upper }}",
+        "cp {{ inputs.src | quote }} {{ inputs.dst }}",
+        "ping -c1 {{ device.mgmt_host }}",
+    ],
+)
+def test_template_errors_refuses_unquoted_values(command):
+    errors = ShellExecuteHandler().template_errors({"commands": ["uname -a", command]})
+    assert len(errors) == 1
+    assert errors[0].startswith("commands line 2:")
+    # Names the line, never echoes the template (it is stored with the result).
+    assert "inputs." not in errors[0].replace("inputs.name", "")
+
+
+def test_template_errors_ignores_non_list_commands():
+    assert ShellExecuteHandler().template_errors({"commands": "echo {{ x }}"}) == []
+    assert ShellExecuteHandler().template_errors({}) == []
 
 
 def test_build_command_bash_wraps_and_quotes():

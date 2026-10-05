@@ -12,6 +12,7 @@ implements it) is resolved from ``device.access_config`` via
 """
 
 import logging
+import re
 import shlex
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -36,6 +37,33 @@ logger = logging.getLogger(__name__)
 #: Interpreters that accept the sh-style ``env``/``-c`` wrapping.
 _SH_FAMILY = frozenset({"sh", "bash"})
 
+#: One ``{{ ... }}`` expression (whitespace-control dashes included) and the
+#: ``| quote`` filter that must end it.
+_EXPRESSION_RE = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
+_QUOTED_RE = re.compile(r"\|\s*quote\s*-?\s*$")
+
+
+def unquoted_template_lines(commands: Any) -> list[int]:
+    """1-based numbers of the command lines with a ``{{ }}`` value not ending in ``| quote``.
+
+    A rendered value lands in the remote shell's command line, so an unquoted
+    one is parsed as shell syntax: an input of ``x; rm -rf ~`` runs a second
+    command. ``| quote`` (the platform's shell-quoting filter) makes the value
+    one literal word. ``{% %}`` statements insert no values of their own and
+    are not checked.
+    """
+    if not isinstance(commands, list):
+        return []
+    lines: list[int] = []
+    for number, command in enumerate(commands, start=1):
+        if not isinstance(command, str):
+            continue
+        for match in _EXPRESSION_RE.finditer(command):
+            if not _QUOTED_RE.search(match.group(1)):
+                lines.append(number)
+                break
+    return lines
+
 
 def build_command(
     command: str,
@@ -46,7 +74,8 @@ def build_command(
     """Compose the remote command line for the chosen interpreter.
 
     - ``default``: the command runs as-is in the account's login shell; env
-      vars are prefixed via ``env KEY=VALUE`` (POSIX remotes).
+      vars are exported first (``export KEY=VALUE; command``), so ``$KEY``
+      works anywhere in the line (POSIX login shells).
     - ``sh``/``bash``: the command is quoted into ``<shell> -c '...'``.
     - ``pwsh``: the command is quoted into ``pwsh -NoProfile -Command '...'``;
       env vars are not supported (no portable prefix syntax).
@@ -59,15 +88,17 @@ def build_command(
             raise ValueError("env variables are not supported with the pwsh interpreter")
         return f"pwsh -NoProfile -Command {shlex.quote(command)}"
 
-    prefix = ""
-    if env:
-        pairs = " ".join(f"{key}={shlex.quote(value)}" for key, value in sorted(env.items()))
-        prefix = f"env {pairs} "
+    pairs = " ".join(f"{key}={shlex.quote(value)}" for key, value in sorted(env.items()))
 
     if shell in _SH_FAMILY:
+        prefix = f"env {pairs} " if pairs else ""
         return f"{prefix}{shell} -c {shlex.quote(command)}"
     if shell == "default":
-        return f"{prefix}{command}"
+        # ``env KEY=VALUE command`` would hand the line to env(1) as a program
+        # to run: builtins (cd, export) fail, and only the first command of a
+        # pipeline or list sees the variables. Exporting them in the login
+        # shell that runs the line makes ``$KEY`` work everywhere in it.
+        return f"export {pairs}; {command}" if pairs else command
     raise ValueError(f"unsupported shell interpreter: {shell}")
 
 
@@ -79,7 +110,11 @@ class ShellExecuteConfig(BaseModel):
     commands: list[str] = Field(
         default_factory=list,
         title="Commands (one per line)",
-        description="Each line runs as its own exec-channel command with its own exit code",
+        description=(
+            "Each line runs as its own exec-channel command with its own exit code. "
+            "A {{ }} value must end with | quote, e.g. {{ inputs.service | quote }}, "
+            "or come in through Environment Variables."
+        ),
         json_schema_extra={
             "x_widget": "commands",
             "x_placeholder": "uname -a\ndf -h /var\nsystemctl is-active nginx",
@@ -103,7 +138,12 @@ class ShellExecuteConfig(BaseModel):
     env: dict[str, str] = Field(
         default_factory=dict,
         title="Environment Variables",
-        description="KEY=VALUE per line; prefixed via env(1). Not supported with pwsh.",
+        description=(
+            "KEY=VALUE per line, quoted and set for every command, which reads them "
+            'as "$KEY". The safe way to pass run inputs or step results. Values '
+            "appear on the remote command line, so use secrets elsewhere. Not "
+            "supported with pwsh."
+        ),
         json_schema_extra={
             "x_widget": "env-vars",
             "x_rows": 3,
@@ -162,6 +202,18 @@ class ShellExecuteHandler(BaseHandler):
     targeting = HandlerTargeting(roles=True, ips=False)
     config_model = ShellExecuteConfig
     default_config = {"shell": "default", "fail_fast": True, "command_timeout_sec": 60}
+
+    def template_errors(self, config: dict[str, Any]) -> list[str]:
+        """Refuse command lines that insert a ``{{ }}`` value without ``| quote``."""
+        lines = unquoted_template_lines(config.get("commands"))
+        if not lines:
+            return []
+        numbers = ", ".join(str(number) for number in lines)
+        return [
+            f"commands line {numbers}: a {{{{ }}}} value inserted into a shell command "
+            "must end with | quote, e.g. {{ inputs.name | quote }}, or be passed in "
+            'Environment Variables and read as "$NAME"'
+        ]
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         target_devices = ctx.get_target_devices()
