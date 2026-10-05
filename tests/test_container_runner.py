@@ -161,9 +161,9 @@ def _install_docker(
     async def fake_exec(*argv, **kwargs):
         proc = AsyncMock()
         proc.stdout = AsyncMock()
-        proc.stdout.readline = AsyncMock(side_effect=[b"hello\n", b""])
+        proc.stdout.read = AsyncMock(side_effect=[b"hello\n", b""])
         proc.stderr = AsyncMock()
-        proc.stderr.readline = AsyncMock(return_value=b"")
+        proc.stderr.read = AsyncMock(return_value=b"")
         proc.wait = AsyncMock(return_value=exit_code)
         proc.returncode = exit_code
         proc.kill = AsyncMock()

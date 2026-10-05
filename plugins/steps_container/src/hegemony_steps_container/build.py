@@ -60,7 +60,7 @@ import tempfile
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -82,6 +82,7 @@ from .image_cache import login_for, parse_reference
 from .pull_progress import require_docker_host
 from .run import RunContainerHandler, _docker_env, repo_digest_for
 from .runner import container_config_from, resolve_secret_values, secret_map_errors
+from .streams import KILL_WAIT_SECONDS, read_lines
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +99,6 @@ _FLUSH_SECONDS = 0.25
 #: The ``docker buildx version`` check and the digest lookup are quick; a
 #: wedged worker or daemon must not hold the step for longer than this.
 _PROBE_TIMEOUT_SECONDS = 15.0
-#: The build's output is read in chunks of this size, and a line longer than
-#: this reaches the log in pieces (asyncio's line reader raises on one).
-_READ_CHUNK_BYTES = 64 * 1024
 #: The build argument that prefixes every cache mount's id (Dockerfile frontend).
 CACHE_MOUNT_NS_ARG = "BUILDKIT_CACHE_MOUNT_NS"
 
@@ -635,24 +633,6 @@ def build_environment(docker_host: str, docker_config_dir: str) -> dict[str, str
 
 def _failure(error: str, summary: str, **extra: Any) -> HandlerResult:
     return HandlerResult(success=False, error=error, summary=summary, **extra)
-
-
-async def _output_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
-    """The stream's lines with their newline; a very long line comes in pieces.
-
-    Read in chunks rather than with ``readline``, which raises on a line longer
-    than the stream's limit (64 KiB), and a build can print one.
-    """
-    pending = b""
-    while chunk := await stream.read(_READ_CHUNK_BYTES):
-        *lines, pending = (pending + chunk).split(b"\n")
-        for line in lines:
-            yield line + b"\n"
-        while len(pending) >= _READ_CHUNK_BYTES:
-            yield pending[:_READ_CHUNK_BYTES]
-            pending = pending[_READ_CHUNK_BYTES:]
-    if pending:
-        yield pending
 
 
 def _error_line(lines: deque[str]) -> str:
@@ -1231,7 +1211,7 @@ class BuildImageHandler(BaseHandler):
 
             flusher = asyncio.create_task(ticker())
             try:
-                async for line in _output_lines(stream):
+                async for line in read_lines(stream):
                     await log.add(line)
             finally:
                 flusher.cancel()
@@ -1246,7 +1226,7 @@ class BuildImageHandler(BaseHandler):
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=10)
+                await asyncio.wait_for(proc.wait(), timeout=KILL_WAIT_SECONDS)
             return None
         except asyncio.CancelledError:
             # A cancelled step must not leave its build running: kill the client
@@ -1259,7 +1239,7 @@ class BuildImageHandler(BaseHandler):
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=10)
+                await asyncio.wait_for(proc.wait(), timeout=KILL_WAIT_SECONDS)
             raise
 
     @staticmethod

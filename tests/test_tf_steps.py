@@ -494,9 +494,9 @@ def _install_docker(
         events.append(argv[1])
         proc = AsyncMock()
         proc.stdout = AsyncMock()
-        proc.stdout.readline = AsyncMock(return_value=b"")
+        proc.stdout.read = AsyncMock(return_value=b"")
         proc.stderr = AsyncMock()
-        proc.stderr.readline = AsyncMock(return_value=b"")
+        proc.stderr.read = AsyncMock(return_value=b"")
         proc.wait = AsyncMock(return_value=exit_code)
         proc.kill = AsyncMock()
         return proc

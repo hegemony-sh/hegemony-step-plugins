@@ -67,6 +67,7 @@ from .runner import (
     resolve_secret_values,
     secret_map_errors,
 )
+from .streams import KILL_WAIT_SECONDS, read_lines
 
 logger = logging.getLogger(__name__)
 
@@ -2339,67 +2340,66 @@ class RunContainerHandler(BaseHandler):
                     except Exception as e:
                         logger.debug("emit_progress failed for %s: %s", stream_label, e)
 
+                async def _take(line: bytes, artifact_bytes: bytearray, event_buf_label: str):
+                    nonlocal stdout_trunc, stderr_trunc, stdout_event_size, stderr_event_size
+                    # Decode using replace to avoid errors
+                    text = line.decode("utf-8", errors="replace")
+
+                    # Append to event buffer and possibly flush if size >= 1KB
+                    to_flush: str | None = None
+                    async with lock:
+                        if event_buf_label == "stdout":
+                            stdout_event_buf.append(text)
+                            stdout_event_size += len(text.encode("utf-8"))
+                            should_flush = stdout_event_size >= 1024
+                            if should_flush:
+                                to_flush = "".join(stdout_event_buf)
+                                stdout_event_buf.clear()
+                                stdout_event_size = 0
+                        else:
+                            stderr_event_buf.append(text)
+                            stderr_event_size += len(text.encode("utf-8"))
+                            should_flush = stderr_event_size >= 1024
+                            if should_flush:
+                                to_flush = "".join(stderr_event_buf)
+                                stderr_event_buf.clear()
+                                stderr_event_size = 0
+
+                    if to_flush is not None:
+                        # Flush outside the lock
+                        await _flush_event_buffer(event_buf_label, [to_flush])
+
+                    # Capture artifact bytes up to budget
+                    if len(artifact_bytes) < stream_budget:
+                        remaining = stream_budget - len(artifact_bytes)
+                        if len(line) > remaining:
+                            artifact_bytes.extend(line[:remaining])
+                            if event_buf_label == "stdout":
+                                stdout_trunc = True
+                            else:
+                                stderr_trunc = True
+                        else:
+                            artifact_bytes.extend(line)
+
                 async def _reader(
                     stream: asyncio.StreamReader,
                     artifact_bytes: bytearray,
                     event_buf_label: str,
                 ):
-                    nonlocal \
-                        stdout_trunc, \
-                        stderr_trunc, \
-                        stdout_event_size, \
-                        stderr_event_size, \
-                        stdout_done, \
-                        stderr_done
-                    while True:
-                        try:
-                            line = await stream.readline()
-                        except Exception:
-                            # On any read error, stop the reader
-                            break
-                        if not line:
-                            break
-                        # Decode using replace to avoid errors
-                        text = line.decode("utf-8", errors="replace")
-
-                        # Append to event buffer and possibly flush if size >= 4KB
-                        to_flush: str | None = None
-                        async with lock:
-                            if event_buf_label == "stdout":
-                                stdout_event_buf.append(text)
-                                stdout_event_size += len(text.encode("utf-8"))
-                                should_flush = stdout_event_size >= 1024
-                                if should_flush:
-                                    to_flush = "".join(stdout_event_buf)
-                                    stdout_event_buf.clear()
-                                    stdout_event_size = 0
-                            else:
-                                stderr_event_buf.append(text)
-                                stderr_event_size += len(text.encode("utf-8"))
-                                should_flush = stderr_event_size >= 1024
-                                if should_flush:
-                                    to_flush = "".join(stderr_event_buf)
-                                    stderr_event_buf.clear()
-                                    stderr_event_size = 0
-
-                        if to_flush is not None:
-                            # Flush outside the lock
-                            if event_buf_label == "stdout":
-                                await _flush_event_buffer("stdout", [to_flush])
-                            else:
-                                await _flush_event_buffer("stderr", [to_flush])
-
-                        # Capture artifact bytes up to budget
-                        if len(artifact_bytes) < stream_budget:
-                            remaining = stream_budget - len(artifact_bytes)
-                            if len(line) > remaining:
-                                artifact_bytes.extend(line[:remaining])
-                                if event_buf_label == "stdout":
-                                    stdout_trunc = True
-                                else:
-                                    stderr_trunc = True
-                            else:
-                                artifact_bytes.extend(line)
+                    nonlocal stdout_done, stderr_done
+                    # Read to the end whatever happens to a line: a pipe nobody
+                    # reads fills up and blocks the container, and its client
+                    # then never exits.
+                    try:
+                        async for line in read_lines(stream):
+                            try:
+                                await _take(line, artifact_bytes, event_buf_label)
+                            except Exception as e:
+                                logger.debug("Output line dropped on %s: %s", event_buf_label, e)
+                    except Exception as e:
+                        # The pipe itself failed, and asyncio has closed it:
+                        # there is nothing left to read, and nothing to block on.
+                        logger.warning("Reading container %s failed: %s", event_buf_label, e)
 
                     # Mark done
                     if event_buf_label == "stdout":
@@ -2497,8 +2497,12 @@ class RunContainerHandler(BaseHandler):
                     proc.wait(), timeout=max(deadline - time.monotonic(), 1)
                 )
             except TimeoutError:
-                proc.kill()
-                await proc.wait()
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                # Bounded: the readers are stopped by now, and a pipe they left
+                # full never closes, which asyncio's wait() also waits for.
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(proc.wait(), timeout=KILL_WAIT_SECONDS)
                 return HandlerResult(
                     success=False,
                     error=f"Container execution timed out after {timeout}s",
