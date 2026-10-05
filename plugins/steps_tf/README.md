@@ -16,8 +16,9 @@ Handlers:
   change (counts and resource addresses, never values), so a branch or an
   approval can act on it. A scheduled plan-only flow is drift detection.
 - `tf.apply` — apply exactly the plan a `tf.plan` step saved earlier in the
-  run, in the same working directory and image; the tool refuses a plan made
-  stale by a state change.
+  run, in the same working directory and image; the step refuses a saved plan
+  that changed since it was made, and the tool refuses a plan made stale by a
+  state change.
 
 OpenTofu is the default engine and Terraform is selectable; the engine never
 appears in the handler id (CONVENTIONS.md, rule 3). By default the platform

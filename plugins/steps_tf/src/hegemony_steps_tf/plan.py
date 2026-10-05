@@ -52,6 +52,7 @@ from .common import (
     PLAN_TEXT_MISSING_NOTE,
     RUN_SCRIPT,
     SECRET_VARS_FILE,
+    SHA256_RE,
     VARS_FILE,
     Engine,
     LockTimeout,
@@ -84,6 +85,9 @@ from .common import (
 from .summary import plan_line, summarize_plan
 
 PLAN_EXIT_FILE = f"{OUTPUT_DIR}/plan-exitcode"
+#: ``sha256sum`` of the saved plan, taken as soon as the tool wrote it:
+#: tf.apply applies the plan only while it still matches.
+PLAN_SHA256_FILE = f"{OUTPUT_DIR}/plan.sha256"
 PLAN_TEXT_FILE = f"{OUTPUT_DIR}/plan.txt"
 #: The JSON plan is by far the largest file, and collection shares one byte
 #: budget in the order of ``collect``: it comes from its own folder, last, so
@@ -345,6 +349,7 @@ def build_plan_script(
         "set -e",
         'if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi',
         f'printf "%s" "$code" > {PLAN_EXIT_FILE}',
+        f"sha256sum {PLAN_FILE} > {PLAN_SHA256_FILE}",
         f"{run}{tf} show -no-color {PLAN_FILE} > {PLAN_TEXT_FILE}",
         f"mkdir -p {PLAN_JSON_DIR} {PLAN_OUTPUTS_DIR}",
         f"{run}{tf} show -json {PLAN_FILE} > {PLAN_JSON_FILE}",
@@ -352,6 +357,13 @@ def build_plan_script(
         f"if ! {run}{tf} output -json > {PLAN_OUTPUTS_FILE}; then rm -f {PLAN_OUTPUTS_FILE}; fi",
     ]
     return "\n".join(lines) + "\n"
+
+
+def saved_plan_digest(raw: bytes | None) -> str:
+    """The SHA-256 digest in ``sha256sum``'s output, or "" when there is none."""
+    words = (raw or b"").decode("utf-8", "replace").split()
+    digest = words[0].lower() if words else ""
+    return digest if SHA256_RE.fullmatch(digest) else ""
 
 
 class TfPlanHandler(BaseHandler):
@@ -586,6 +598,32 @@ class TfPlanHandler(BaseHandler):
                 },
                 evidence=evidence,
             )
+        # Without the digest, tf.apply could not tell this plan from one
+        # written over it later: fail as for the exit code.
+        plan_sha256 = saved_plan_digest(outcome.collected.get(PLAN_SHA256_FILE))
+        if not plan_sha256:
+            copy_failure = collect_failure(outcome, PLAN_SHA256_FILE)
+            cause = (
+                f"the copy out of the container failed ({copy_failure})"
+                if copy_failure
+                else "it is missing or not a SHA-256 digest"
+            )
+            return HandlerResult(
+                success=False,
+                summary=f"{BINARIES[config.engine]} plan result missing",
+                error=(
+                    f"{BINARIES[config.engine]} plan finished, but the saved plan's digest "
+                    f"could not be read back from the container ({cause}); run the step again"
+                ),
+                metrics={
+                    "exit_code": exit_code,
+                    "duration_seconds": outcome.duration_seconds,
+                    "image_served": outcome.image_served,
+                    "image_source": outcome.image_source,
+                    "image_cached": outcome.image_cached,
+                },
+                evidence=evidence,
+            )
         has_changes = plan_code == "2"
         plan_text = (outcome.collected.get(PLAN_TEXT_FILE) or b"").decode("utf-8", "replace")
         summary_data: dict[str, Any] = {}
@@ -600,8 +638,14 @@ class TfPlanHandler(BaseHandler):
                 {
                     "kind": "step_result",
                     "name": f"plan_{ctx.step_id}.txt",
-                    "content_text": plan_text,
-                    "content_json": {"has_changes": has_changes, **summary_data},
+                    # The digest tf.apply checks, for whoever approves this plan.
+                    "content_text": plan_text.rstrip("\n")
+                    + f"\n\nSaved plan {PLAN_FILE}, SHA-256: {plan_sha256}\n",
+                    "content_json": {
+                        "has_changes": has_changes,
+                        **summary_data,
+                        "plan_sha256": plan_sha256,
+                    },
                 }
             )
 
@@ -647,6 +691,8 @@ class TfPlanHandler(BaseHandler):
             "image_digest": outcome.image_digest,
             # tf.apply pulls the plan's image the way the plan did.
             "cache_image": config.cache_image,
+            # tf.apply applies the saved plan only while it has this digest.
+            "plan_sha256": plan_sha256,
             "state": config.state,
             "state_name": config.state_name.strip() if config.state == "managed" else "",
             # The run holds the state until it applies or ends (managed state

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import posixpath
@@ -31,10 +32,14 @@ from hegemony_step_sdk import (
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
 from hegemony_steps_container.runner import ContainerJobResult
 from hegemony_steps_tf.apply import (
+    APPLIED_PLAN_FILE,
+    APPLIED_PLAN_SUM_FILE,
     ERRORED_STATE_FILE,
     EXIT_NO_PLAN,
+    EXIT_PLAN_CHANGED,
     NO_PLAN_MESSAGE,
     OUTPUTS_FILE,
+    PLAN_CHANGED_MESSAGE,
     TfApplyHandler,
     apply_failure,
     build_apply_script,
@@ -74,6 +79,7 @@ from hegemony_steps_tf.plan import (
     PLAN_JSON_FILE,
     PLAN_OUTPUTS_DIR,
     PLAN_OUTPUTS_FILE,
+    PLAN_SHA256_FILE,
     TfPlanConfig,
     TfPlanHandler,
     build_plan_script,
@@ -283,17 +289,32 @@ def test_plan_script_quotes_untrusted_values():
 
 
 def test_apply_script():
-    script = build_apply_script("opentofu", "/shared/tf/plan", "5m")
+    digest = "d" * 64
+    script = build_apply_script("opentofu", "/shared/tf/plan", "5m", digest)
     assert "cd /shared/tf/plan" in script
-    assert "tofu apply -input=false -no-color -lock-timeout=5m plan.tfplan" in script
+    # The shared plan is copied out and checked; only the private copy is applied.
+    assert f"cp plan.tfplan {APPLIED_PLAN_FILE}\n" in script
+    assert f"printf '%s  %s\\n' {digest} {APPLIED_PLAN_FILE} > {APPLIED_PLAN_SUM_FILE}" in script
+    assert f"if ! sha256sum -c {APPLIED_PLAN_SUM_FILE} > /dev/null 2>&1; then" in script
+    assert f"  exit {EXIT_PLAN_CHANGED}\n" in script
+    assert script.index("sha256sum -c") < script.index("tofu apply")
+    assert f"tofu apply -input=false -no-color -lock-timeout=5m {APPLIED_PLAN_FILE}\n" in script
     assert "tofu output -json > /hegemony/out/outputs.json" in script
     _assert_parses(script)
-    _assert_parses(build_apply_script("terraform", "/shared/tf/a b;c'd", "300s"))
+    _assert_parses(build_apply_script("terraform", "/shared/tf/a b;c'd", "300s", digest))
+
+
+@pytest.mark.parametrize("digest", ["", "d" * 63, "D" * 64, "d" * 63 + ";", "$(id)" + "d" * 59])
+def test_apply_script_takes_only_a_sha256_digest(digest):
+    with pytest.raises(ValueError, match="64 hex digits"):
+        build_apply_script("opentofu", "/shared/tf/plan", "5m", digest)
 
 
 def test_scripts_stop_the_tool_at_the_step_deadline():
     """A dead worker stops nothing: the script bounds every tool call itself."""
-    apply = build_apply_script("opentofu", "/shared/tf/plan", "5m", deadline=1_900_000_000)
+    apply = build_apply_script(
+        "opentofu", "/shared/tf/plan", "5m", "d" * 64, deadline=1_900_000_000
+    )
     assert "hegemony_deadline=1900000000" in apply
     assert "\nbounded tofu apply -input=false" in apply
     assert "bounded tofu output -json" in apply
@@ -382,6 +403,10 @@ def test_plan_validation_accepts_defaults():
 
 # ── end to end ───────────────────────────────────────────────────────────────
 
+#: The saved plan's digest, as tf.plan's script writes it with sha256sum.
+_PLAN_SHA256 = hashlib.sha256(b"plan").hexdigest()
+_PLAN_SUM = f"{_PLAN_SHA256}  plan.tfplan\n".encode()
+
 
 class _Services:
     def __init__(
@@ -448,14 +473,17 @@ class _Services:
 def _install_docker(
     monkeypatch,
     *,
-    out: dict[str, bytes],
+    out: dict[str, bytes | None],
     exit_code: int = 0,
     events: list[Any] | None = None,
     repo_digests: list[str] | None = None,
 ) -> dict[str, Any]:
     """Fake docker. ``events`` (a _Services' log) records the staging of the
     container's files and the container start among the state access events.
-    ``repo_digests`` is the pulled image's RepoDigests (none by default)."""
+    ``repo_digests`` is the pulled image's RepoDigests (none by default).
+    ``out`` gets the saved plan's digest unless it names ``plan.sha256``
+    itself (None: not written)."""
+    out = {"plan.sha256": _PLAN_SUM, **out}
     state: dict[str, Any] = {"roots": {}, "calls": [], "exec": 0, "collected": []}
     events = events if events is not None else []
     monkeypatch.setattr(
@@ -484,7 +512,7 @@ def _install_docker(
                 state["collected"].append(folder)
                 for name, data in out.items():
                     path = name if name.startswith("/") else f"/hegemony/out/{name}"
-                    if posixpath.dirname(path) == folder:
+                    if data is not None and posixpath.dirname(path) == folder:
                         with open(os.path.join(dest, posixpath.basename(path)), "wb") as fh:
                             fh.write(data)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -567,6 +595,12 @@ async def test_plan_step_reports_changes(monkeypatch):
     assert "planned-secret-value" not in json.dumps(result.output)
     plan_artifact = next(e for e in result.evidence if e["name"] == "plan_plan.txt")
     assert "1 to add" in plan_artifact["content_text"]
+    # The digest tf.apply checks, where an approver sees it.
+    assert result.output["plan_sha256"] == _PLAN_SHA256
+    assert plan_artifact["content_json"]["plan_sha256"] == _PLAN_SHA256
+    assert plan_artifact["content_text"].endswith(
+        f"\n\nSaved plan plan.tfplan, SHA-256: {_PLAN_SHA256}\n"
+    )
 
     roots = state["roots"]
     assert json.loads(roots[VARS_FILE]) == {"routers": ["r1", "r2"]}
@@ -575,6 +609,9 @@ async def test_plan_step_reports_changes(monkeypatch):
     assert "TF_ENCRYPTION=" in roots[SECRET_ENV_FILE]
     assert 'backend "local"' in roots[BACKEND_OVERRIDE_FILE]
     assert "\nbounded tofu plan " in roots[RUN_SCRIPT]
+    script = roots[RUN_SCRIPT]
+    hashed = script.index(f"\nsha256sum plan.tfplan > {PLAN_SHA256_FILE}\n")
+    assert script.index("\nbounded tofu plan ") < hashed < script.index("\nbounded tofu show ")
     create = next(call for call in state["calls"] if call[1] == "create")
     assert "hegemony.handler_id=tf.plan" in create
     assert not any("resolved-" in part for part in create)
@@ -763,6 +800,21 @@ async def test_plan_step_fails_without_a_valid_detailed_exit_code(monkeypatch, c
     result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
     assert result.success is False
     assert "detailed exit code" in (result.error or "")
+    assert not result.output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("digest", [None, b"", b"not-a-digest  plan.tfplan\n", b"abc  plan.tfplan"])
+async def test_plan_step_fails_without_the_saved_plans_digest(monkeypatch, digest):
+    """tf.apply could not tell the saved plan from one written over it later."""
+    _install_docker(
+        monkeypatch,
+        out={"plan-exitcode": b"2", "plan.txt": b"Plan: 1 to add.\n", "plan.sha256": digest},
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+    assert result.success is False
+    assert result.summary == "tofu plan result missing"
+    assert "the saved plan's digest could not be read back" in (result.error or "")
     assert not result.output
 
 
@@ -1133,6 +1185,7 @@ def _plan_output(**overrides: Any) -> dict[str, Any]:
         "image": "ghcr.io/opentofu/opentofu:1.12.6",
         "working_dir": "/shared/tf/plan",
         "apply_ready": True,
+        "plan_sha256": _PLAN_SHA256,
     }
     output.update(overrides)
     return {"plan": {"success": True, "output": output}}
@@ -1214,6 +1267,10 @@ def _without(key: str) -> dict[str, Any]:
         (_without("has_changes"), True, "unusable plan: has_changes"),
         (_plan_output(state="cloud"), True, "unusable plan: state"),
         (_plan_output(working_dir="/shared/other"), True, "working directory '/shared/other'"),
+        # A plan from before tf.plan recorded the saved plan's digest.
+        (_without("plan_sha256"), True, "older version of tf.plan, which did not record"),
+        (_plan_output(plan_sha256="abc"), True, "unusable plan: plan_sha256"),
+        (_plan_output(plan_sha256="$(id)" + "a" * 59), True, "unusable plan: plan_sha256"),
     ],
 )
 async def test_apply_step_refusals(monkeypatch, outputs, shared, message):
@@ -1336,6 +1393,18 @@ async def test_apply_without_changes_succeeds_when_the_hold_cannot_be_ended(monk
     result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _NoReleaseServices(plan)))
     assert result.success is True, result.error
     assert result.summary == "Nothing to apply: the plan has no changes" + HOLD_KEPT_NOTE
+
+
+@pytest.mark.asyncio
+async def test_apply_step_checks_the_plan_against_its_digest(monkeypatch):
+    digest = "e" * 64
+    state = _install_docker(monkeypatch, out={}, exit_code=EXIT_PLAN_CHANGED)
+    services = _Services(_plan_output(plan_sha256=digest))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert f"printf '%s  %s\\n' {digest} {APPLIED_PLAN_FILE}" in state["roots"][RUN_SCRIPT]
+    assert result.success is False
+    assert result.summary == "tofu apply failed"
+    assert result.error == PLAN_CHANGED_MESSAGE
 
 
 @pytest.mark.asyncio
@@ -1475,20 +1544,29 @@ async def test_apply_succeeds_when_only_its_outputs_cannot_be_read(monkeypatch):
     assert "outputs could not be read" in (result.summary or "")
 
 
-def _run_apply_script(tmp_path, *, apply_code: int, push_fails: int, output_code: int = 0):
-    """Run the generated apply script under sh with a fake tool and no real waits."""
+def _run_apply_script(
+    tmp_path, *, apply_code: int, push_fails: int, output_code: int = 0, plan: str = "plan"
+):
+    """Run the generated apply script under sh with a fake tool and no real waits.
+
+    The saved plan holds ``plan``; the script checks it against the digest of
+    "plan". The tool writes the plan file it applies to ``applied``.
+    """
     root = tmp_path / "root"
     workdir = root / "shared" / "tf" / "plan"
     workdir.mkdir(parents=True)
-    (workdir / "plan.tfplan").write_text("plan")
+    (workdir / "plan.tfplan").write_text(plan)
+    (root / "hegemony" / "tf").mkdir(parents=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     pushes = tmp_path / "pushes"
+    applied = tmp_path / "applied"
     tool = bin_dir / "tofu"
     tool.write_text(
         f"""#!/bin/sh
 case "$1" in
   apply)
+    for arg; do last=$arg; done; echo "$last" > {applied}
     if [ {apply_code} -ne 0 ]; then echo '{{"serial": 7}}' > errored.tfstate; fi
     exit {apply_code} ;;
   state)
@@ -1504,7 +1582,7 @@ esac
     for path in (tool, bin_dir / "sleep"):
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
     script = build_apply_script(
-        "opentofu", "/shared/tf/plan", "300s", deadline=int(time.time()) + 600
+        "opentofu", "/shared/tf/plan", "300s", _PLAN_SHA256, deadline=int(time.time()) + 600
     )
     for prefix in ("/hegemony/", "/shared/"):
         script = script.replace(prefix, f"{root}{prefix}")
@@ -1513,6 +1591,23 @@ esac
     done = subprocess.run(["sh", str(tmp_path / "run.sh")], env=env, capture_output=True, text=True)
     out = root / "hegemony" / "out"
     return done, out, root / KEEP_DIR.lstrip("/"), pushes
+
+
+def test_apply_script_applies_a_private_copy_of_the_plan(tmp_path):
+    done, _out, _keep, _pushes = _run_apply_script(tmp_path, apply_code=0, push_fails=0)
+    assert done.returncode == 0, done.stderr
+    private = tmp_path / "root" / APPLIED_PLAN_FILE.lstrip("/")
+    assert (tmp_path / "applied").read_text().strip() == str(private)
+    assert private.read_text() == "plan"
+
+
+def test_apply_script_refuses_a_plan_that_changed(tmp_path):
+    done, _out, _keep, _pushes = _run_apply_script(
+        tmp_path, apply_code=0, push_fails=0, plan="plan with a resource added"
+    )
+    assert done.returncode == EXIT_PLAN_CHANGED
+    assert PLAN_CHANGED_MESSAGE in done.stderr
+    assert not (tmp_path / "applied").exists()
 
 
 @pytest.mark.parametrize("output_code", [0, 1])
@@ -1530,7 +1625,7 @@ def test_plan_script_does_not_fail_on_its_outputs(tmp_path, output_code):
     tool.write_text(
         f"""#!/bin/sh
 case "$1" in
-  plan) exit 2 ;;
+  plan) echo plan > plan.tfplan; exit 2 ;;
   show) echo '{{}}' ;;
   output) echo '{{"a": {{"value": 1}}}}'; exit {output_code} ;;
 esac
@@ -1553,6 +1648,8 @@ esac
 
     assert done.returncode == 0, done.stderr
     assert (root / "hegemony" / "out" / "plan-exitcode").read_text() == "2"
+    digest = hashlib.sha256(b"plan\n").hexdigest()
+    assert (root / PLAN_SHA256_FILE.lstrip("/")).read_text() == f"{digest}  plan.tfplan\n"
     outputs = root / PLAN_OUTPUTS_FILE.lstrip("/")
     assert outputs.exists() is (output_code == 0)
 
