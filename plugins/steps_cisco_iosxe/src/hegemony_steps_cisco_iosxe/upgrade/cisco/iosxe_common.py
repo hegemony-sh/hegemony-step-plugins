@@ -168,7 +168,15 @@ def same_boot_path(entry: str, path: str) -> bool:
 
 
 class CommandError(RuntimeError):
-    """A device command failed, could not run, or gave an unusable answer."""
+    """A device command failed, could not run, or gave an unusable answer.
+
+    ``transcript`` holds what a configuration session printed before it
+    failed, since some of its lines may already be applied.
+    """
+
+    def __init__(self, message: str, *, transcript: str = "") -> None:
+        super().__init__(message)
+        self.transcript = transcript
 
 
 def cli_error_line(output: str) -> str | None:
@@ -211,16 +219,56 @@ async def run_config(ssh: "Transport", lines: list[str]) -> str:
     ``lines`` starts with "configure terminal" and ends with "end", which is
     what makes the transports send them as one config session; sent one by
     one, each line would run in exec mode in a new session. Raises when any
-    line fails or the session did not run.
+    line fails or the session did not run; the lines before a failed one may
+    be applied, so the error carries the whole transcript.
     """
     results = await ssh.execute_commands(lines)
     if not results:
         raise CommandError("configuration session returned no result")
-    transcript = []
+    transcript: list[str] = []
+    failure: CommandError | None = None
     for result in results:
-        output = checked(result, result.command or "configuration")
-        transcript.append(f"{result.command}\n{output}" if output else result.command)
+        command = result.command or "configuration"
+        output = (result.output or "").rstrip("\n")
+        transcript.append(f"{command}\n{output}" if output else command)
+        try:
+            checked(result, command)
+        except CommandError as e:
+            transcript.append(f"! {e}")
+            failure = failure or e
+    if failure:
+        raise CommandError(str(failure), transcript="\n".join(transcript))
     return "\n".join(transcript)
+
+
+async def undo_boot_change(ssh: "Transport", previous: list[str], cli_outputs: list[str]) -> bool:
+    """Put the boot entries back to ``previous`` after a boot change failed.
+
+    A failed configuration session can still have applied its first lines,
+    such as "no boot system", so the running boot setting is rewritten from
+    the entries "show boot" listed before. Returns whether that worked; the
+    transcript goes to ``cli_outputs``.
+    """
+    lines = ["configure terminal", "no boot system"]
+    lines += [f"boot system {image}" for image in previous]
+    lines.append("end")
+    try:
+        transcript = await run_config(ssh, lines)
+    except CommandError as e:
+        cli_outputs.append(f"=== restore previous boot entries (failed) ===\n{e.transcript or e}")
+        return False
+    cli_outputs.append(f"=== restore previous boot entries ===\n{transcript}")
+    return True
+
+
+def boot_change_failure(error: CommandError, *, restored: bool) -> str:
+    """The error for a boot change session that failed, after the undo."""
+    if restored:
+        return f"{error}; the previous boot entries were restored"
+    return (
+        f"{error}; restoring the previous boot entries failed too, so check the "
+        "device's boot setting"
+    )
 
 
 async def save_config(ssh: "Transport") -> str:

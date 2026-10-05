@@ -41,6 +41,7 @@ from ..driver import (
 from .iosxe_common import (
     CommandError,
     all_boot_images,
+    boot_change_failure,
     check_file_exists_in_dir,
     checked,
     cli_error_line,
@@ -54,6 +55,7 @@ from .iosxe_common import (
     same_boot_path,
     save_config,
     stage_image,
+    undo_boot_change,
 )
 
 logger = logging.getLogger(__name__)
@@ -301,7 +303,13 @@ class IOSXEBundleDriver(UpgradeDriver):
                 config_lines.append(f"boot system {fallback}")
                 logger.info("Added fallback boot image: %s", fallback)
             config_lines.append("end")
-            transcript = await run_config(ssh, config_lines)
+            try:
+                transcript = await run_config(ssh, config_lines)
+            except CommandError as e:
+                cli_outputs.append(f"=== boot configuration (failed) ===\n{e.transcript}")
+                restored = await undo_boot_change(ssh, previous_boot, cli_outputs)
+                boot_config_changed = not restored
+                return _failed(boot_change_failure(e, restored=restored))
             boot_config_changed = True
             cli_outputs.append(f"=== boot configuration ===\n{transcript}")
 

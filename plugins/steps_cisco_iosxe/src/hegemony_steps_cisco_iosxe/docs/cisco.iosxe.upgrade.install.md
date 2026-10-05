@@ -22,10 +22,11 @@ automatically.
 
 In bundle mode the step sends `no boot system`, `boot system` with the new
 image, and `boot system` with the first previously configured image as a
-fallback, all in one configuration session. It saves with `write memory`,
-which must answer `[OK]`, checks that `show boot` now lists the new image
-first, and issues `reload`, answering `no` to saving the configuration
-again and confirming the reload.
+fallback, all in one configuration session; if a line fails, the step
+writes the previous boot entries back and does not reload. It saves with
+`write memory`, which must answer `[OK]`, checks that `show boot` now lists
+the new image first, and issues `reload`, answering `no` to saving the
+configuration again and confirming the reload.
 
 An install-mode activation boots packages.conf, so with Activate on the step
 first reads `show boot`. The first boot entry must be packages.conf on the
@@ -35,7 +36,9 @@ is changed. Turn on Fix Boot Setting to let the step correct it: it sends
 `no boot system` and `boot system` with the destination filesystem in one
 configuration session, saves with `write memory`, and reads `show boot`
 again before installing. Saving also stores any other unsaved change in the
-running configuration. When `show boot` fails or shows no boot variable, the
+running configuration. If a line of the session fails, its first lines may
+already be applied, so the step writes the previous boot entries back in a
+new session, and the device fails. When `show boot` fails or shows no boot variable, the
 device fails; the step never changes the boot setting on a guess.
 
 Uncheck Activate to prepare the upgrade without reloading: install mode runs

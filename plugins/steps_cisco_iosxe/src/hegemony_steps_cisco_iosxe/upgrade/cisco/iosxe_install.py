@@ -39,6 +39,7 @@ from ..driver import (
 )
 from .iosxe_common import (
     CommandError,
+    boot_change_failure,
     check_file_exists_in_dir,
     checked,
     has_boot_variable,
@@ -51,6 +52,7 @@ from .iosxe_common import (
     same_boot_path,
     save_config,
     stage_image,
+    undo_boot_change,
 )
 
 logger = logging.getLogger(__name__)
@@ -417,15 +419,21 @@ class IOSXEInstallDriver(UpgradeDriver):
                             "(turn on fix_boot_config to set it)"
                         )
                     logger.warning("Setting boot variable %s (was %s)", expected_boot, current)
-                    transcript = await run_config(
-                        ssh,
-                        [
-                            "configure terminal",
-                            "no boot system",
-                            f"boot system {expected_boot}",
-                            "end",
-                        ],
-                    )
+                    try:
+                        transcript = await run_config(
+                            ssh,
+                            [
+                                "configure terminal",
+                                "no boot system",
+                                f"boot system {expected_boot}",
+                                "end",
+                            ],
+                        )
+                    except CommandError as e:
+                        cli_outputs.append(f"=== boot configuration (failed) ===\n{e.transcript}")
+                        restored = await undo_boot_change(ssh, previous_boot, cli_outputs)
+                        boot_config_changed = not restored
+                        return _failed(boot_change_failure(e, restored=restored))
                     boot_config_changed = True
                     cli_outputs.append(f"=== boot configuration ===\n{transcript}")
                     saved = await save_config(ssh)

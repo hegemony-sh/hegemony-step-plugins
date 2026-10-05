@@ -176,3 +176,42 @@ async def test_handler_default_fails_a_device_with_the_wrong_boot_variable():
     assert result.success is False
     assert "expected flash:packages.conf" in result.evidence[0]["content_json"]["error"]
     assert not any(c.startswith(("configure", "install")) for c in ssh.commands)
+
+
+# --- a boot change that fails part-way ---------------------------------------
+
+RESTORE_LINES = ["configure terminal", "no boot system", f"boot system {OLD_IMAGE}", "end"]
+
+
+def _partly_applied(**replies: Result | list[Result]) -> ScriptedTransport:
+    """'no boot system' is applied, then the new boot line is rejected."""
+    return _fixing_device(
+        **{
+            "boot system bootflash:packages.conf": Result(
+                "% Invalid input detected at '^' marker.", exit_code=1, error="% Invalid input"
+            ),
+            **replies,
+        }
+    )
+
+
+async def test_partly_applied_boot_change_is_undone_and_kept_in_the_transcript():
+    ssh = _partly_applied()
+    result = await _install(ssh, fix_boot_config=True)
+    assert result.success is False
+    # The previous entries are put back in a second session.
+    assert ssh.calls[-1] == RESTORE_LINES
+    assert result.boot_config_changed is False
+    assert "previous boot entries were restored" in (result.error or "")
+    # The failed session's own output stays in the evidence.
+    assert "% Invalid input detected" in result.cli_output
+    assert "write memory" not in ssh.commands
+
+
+async def test_partly_applied_boot_change_that_cannot_be_undone_is_reported():
+    ssh = _partly_applied(**{f"boot system {OLD_IMAGE}": UNREACHABLE})
+    result = await _install(ssh, fix_boot_config=True)
+    assert result.success is False
+    assert ssh.calls[-1] == RESTORE_LINES
+    assert result.boot_config_changed is True
+    assert "check the device's boot setting" in (result.error or "")

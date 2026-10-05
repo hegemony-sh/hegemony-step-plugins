@@ -314,3 +314,26 @@ async def test_bundle_cleanup_with_an_empty_boot_variable_deletes_nothing():
     result = await IOSXEBundleDriver().cleanup(ssh, keep_versions=0)
     assert result.success is False
     assert not any(c.startswith("delete") for c in ssh.commands)
+
+
+async def test_partly_applied_bundle_boot_change_is_undone():
+    ssh = _device(**{f"boot system {NEW}": Result(INVALID, exit_code=1, error="% Invalid input")})
+    result = await _install(ssh)
+    assert result.success is False
+    assert ssh.calls[-1] == ["configure terminal", "no boot system", f"boot system {OLD}", "end"]
+    assert result.boot_config_changed is False
+    assert "% Invalid input detected" in result.cli_output
+    assert "reload" not in ssh.commands
+
+
+async def test_partly_applied_bundle_boot_change_that_cannot_be_undone_is_reported():
+    ssh = _device(
+        **{
+            f"boot system {NEW}": Result(INVALID, exit_code=1, error="% Invalid input"),
+            f"boot system {OLD}": UNREACHABLE,
+        }
+    )
+    result = await _install(ssh)
+    assert result.success is False
+    assert result.boot_config_changed is True
+    assert "check the device's boot setting" in (result.error or "")
