@@ -5,27 +5,19 @@
 """Background connectivity-monitor step handlers for Hegemony.
 
 Registers under the ``hegemony.step_handlers`` entry-point group with the
-claimed prefix ``monitor``. These are thin shells: they assemble config and
-resolve targets, then drive the host monitor machinery through
-``services.start_monitor`` / ``services.stop_monitor``. MonitorManager and the
-engine's monitor-node semantics stay host-side.
+claimed prefix ``monitor``. The handler is a thin shell: it assembles config
+and resolves targets, then drives the host monitor machinery through
+``services.start_monitor``. MonitorManager and the engine's monitor-node
+semantics stay host-side.
 """
 
 from __future__ import annotations
 
 from hegemony_step_sdk import BaseHandler, StepHandlerRegistry
 
-from .handlers import (
-    ConnectivityMonitorHandler,
-    ConnectivityMonitorStartHandler,
-    ConnectivityMonitorStopHandler,
-)
+from .handlers import ConnectivityMonitorHandler
 
-ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
-    ConnectivityMonitorHandler,
-    ConnectivityMonitorStartHandler,
-    ConnectivityMonitorStopHandler,
-)
+ALL_HANDLERS: tuple[type[BaseHandler], ...] = (ConnectivityMonitorHandler,)
 
 
 def register(registry: StepHandlerRegistry) -> None:
