@@ -216,16 +216,39 @@ async def test_read_lines_splits_long_lines_into_pieces():
 
 def test_live_output_admits_pieces_until_its_limit_then_one_notice():
     live = LiveOutput("[stop]", limit=10)
-    assert live.admit(b"abcd\n", "abcd\n") == "abcd\n"
-    assert live.admit(b"efg", "efg") == "efg"
+    assert live.admit("abcd\n") == "abcd\n"
+    assert live.admit("efg") == "efg"
     assert not live.stopped
     # Past the limit, mid-line: the notice starts a line of its own.
-    assert live.admit(b"hijk\n", "hijk\n") == "\n[stop]\n"
+    assert live.admit("hijk\n") == "\n[stop]\n"
     assert live.stopped
-    assert live.admit(b"l\n", "l\n") == ""
+    assert live.admit("l\n") == ""
 
 
 def test_live_output_notice_after_a_whole_line_starts_at_once():
     live = LiveOutput("[stop]", limit=4)
-    assert live.admit(b"ab\n", "ab\n") == "ab\n"
-    assert live.admit(b"cd\n", "cd\n") == "[stop]\n"
+    assert live.admit("ab\n") == "ab\n"
+    assert live.admit("cd\n") == "[stop]\n"
+
+
+def test_live_output_counts_the_utf8_the_log_receives():
+    # Each invalid byte decodes to U+FFFD, three bytes of UTF-8: three read
+    # bytes fill a limit of nine, so the log never gets more than its limit.
+    live = LiveOutput("[stop]", limit=9)
+    assert live.admit(b"\xff\xff\xff".decode("utf-8", errors="replace")) == "�" * 3
+    assert live.admit("a") == "\n[stop]\n"
+
+
+async def test_output_after_a_line_that_fills_the_budget_marks_it_truncated(
+    attached_client, monkeypatch
+):
+    # 20 bytes for the evidence: 10 per stream, which the first line fills.
+    monkeypatch.setattr(RunContainerHandler, "_MAX_OUTPUT_BYTES", 20)
+    attached_client["script"] = "import sys\nsys.stdout.write('abcdefghi\\nmore\\n')\n"
+    events: list[tuple[str, dict]] = []
+
+    result = await _run(_ctx(events))
+
+    assert isinstance(result, ContainerJobResult)
+    assert result.stdout == "abcdefghi\n"
+    assert result.truncated

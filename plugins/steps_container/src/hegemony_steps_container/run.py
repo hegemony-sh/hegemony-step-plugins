@@ -2355,7 +2355,7 @@ class RunContainerHandler(BaseHandler):
                     nonlocal stdout_trunc, stderr_trunc, stdout_event_size, stderr_event_size
                     # Decode using replace to avoid errors; past its limit the
                     # live log gets one notice, then nothing.
-                    text = live.admit(line, line.decode("utf-8", errors="replace"))
+                    text = live.admit(line.decode("utf-8", errors="replace"))
 
                     # Append to event buffer and possibly flush if size >= 1KB
                     to_flush: str | None = None
@@ -2381,17 +2381,18 @@ class RunContainerHandler(BaseHandler):
                         # Flush outside the lock
                         await _flush_event_buffer(event_buf_label, [to_flush])
 
-                    # Capture artifact bytes up to budget
-                    if len(artifact_bytes) < stream_budget:
-                        remaining = stream_budget - len(artifact_bytes)
-                        if len(line) > remaining:
-                            artifact_bytes.extend(line[:remaining])
-                            if event_buf_label == "stdout":
-                                stdout_trunc = True
-                            else:
-                                stderr_trunc = True
+                    # Capture artifact bytes up to budget. Output that arrives
+                    # once the budget is full, also when a line filled it
+                    # exactly, is dropped and marks the stream truncated.
+                    remaining = stream_budget - len(artifact_bytes)
+                    if len(line) > remaining:
+                        artifact_bytes.extend(line[: max(remaining, 0)])
+                        if event_buf_label == "stdout":
+                            stdout_trunc = True
                         else:
-                            artifact_bytes.extend(line)
+                            stderr_trunc = True
+                    else:
+                        artifact_bytes.extend(line)
 
                 async def _reader(
                     stream: asyncio.StreamReader,

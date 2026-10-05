@@ -681,7 +681,7 @@ class _BuildLog:
         else:
             self.truncated = True
         self.tail.append(text.rstrip("\n"))
-        live = self._live.admit(raw, text)
+        live = self._live.admit(text)
         if not live:
             return
         self._pending.append(live)

@@ -51,7 +51,8 @@ class LiveOutput:
 
     Pieces pass until :data:`MAX_LIVE_OUTPUT_BYTES` of them have; the piece
     that would go past it is replaced by ``notice`` (once), and later pieces
-    by nothing.
+    by nothing. Pieces are counted as the UTF-8 the log receives, not as the
+    bytes read: decoding turns each invalid byte into a three-byte U+FFFD.
     """
 
     def __init__(self, notice: str, limit: int = MAX_LIVE_OUTPUT_BYTES) -> None:
@@ -60,12 +61,13 @@ class LiveOutput:
         self._line_start = True
         self.stopped = False
 
-    def admit(self, raw: bytes, text: str) -> str:
-        """What the live log shows of the piece ``raw`` (decoded as ``text``)."""
+    def admit(self, text: str) -> str:
+        """What the live log shows of the decoded output piece ``text``."""
         if self.stopped:
             return ""
-        if len(raw) <= self._left:
-            self._left -= len(raw)
+        size = len(text.encode("utf-8"))
+        if size <= self._left:
+            self._left -= size
             if text:
                 self._line_start = text.endswith("\n")
             return text
