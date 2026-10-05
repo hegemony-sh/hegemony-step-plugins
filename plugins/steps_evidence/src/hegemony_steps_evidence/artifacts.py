@@ -15,7 +15,7 @@ from hegemony_step_sdk import command_label
 def _parse_created_at(value: Any) -> datetime | None:
     """Parse an ISO-8601 ``created_at`` defensively; None when unusable.
 
-    Comparing raw strings would mis-order mixed forms ('Z' vs '+00:00');
+    Comparing raw strings would sort mixed forms ('Z' vs '+00:00') wrongly;
     naive values are pinned to UTC so aware/naive pairs stay comparable.
     """
     if not isinstance(value, str) or not value:
