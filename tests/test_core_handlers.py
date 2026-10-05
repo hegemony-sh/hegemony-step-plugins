@@ -54,14 +54,10 @@ WHEELS = [
             "cisco.iosxe.upgrade.cleanup",
         },
     ),
-    (
-        hegemony_steps_monitor,
-        "monitor",
-        {"monitor.connectivity", "monitor.start", "monitor.stop"},
-    ),
+    (hegemony_steps_monitor, "monitor", {"monitor.connectivity"}),
 ]
 
-HIDDEN_IDS = {"general.noop", "monitor.start", "monitor.stop"}
+HIDDEN_IDS = {"general.noop"}
 
 
 class RecordingRegistry:
@@ -112,7 +108,7 @@ def test_no_duplicate_ids_across_wheels():
     all_ids: list[str] = []
     for module, _ns, _expected in WHEELS:
         all_ids += [cls.handler_id for cls in module.ALL_HANDLERS]
-    assert len(all_ids) == len(set(all_ids)) == 23
+    assert len(all_ids) == len(set(all_ids)) == 21
 
 
 def test_connectivity_check_type_is_registry_driven():
