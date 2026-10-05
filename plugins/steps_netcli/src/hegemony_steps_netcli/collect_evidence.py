@@ -130,7 +130,11 @@ class CollectEvidenceHandler(BaseHandler):
                 return outcome
 
             try:
-                ssh = services.connect(device, platform=device.get("platform"))
+                # step_run_id registers the session, so cancelling the run
+                # closes it.
+                ssh = services.connect(
+                    device, platform=device.get("platform"), step_run_id=ctx.step_run_id
+                )
                 # Execute all commands together for efficiency
                 results = await ssh.execute_commands(commands)
                 for result in results:

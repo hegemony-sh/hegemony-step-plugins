@@ -583,3 +583,56 @@ async def test_execute_cli_connects_with_the_device_platform():
     result = await handler.execute(ctx)
     assert result.success is True
     assert connects == ["eos"]
+
+
+def _netcli_ctx(services: Any, **config: Any) -> HandlerContext:
+    return HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        config={"commands": ["show version"], **config},
+        target_roles=["primary"],
+        target_devices_by_role={"primary": [{"id": "d1", "name": "r1", "mgmt_host": "192.0.2.1"}]},
+        services=cast(HandlerServices, services),
+    )
+
+
+class _RecordingConnects:
+    """services.connect stand-in recording its keyword arguments."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def connect(self, device, **kwargs):
+        self.calls.append(kwargs)
+
+        class _Result:
+            command = "show version"
+            output = "ok"
+            exit_code = 0
+            error = None
+            latency_ms = 1.0
+
+        class _Transport:
+            async def execute_commands(self, commands):
+                return [_Result() for _ in commands]
+
+        return _Transport()
+
+
+def _netcli_handlers() -> list[BaseHandler]:
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    return [ExecuteCLIActionHandler(), CollectEvidenceHandler()]
+
+
+@pytest.mark.parametrize("handler", _netcli_handlers(), ids=lambda h: h.handler_id)
+async def test_netcli_sessions_register_for_cancellation(handler: BaseHandler):
+    """The step run id reaches services.connect, so cancelling the run closes
+    the device session instead of leaving it running."""
+    services = _RecordingConnects()
+    result = await handler.execute(_netcli_ctx(services))
+    assert result.success is True, result.error
+    assert [call["step_run_id"] for call in services.calls] == ["sr"]
