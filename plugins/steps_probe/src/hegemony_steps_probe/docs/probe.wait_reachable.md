@@ -31,6 +31,11 @@ window. The step succeeds at the first moment all targets have been stable
 for the full window; expect it to take at least Stable (sec) even when
 everything is already up.
 
+Each poll round checks every target, up to Max Parallel Devices at the same
+time (default 10, up to 32; 1 polls them one after another). No poll runs
+past Max Wait (sec): one that starts near the deadline gets only the time
+left, and the deadline is checked again when the round ends.
+
 When the flow runs under an egress policy, every target is checked against
 it once up front, and a denied target fails the step immediately with the
 policy's reason instead of polling until the deadline.

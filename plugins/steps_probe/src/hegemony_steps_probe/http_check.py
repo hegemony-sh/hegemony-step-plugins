@@ -12,9 +12,22 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, StepKind
+from hegemony_step_sdk import (
+    MAX_PARALLEL_DEVICES_LIMIT,
+    BaseHandler,
+    HandlerContext,
+    HandlerResult,
+    StepKind,
+    for_each_target_device,
+    max_parallel_from_config,
+)
 
-from .targets import all_probe_targets
+from .targets import (
+    DEFAULT_MAX_PARALLEL_TARGETS,
+    TargetOutcome,
+    all_probe_targets,
+    merge_outcomes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +142,13 @@ class HttpProbeConfig(BaseModel):
     attempts: int = Field(
         default=1, ge=1, le=10, title="Attempts", description="Number of attempts (1-10)"
     )
+    max_parallel_devices: int = Field(
+        default=DEFAULT_MAX_PARALLEL_TARGETS,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Targets requested at the same time (1 = one after another). Defaults to 10.",
+    )
 
 
 class HttpProbeHandler(BaseHandler):
@@ -175,11 +195,6 @@ class HttpProbeHandler(BaseHandler):
         effective_port = port or _SCHEME_DEFAULT_PORTS[scheme]
         default_port = effective_port == _SCHEME_DEFAULT_PORTS[scheme]
 
-        all_evidence: list[dict[str, Any]] = []
-        all_metrics: dict[str, Any] = {}
-        failed_devices: list[str] = []
-        success_count = 0
-
         # This handler drives its own httpx client rather than going through
         # services.run_probe, which is where the host applies the flow egress
         # gate — so without this hook a restricted policy would never see
@@ -203,15 +218,16 @@ class HttpProbeHandler(BaseHandler):
             timeout=timeout_sec,
             event_hooks={"request": [_authorize_request]},
         ) as client:
-            for device in target_devices:
+
+            async def _check(device: dict[str, Any]) -> TargetOutcome:
+                """Request one target, retrying up to ``attempts`` times."""
                 # None for a direct-IP target: it has no inventory identity,
                 # and the artifact column behind evidence device_id is a UUID.
                 device_id = device.get("id")
                 device_name = device.get("name") or device_id or "unknown"
                 host = device.get("mgmt_host")
                 if not host:
-                    failed_devices.append(f"{device_name} (no host)")
-                    continue
+                    return TargetOutcome(device_name, ok=False, error="no host")
 
                 # A colon marks an IPv6 literal (hostnames and IPv4 cannot
                 # carry one), and a URL authority requires it bracketed.
@@ -227,15 +243,13 @@ class HttpProbeHandler(BaseHandler):
                     if attempt < attempts - 1:
                         await asyncio.sleep(0.5)
 
-                if outcome.get("success"):
-                    success_count += 1
-                    if "latency_ms" in outcome:
-                        all_metrics[f"{device_name}_ms"] = outcome["latency_ms"]
-                else:
-                    failed_devices.append(f"{device_name} ({outcome.get('error', 'failed')})")
-
-                all_evidence.append(
-                    {
+                ok = bool(outcome.get("success"))
+                return TargetOutcome(
+                    device_name,
+                    ok=ok,
+                    error=None if ok else outcome.get("error", "failed"),
+                    latency_ms=outcome.get("latency_ms"),
+                    evidence={
                         "kind": "transport_meta",
                         "name": f"http_{device_name}",
                         "device_id": device_id,
@@ -246,8 +260,21 @@ class HttpProbeHandler(BaseHandler):
                             "method": method,
                             **outcome,
                         },
-                    }
+                    },
                 )
+
+            # An egress denial raised by the request hook propagates and
+            # cancels the requests still running.
+            outcomes = await for_each_target_device(
+                target_devices,
+                _check,
+                max_parallel=max_parallel_from_config(
+                    ctx.config, default=DEFAULT_MAX_PARALLEL_TARGETS
+                ),
+            )
+
+        all_evidence, all_metrics, failed_devices = merge_outcomes(outcomes)
+        success_count = sum(outcome.ok for outcome in outcomes)
 
         total = len(target_devices)
         summary = f"http {method} {path}: {success_count}/{total} targets OK"

@@ -14,9 +14,22 @@ import dns.asyncresolver
 import dns.exception
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, StepKind
+from hegemony_step_sdk import (
+    MAX_PARALLEL_DEVICES_LIMIT,
+    BaseHandler,
+    HandlerContext,
+    HandlerResult,
+    StepKind,
+    for_each_target_device,
+    max_parallel_from_config,
+)
 
-from .targets import all_probe_targets
+from .targets import (
+    DEFAULT_MAX_PARALLEL_TARGETS,
+    TargetOutcome,
+    all_probe_targets,
+    merge_outcomes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +132,13 @@ class DnsProbeConfig(BaseModel):
     attempts: int = Field(
         default=1, ge=1, le=10, title="Attempts", description="Number of attempts (1-10)"
     )
+    max_parallel_devices: int = Field(
+        default=DEFAULT_MAX_PARALLEL_TARGETS,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Targets looked up at the same time (1 = one after another). Defaults to 10.",
+    )
 
     @field_validator("resolver")
     @classmethod
@@ -185,26 +205,22 @@ class DnsProbeHandler(BaseHandler):
             for proto in DNS_PROTOCOLS:
                 await enforce(resolver_ip, DNS_PORT, proto=proto, kind="dns query")
 
-        all_evidence: list[dict[str, Any]] = []
-        all_metrics: dict[str, Any] = {}
-        failed_devices: list[str] = []
-        success_count = 0
-
-        for device in target_devices:
+        async def _check(device: dict[str, Any]) -> TargetOutcome:
+            """Resolve one target's question, retrying up to ``attempts`` times."""
             # None for a direct-IP target: it has no inventory identity, and
             # the artifact column behind evidence device_id is a UUID.
             device_id = device.get("id")
             device_name = device.get("name") or device_id or "unknown"
             query_name = configured_name or device.get("hostname") or device.get("mgmt_host")
             if not query_name:
-                failed_devices.append(f"{device_name} (no name to resolve)")
-                continue
+                return TargetOutcome(device_name, ok=False, error="no name to resolve")
             # A bare IP literal is not a DNS question. A direct-IP target only
             # makes sense here alongside an explicit Name to Resolve; without
             # one, resolving "8.8.8.8" as an A record would fail confusingly.
             if not configured_name and _looks_like_ip(query_name):
-                failed_devices.append(f"{device_name} (IP target needs a Name to Resolve)")
-                continue
+                return TargetOutcome(
+                    device_name, ok=False, error="IP target needs a Name to Resolve"
+                )
 
             answers: list[str] = []
             error: str | None = None
@@ -231,16 +247,17 @@ class DnsProbeHandler(BaseHandler):
             missing = [value for value in expected if value not in answers]
             ok = error is None and not missing
             if ok:
-                success_count += 1
-                if latency_ms is not None:
-                    all_metrics[f"{device_name}_ms"] = latency_ms
+                reason = None
             elif error is not None:
-                failed_devices.append(f"{device_name} ({error})")
+                reason = error
             else:
-                failed_devices.append(f"{device_name} (missing: {', '.join(missing)})")
-
-            all_evidence.append(
-                {
+                reason = f"missing: {', '.join(missing)}"
+            return TargetOutcome(
+                device_name,
+                ok=ok,
+                error=reason,
+                latency_ms=latency_ms,
+                evidence={
                     "kind": "transport_meta",
                     "name": f"dns_{record_type}_{device_name}",
                     "device_id": device_id,
@@ -255,8 +272,16 @@ class DnsProbeHandler(BaseHandler):
                         "missing_expected": missing,
                         "error": error,
                     },
-                }
+                },
             )
+
+        outcomes = await for_each_target_device(
+            target_devices,
+            _check,
+            max_parallel=max_parallel_from_config(ctx.config, default=DEFAULT_MAX_PARALLEL_TARGETS),
+        )
+        all_evidence, all_metrics, failed_devices = merge_outcomes(outcomes)
+        success_count = sum(outcome.ok for outcome in outcomes)
 
         total = len(target_devices)
         summary = f"dns {record_type}: {success_count}/{total} lookups OK"

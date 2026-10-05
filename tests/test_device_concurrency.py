@@ -7,7 +7,8 @@
 Pins ``for_each_target_device`` (strictly sequential at the default of 1,
 bounded overlap above it, results in device order), the tolerant
 ``max_parallel_from_config`` parsing, and that a multi-device handler
-actually overlaps device work when ``max_parallel_devices`` is raised.
+actually overlaps device work when ``max_parallel_devices`` is raised. The
+probe handlers check their targets in parallel by default.
 """
 
 from __future__ import annotations
@@ -15,10 +16,14 @@ from __future__ import annotations
 import asyncio
 from typing import Any, cast
 
+import httpx
+import pytest
+
 from hegemony_step_sdk import (
     MAX_PARALLEL_DEVICES_LIMIT,
     HandlerContext,
     HandlerServices,
+    ProbeResult,
     for_each_target_device,
     max_parallel_from_config,
 )
@@ -246,3 +251,247 @@ class TestHandlerParallelism:
             "version sw1",
             "version sw2",
         ]
+
+
+_IPS = [f"192.0.2.{i}" for i in range(1, 7)]
+
+
+class _InFlight:
+    """Count overlapping checks; earlier targets take longest."""
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.peak = 0
+
+    async def hold(self, index: int) -> None:
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        try:
+            # Target 1 waits longest, so completion order is reversed.
+            await asyncio.sleep(0.05 - index * 0.005)
+        finally:
+            self.active -= 1
+
+
+def _index(address: str) -> int:
+    return int(address.rsplit(".", 1)[1])
+
+
+def _probe_ctx(config: dict[str, Any], services: Any, ips: list[str] = _IPS) -> HandlerContext:
+    return HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        config=config,
+        step_target_ips=ips,
+        services=cast(HandlerServices, services),
+    )
+
+
+class _Denied(Exception):
+    """Stands in for the host's egress-denial error."""
+
+
+class TestProbeHandlerParallelism:
+    """The probe handlers check targets concurrently and merge in target order."""
+
+    @pytest.mark.parametrize(("config", "peak"), [({}, 6), ({"max_parallel_devices": 1}, 1)])
+    async def test_connectivity_defaults_to_ten_at_once(self, config, peak):
+        from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
+
+        flight = _InFlight()
+
+        class _Services:
+            async def run_probe(self, check_type, address, options):
+                await flight.hold(_index(address))
+                return ProbeResult(ok=True, metrics={"connect_ms": 1.0})
+
+        result = await ConnectivityCheckHandler().execute(_probe_ctx(config, _Services()))
+        assert result.success is True, result.error
+        assert flight.peak == peak
+
+    async def test_connectivity_keeps_target_order(self):
+        from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
+
+        flight = _InFlight()
+
+        class _Services:
+            async def run_probe(self, check_type, address, options):
+                await flight.hold(_index(address))
+                ok = address != _IPS[0]
+                return ProbeResult(ok=ok, metrics={"connect_ms": 1.0}, error_detail="refused")
+
+        ctx = _probe_ctx({"max_parallel_devices": 3}, _Services())
+        result = await ConnectivityCheckHandler().execute(ctx)
+        assert 1 < flight.peak <= 3
+        assert result.success is False
+        assert [e["content_json"]["host"] for e in result.evidence] == _IPS
+        assert list(result.metrics) == [f"{ip}_ms" for ip in _IPS[1:]]
+        assert result.error == "Failed: 192.0.2.1 (refused)"
+
+    async def test_connectivity_unknown_check_type_still_fails_cleanly(self):
+        from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
+
+        class _Services:
+            async def run_probe(self, check_type, address, options):
+                await asyncio.sleep(0)
+                raise KeyError(check_type)
+
+        ctx = _probe_ctx({"check_type": "tls_handshake"}, _Services())
+        result = await ConnectivityCheckHandler().execute(ctx)
+        assert result.success is False
+        assert result.error == "Check type 'tls_handshake' is not available on this worker"
+        assert result.summary == "Unsupported check type: tls_handshake"
+
+    async def test_connectivity_egress_denial_still_raises(self):
+        from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
+
+        stopped: list[str] = []
+
+        class _Services:
+            async def run_probe(self, check_type, address, options):
+                if address == _IPS[2]:
+                    raise _Denied(f"probe to {address} refused by the flow egress policy")
+                try:
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    stopped.append(address)
+                    raise
+                return ProbeResult(ok=True)  # pragma: no cover - always cancelled
+
+        with pytest.raises(_Denied):
+            await asyncio.wait_for(
+                ConnectivityCheckHandler().execute(_probe_ctx({}, _Services())), timeout=5
+            )
+        # The checks still running were stopped, not left behind.
+        assert sorted(stopped) == sorted(ip for ip in _IPS if ip != _IPS[2])
+
+    async def test_http_requests_targets_concurrently_in_order(self, monkeypatch):
+        from hegemony_steps_probe import http_check
+        from hegemony_steps_probe.http_check import HttpProbeHandler
+
+        flight = _InFlight()
+
+        async def answer(request: httpx.Request) -> httpx.Response:
+            await flight.hold(_index(request.url.host))
+            return httpx.Response(200)
+
+        real_client = httpx.AsyncClient
+
+        def client_with_mock_transport(**kwargs):
+            kwargs["transport"] = httpx.MockTransport(answer)
+            return real_client(**kwargs)
+
+        monkeypatch.setattr(http_check.httpx, "AsyncClient", client_with_mock_transport)
+        ctx = _probe_ctx({"max_parallel_devices": 4}, type("_Services", (), {})())
+        result = await HttpProbeHandler().execute(ctx)
+        assert result.success is True, result.error
+        assert 1 < flight.peak <= 4
+        assert [e["content_json"]["url"] for e in result.evidence] == [
+            f"http://{ip}/" for ip in _IPS
+        ]
+        assert list(result.metrics) == [f"{ip}_ms" for ip in _IPS]
+
+    async def test_http_egress_denial_still_raises(self, monkeypatch):
+        from hegemony_steps_probe import http_check
+        from hegemony_steps_probe.http_check import HttpProbeHandler
+
+        async def answer(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(0.01)
+            return httpx.Response(200)
+
+        real_client = httpx.AsyncClient
+
+        def client_with_mock_transport(**kwargs):
+            kwargs["transport"] = httpx.MockTransport(answer)
+            return real_client(**kwargs)
+
+        monkeypatch.setattr(http_check.httpx, "AsyncClient", client_with_mock_transport)
+
+        class _Services:
+            async def enforce_egress(self, host, port, *, proto, kind):
+                if host == _IPS[3]:
+                    raise _Denied(f"{kind} to {host} refused by the flow egress policy")
+
+        with pytest.raises(_Denied):
+            await HttpProbeHandler().execute(_probe_ctx({}, _Services()))
+
+    async def test_dns_looks_targets_up_concurrently_in_order(self, monkeypatch):
+        from hegemony_steps_probe import dns_check
+        from hegemony_steps_probe.dns_check import DnsProbeHandler
+
+        flight = _InFlight()
+
+        async def fake_resolve(query_name, record_type, *, resolver_ip="", timeout_sec=5.0):
+            index = int(query_name.split(".")[0].removeprefix("r"))
+            await flight.hold(index)
+            return [f"192.0.2.{index}"]
+
+        monkeypatch.setattr(dns_check, "resolve_records", fake_resolve)
+        devices = [
+            {"id": None, "name": f"r{i}", "hostname": f"r{i}.example.com", "mgmt_host": ip}
+            for i, ip in enumerate(_IPS, start=1)
+        ]
+        ctx = HandlerContext(
+            run_id="r",
+            flow_id="f",
+            step_run_id="sr",
+            step_id="s",
+            config={"max_parallel_devices": 3},
+            target_roles=["primary"],
+            target_devices_by_role={"primary": devices},
+        )
+        result = await DnsProbeHandler().execute(ctx)
+        assert result.success is True, result.error
+        assert 1 < flight.peak <= 3
+        assert [e["content_json"]["answers"] for e in result.evidence] == [[ip] for ip in _IPS]
+        assert list(result.metrics) == [f"r{i}_ms" for i in range(1, 7)]
+
+    async def test_wait_reachable_polls_a_round_concurrently(self, monkeypatch):
+        from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+        handler = WaitReachableHandler()
+        flight = _InFlight()
+
+        async def check(host, port, timeout):
+            await flight.hold(_index(host))
+            return True
+
+        monkeypatch.setattr(handler, "_check_tcp", check)
+        config = {"max_wait_seconds": 10, "stable_seconds": 1, "poll_interval": 1}
+        result = await handler.execute(
+            _probe_ctx({**config, "max_parallel_devices": 3}, type("_Services", (), {})())
+        )
+        assert result.success is True, result.error
+        assert 1 < flight.peak <= 3
+        assert [e["content_json"]["host"] for e in result.evidence] == _IPS
+
+    async def test_wait_reachable_keeps_its_deadline(self, monkeypatch):
+        """Six hanging targets, two at a time, a 5 s connect timeout: the step
+        still ends at its 1 s deadline instead of after 6 x 5 s."""
+        from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+        handler = WaitReachableHandler()
+        timeouts: list[float] = []
+
+        async def hang(host, port, timeout):
+            timeouts.append(timeout)
+            await asyncio.sleep(timeout)
+            return False
+
+        monkeypatch.setattr(handler, "_check_tcp", hang)
+        config = {
+            "max_wait_seconds": 1,
+            "stable_seconds": 1,
+            "poll_interval": 1,
+            "connect_timeout_seconds": 5,
+            "max_parallel_devices": 2,
+        }
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        result = await handler.execute(_probe_ctx(config, type("_Services", (), {})()))
+        assert loop.time() - started < 1.5
+        assert result.success is False
+        assert (result.error or "").startswith("Timeout waiting for targets")
+        assert timeouts and max(timeouts) <= 1

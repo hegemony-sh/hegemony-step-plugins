@@ -7,18 +7,20 @@
 import asyncio
 import contextlib
 import logging
-from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     StepKind,
+    for_each_target_device,
 )
 
-from .targets import all_probe_targets
+from .targets import DEFAULT_MAX_PARALLEL_TARGETS, all_probe_targets
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +72,13 @@ class WaitReachableConfig(BaseModel):
             "Defaults to 5."
         ),
         json_schema_extra={"x_legacy_keys": ["connect_timeout"]},
+    )
+    max_parallel_devices: int = Field(
+        default=DEFAULT_MAX_PARALLEL_TARGETS,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Targets polled at the same time (1 = one after another). Defaults to 10.",
     )
 
 
@@ -138,66 +147,72 @@ class WaitReachableHandler(BaseHandler):
                     kind="reachability check",
                 )
 
-        start_time = datetime.now(UTC)
-        # Track stability per device (all devices validated to have mgmt_host above)
-        device_stable_start: dict[str, datetime | None] = {
-            d.get("id", d.get("mgmt_host")): None for d in target_devices
-        }
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline = started + max_wait_seconds
+        # Per target, the loop time it answered from when it last became
+        # reachable; None while it is not.
+        stable_since: list[float | None] = [None] * len(target_devices)
         attempts = 0
-        all_evidence = []
+
+        async def _poll(device: dict[str, Any]) -> float | None:
+            """Poll one target; the loop time it answered, or None if it did not."""
+            # A poll never outlasts the deadline, also when it starts late in
+            # a round with more targets than run at once.
+            timeout = min(connect_timeout, deadline - loop.time())
+            if timeout <= 0:
+                return None
+            port = device.get("mgmt_port") or 22
+            if await self._check_tcp(device["mgmt_host"], port, timeout):
+                return loop.time()
+            return None
+
+        def _timed_out() -> HandlerResult:
+            not_stable = [
+                d.get("name", d.get("mgmt_host"))
+                for d, since in zip(target_devices, stable_since, strict=True)
+                if since is None
+            ]
+            return HandlerResult(
+                success=False,
+                error=f"Timeout waiting for targets: {', '.join(not_stable)}",
+                summary=f"Targets not reachable after {max_wait_seconds}s",
+                metrics={"attempts": attempts, "elapsed_seconds": loop.time() - started},
+            )
 
         while True:
-            elapsed = (datetime.now(UTC) - start_time).total_seconds()
-            if elapsed > max_wait_seconds:
-                not_stable = [
-                    d.get("name", d.get("mgmt_host"))
-                    for d in target_devices
-                    if device_stable_start.get(d.get("id", d.get("mgmt_host"))) is None
-                ]
-                return HandlerResult(
-                    success=False,
-                    error=f"Timeout waiting for targets: {', '.join(not_stable)}",
-                    summary=f"Targets not reachable after {max_wait_seconds}s",
-                    metrics={"attempts": attempts, "elapsed_seconds": elapsed},
-                    evidence=all_evidence,
-                )
+            if loop.time() >= deadline:
+                return _timed_out()
 
             attempts += 1
+            # One round polls every target, up to max_parallel_devices at once.
+            answered = await for_each_target_device(
+                target_devices, _poll, max_parallel=config.max_parallel_devices
+            )
+            now = loop.time()
             all_stable = True
 
-            for device in target_devices:
-                device_id = device.get("id", device.get("mgmt_host"))
-                device_name = device.get("name", device_id)
-                host: str = device["mgmt_host"]  # validated non-None above
-                port = device.get("mgmt_port", 22)
-
-                reachable = await self._check_tcp(host, port, connect_timeout)
-
-                if reachable:
-                    if device_stable_start[device_id] is None:
-                        device_stable_start[device_id] = datetime.now(UTC)
-                        logger.info(
-                            f"Device {device_name} became reachable, starting stability window"
-                        )
-                        all_stable = False  # Just became reachable, not yet stable
-                    else:
-                        stable_start = device_stable_start[device_id]
-                        if stable_start is not None:
-                            stable_duration = (datetime.now(UTC) - stable_start).total_seconds()
-                            if stable_duration < stable_seconds:
-                                all_stable = False
-                            else:
-                                logger.info(
-                                    f"Device {device_name} stable for {stable_duration:.1f}s"
-                                )
-                else:
-                    if device_stable_start[device_id] is not None:
+            for index, (device, answered_at) in enumerate(
+                zip(target_devices, answered, strict=True)
+            ):
+                device_name = device.get("name", device.get("id", device.get("mgmt_host")))
+                since = stable_since[index]
+                if answered_at is None:
+                    if since is not None:
                         logger.info(f"Device {device_name} went unreachable, resetting stability")
-                    device_stable_start[device_id] = None
+                    stable_since[index] = None
                     all_stable = False
+                elif since is None:
+                    stable_since[index] = answered_at
+                    logger.info(f"Device {device_name} became reachable, starting stability window")
+                    all_stable = False  # Just became reachable, not yet stable
+                elif now - since < stable_seconds:
+                    all_stable = False
+                else:
+                    logger.info(f"Device {device_name} stable for {now - since:.1f}s")
 
-            if all_stable and all(s is not None for s in device_stable_start.values()):
-                # All devices are stable
+            if all_stable:
+                all_evidence = []
                 for device in target_devices:
                     device_id = device.get("id", device.get("mgmt_host"))
                     device_name = device.get("name", device_id)
@@ -221,14 +236,19 @@ class WaitReachableHandler(BaseHandler):
                     summary=f"All {len(target_devices)} target(s) stable for {stable_seconds}s",
                     metrics={
                         "attempts": attempts,
-                        "elapsed_seconds": elapsed,
+                        "elapsed_seconds": loop.time() - started,
                         "stable_seconds": stable_seconds,
                         "device_count": len(target_devices),
                     },
                     evidence=all_evidence,
                 )
 
-            await asyncio.sleep(poll_interval)
+            # Checked again after the round, so a round that ran into the
+            # deadline fails now rather than after one more poll interval.
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return _timed_out()
+            await asyncio.sleep(min(poll_interval, remaining))
 
     async def _check_tcp(self, host: str, port: int, timeout: float) -> bool:
         """Check TCP connectivity, whatever family the target resolves to.

@@ -17,17 +17,29 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     ProbeResult,
     StepKind,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
 from .checks import PORT_CHECKS, default_port
-from .targets import all_probe_targets
+from .targets import (
+    DEFAULT_MAX_PARALLEL_TARGETS,
+    TargetOutcome,
+    all_probe_targets,
+    merge_outcomes,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class _CheckUnavailable(Exception):
+    """``run_probe`` has no probe for the check type (it raised KeyError)."""
 
 
 class ConnectivityCheckConfig(BaseModel):
@@ -127,6 +139,13 @@ class ConnectivityCheckConfig(BaseModel):
             "x_col_span": 2,
         },
     )
+    max_parallel_devices: int = Field(
+        default=DEFAULT_MAX_PARALLEL_TARGETS,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Targets checked at the same time (1 = one after another). Defaults to 10.",
+    )
 
 
 class ConnectivityCheckHandler(BaseHandler):
@@ -142,6 +161,7 @@ class ConnectivityCheckHandler(BaseHandler):
         attempts: int - Number of attempts (default: 1)
         url_path: str - For http_health, the URL path (default: /health)
         hostname: str - For dns_resolve, hostname to resolve
+        max_parallel_devices: int - Targets checked at once (default: 10)
     """
 
     handler_id = "probe.connectivity"
@@ -191,21 +211,16 @@ class ConnectivityCheckHandler(BaseHandler):
             options["socks_proxy"] = socks_proxy
 
         services = ctx.require_services()
-        all_evidence = []
-        all_metrics = {}
-        failed_devices = []
-        success_count = 0
 
-        for device in target_devices:
+        async def _check(device: dict[str, Any]) -> TargetOutcome:
+            """Probe one target, retrying up to ``attempts`` times."""
             # None for a direct-IP target: it has no inventory identity, and
             # the artifact column behind evidence device_id is a UUID.
             device_id = device.get("id")
             device_name = device.get("name") or device_id or "unknown"
             host = device.get("mgmt_host")
-
             if not host:
-                failed_devices.append(f"{device_name} (no host)")
-                continue
+                return TargetOutcome(device_name, ok=False, error="no host")
 
             # Run checks with attempts, through the host's shared probe registry.
             best_result: ProbeResult | None = None
@@ -213,30 +228,25 @@ class ConnectivityCheckHandler(BaseHandler):
                 try:
                     result = await services.run_probe(check_type, host, options)
                 except KeyError:
-                    return HandlerResult(
-                        success=False,
-                        error=f"Check type '{check_type}' is not available on this worker",
-                        summary=f"Unsupported check type: {check_type}",
-                        evidence=all_evidence,
-                    )
-                if result.ok:
-                    best_result = result
-                    break
+                    raise _CheckUnavailable from None
                 best_result = result
+                if result.ok:
+                    break
                 if attempt < attempts - 1:
                     await asyncio.sleep(0.5)  # Brief pause between retries
 
             if best_result and best_result.ok:
-                success_count += 1
                 # Extract primary metric
-                metric_key = f"{device_name}_ms"
+                latency_ms = None
                 if "rtt_ms" in best_result.metrics:
-                    all_metrics[metric_key] = best_result.metrics["rtt_ms"]
+                    latency_ms = best_result.metrics["rtt_ms"]
                 elif "connect_ms" in best_result.metrics:
-                    all_metrics[metric_key] = best_result.metrics["connect_ms"]
-
-                all_evidence.append(
-                    {
+                    latency_ms = best_result.metrics["connect_ms"]
+                return TargetOutcome(
+                    device_name,
+                    ok=True,
+                    latency_ms=latency_ms,
+                    evidence={
                         "kind": "transport_meta",
                         "name": f"connectivity_{check_type}_{device_name}",
                         "device_id": device_id,
@@ -248,26 +258,45 @@ class ConnectivityCheckHandler(BaseHandler):
                             "success": True,
                             "metrics": best_result.metrics,
                         },
-                    }
+                    },
                 )
-            else:
-                error_msg = best_result.error_detail if best_result else "unknown error"
-                failed_devices.append(f"{device_name} ({error_msg})")
-                all_evidence.append(
-                    {
-                        "kind": "transport_meta",
-                        "name": f"connectivity_{check_type}_{device_name}",
+            error_msg = best_result.error_detail if best_result else "unknown error"
+            return TargetOutcome(
+                device_name,
+                ok=False,
+                error=error_msg,
+                evidence={
+                    "kind": "transport_meta",
+                    "name": f"connectivity_{check_type}_{device_name}",
+                    "device_id": device_id,
+                    "content_json": {
                         "device_id": device_id,
-                        "content_json": {
-                            "device_id": device_id,
-                            "device_name": device_name,
-                            "host": host,
-                            "check_type": check_type,
-                            "success": False,
-                            "error": error_msg,
-                        },
-                    }
-                )
+                        "device_name": device_name,
+                        "host": host,
+                        "check_type": check_type,
+                        "success": False,
+                        "error": error_msg,
+                    },
+                },
+            )
+
+        # Egress denials raised by run_probe propagate and cancel the rest.
+        try:
+            outcomes = await for_each_target_device(
+                target_devices,
+                _check,
+                max_parallel=max_parallel_from_config(
+                    ctx.config, default=DEFAULT_MAX_PARALLEL_TARGETS
+                ),
+            )
+        except _CheckUnavailable:
+            return HandlerResult(
+                success=False,
+                error=f"Check type '{check_type}' is not available on this worker",
+                summary=f"Unsupported check type: {check_type}",
+            )
+        all_evidence, all_metrics, failed_devices = merge_outcomes(outcomes)
+        success_count = sum(outcome.ok for outcome in outcomes)
 
         total = len(target_devices)
         if failed_devices:
