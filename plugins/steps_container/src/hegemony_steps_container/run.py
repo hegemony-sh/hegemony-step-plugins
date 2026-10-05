@@ -67,7 +67,13 @@ from .runner import (
     resolve_secret_values,
     secret_map_errors,
 )
-from .streams import KILL_WAIT_SECONDS, read_lines
+from .streams import (
+    KILL_WAIT_SECONDS,
+    MAX_LIVE_OUTPUT_BYTES,
+    LiveOutput,
+    read_lines,
+    size_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2300,6 +2306,11 @@ class RunContainerHandler(BaseHandler):
 
             max_bytes = self._MAX_OUTPUT_BYTES
             stream_budget = max_bytes // 2
+            live = LiveOutput(
+                f"[Live output stops here, at its {size_text(MAX_LIVE_OUTPUT_BYTES)} limit; "
+                f"the container goes on. Its container_output evidence keeps the first "
+                f"{size_text(stream_budget)} of stdout and of stderr.]"
+            )
 
             async def _stream_and_capture(
                 proc: asyncio.subprocess.Process,
@@ -2342,13 +2353,14 @@ class RunContainerHandler(BaseHandler):
 
                 async def _take(line: bytes, artifact_bytes: bytearray, event_buf_label: str):
                     nonlocal stdout_trunc, stderr_trunc, stdout_event_size, stderr_event_size
-                    # Decode using replace to avoid errors
-                    text = line.decode("utf-8", errors="replace")
+                    # Decode using replace to avoid errors; past its limit the
+                    # live log gets one notice, then nothing.
+                    text = live.admit(line, line.decode("utf-8", errors="replace"))
 
                     # Append to event buffer and possibly flush if size >= 1KB
                     to_flush: str | None = None
                     async with lock:
-                        if event_buf_label == "stdout":
+                        if text and event_buf_label == "stdout":
                             stdout_event_buf.append(text)
                             stdout_event_size += len(text.encode("utf-8"))
                             should_flush = stdout_event_size >= 1024
@@ -2356,7 +2368,7 @@ class RunContainerHandler(BaseHandler):
                                 to_flush = "".join(stdout_event_buf)
                                 stdout_event_buf.clear()
                                 stdout_event_size = 0
-                        else:
+                        elif text:
                             stderr_event_buf.append(text)
                             stderr_event_size += len(text.encode("utf-8"))
                             should_flush = stderr_event_size >= 1024

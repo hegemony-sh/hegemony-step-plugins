@@ -82,7 +82,13 @@ from .image_cache import login_for, parse_reference
 from .pull_progress import require_docker_host
 from .run import RunContainerHandler, _docker_env, repo_digest_for
 from .runner import container_config_from, resolve_secret_values, secret_map_errors
-from .streams import KILL_WAIT_SECONDS, read_lines
+from .streams import (
+    KILL_WAIT_SECONDS,
+    MAX_LIVE_OUTPUT_BYTES,
+    LiveOutput,
+    read_lines,
+    size_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +96,7 @@ HANDLER_ID = "container.build"
 
 #: Built-in step timeout: a build installs packages and pushes layers.
 DEFAULT_BUILD_TIMEOUT_SECONDS = 1800
-#: The build log kept as evidence; the live log streams all of it.
+#: The build log kept as evidence; the live log stops at MAX_LIVE_OUTPUT_BYTES.
 MAX_LOG_BYTES = 5 * 1024 * 1024
 #: Live output is sent in batches of about this many characters, or every
 #: :data:`_FLUSH_SECONDS`, whichever comes first.
@@ -647,7 +653,7 @@ def _error_line(lines: deque[str]) -> str:
 
 
 class _BuildLog:
-    """The build's output: streamed to the live log in batches, kept for evidence."""
+    """The build's output: streamed to the live log in batches, up to a limit; kept for evidence."""
 
     def __init__(self, emit: Callable[..., Awaitable[Any]]) -> None:
         self._emit = emit
@@ -659,6 +665,11 @@ class _BuildLog:
         self.captured = bytearray()
         self.truncated = False
         self.tail: deque[str] = deque(maxlen=40)
+        self._live = LiveOutput(
+            f"[Live output stops here, at its {size_text(MAX_LIVE_OUTPUT_BYTES)} limit; the "
+            f"build goes on. Its build_output evidence keeps the first "
+            f"{size_text(MAX_LOG_BYTES)} of the log.]"
+        )
 
     async def add(self, raw: bytes) -> None:
         text = raw.decode("utf-8", errors="replace")
@@ -670,8 +681,11 @@ class _BuildLog:
         else:
             self.truncated = True
         self.tail.append(text.rstrip("\n"))
-        self._pending.append(text)
-        self._pending_chars += len(text)
+        live = self._live.admit(raw, text)
+        if not live:
+            return
+        self._pending.append(live)
+        self._pending_chars += len(live)
         if (
             self._pending_chars >= _EVENT_BATCH_CHARS
             or time.monotonic() - self._last_flush >= _FLUSH_SECONDS

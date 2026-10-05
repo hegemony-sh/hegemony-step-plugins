@@ -2,12 +2,12 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""container.run reads its client's output to the end.
+"""container.run reads its client's output to the end, and limits the live log.
 
 A pipe nobody reads fills up and blocks the container, so the reader must
-never stop early, not even on a line longer than asyncio's 64 KiB line
-limit. A client whose pipe never closes must not hold a timed-out step past
-a bounded wait either.
+never stop early: not on a line longer than asyncio's 64 KiB line limit, and
+not once the live log has shown all it may. A client whose pipe never closes
+must not hold a timed-out step past a bounded wait either.
 
 ``docker start -a`` is a real child process here, writing to real pipes;
 only the one-shot docker calls and the pull are faked.
@@ -30,7 +30,12 @@ import pytest
 from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerResult, HandlerServices
 from hegemony_steps_container.run import RunContainerHandler
 from hegemony_steps_container.runner import ContainerJob, ContainerJobResult
-from hegemony_steps_container.streams import READ_CHUNK_BYTES, read_lines
+from hegemony_steps_container.streams import (
+    MAX_LIVE_OUTPUT_BYTES,
+    READ_CHUNK_BYTES,
+    LiveOutput,
+    read_lines,
+)
 
 
 class _FakeServices:
@@ -163,6 +168,32 @@ async def test_a_pipe_that_never_closes_ends_in_the_timeout_result(attached_clie
     assert result.error == "Container execution timed out after 2s"
 
 
+async def test_the_live_log_stops_at_its_limit_and_the_output_is_still_read(attached_client):
+    total = MAX_LIVE_OUTPUT_BYTES + 3 * 1024 * 1024
+    attached_client["script"] = (
+        "import sys\n"
+        "line = 'x' * 99 + '\\n'\n"
+        f"for i in range({total // 100}): sys.stdout.write(line)\n"
+        "sys.stdout.flush()\n"
+        "sys.stderr.write('done\\n')\n"
+    )
+    events: list[tuple[str, dict]] = []
+
+    result = await _run(_ctx(events))
+
+    # The child exited by itself: its whole output was read.
+    assert isinstance(result, ContainerJobResult)
+    assert result.exit_code == 0
+    live = _live(events)
+    notice = "[Live output stops here, at its 5 MB limit; the container goes on."
+    assert live.count(notice) == 1
+    assert len(live.encode()) <= MAX_LIVE_OUTPUT_BYTES + 300
+    assert live.rstrip("\n").endswith("of stdout and of stderr.]")
+    # What the evidence keeps is kept as before.
+    assert result.truncated
+    assert len(result.stdout) == 5 * 1024 * 1024 // 2
+
+
 async def _lines_of(data: bytes) -> list[bytes]:
     stream = asyncio.StreamReader()
     stream.feed_data(data)
@@ -181,3 +212,20 @@ async def test_read_lines_splits_long_lines_into_pieces():
     assert len(pieces) > 1
     assert all(len(piece) < 2 * READ_CHUNK_BYTES for piece in pieces)
     assert [piece.endswith(b"\n") for piece in pieces] == [False] * (len(pieces) - 1) + [True]
+
+
+def test_live_output_admits_pieces_until_its_limit_then_one_notice():
+    live = LiveOutput("[stop]", limit=10)
+    assert live.admit(b"abcd\n", "abcd\n") == "abcd\n"
+    assert live.admit(b"efg", "efg") == "efg"
+    assert not live.stopped
+    # Past the limit, mid-line: the notice starts a line of its own.
+    assert live.admit(b"hijk\n", "hijk\n") == "\n[stop]\n"
+    assert live.stopped
+    assert live.admit(b"l\n", "l\n") == ""
+
+
+def test_live_output_notice_after_a_whole_line_starts_at_once():
+    live = LiveOutput("[stop]", limit=4)
+    assert live.admit(b"ab\n", "ab\n") == "ab\n"
+    assert live.admit(b"cd\n", "cd\n") == "[stop]\n"
