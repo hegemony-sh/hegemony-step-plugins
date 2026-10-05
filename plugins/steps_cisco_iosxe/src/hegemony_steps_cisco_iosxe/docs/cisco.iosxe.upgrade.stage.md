@@ -37,8 +37,14 @@ transferred again (advanced: a step's raw definition may carry an
 transfer, a weaker guarantee than a checksum); turn on the overwrite option to force a fresh transfer
 regardless. After every transfer the checksum, when given, is verified the
 same way. Only MD5 is checked on the device - IOS-XE's `verify` offers no
-SHA-256 - so there is no SHA-256 field. Max Parallel Devices controls how
-many devices are staged concurrently.
+SHA-256 - so there is no SHA-256 field.
+
+The checksum is 32 hexadecimal digits; it can come from a run input as a
+`{{ }}` template, and the step checks the value once it is filled in. The
+check passes only when the device prints its `Verified (<file>) = <hash>`
+line with that same hash.
+An error, a mismatch report or any other output fails the check. Max
+Parallel Devices controls how many devices are staged concurrently.
 
 ## Output
 
@@ -50,7 +56,8 @@ device id whose entries hold `staged`, `skipped`, `full_path`,
 
 One evidence artifact is saved per device: `Stage: <device>` - success or
 failure - holds the transfer transcript, method, duration, and
-verification results, while a device that could not be attempted at all
+verification results, including the MD5 hash the device computed (also in
+its `computed_hash` field), while a device that could not be attempted at all
 (no management host, an unexpected error) gets `Stage Error: <device>`
 with the error text instead. The summary
 line reports how many devices were staged and how many already had the file.
@@ -58,12 +65,13 @@ line reports how many devices were staged and how many already had the file.
 ## When It Fails
 
 The step fails immediately when both or neither image source is configured,
-when the selected repository file cannot be resolved to a device-reachable
-URL, or when no upgrade driver exists for the configured platform and mode.
-Per-device failures include a missing management host, a failed HTTP
-transfer, a failed MD5 verification, a non-HTTP(S) source URL, a legacy
-`scp` or `tftp` transfer method, and
-SSH errors. Any single
+when the MD5 checksum is not 32 hexadecimal digits, when the selected
+repository file cannot be resolved to a device-reachable URL, or when no
+upgrade driver exists for the configured platform and mode.
+Per-device failures include a missing management host, a `dir` of the
+destination that cannot run, a failed HTTP transfer, a checksum the device
+does not confirm, a non-HTTP(S) source URL, a legacy `scp` or `tftp`
+transfer method, and SSH errors. Any single
 device failing fails the whole step, though per-device evidence is still
 recorded.
 

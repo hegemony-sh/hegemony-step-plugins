@@ -9,6 +9,7 @@ These utilities are used by both install-mode and bundle-mode drivers.
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -125,22 +126,53 @@ def parse_boot_statements(show_boot: str) -> list[str]:
 # ==============================================================================
 
 
+# A matching "verify /md5 <file> <hash>" prints this line with the hash the
+# device computed. A mismatch prints "%Error verifying <file>" followed by
+# "Computed signature" and "Submitted signature" lines instead.
+_MD5_VERIFIED_RE = re.compile(r"^\s*Verified \((.+)\) = ([0-9a-fA-F]{32})", re.MULTILINE)
+_MD5_COMPUTED_RE = re.compile(r"Computed signature\s*[=:]?\s*([0-9a-fA-F]{32})", re.IGNORECASE)
+_MD5_RE = re.compile(r"[0-9a-f]{32}")
+# IOS error lines: "%Error ...", "% Invalid input ...", "% Incomplete command."
+_CLI_ERROR_RE = re.compile(
+    r"^\s*%\s*(?:Error|Invalid input|Incomplete command|Ambiguous command|Unknown command)",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class Md5Check:
+    """Outcome of one on-device MD5 check."""
+
+    verified: bool
+    computed: str | None  # Hash the device reported (lowercase), if it printed one
+    cli_output: str
+
+
 async def verify_md5(
     ssh: "Transport",
     file_path: str,
     expected_md5: str,
-) -> tuple[bool, str]:
-    """Verify file MD5 hash on IOS-XE device.
+) -> Md5Check:
+    """Verify a file's MD5 hash on an IOS-XE device.
+
+    Fails closed: the file counts as verified only when the device prints its
+    "Verified (<file>) = <hash>" line with the expected hash and the command
+    reported no error. Anything else, including output this function does not
+    recognise, is a failed check.
 
     Args:
         ssh: SSH transport connection
         file_path: Full path to file (e.g., "flash:image.bin")
-        expected_md5: Expected MD5 hash
+        expected_md5: Expected MD5 hash (32 hex digits, any case)
 
-    Returns:
-        Tuple of (verified: bool, cli_output: str)
+    Raises:
+        ValueError: If ``expected_md5`` is not 32 hex digits
     """
-    md5_cmd = f"verify /md5 {file_path} {expected_md5}"
+    expected = expected_md5.strip().lower()
+    if not _MD5_RE.fullmatch(expected):
+        raise ValueError("Expected MD5 must be 32 hexadecimal digits")
+
+    md5_cmd = f"verify /md5 {file_path} {expected}"
     logger.info("Running MD5 verification: %s", md5_cmd)
 
     result = await ssh.execute_command_timing(
@@ -148,24 +180,37 @@ async def verify_md5(
         read_timeout=600,  # 10 minutes for large images
         delay_factor=4,
         wait_for_patterns=[
-            "Verified",
-            "verified",
-            "does not match",
-            "mismatch",
-            "Error",
+            "Verified (",
+            "Submitted signature",
             "%Error",
+            "% Invalid input",
+            "% Incomplete command",
         ],
     )
 
-    output = f"=== {md5_cmd} ===\n{result.output}"
+    output = result.output or ""
+    cli_output = f"=== {md5_cmd} ===\n{output}"
+    if result.error:
+        cli_output += f"\n[command error: {result.error}]"
 
-    if "Verified" in result.output or "verified" in result.output.lower():
-        return True, output
-    elif "does not match" in result.output.lower() or "mismatch" in result.output.lower():
-        return False, output
+    verified_match = _MD5_VERIFIED_RE.search(output)
+    computed_match = _MD5_COMPUTED_RE.search(output)
+    if verified_match:
+        computed: str | None = verified_match.group(2).lower()
+    elif computed_match:
+        computed = computed_match.group(1).lower()
     else:
-        # Uncertain - treat as success if no error
-        return result.exit_code == 0, output
+        computed = None
+
+    verified = (
+        result.exit_code == 0
+        and not result.error
+        and verified_match is not None
+        and computed == expected
+        and not _CLI_ERROR_RE.search(output)
+        and "computed signature" not in output.lower()
+    )
+    return Md5Check(verified=verified, computed=computed, cli_output=cli_output)
 
 
 async def stage_image(
@@ -195,12 +240,28 @@ async def stage_image(
 
     try:
         # Check if image already exists
-        dir_result = await ssh.execute_commands([f"dir {full_path}"])
-        dir_output = dir_result[0].output if dir_result else ""
+        dir_results = await ssh.execute_commands([f"dir {full_path}"])
+        dir_result = dir_results[0] if dir_results else None
+        dir_output = dir_result.output if dir_result else ""
         cli_outputs.append(f"=== dir {full_path} ===\n{dir_output}")
 
-        file_exists = "No such file" not in dir_output and "%Error" not in dir_output
+        # A dir that did not run (no session, a dropped connection) says
+        # nothing about the file - it is an error, not "the file exists".
+        if dir_result is None or dir_result.exit_code < 0:
+            reason = dir_result.error if dir_result else "no result"
+            return StageResult(
+                success=False,
+                error=f"Could not list {full_path}: {reason}",
+                cli_output="\n".join(cli_outputs),
+            )
+
+        file_exists = (
+            dir_result.exit_code == 0
+            and "No such file" not in dir_output
+            and "%Error" not in dir_output
+        )
         actual_size = parse_file_size_from_dir(dir_output, dest_filename) if file_exists else None
+        computed_hash: str | None = None
 
         # A file already on the device is reused only when we can prove it is
         # the right one: the MD5 checksum, when configured, is verified on the
@@ -209,10 +270,10 @@ async def stage_image(
         # name collision or a partial earlier transfer.
         if file_exists and not overwrite:
             if expected_md5:
-                hash_verified, hash_output = await verify_md5(ssh, full_path, expected_md5)
-                cli_outputs.append(hash_output)
+                check = await verify_md5(ssh, full_path, expected_md5)
+                cli_outputs.append(check.cli_output)
 
-                if hash_verified:
+                if check.verified:
                     logger.info("Image already staged and verified: %s", full_path)
                     return StageResult(
                         success=True,
@@ -220,7 +281,8 @@ async def stage_image(
                         skipped=True,
                         transferred_bytes=actual_size or 0,
                         hash_verified=True,
-                        verified_hash=expected_md5,
+                        verified_hash=check.computed,
+                        computed_hash=check.computed,
                         hash_type="md5",
                         filesystem=dest_fs,
                         full_path=full_path,
@@ -316,18 +378,28 @@ async def stage_image(
         hash_type = ""
 
         if expected_md5:
-            hash_verified, hash_output = await verify_md5(ssh, full_path, expected_md5)
-            cli_outputs.append(hash_output)
-            if hash_verified:
-                verified_hash = expected_md5
+            check = await verify_md5(ssh, full_path, expected_md5)
+            cli_outputs.append(check.cli_output)
+            computed_hash = check.computed
+            if check.verified:
+                hash_verified = True
+                verified_hash = check.computed
                 hash_type = "md5"
             else:
+                if check.computed:
+                    error = (
+                        f"MD5 mismatch: the device computed {check.computed}, "
+                        f"expected {expected_md5.strip().lower()}"
+                    )
+                else:
+                    error = "MD5 verification failed: the device did not confirm the checksum"
                 return StageResult(
                     success=False,
                     transferred_bytes=actual_size,
                     transfer_method=transfer_method,
                     transfer_elapsed_sec=transfer_elapsed,
-                    error="MD5 verification failed",
+                    computed_hash=computed_hash,
+                    error=error,
                     cli_output="\n".join(cli_outputs),
                 )
 
@@ -340,6 +412,7 @@ async def stage_image(
             transfer_elapsed_sec=transfer_elapsed,
             hash_verified=hash_verified,
             verified_hash=verified_hash,
+            computed_hash=computed_hash,
             hash_type=hash_type,
             filesystem=dest_fs,
             full_path=full_path,

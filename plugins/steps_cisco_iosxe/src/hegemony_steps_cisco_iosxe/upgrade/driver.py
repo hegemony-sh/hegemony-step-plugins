@@ -100,6 +100,7 @@ class StageResult:
     transfer_elapsed_sec: float = 0.0
     hash_verified: bool = False
     verified_hash: str | None = None  # MD5 (the only on-device check IOS-XE offers here)
+    computed_hash: str | None = None  # MD5 the device reported, whether it matched or not
     hash_type: str = ""  # "md5"
     filesystem: str = ""
     full_path: str = ""  # e.g., "flash:cat9k_iosxe.17.09.01.SPA.bin"
