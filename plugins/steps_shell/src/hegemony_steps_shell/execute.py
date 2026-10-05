@@ -31,10 +31,31 @@ from hegemony_step_sdk import (
     max_parallel_from_config,
 )
 
+from .templates import command_template_problem
+
 logger = logging.getLogger(__name__)
 
 #: Interpreters that accept the sh-style ``env``/``-c`` wrapping.
 _SH_FAMILY = frozenset({"sh", "bash"})
+
+
+def command_template_errors(commands: Any) -> list[str]:
+    """One error per command line that could let a rendered value become shell syntax.
+
+    A rendered value lands in the remote shell's command line, so an input of
+    ``x; rm -rf ~`` would run a second command. See :mod:`.templates` for what
+    a line must look like: every value ``| quote``-d and standing unquoted.
+    """
+    if not isinstance(commands, list):
+        return []
+    errors: list[str] = []
+    for number, command in enumerate(commands, start=1):
+        if not isinstance(command, str):
+            continue
+        problem = command_template_problem(command)
+        if problem:
+            errors.append(f"commands line {number}: {problem}")
+    return errors
 
 
 def build_command(
@@ -46,7 +67,8 @@ def build_command(
     """Compose the remote command line for the chosen interpreter.
 
     - ``default``: the command runs as-is in the account's login shell; env
-      vars are prefixed via ``env KEY=VALUE`` (POSIX remotes).
+      vars are exported first (``export KEY=VALUE; command``), so ``$KEY``
+      works anywhere in the line (POSIX login shells).
     - ``sh``/``bash``: the command is quoted into ``<shell> -c '...'``.
     - ``pwsh``: the command is quoted into ``pwsh -NoProfile -Command '...'``;
       env vars are not supported (no portable prefix syntax).
@@ -59,15 +81,17 @@ def build_command(
             raise ValueError("env variables are not supported with the pwsh interpreter")
         return f"pwsh -NoProfile -Command {shlex.quote(command)}"
 
-    prefix = ""
-    if env:
-        pairs = " ".join(f"{key}={shlex.quote(value)}" for key, value in sorted(env.items()))
-        prefix = f"env {pairs} "
+    pairs = " ".join(f"{key}={shlex.quote(value)}" for key, value in sorted(env.items()))
 
     if shell in _SH_FAMILY:
+        prefix = f"env {pairs} " if pairs else ""
         return f"{prefix}{shell} -c {shlex.quote(command)}"
     if shell == "default":
-        return f"{prefix}{command}"
+        # ``env KEY=VALUE command`` would hand the line to env(1) as a program
+        # to run: builtins (cd, export) fail, and only the first command of a
+        # pipeline or list sees the variables. Exporting them in the login
+        # shell that runs the line makes ``$KEY`` work everywhere in it.
+        return f"export {pairs}; {command}" if pairs else command
     raise ValueError(f"unsupported shell interpreter: {shell}")
 
 
@@ -79,7 +103,12 @@ class ShellExecuteConfig(BaseModel):
     commands: list[str] = Field(
         default_factory=list,
         title="Commands (one per line)",
-        description="Each line runs as its own exec-channel command with its own exit code",
+        description=(
+            "Each line runs as its own exec-channel command with its own exit code. "
+            "A {{ }} value must end with | quote and stand outside quotes, e.g. "
+            "systemctl restart {{ inputs.service | quote }}, or come in through "
+            "Environment Variables."
+        ),
         json_schema_extra={
             "x_widget": "commands",
             "x_placeholder": "uname -a\ndf -h /var\nsystemctl is-active nginx",
@@ -103,7 +132,12 @@ class ShellExecuteConfig(BaseModel):
     env: dict[str, str] = Field(
         default_factory=dict,
         title="Environment Variables",
-        description="KEY=VALUE per line; prefixed via env(1). Not supported with pwsh.",
+        description=(
+            "KEY=VALUE per line, quoted and set for every command, which reads them "
+            'as "$KEY". The safe way to pass run inputs or step results. Values '
+            "appear on the remote command line, so use secrets elsewhere. Not "
+            "supported with pwsh."
+        ),
         json_schema_extra={
             "x_widget": "env-vars",
             "x_rows": 3,
@@ -162,6 +196,10 @@ class ShellExecuteHandler(BaseHandler):
     targeting = HandlerTargeting(roles=True, ips=False)
     config_model = ShellExecuteConfig
     default_config = {"shell": "default", "fail_fast": True, "command_timeout_sec": 60}
+
+    def template_errors(self, config: dict[str, Any]) -> list[str]:
+        """Refuse command lines whose ``{{ }}`` values would not be single literal words."""
+        return command_template_errors(config.get("commands"))
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         target_devices = ctx.get_target_devices()

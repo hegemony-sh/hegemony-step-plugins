@@ -42,8 +42,11 @@ it reads from the inventory and from variable files, so everything the step
 takes from device records (the management address, the `hegemony` variable
 with the device's attributes) and from secrets (logins, passwords, Secrets,
 Group secrets) is written escaped: Ansible reads it back exactly as written,
-and nothing in it runs. Extra variables are the flow author's and are
-templated as usual. Groups
+and nothing in it runs. Extra variables are written escaped as well: the
+platform renders their `{{ }}` templates before the step runs, so a value may
+carry a run input or another step's output, and Ansible reads the result as
+plain text. Write Ansible expressions in the playbook, not in extra
+variables. Groups
 are derived from:
 
 - role: the flow's role names, e.g. `routers`;
@@ -109,7 +112,8 @@ passed to Ansible from a file (never an environment variable or argument).
 Anything written as `scheme://…` is read as a reference; references are
 resolved by the platform and their values redacted from the step's output,
 while other text is used as written and not redacted. Extra variables are
-plain `NAME=value` lines and may use templates.
+plain `NAME=value` lines and may use platform templates; Ansible does not
+template their values again.
 
 ## Output
 
