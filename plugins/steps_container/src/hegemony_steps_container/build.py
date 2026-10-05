@@ -327,6 +327,28 @@ class BuildRefused(Exception):
         self.summary = summary
 
 
+#: Ports a registry host may carry that still name the same registry: Docker
+#: reaches a registry on 443 (or 80 when it is insecure) when none is given.
+_DEFAULT_REGISTRY_PORTS = (":443", ":80")
+
+
+def same_registry_host(host: str, registry: str) -> bool:
+    """Whether ``host`` names ``registry``, in any case and with or without a default port.
+
+    ``registry.hegemony.internal:80`` and ``REGISTRY.hegemony.internal`` are
+    the platform registry; ``registry.hegemony.internal:5000`` is another one.
+    """
+
+    def bare(value: str) -> str:
+        value = value.lower()
+        for port in _DEFAULT_REGISTRY_PORTS:
+            if value.endswith(port):
+                return value[: -len(port)]
+        return value
+
+    return bare(host) == bare(registry)
+
+
 def build_destination(name: str, target: ImageBuild) -> BuildDestination:
     """Where the image named ``name`` goes, by its name and what the host allows.
 
@@ -348,7 +370,7 @@ def build_destination(name: str, target: ImageBuild) -> BuildDestination:
         if target.push:
             return BuildDestination(DESTINATION_PLATFORM, repository, target.registry)
         return BuildDestination(DESTINATION_LOCAL, repository)
-    if target.registry and host.lower() == target.registry.lower():
+    if target.registry and same_registry_host(host, target.registry):
         raise BuildRefused(
             f"'image' {name!r} names the platform registry itself: give the name without "
             "it, and the step puts the image under this organization's namespace",
@@ -1368,5 +1390,6 @@ __all__ = [
     "looks_like_host",
     "registry_host_of",
     "run_tag",
+    "same_registry_host",
     "tag_error",
 ]

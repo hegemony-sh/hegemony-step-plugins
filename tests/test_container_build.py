@@ -48,6 +48,7 @@ from hegemony_steps_container.build import (
     looks_like_host,
     registry_host_of,
     run_tag,
+    same_registry_host,
     tag_error,
 )
 
@@ -352,13 +353,42 @@ def test_another_registry_needs_the_hosts_permission() -> None:
     assert "egress policy is open" in refused.value.error
 
 
-@pytest.mark.parametrize("name", [f"{REGISTRY}/orgs/acme/x", f"{REGISTRY.upper()}/orgs/other/x"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        f"{REGISTRY}/orgs/acme/x",
+        f"{REGISTRY.upper()}/orgs/other/x",
+        # Its default ports name it too.
+        f"{REGISTRY}:80/orgs/other/x",
+        f"{REGISTRY}:443/orgs/other/x",
+    ],
+)
 def test_the_platform_registry_is_named_by_short_names_only(name: str) -> None:
     """Its names are the namespace's to give: no step picks another organization's."""
     with pytest.raises(BuildRefused) as refused:
         build_destination(name, _target(external_push=True))
     assert refused.value.summary == "Config validation failed"
     assert "platform registry itself" in refused.value.error
+
+
+def test_another_port_on_the_platform_registry_host_is_another_registry() -> None:
+    destination = build_destination(f"{REGISTRY}:5000/team/x", _target(external_push=True))
+    assert destination.kind == DESTINATION_REMOTE
+    assert destination.host == f"{REGISTRY}:5000"
+
+
+def test_a_platform_registry_named_with_its_port_matches_names_without_one() -> None:
+    target = ImageBuild(registry=f"{REGISTRY}:80", namespace="orgs/acme", external_push=True)
+    with pytest.raises(BuildRefused):
+        build_destination(f"{REGISTRY}/orgs/other/x", target)
+
+
+def test_registry_hosts_compare_without_case_or_default_ports() -> None:
+    assert same_registry_host("Registry.Example.com:443", "registry.example.com")
+    assert same_registry_host("registry.example.com", "registry.example.com:80")
+    assert not same_registry_host("registry.example.com:5000", "registry.example.com")
+    assert not same_registry_host("registry.example.com:8080", "registry.example.com:80")
+    assert not same_registry_host("other.example.com", "registry.example.com")
 
 
 def test_a_short_name_needs_a_namespace() -> None:

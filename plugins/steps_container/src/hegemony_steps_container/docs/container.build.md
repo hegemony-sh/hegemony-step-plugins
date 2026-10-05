@@ -31,7 +31,8 @@ tags come from their own field). A name without a registry may not start
 with a segment that looks like a registry host (a dot, or `localhost`): those
 names are reserved for the platform's cached copies of upstream images. A
 name with a registry in front may not name `localhost` (the sandbox itself)
-or the platform registry: give the platform registry's images their short
+or the platform registry, with or without its default port (80 or 443): give
+the platform registry's images their short
 name, and the step puts them under the organization's namespace. The registry
 host is used in lowercase, the spelling its saved login goes by.
 
