@@ -26,8 +26,11 @@ Port (default 22) applies to the port-based checks and is ignored by ICMP
 Ping and DNS Resolve. URL Path applies only to the HTTP Health check and
 falls back to `/health` when omitted. HTTP Health passes on any status
 below 400 and does not follow redirects, so a redirect counts as a healthy
-answer. Hostname to Resolve applies only to the DNS Resolve check. Timeout
-(sec) bounds each attempt (default 10), and Attempts (default 1, up to 10)
+answer. Hostname to Resolve applies only to the DNS Resolve check: the
+worker's system resolver looks the name up once per target, and the target
+itself is not asked. Left empty, each target's own name is looked up, so an
+IP address target fails unless Hostname to Resolve is set. Timeout (sec)
+bounds each attempt (default 10), and Attempts (default 1, up to 10)
 retries a failing target with a half-second pause between tries — one
 success ends the retries for that target.
 

@@ -98,8 +98,10 @@ class ConnectivityCheckConfig(BaseModel):
         default="",
         title="Hostname to Resolve",
         description=(
-            "DNS name the DNS Resolve check looks up against each target. "
-            "Ignored by every other check type."
+            "DNS name the DNS Resolve check looks up with the worker's system "
+            "resolver, once per target; the target is not asked. When empty, "
+            "each target's own name is looked up, so an IP address target "
+            "needs this field. Ignored by every other check type."
         ),
         json_schema_extra={
             "x_placeholder": "device.example.com",

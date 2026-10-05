@@ -5,13 +5,16 @@
 """DNS resolution probe.
 
 Resolves a hostname (the ``hostname`` option, falling back to the target
-address) via the system resolver. Record types, custom resolvers, and
-expected-answer assertions live in the ``probe.dns`` step handler.
+address) via the system resolver. An IP address target needs the option: the
+resolver hands an address back without a lookup. Record types, custom
+resolvers, and expected-answer assertions live in the ``probe.dns`` step
+handler.
 """
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import socket
 import time
@@ -22,11 +25,21 @@ from hegemony_step_sdk import BaseProbe, ProbeResult
 logger = logging.getLogger(__name__)
 
 
+def _is_ip_address(value: str) -> bool:
+    """Is this target an address literal rather than a name to look up?"""
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
 class DnsResolveProbe(BaseProbe):
     """DNS resolution probe using the system resolver.
 
     Options:
-        hostname: Name to resolve (default: the target address)
+        hostname: Name to resolve (default: the target address; required
+            when the target is an IP address)
         timeout_ms: Resolution timeout in milliseconds (default: 5000)
 
     Metrics produced:
@@ -54,7 +67,20 @@ class DnsResolveProbe(BaseProbe):
                 ),
             )
 
-        hostname = (options.get("hostname") or "").strip() or address
+        hostname = (options.get("hostname") or "").strip()
+        if not hostname:
+            # getaddrinfo returns an IP literal as it is, so falling back to
+            # an IP target would pass without asking any DNS server.
+            if _is_ip_address(address):
+                return ProbeResult(
+                    ok=False,
+                    error_kind="config_error",
+                    error_detail=(
+                        f"dns_resolve needs a hostname to look up: the target "
+                        f"{address} is an IP address"
+                    ),
+                )
+            hostname = address
         timeout_sec = options.get("timeout_ms", 5000) / 1000.0
 
         loop = asyncio.get_running_loop()

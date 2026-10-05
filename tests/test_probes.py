@@ -63,6 +63,22 @@ async def test_dns_resolve_localhost():
     assert result.metrics.get("addresses", 0) >= 1
 
 
+async def test_dns_resolve_refuses_an_ip_target_without_a_hostname():
+    """The resolver hands an IP literal back unasked, which used to pass."""
+    from hegemony_probe_net.dns_resolve import DnsResolveProbe
+
+    probe = DnsResolveProbe()
+    for address in ("192.0.2.7", "2001:db8::7"):
+        for options in ({}, {"hostname": "  "}):
+            result = await probe.execute(address, {"timeout_ms": 2000, **options})
+            assert result.ok is False, (address, options)
+            assert result.error_kind == "config_error"
+            assert "needs a hostname" in (result.error_detail or "")
+    # With a name to look up, the IP target is only where the question came from.
+    result = await probe.execute("192.0.2.7", {"hostname": "localhost", "timeout_ms": 2000})
+    assert result.ok is True, result.error_detail
+
+
 def _route_http_health_to(monkeypatch, answer) -> None:
     """Send the probe's direct requests to ``answer`` instead of the network."""
     real_client = httpx.AsyncClient
