@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 import dns.asyncresolver
 import dns.exception
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, StepKind
 
@@ -28,6 +28,22 @@ def _looks_like_ip(value: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+#: Where a nameserver answers: DNS over UDP, and over TCP for answers too
+#: large for UDP (the resolver falls back on its own).
+DNS_PORT = 53
+DNS_PROTOCOLS = ("udp", "tcp")
+
+
+def resolver_error(value: str) -> str | None:
+    """Why ``value`` cannot be a Resolver, or None when it is empty or an IP address."""
+    if not value or _looks_like_ip(value):
+        return None
+    return (
+        f"Resolver {value!r} must be a nameserver IP address; host names, ports "
+        "and URLs are not accepted"
+    )
 
 
 def normalize_answer(value: str) -> str:
@@ -73,7 +89,10 @@ class DnsProbeConfig(BaseModel):
     resolver: str = Field(
         default="",
         title="Resolver (optional)",
-        description="Nameserver IP; empty uses the system resolver",
+        description=(
+            "Nameserver IP address, asked on port 53 under the flow's network "
+            "policy; empty uses the system resolver"
+        ),
         json_schema_extra={"x_placeholder": "192.0.2.53"},
     )
     expected_values: list[str] = Field(
@@ -101,6 +120,15 @@ class DnsProbeConfig(BaseModel):
         default=1, ge=1, le=10, title="Attempts", description="Number of attempts (1-10)"
     )
 
+    @field_validator("resolver")
+    @classmethod
+    def _resolver_is_an_ip(cls, value: str) -> str:
+        """A host name or URL would let the query go somewhere the policy never saw."""
+        error = resolver_error(value.strip())
+        if error:
+            raise ValueError(error)
+        return value
+
 
 class DnsProbeHandler(BaseHandler):
     """DNS resolution check, per target device or for an explicit name."""
@@ -125,6 +153,11 @@ class DnsProbeHandler(BaseHandler):
         configured_name = str(ctx.config.get("query_name", "") or "").strip()
         record_type = ctx.config.get("record_type", "A")
         resolver_ip = str(ctx.config.get("resolver", "") or "").strip()
+        bad_resolver = resolver_error(resolver_ip)
+        if bad_resolver:
+            return HandlerResult(
+                success=False, error=bad_resolver, summary="DNS check configuration error"
+            )
         timeout_sec = ctx.config.get("timeout_sec", 5)
         attempts = min(int(ctx.config.get("attempts", 1)), 10)
         expected = [
@@ -132,6 +165,25 @@ class DnsProbeHandler(BaseHandler):
             for value in ctx.config.get("expected_values", []) or []
             if str(value).strip()
         ]
+
+        if resolver_ip:
+            # The system resolver is the platform's own; a chosen nameserver is
+            # a destination like any other the step dials, so the flow's
+            # egress policy decides whether the queries may reach it. A denial
+            # raises out of the step with the policy's reason.
+            # Fail closed: without the gate nothing would apply the policy.
+            enforce = getattr(ctx.services, "enforce_egress", None)
+            if enforce is None:
+                return HandlerResult(
+                    success=False,
+                    error=(
+                        "this platform cannot apply the flow's network policy to a "
+                        "chosen Resolver; leave it empty to use the system resolver"
+                    ),
+                    summary="DNS check configuration error",
+                )
+            for proto in DNS_PROTOCOLS:
+                await enforce(resolver_ip, DNS_PORT, proto=proto, kind="dns query")
 
         all_evidence: list[dict[str, Any]] = []
         all_metrics: dict[str, Any] = {}
