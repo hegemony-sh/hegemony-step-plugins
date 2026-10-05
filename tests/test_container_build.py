@@ -339,7 +339,8 @@ def test_another_registry_needs_the_hosts_permission() -> None:
     with pytest.raises(BuildRefused) as refused:
         build_destination("ghcr.io/acme/x", _target())
     assert refused.value.summary == "Push not allowed"
-    assert "ghcr.io" in refused.value.error and "egress policy is open" in refused.value.error
+    assert refused.value.error.startswith("This step may not push to ghcr.io: ")
+    assert "egress policy is open" in refused.value.error
 
 
 @pytest.mark.parametrize("name", [f"{REGISTRY}/orgs/acme/x", f"{REGISTRY.upper()}/orgs/other/x"])
