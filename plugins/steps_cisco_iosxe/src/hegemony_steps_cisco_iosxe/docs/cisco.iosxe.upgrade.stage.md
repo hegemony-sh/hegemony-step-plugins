@@ -42,9 +42,10 @@ SHA-256 - so there is no SHA-256 field.
 The checksum is 32 hexadecimal digits; it can come from a run input as a
 `{{ }}` template, and the step checks the value once it is filled in. The
 check passes only when the device prints its `Verified (<file>) = <hash>`
-line with that same hash.
-An error, a mismatch report or any other output fails the check. Max
-Parallel Devices controls how many devices are staged concurrently.
+line for the staged file with that same hash (`flash:` and `bootflash:`
+count as one filesystem). An error, a mismatch report or any other output
+fails the check. Max Parallel Devices controls how many devices are staged
+concurrently.
 
 ## Output
 

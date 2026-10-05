@@ -180,3 +180,58 @@ async def test_handler_evidence_carries_the_computed_hash():
     content = result.evidence[0]["content_json"]
     assert content["computed_hash"] == OTHER
     assert content["hash_verified"] is False
+
+
+class _ChunkedTransport(ScriptedTransport):
+    """Answers a timing command in chunks and stops reading at the first
+    chunk that holds a wait pattern, as the netmiko and scrapli transports do."""
+
+    def __init__(self, chunks: list[str]) -> None:
+        super().__init__()
+        self.chunks = chunks
+
+    async def execute_command_timing(self, command, *, wait_for_patterns=None, **kwargs):
+        self.calls.append([command])
+        output = ""
+        for chunk in self.chunks:
+            output += chunk
+            if any(p.lower() in output.lower() for p in wait_for_patterns or []):
+                break
+        return Result(output, command=command)
+
+
+async def test_mismatch_split_over_reads_still_records_the_computed_hash():
+    """ "%Error verifying" comes before the hashes; reading must not stop there."""
+    ssh = _ChunkedTransport(
+        [
+            "....................Done!\n%Error verifying flash:img.bin\n",
+            f"Computed signature {OTHER}\n",
+            f"Submitted signature {EXPECTED}\n",
+        ]
+    )
+    check = await verify_md5(ssh, "flash:img.bin", EXPECTED)
+    assert check.verified is False
+    assert check.computed == OTHER
+
+
+async def test_verified_line_split_over_reads_is_read_to_the_end():
+    ssh = _ChunkedTransport(
+        [
+            f"....................Done!\nVerified (flash:img.bin) = {EXPECTED[:16]}",
+            f"{EXPECTED[16:]}\n",
+        ]
+    )
+    check = await verify_md5(ssh, "flash:img.bin", EXPECTED)
+    assert check.verified is True
+    assert check.computed == EXPECTED
+
+
+async def test_verified_line_for_another_file_is_not_verified():
+    check, _ = await _verify(Result(f"Verified (flash:other.bin) = {EXPECTED}\n"))
+    assert check.verified is False
+
+
+async def test_verified_line_may_name_the_file_on_bootflash():
+    """flash: and bootflash: are one filesystem, and "fs:/name" is "fs:name"."""
+    check, _ = await _verify(Result(f"Verified (bootflash:/img.bin) = {EXPECTED}\n"))
+    assert check.verified is True

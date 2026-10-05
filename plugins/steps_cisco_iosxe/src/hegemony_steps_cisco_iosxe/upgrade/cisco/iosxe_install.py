@@ -49,7 +49,7 @@ from .iosxe_common import (
     parse_version_from_show_version,
     run_checked,
     run_config,
-    same_boot_path,
+    same_file_path,
     save_config,
     stage_image,
     undo_boot_change,
@@ -411,7 +411,7 @@ class IOSXEInstallDriver(UpgradeDriver):
                     return _failed("Could not read the boot variable from show boot")
                 previous_boot = parse_boot_statements(before)
 
-                if not (previous_boot and same_boot_path(previous_boot[0], expected_boot)):
+                if not (previous_boot and same_file_path(previous_boot[0], expected_boot)):
                     current = ";".join(previous_boot) or "not set"
                     if not fix_boot_config:
                         return _failed(
@@ -443,7 +443,7 @@ class IOSXEInstallDriver(UpgradeDriver):
                     after = await run_checked(ssh, "show boot")
                     cli_outputs.append(f"=== show boot (after) ===\n{after}")
                     new_boot = parse_boot_statements(after)
-                    if not (new_boot and same_boot_path(new_boot[0], expected_boot)):
+                    if not (new_boot and same_file_path(new_boot[0], expected_boot)):
                         return _failed(
                             f"Boot variable is {';'.join(new_boot) or 'not set'} after the "
                             f"change, expected {expected_boot}"

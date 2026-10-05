@@ -152,14 +152,21 @@ def has_boot_variable(show_boot: str) -> bool:
     return bool(_BOOT_LINE_RE.search(show_boot))
 
 
-def same_boot_path(entry: str, path: str) -> bool:
-    """Whether a boot entry names ``path``; flash: and bootflash: are one device."""
+def same_file_path(first: str, second: str) -> bool:
+    """Whether two device paths name the same file.
+
+    flash: and bootflash: are one filesystem, and "flash:/x" is "flash:x".
+    """
 
     def _norm(value: str) -> str:
-        value = value.strip().lower()
-        return "flash:" + value[len("bootflash:") :] if value.startswith("bootflash:") else value
+        filesystem, colon, name = value.strip().lower().partition(":")
+        if not colon:
+            return filesystem
+        if filesystem == "bootflash":
+            filesystem = "flash"
+        return f"{filesystem}:{name.lstrip('/')}"
 
-    return _norm(entry) == _norm(path)
+    return _norm(first) == _norm(second)
 
 
 # ==============================================================================
@@ -317,8 +324,8 @@ async def verify_md5(
     """Verify a file's MD5 hash on an IOS-XE device.
 
     Fails closed: the file counts as verified only when the device prints its
-    "Verified (<file>) = <hash>" line with the expected hash and the command
-    reported no error. Anything else, including output this function does not
+    "Verified (<file>) = <hash>" line for this file with the expected hash
+    and the command reported no error. Anything else, including output this function does not
     recognise, is a failed check.
 
     Args:
@@ -336,16 +343,23 @@ async def verify_md5(
     md5_cmd = f"verify /md5 {file_path} {expected}"
     logger.info("Running MD5 verification: %s", md5_cmd)
 
+    # The transports stop reading at the first of these they see, so each
+    # must mark an answer that is complete: the match line once it holds the
+    # whole hash, the last line of a mismatch report (the computed hash comes
+    # before it), and errors that are the whole answer. "%Error verifying"
+    # starts a mismatch report and is not one of them.
     result = await ssh.execute_command_timing(
         md5_cmd,
         read_timeout=600,  # 10 minutes for large images
         delay_factor=4,
         wait_for_patterns=[
-            "Verified (",
+            f") = {expected}",
             "Submitted signature",
-            "%Error",
+            "%Error opening",
+            "%Error reading",
             "% Invalid input",
             "% Incomplete command",
+            "% Ambiguous command",
         ],
     )
 
@@ -367,6 +381,7 @@ async def verify_md5(
         result.exit_code == 0
         and not result.error
         and verified_match is not None
+        and same_file_path(verified_match.group(1), file_path)
         and computed == expected
         and not _CLI_ERROR_RE.search(output)
         and "computed signature" not in output.lower()

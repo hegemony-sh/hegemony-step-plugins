@@ -52,7 +52,7 @@ from .iosxe_common import (
     parse_version_from_show_version,
     run_checked,
     run_config,
-    same_boot_path,
+    same_file_path,
     save_config,
     stage_image,
     undo_boot_change,
@@ -287,7 +287,7 @@ class IOSXEBundleDriver(UpgradeDriver):
 
             # Keep the first other image as a fallback boot entry
             fallback = next(
-                (image for image in previous_boot if not same_boot_path(image, full_image_path)),
+                (image for image in previous_boot if not same_file_path(image, full_image_path)),
                 None,
             )
 
@@ -321,7 +321,7 @@ class IOSXEBundleDriver(UpgradeDriver):
             verify_output = await run_checked(ssh, "show boot")
             cli_outputs.append(f"=== show boot (after) ===\n{verify_output}")
             new_boot = parse_boot_statements(verify_output)
-            if not (new_boot and same_boot_path(new_boot[0], full_image_path)):
+            if not (new_boot and same_file_path(new_boot[0], full_image_path)):
                 return _failed(
                     f"Boot variable is {';'.join(new_boot) or 'not set'} after the change, "
                     f"expected {full_image_path} first"
