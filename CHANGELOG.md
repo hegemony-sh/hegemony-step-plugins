@@ -1,3 +1,36 @@
+## [0.13.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.12.0...v0.13.0) (2026-10-05)
+
+### ⚠ BREAKING CHANGES
+
+* **ansible:** Ansible no longer templates extra variable values. Write
+Ansible expressions in the playbook instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+* **shell:** a shell.execute step whose commands insert a {{ }} value
+without | quote now fails before contacting any host. Add | quote, or
+pass the value under Environment Variables and read it as "$NAME". With
+the default interpreter environment variables are exported, which needs a
+POSIX login shell. The | quote filter ships with the platform release that
+calls template_errors.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+
+### Features
+
+* **sdk:** let a handler refuse unsafe templates before they are rendered ([2c6ec1a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/2c6ec1aa903891962b480917006edc9db2027838))
+
+### Bug Fixes
+
+* **ansible:** stage extra variables as data, not templates ([8ad452d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8ad452df9b4ca1b1ee1fee436bc3e57703a81578))
+* **probe:** put the DNS check's chosen resolver through the egress policy ([5ffa0b4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/5ffa0b4be6849136435e63989983e1885480ac9c))
+* **probe:** refuse a chosen resolver when no egress gate can check it ([fad2b50](https://github.com/hegemony-sh/hegemony-step-plugins/commit/fad2b501c50a3ef74a3d888530647feb39900292))
+* **shell:** check where a quoted value stands, with Jinja's parser ([85d7a63](https://github.com/hegemony-sh/hegemony-step-plugins/commit/85d7a63e7f2e719ff7fc671d0ac9be8634ac23b7))
+* **shell:** refuse unquoted template values in commands, make env work ([a5d7795](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a5d7795d578a45c7e15024ac6b0365c3decf4161))
+
 ## [0.12.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.11.0...v0.12.0) (2026-10-05)
 
 ### ⚠ BREAKING CHANGES
