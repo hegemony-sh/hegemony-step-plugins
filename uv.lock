@@ -13,6 +13,7 @@ members = [
     "hegemony-steps-evidence",
     "hegemony-steps-flow",
     "hegemony-steps-general",
+    "hegemony-steps-http",
     "hegemony-steps-monitor",
     "hegemony-steps-netcli",
     "hegemony-steps-probe",
@@ -511,6 +512,21 @@ requires-dist = [
 name = "hegemony-steps-general"
 version = "0.19.0"
 source = { editable = "plugins/steps_general" }
+dependencies = [
+    { name = "hegemony-step-sdk" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "httpx", specifier = ">=0.27.0" },
+]
+
+[[package]]
+name = "hegemony-steps-http"
+version = "0.19.0"
+source = { editable = "plugins/steps_http" }
 dependencies = [
     { name = "hegemony-step-sdk" },
     { name = "httpx" },
