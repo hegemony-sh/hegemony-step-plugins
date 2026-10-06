@@ -24,7 +24,8 @@ provides, and the value is validated when the step runs.
 
 Port applies to the port-based checks and is ignored by ICMP Ping and DNS
 Resolve; left empty, HTTP Health uses port 80 and the other checks port 22.
-Timeout (sec) bounds each attempt (default 10), and Attempts (default 1, up
+Timeout (sec) bounds each attempt (default 10; steps saved with its old
+name, `timeout_sec`, keep working), and Attempts (default 1, up
 to 10) retries a failing target with a half-second pause between tries —
 one success ends the retries for that target. Max Parallel Devices sets how
 many targets are checked at the same time (default 10, up to 32); 1 checks

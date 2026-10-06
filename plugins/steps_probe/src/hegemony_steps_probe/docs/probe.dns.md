@@ -31,7 +31,8 @@ Values lists answers, one per line, that must all appear in the response —
 comparison is normalized, so case, trailing dots, and surrounding quotes do
 not matter, and extra answers beyond the expected ones are fine. With no
 expected values, any successful resolution passes. Timeout (sec) bounds each
-attempt (default 5), and Attempts (default 1, up to 10) retries failed
+attempt (default 5; steps saved with its old name, `timeout_sec`, keep
+working), and Attempts (default 1, up to 10) retries failed
 lookups with a half-second pause between tries. Max Parallel Devices sets
 how many targets are looked up at the same time (default 10, up to 32); 1
 looks them up one after another. Evidence and metrics always follow target

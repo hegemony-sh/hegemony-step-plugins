@@ -769,8 +769,9 @@ async def test_plan_step_with_managed_state(monkeypatch):
         out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"},
         events=services.events,
     )
+    # The platform gives the step its own timeout plus the handler's margin.
     result = await TfPlanHandler().execute(
-        _ctx({"state_name": "core", "timeout_seconds": 900}, services)
+        _ctx({"state_name": "core", "timeout_seconds": 900}, services, timeout=960)
     )
 
     assert result.success is True, result.error
@@ -840,6 +841,8 @@ async def test_plan_step_fails_without_the_saved_plans_digest(monkeypatch, diges
         # The step's own timeout wins, for the container and its state access alike.
         (TfPlanHandler, {"state_name": "core", "timeout_seconds": 900}, 3600, 900),
         (TfApplyHandler, {"plan_step": "plan", "timeout_seconds": 900}, 3600, 900),
+        # A platform that does not raise the step timeout to the step's own cuts it.
+        (TfApplyHandler, {"plan_step": "plan", "timeout_seconds": 7200}, 3600, 3600),
     ],
 )
 async def test_state_access_lasts_as_long_as_the_container(

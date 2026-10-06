@@ -181,6 +181,8 @@ that is not a host name or IP address, a jump host has only a password or a
 host, user name or port that is not plain (a host name or IP address; a user
 name of letters, digits and `. _ @ + -`), or a secret
 resolves to nothing. The timeout covers the whole run, image pull included.
+An empty Timeout uses the step's timeout; a longer Timeout raises the
+step's timeout to fit it plus a minute.
 At the timeout the play is also stopped from inside the container (SIGTERM,
 then SIGKILL five minutes later, with the image's `timeout` command), so it
 stops even when the worker that should stop the container is gone.

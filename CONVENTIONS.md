@@ -163,6 +163,36 @@ text again must keep it data:
   through `services.enforce_egress` first, and must be an address the policy
   can evaluate (`probe.dns` accepts only an IP address as its resolver).
 
+## Setting names
+
+Setting names are a persistence contract too: steps store them.
+
+- **Durations end in their unit**: `_seconds`, or `_ms` only where
+  sub-second precision is part of the setting's meaning (`interval_ms`).
+  No `_sec` or `_s`, and no bare `seconds`, `interval` or `timeout`.
+- **A limit on one operation names the operation**
+  (`command_timeout_seconds`, `attempt_timeout_seconds`,
+  `connect_timeout_seconds`). Declare a limit on the whole step
+  (`timeout_seconds`, probe.wait_reachable's `max_wait_seconds`) as the
+  handler's `run_timeout_field`, so the host gives the step that long plus a
+  margin; a limit that applies to each device in turn is not one.
+- **A tool's own setting keeps the tool's form** when the value is passed to
+  the tool as written (tf's `lock_timeout` is a duration string such as `5m`).
+- **Renaming a setting keeps the old name working.** Give the field
+  `validation_alias=AliasChoices("new_name", "old_name")` and
+  `json_schema_extra={"x_legacy_keys": ["old_name"]}`, and keep both for
+  good: saved flows and committed versions are never rewritten. The schema
+  then shows only the new name, the editor shows a step saved under the old
+  one in the new field, and `parse_config` maps it for the handler. This
+  works only for a handler that reads its settings through `parse_config`.
+- **Model defaults are the handler's defaults.** The editor and the reference
+  docs show the model's defaults, so a handler must not fall back to other
+  values. A setting whose default depends on the step ("empty = the step's
+  timeout") is `Optional` with a `None` default.
+
+`supported_kinds` (and `StepKind`) only describes a handler: the platform
+lists it as a capability, and nothing reads it when a step runs.
+
 ## Wheel granularity
 
 One wheel = one namespace prefix = `hegemony-steps-<prefix-with-dashes>`.

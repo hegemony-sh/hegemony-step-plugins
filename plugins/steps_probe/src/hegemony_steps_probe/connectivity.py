@@ -14,17 +14,17 @@ import asyncio
 import logging
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
+    InvalidConfigError,
     ProbeResult,
     StepKind,
     for_each_target_device,
-    max_parallel_from_config,
 )
 
 from .checks import CHECK_TYPE_LABELS, PORT_CHECKS, CheckUnavailable, default_port
@@ -77,14 +77,17 @@ class ConnectivityCheckConfig(BaseModel):
             "x_hide_when": {"field": "check_type", "value": "icmp_ping"},
         },
     )
-    timeout_sec: int = Field(
+    attempt_timeout_seconds: int = Field(
         default=10,
         ge=1,
+        # Steps saved before the rename carry timeout_sec.
+        validation_alias=AliasChoices("attempt_timeout_seconds", "timeout_sec"),
         title="Timeout (sec)",
         description=(
             "Time limit for each probe attempt, in seconds. An attempt that "
             "does not complete in time counts as failed. Defaults to 10."
         ),
+        json_schema_extra={"x_legacy_keys": ["timeout_sec"]},
     )
     attempts: int = Field(
         default=1, ge=1, le=10, title="Attempts", description="Number of attempts (1-10)"
@@ -145,16 +148,7 @@ class ConnectivityCheckHandler(BaseHandler):
     """Unified connectivity check handler.
 
     Performs single or few connectivity checks against targets and
-    emits results as evidence.
-
-    Config:
-        check_type: str - Type of check (default: tcp_connect)
-        port: int - Target port (default: 80 for http_health, else 22)
-        timeout_sec: int - Timeout per attempt (default: 10)
-        attempts: int - Number of attempts (default: 1)
-        url_path: str - For http_health, the URL path (default: /health)
-        hostname: str - For dns_resolve, hostname to resolve
-        max_parallel_devices: int - Targets checked at once (default: 10)
+    emits results as evidence. Settings: :class:`ConnectivityCheckConfig`.
     """
 
     handler_id = "probe.connectivity"
@@ -163,7 +157,7 @@ class ConnectivityCheckHandler(BaseHandler):
     description = "One-shot connectivity probes (TCP/ICMP/HTTP/DNS) against targets."
     category = "Checks"
     config_model = ConnectivityCheckConfig
-    default_config = {"check_type": "tcp_connect", "timeout_sec": 10, "attempts": 1}
+    default_config = {"check_type": "tcp_connect", "attempt_timeout_seconds": 10, "attempts": 1}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Run connectivity check against all targets (devices and direct IPs)."""
@@ -175,31 +169,34 @@ class ConnectivityCheckHandler(BaseHandler):
                 summary="Missing targets",
             )
 
-        check_type = ctx.config.get("check_type", "tcp_connect")
+        try:
+            config = self.parse_config(ctx.config, ConnectivityCheckConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        check_type = config.check_type
         # An empty Port means the check's own default: 80 for HTTP Health,
         # 22 (the old fixed default) for the rest.
-        port = ctx.config.get("port") or default_port(check_type)
-        timeout_sec = ctx.config.get("timeout_sec", 10)
-        attempts = min(ctx.config.get("attempts", 1), 10)
+        port = config.port or default_port(check_type)
+        attempts = config.attempts
 
         # Build check options based on type. An unregistered check type fails
         # the step below when run_probe raises KeyError — validity is the host
         # probe registry, not a hardcoded allowlist here.
-        options: dict[str, Any] = {"timeout_ms": timeout_sec * 1000}
+        options: dict[str, Any] = {"timeout_ms": config.attempt_timeout_seconds * 1000}
         if check_type in PORT_CHECKS:
             options["port"] = port
         if check_type == "http_health":
-            options["url_path"] = ctx.config.get("url_path", "/health")
+            options["url_path"] = config.url_path or "/health"
         elif check_type == "icmp_ping":
             options["count"] = 1
         elif check_type == "dns_resolve":
-            options["hostname"] = ctx.config.get("hostname", "")
+            options["hostname"] = config.hostname
 
         # Bastion routing (design-dind-sandbox.md §11.4): forwarded for every
         # check type — the probes that cannot carry it (icmp_ping, dns_resolve)
         # reject it with a clear config_error instead of silently probing the
         # wrong path.
-        socks_proxy = (ctx.config.get("socks_proxy") or "").strip()
+        socks_proxy = config.socks_proxy.strip()
         if socks_proxy:
             options["socks_proxy"] = socks_proxy
 
@@ -278,9 +275,7 @@ class ConnectivityCheckHandler(BaseHandler):
             outcomes = await for_each_target_device(
                 target_devices,
                 _check,
-                max_parallel=max_parallel_from_config(
-                    ctx.config, default=DEFAULT_MAX_PARALLEL_TARGETS
-                ),
+                max_parallel=config.max_parallel_devices,
             )
         except CheckUnavailable:
             return HandlerResult(

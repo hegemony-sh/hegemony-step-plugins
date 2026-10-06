@@ -13,6 +13,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
 )
 
@@ -44,10 +45,15 @@ class NoOpHandler(BaseHandler):
     hidden = True
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = NoOpConfig
+    run_timeout_field = "delay_seconds"
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Do nothing and succeed."""
-        delay = ctx.config.get("delay_seconds", 0)
+        try:
+            config = self.parse_config(ctx.config, NoOpConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        delay = config.delay_seconds
         if delay > 0:
             await asyncio.sleep(delay)
 

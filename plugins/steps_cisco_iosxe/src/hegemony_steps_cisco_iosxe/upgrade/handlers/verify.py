@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     DEFAULT_DEVICE_PLATFORM,
@@ -24,9 +24,9 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
     for_each_target_device,
-    max_parallel_from_config,
 )
 
 from ..driver import UpgradeMode, get_driver
@@ -67,11 +67,14 @@ class UpgradeVerifyConfig(BaseModel):
         title="Max Wait (sec)",
         description="Max time to wait for device to come back online",
     )
-    retry_interval: int = Field(
+    poll_interval_seconds: int = Field(
         default=30,
         ge=5,
+        # Steps saved before the rename carry retry_interval.
+        validation_alias=AliasChoices("poll_interval_seconds", "retry_interval"),
         title="Retry Interval (sec)",
         description="Seconds between reconnect attempts",
+        json_schema_extra={"x_legacy_keys": ["retry_interval"]},
     )
     auto_commit: bool = Field(
         default=True,
@@ -124,7 +127,7 @@ class UpgradeVerifyHandler(BaseHandler):
         preflight_version: Version from preflight (to confirm change)
         auto_commit: Run 'install commit' if not committed (default: true)
         max_wait_seconds: Max time to wait for device (default: 600)
-        retry_interval: Seconds between reconnect attempts (default: 30)
+        poll_interval_seconds: Seconds between reconnect attempts (default: 30)
 
     Output context:
         verify.current_version: Running version after upgrade
@@ -140,7 +143,13 @@ class UpgradeVerifyHandler(BaseHandler):
     category = "Upgrade"
     targeting = HandlerTargeting(roles=True, ips=False)
     config_model = UpgradeVerifyConfig
-    default_config = {"upgrade_mode": "install", "max_wait_seconds": 600, "retry_interval": 30}
+    default_config = {
+        "upgrade_mode": "install",
+        "max_wait_seconds": 600,
+        "poll_interval_seconds": 30,
+    }
+    # No run_timeout_field: Max Wait applies to each device in turn, and each
+    # then still runs its checks and may commit, so it bounds no whole step.
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Verify upgrade on all target devices."""
@@ -152,16 +161,20 @@ class UpgradeVerifyHandler(BaseHandler):
                 summary="Missing target device",
             )
 
-        # Get parameters
+        try:
+            config = self.parse_config(ctx.config, UpgradeVerifyConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
         platform = ctx.config.get("platform", DEFAULT_DEVICE_PLATFORM)
-        mode_str = ctx.config.get("upgrade_mode", "install")
-        upgrade_mode = UpgradeMode.BUNDLE if mode_str.lower() == "bundle" else UpgradeMode.INSTALL
+        upgrade_mode = (
+            UpgradeMode.BUNDLE if config.upgrade_mode == "bundle" else UpgradeMode.INSTALL
+        )
 
-        target_version = ctx.config.get("target_version")
+        target_version = config.target_version or None
         preflight_version = ctx.config.get("preflight_version")
-        auto_commit = ctx.config.get("auto_commit", True)
-        max_wait_seconds = ctx.config.get("max_wait_seconds", 600)
-        retry_interval = ctx.config.get("retry_interval", 30)
+        auto_commit = config.auto_commit
+        max_wait_seconds = config.max_wait_seconds
+        retry_interval = config.poll_interval_seconds
 
         # Get driver for platform
         try:
@@ -284,7 +297,7 @@ class UpgradeVerifyHandler(BaseHandler):
                 # Build evidence with proper structure for artifact saving
                 content_lines = [
                     f"Device: {device_name}",
-                    f"Platform: {platform} ({mode_str} mode)",
+                    f"Platform: {platform} ({config.upgrade_mode} mode)",
                     f"Success: {result.success}",
                     f"Current Version: {result.current_version}",
                     f"Version Match: {result.version_match}",
@@ -314,7 +327,7 @@ class UpgradeVerifyHandler(BaseHandler):
                         "device_id": device_id,
                         "device_name": device_name,
                         "platform": platform,
-                        "upgrade_mode": mode_str,
+                        "upgrade_mode": config.upgrade_mode,
                         "success": result.success,
                         "current_version": result.current_version,
                         "version_match": result.version_match,
@@ -379,7 +392,7 @@ class UpgradeVerifyHandler(BaseHandler):
         outcomes = await for_each_target_device(
             target_devices,
             _process_device,
-            max_parallel=max_parallel_from_config(ctx.config),
+            max_parallel=config.max_parallel_devices,
         )
 
         # Merge per-device results in device order — deterministic regardless

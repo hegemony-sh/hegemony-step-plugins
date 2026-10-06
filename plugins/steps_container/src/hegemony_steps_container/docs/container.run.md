@@ -147,7 +147,10 @@ the Docker binary is missing on the worker, or the worker has no
 Docker-in-Docker sandbox configured: the step never runs on the worker's own
 Docker daemon instead. The timeout covers the whole step — image pull
 included — and on expiry the container is killed and the step fails as timed
-out. Step-output snapshots and post-run artifact harvesting are best-effort:
+out, with the output it produced. An empty Timeout uses the step's timeout;
+a longer Timeout raises the step's timeout to fit it plus a minute. On a
+platform too old to do that, the container stops at the step's timeout
+instead, and the step's log says so. Step-output snapshots and post-run artifact harvesting are best-effort:
 problems there are logged but do not fail the step. The container is
 force-removed after every attempt, success or failure. Step containers carry
 the Docker labels `hegemony.run_id`, `hegemony.step_run_id`, and

@@ -27,7 +27,8 @@ response body to contain that exact text. Follow redirects (on by default)
 chases redirects and asserts the final response; switch it off to assert the
 redirect response itself. Verify TLS certificate (on by default) applies to
 HTTPS and can be switched off for self-signed device certificates. Timeout
-(sec) bounds each request attempt (default 10), and Attempts (default 1, up
+(sec) bounds each request attempt (default 10; steps saved with its old name,
+`timeout_sec`, keep working), and Attempts (default 1, up
 to 10) retries failing targets with a half-second pause between tries. Max
 Parallel Devices sets how many targets are requested at the same time
 (default 10, up to 32); 1 requests them one after another. Evidence and
