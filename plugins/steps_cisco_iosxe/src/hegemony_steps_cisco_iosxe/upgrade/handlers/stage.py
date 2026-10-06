@@ -11,6 +11,7 @@ before the maintenance window.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -32,6 +33,8 @@ from ..api_client import get_file_device_download_url
 from ..driver import UpgradeMode, get_driver
 
 logger = logging.getLogger(__name__)
+
+_MD5_RE = re.compile(r"[0-9a-fA-F]{32}")
 
 
 class UpgradeStageConfig(BaseModel):
@@ -116,13 +119,16 @@ class UpgradeStageConfig(BaseModel):
         json_schema_extra={"x_placeholder": "flash:"},
     )
     expected_md5: str = Field(
+        # No schema pattern: the hash usually comes from a run input as a
+        # {{ }} template, which flow validation checks unrendered. execute()
+        # checks the rendered value instead.
         default="",
         title="MD5 Checksum (optional)",
         description=(
-            "MD5 hash verified on the device with verify /md5 after a "
-            "transfer - and before one: a file already staged under the "
-            "destination name that passes this check is not transferred "
-            "again."
+            "MD5 hash (32 hex digits) verified on the device with verify /md5 "
+            "after a transfer - and before one: a file already staged under "
+            "the destination name that passes this check is not transferred "
+            "again. The check passes only when the device confirms this hash."
         ),
         json_schema_extra={
             "x_placeholder": "d41d8cd98f00b204e9800998ecf8427e",
@@ -219,6 +225,15 @@ class UpgradeStageHandler(BaseHandler):
                 ),
                 summary="Unsupported expected_sha256 configuration",
             )
+        # The value is also sent to the device in "verify /md5", so a rendered
+        # template must still be a plain MD5 hash.
+        expected_md5 = str(ctx.config.get("expected_md5") or "").strip() or None
+        if expected_md5 and not _MD5_RE.fullmatch(expected_md5):
+            return HandlerResult(
+                success=False,
+                error="expected_md5 must be 32 hexadecimal digits",
+                summary="Invalid MD5 checksum",
+            )
         services = ctx.require_services()
         target_devices = ctx.get_target_devices()
         if not target_devices:
@@ -281,7 +296,6 @@ class UpgradeStageHandler(BaseHandler):
 
         dest_fs = ctx.config.get("dest_fs", "flash:")
         transfer_method = ctx.config.get("transfer_method", "auto")
-        expected_md5 = ctx.config.get("expected_md5")
         expected_size = ctx.config.get("expected_size")
         overwrite = ctx.config.get("overwrite", False)
 
@@ -323,7 +337,7 @@ class UpgradeStageHandler(BaseHandler):
             await ctx.emit_progress(f"Staging file on {device_name}", device_id)
 
             try:
-                ssh = services.connect(device, platform=platform)
+                ssh = services.connect(device, platform=platform, step_run_id=ctx.step_run_id)
                 result = await driver.stage(
                     ssh,
                     source_url=source_url,
@@ -396,6 +410,10 @@ class UpgradeStageHandler(BaseHandler):
                         content_lines.append(f"Duration: {result.transfer_elapsed_sec:.1f}s")
                     if result.hash_verified:
                         content_lines.append(f"Hash Verified: {result.hash_type}")
+                # Fakes built for older results lack the field.
+                computed_hash = getattr(result, "computed_hash", None)
+                if computed_hash:
+                    content_lines.append(f"MD5 Computed on Device: {computed_hash}")
                 if result.error:
                     content_lines.append(f"Error: {result.error}")
                 if result.cli_output:
@@ -425,6 +443,7 @@ class UpgradeStageHandler(BaseHandler):
                         "transfer_elapsed_sec": result.transfer_elapsed_sec,
                         "hash_verified": result.hash_verified,
                         "hash_type": result.hash_type,
+                        "computed_hash": computed_hash,
                         "error": result.error,
                     },
                 }

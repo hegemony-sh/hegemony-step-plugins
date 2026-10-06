@@ -70,14 +70,14 @@ def _ctx() -> HandlerContext:
 class _EmptyStream:
     """A pipe that is immediately at EOF, so the readers finish at once."""
 
-    async def readline(self) -> bytes:
+    async def read(self, n: int = -1) -> bytes:
         return b""
 
 
 class _BlockingStream:
     """A pipe that never yields a line, keeping the readers parked mid-stream."""
 
-    async def readline(self) -> bytes:
+    async def read(self, n: int = -1) -> bytes:
         await asyncio.Event().wait()  # never set
         raise AssertionError("unreachable")
 
@@ -173,7 +173,7 @@ async def test_cancelled_step_mid_stream_leaves_no_tasks_behind(monkeypatch) -> 
 
     task = asyncio.create_task(RunContainerHandler().execute(_ctx()))
     await asyncio.wait_for(started.wait(), timeout=10)
-    # Let the readers start and park on readline(), and the flusher on sleep().
+    # Let the readers start and park on read(), and the flusher on sleep().
     await asyncio.sleep(0.05)
 
     await _cancel_and_await(task)

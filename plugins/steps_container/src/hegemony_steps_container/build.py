@@ -60,7 +60,7 @@ import tempfile
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -82,6 +82,13 @@ from .image_cache import login_for, parse_reference
 from .pull_progress import require_docker_host
 from .run import RunContainerHandler, _docker_env, repo_digest_for
 from .runner import container_config_from, resolve_secret_values, secret_map_errors
+from .streams import (
+    KILL_WAIT_SECONDS,
+    MAX_LIVE_OUTPUT_BYTES,
+    LiveOutput,
+    read_lines,
+    size_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +96,7 @@ HANDLER_ID = "container.build"
 
 #: Built-in step timeout: a build installs packages and pushes layers.
 DEFAULT_BUILD_TIMEOUT_SECONDS = 1800
-#: The build log kept as evidence; the live log streams all of it.
+#: The build log kept as evidence; the live log stops at MAX_LIVE_OUTPUT_BYTES.
 MAX_LOG_BYTES = 5 * 1024 * 1024
 #: Live output is sent in batches of about this many characters, or every
 #: :data:`_FLUSH_SECONDS`, whichever comes first.
@@ -98,9 +105,6 @@ _FLUSH_SECONDS = 0.25
 #: The ``docker buildx version`` check and the digest lookup are quick; a
 #: wedged worker or daemon must not hold the step for longer than this.
 _PROBE_TIMEOUT_SECONDS = 15.0
-#: The build's output is read in chunks of this size, and a line longer than
-#: this reaches the log in pieces (asyncio's line reader raises on one).
-_READ_CHUNK_BYTES = 64 * 1024
 #: The build argument that prefixes every cache mount's id (Dockerfile frontend).
 CACHE_MOUNT_NS_ARG = "BUILDKIT_CACHE_MOUNT_NS"
 
@@ -637,24 +641,6 @@ def _failure(error: str, summary: str, **extra: Any) -> HandlerResult:
     return HandlerResult(success=False, error=error, summary=summary, **extra)
 
 
-async def _output_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
-    """The stream's lines with their newline; a very long line comes in pieces.
-
-    Read in chunks rather than with ``readline``, which raises on a line longer
-    than the stream's limit (64 KiB), and a build can print one.
-    """
-    pending = b""
-    while chunk := await stream.read(_READ_CHUNK_BYTES):
-        *lines, pending = (pending + chunk).split(b"\n")
-        for line in lines:
-            yield line + b"\n"
-        while len(pending) >= _READ_CHUNK_BYTES:
-            yield pending[:_READ_CHUNK_BYTES]
-            pending = pending[_READ_CHUNK_BYTES:]
-    if pending:
-        yield pending
-
-
 def _error_line(lines: deque[str]) -> str:
     """The build's own explanation of a failure: its last ``ERROR:`` line."""
     for line in reversed(lines):
@@ -667,7 +653,7 @@ def _error_line(lines: deque[str]) -> str:
 
 
 class _BuildLog:
-    """The build's output: streamed to the live log in batches, kept for evidence."""
+    """The build's output: streamed to the live log in batches, up to a limit; kept for evidence."""
 
     def __init__(self, emit: Callable[..., Awaitable[Any]]) -> None:
         self._emit = emit
@@ -679,6 +665,11 @@ class _BuildLog:
         self.captured = bytearray()
         self.truncated = False
         self.tail: deque[str] = deque(maxlen=40)
+        self._live = LiveOutput(
+            f"[Live output stops here, at its {size_text(MAX_LIVE_OUTPUT_BYTES)} limit; the "
+            f"build goes on. Its build_output evidence keeps the first "
+            f"{size_text(MAX_LOG_BYTES)} of the log.]"
+        )
 
     async def add(self, raw: bytes) -> None:
         text = raw.decode("utf-8", errors="replace")
@@ -690,8 +681,11 @@ class _BuildLog:
         else:
             self.truncated = True
         self.tail.append(text.rstrip("\n"))
-        self._pending.append(text)
-        self._pending_chars += len(text)
+        live = self._live.admit(text)
+        if not live:
+            return
+        self._pending.append(live)
+        self._pending_chars += len(live)
         if (
             self._pending_chars >= _EVENT_BATCH_CHARS
             or time.monotonic() - self._last_flush >= _FLUSH_SECONDS
@@ -1231,7 +1225,7 @@ class BuildImageHandler(BaseHandler):
 
             flusher = asyncio.create_task(ticker())
             try:
-                async for line in _output_lines(stream):
+                async for line in read_lines(stream):
                     await log.add(line)
             finally:
                 flusher.cancel()
@@ -1246,7 +1240,7 @@ class BuildImageHandler(BaseHandler):
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=10)
+                await asyncio.wait_for(proc.wait(), timeout=KILL_WAIT_SECONDS)
             return None
         except asyncio.CancelledError:
             # A cancelled step must not leave its build running: kill the client
@@ -1259,7 +1253,7 @@ class BuildImageHandler(BaseHandler):
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=10)
+                await asyncio.wait_for(proc.wait(), timeout=KILL_WAIT_SECONDS)
             raise
 
     @staticmethod

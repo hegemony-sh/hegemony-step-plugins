@@ -312,6 +312,8 @@ async def test_iosxe_install_skips_transcript_when_transport_streams():
             note=None,
             error=None,
             cli_output="install transcript",
+            boot_config_changed=False,
+            previous_boot=[],
         )
 
     class _Driver:

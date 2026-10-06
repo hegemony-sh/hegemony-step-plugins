@@ -427,9 +427,9 @@ def _install_docker_mocks(monkeypatch, harvest: dict[str, bytes]) -> None:
         """A container that starts, produces no output, and exits 0."""
         proc = AsyncMock()
         proc.stdout = AsyncMock()
-        proc.stdout.readline = AsyncMock(return_value=b"")
+        proc.stdout.read = AsyncMock(return_value=b"")
         proc.stderr = AsyncMock()
-        proc.stderr.readline = AsyncMock(return_value=b"")
+        proc.stderr.read = AsyncMock(return_value=b"")
         proc.wait = AsyncMock(return_value=0)
         proc.returncode = 0
         proc.kill = AsyncMock()
