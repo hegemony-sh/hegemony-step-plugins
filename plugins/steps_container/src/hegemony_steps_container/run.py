@@ -2391,6 +2391,11 @@ class RunContainerHandler(BaseHandler):
 
             max_bytes = self._MAX_OUTPUT_BYTES
             stream_budget = max_bytes // 2
+            # What the evidence keeps of each stream (up to stream_budget), held
+            # here so that a container stopped at the timeout keeps what it wrote.
+            stdout_bytes = bytearray()
+            stderr_bytes = bytearray()
+            truncated_streams: set[str] = set()
             live = LiveOutput(
                 f"[Live output stops here, at its {size_text(MAX_LIVE_OUTPUT_BYTES)} limit; "
                 f"the container goes on. Its container_output evidence keeps the first "
@@ -2410,11 +2415,6 @@ class RunContainerHandler(BaseHandler):
                 """
 
                 lock = asyncio.Lock()
-
-                stdout_bytes = bytearray()
-                stderr_bytes = bytearray()
-                stdout_trunc = False
-                stderr_trunc = False
 
                 # Event buffers store decoded text fragments to emit via ctx.emit_progress
                 stdout_event_buf: list[str] = []
@@ -2437,7 +2437,18 @@ class RunContainerHandler(BaseHandler):
                         logger.debug("emit_progress failed for %s: %s", stream_label, e)
 
                 async def _take(line: bytes, artifact_bytes: bytearray, event_buf_label: str):
-                    nonlocal stdout_trunc, stderr_trunc, stdout_event_size, stderr_event_size
+                    nonlocal stdout_event_size, stderr_event_size
+                    # Capture artifact bytes up to budget, before anything this
+                    # task can be cancelled at. Output that arrives once the
+                    # budget is full, also when a line filled it exactly, is
+                    # dropped and marks the stream truncated.
+                    remaining = stream_budget - len(artifact_bytes)
+                    if len(line) > remaining:
+                        artifact_bytes.extend(line[: max(remaining, 0)])
+                        truncated_streams.add(event_buf_label)
+                    else:
+                        artifact_bytes.extend(line)
+
                     # Decode using replace to avoid errors; past its limit the
                     # live log gets one notice, then nothing.
                     text = live.admit(line.decode("utf-8", errors="replace"))
@@ -2465,19 +2476,6 @@ class RunContainerHandler(BaseHandler):
                     if to_flush is not None:
                         # Flush outside the lock
                         await _flush_event_buffer(event_buf_label, [to_flush])
-
-                    # Capture artifact bytes up to budget. Output that arrives
-                    # once the budget is full, also when a line filled it
-                    # exactly, is dropped and marks the stream truncated.
-                    remaining = stream_budget - len(artifact_bytes)
-                    if len(line) > remaining:
-                        artifact_bytes.extend(line[: max(remaining, 0)])
-                        if event_buf_label == "stdout":
-                            stdout_trunc = True
-                        else:
-                            stderr_trunc = True
-                    else:
-                        artifact_bytes.extend(line)
 
                 async def _reader(
                     stream: asyncio.StreamReader,
@@ -2580,9 +2578,9 @@ class RunContainerHandler(BaseHandler):
                 # Return decoded artifacts and truncation flags
                 return (
                     stdout_bytes.decode("utf-8", errors="replace"),
-                    stdout_trunc,
+                    "stdout" in truncated_streams,
                     stderr_bytes.decode("utf-8", errors="replace"),
-                    stderr_trunc,
+                    "stderr" in truncated_streams,
                 )
 
             try:
@@ -2601,10 +2599,48 @@ class RunContainerHandler(BaseHandler):
                 # full never closes, which asyncio's wait() also waits for.
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(proc.wait(), timeout=KILL_WAIT_SECONDS)
+                # The step fails as timed out, with what the container wrote
+                # until then, kept as a finished run's output is.
+                error = f"Container execution timed out after {timeout}s"
+                stdout_out = stdout_bytes.decode("utf-8", errors="replace")
+                stderr_out = stderr_bytes.decode("utf-8", errors="replace")
+                truncated = bool(truncated_streams)
+                output = stdout_out + stderr_out
+                if truncated:
+                    output += f"\n[TRUNCATED after {max_bytes} bytes]"
+                duration = round(time.monotonic() - start_time, 2)
                 return HandlerResult(
                     success=False,
-                    error=f"Container execution timed out after {timeout}s",
+                    error=error,
                     summary="Container timed out",
+                    # As for a timeout before the container ran: no harvest.
+                    metrics={"duration_seconds": duration, "image": image, "skipped_artifacts": 0},
+                    evidence=[
+                        {
+                            "kind": "container_output",
+                            "name": f"container_output_{ctx.step_id}",
+                            "content_text": output,
+                            "content_json": {
+                                "exit_code": None,
+                                "timed_out": True,
+                                "error": error,
+                                "image": image,
+                                "image_digest": image_digest,
+                                "image_served": served,
+                                "image_source": acquired.source,
+                                "image_cached": acquired.cached,
+                                "duration_seconds": duration,
+                                "truncated": truncated,
+                                "container_name": container_name,
+                                "stdout": stdout_out,
+                                "stderr": stderr_out,
+                            },
+                        }
+                    ],
+                    output={
+                        "stdout": stdout_out[:MAX_CHAIN_OUTPUT_CHARS],
+                        "stderr": stderr_out[:MAX_CHAIN_OUTPUT_CHARS],
+                    },
                 )
             except asyncio.CancelledError:
                 # Cancellation (workflow cancelled, heartbeat timeout) is a
