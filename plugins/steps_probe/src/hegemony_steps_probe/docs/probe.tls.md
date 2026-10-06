@@ -34,7 +34,8 @@ combined with targets or endpoints. Server Name then names the host the
 certificate is checked against.
 
 Each endpoint is contacted twice, each attempt bounded by Timeout (sec)
-(default 10). The first handshake reads what the server presents and accepts
+(default 10), which also bounds each OCSP request and each download as a
+whole, the response body included. The first handshake reads what the server presents and accepts
 any certificate, even from servers that only offer outdated protocol
 versions; the second verifies the chain with the worker's normal TLS
 settings. A server that presents another certificate to the second

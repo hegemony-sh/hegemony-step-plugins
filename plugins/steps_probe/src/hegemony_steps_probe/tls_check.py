@@ -135,7 +135,8 @@ class TlsProbeConfig(BaseModel):
         title="Timeout (sec)",
         description=(
             "Time limit for each connection and handshake, and for each OCSP "
-            "request and download, in seconds. Defaults to 10."
+            "request and download including its whole response, in seconds. "
+            "Defaults to 10."
         ),
     )
     require_reachable: bool = Field(
@@ -710,22 +711,31 @@ class _TlsRun:
         """One revocation-related HTTP request: the body of a 200 response, capped at ``limit``.
 
         ``kind`` names the request in the egress check (``ocsp check``,
-        ``issuer download``, ``crl download``).
+        ``issuer download``, ``crl download``). The whole exchange, the body
+        included, must finish within the attempt timeout: the client's own
+        timeouts bound each read, which a responder that trickles its answer
+        never trips.
         """
         if self.client is None:
             raise _FetchError("the revocation client is not open")
-        async with self.client.stream(
-            method, url, content=content, headers=headers, extensions={_EGRESS_KIND: kind}
-        ) as response:
-            if response.status_code != 200:
-                raise _FetchError(f"HTTP {response.status_code} from {url}")
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.aiter_bytes():
-                total += len(chunk)
-                if total > limit:
-                    raise _FetchError(f"response from {url} exceeds {limit} bytes")
-                chunks.append(chunk)
+        chunks: list[bytes] = []
+        try:
+            async with (
+                asyncio.timeout(self.timeout),
+                self.client.stream(
+                    method, url, content=content, headers=headers, extensions={_EGRESS_KIND: kind}
+                ) as response,
+            ):
+                if response.status_code != 200:
+                    raise _FetchError(f"HTTP {response.status_code} from {url}")
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > limit:
+                        raise _FetchError(f"response from {url} exceeds {limit} bytes")
+                    chunks.append(chunk)
+        except TimeoutError:
+            raise _FetchError(f"timed out after {self.timeout:g}s") from None
         return b"".join(chunks)
 
     async def _once(

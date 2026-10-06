@@ -495,6 +495,30 @@ async def alternating_tls_server(tmp_path: Path, first: Leaf, second: Leaf) -> A
             await asyncio.wait_for(server.wait_closed(), 2)
 
 
+@contextlib.asynccontextmanager
+async def trickling_http_server(seconds: float) -> AsyncIterator[int]:
+    """An HTTP server answering 200 with a 20-byte body sent one byte at a time over ``seconds``."""
+
+    async def trickle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(Exception):
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n")
+            await writer.drain()
+            for _ in range(20):
+                await asyncio.sleep(seconds / 20)
+                writer.write(b"x")
+                await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(trickle, "127.0.0.1", 0)
+    try:
+        yield server.sockets[0].getsockname()[1]
+    finally:
+        server.close()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(server.wait_closed(), 2)
+
+
 def closed_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -1496,6 +1520,41 @@ async def test_ocsp_responder_down_is_an_error(pki, monkeypatch):
     [record] = result.output["endpoints"]
     assert record["ocsp"] == "error"
     assert record["ocsp_detail"].startswith(f"OCSP request to {dead} failed: ConnectError")
+
+
+async def test_the_attempt_timeout_bounds_each_revocation_request_as_a_whole(pki):
+    """A responder that sends its answer a byte at a time never trips a read timeout."""
+    async with trickling_http_server(6.0) as port:
+        key = ec.generate_private_key(ec.SECP256R1())
+        leaf = issue(
+            "slow.example.test",
+            key,
+            issuer=pki.inter,
+            issuer_key=pki.inter_key,
+            ocsp_url=f"http://127.0.0.1:{port}/ocsp",
+            crl_url=f"http://127.0.0.1:{port}/inter.crl",
+        )
+        started = time.perf_counter()
+        result = await run_step(
+            {
+                "pem": pem_of(leaf, pki.inter),
+                "ca_bundle": pki.root_pem,
+                "check_ocsp": True,
+                "check_crl": True,
+                "attempt_timeout_seconds": 1,
+            }
+        )
+        elapsed = time.perf_counter() - started
+    [record] = result.output["endpoints"]
+    assert (record["ocsp"], record["ocsp_detail"]) == (
+        "error",
+        f"OCSP request to http://127.0.0.1:{port}/ocsp failed: timed out after 1s",
+    )
+    assert (record["crl"], record["crl_detail"]) == (
+        "error",
+        "downloading the CRL failed: timed out after 1s",
+    )
+    assert elapsed < 4.0
 
 
 # --- Configuration -------------------------------------------------------------
