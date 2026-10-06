@@ -18,6 +18,7 @@ import math
 import os
 import re
 import ssl
+import string
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -551,11 +552,14 @@ def _signed_by(cert: x509.Certificate, issuer: x509.Certificate) -> bool:
     return True
 
 
-def _may_issue(cert: x509.Certificate) -> bool:
+def _may_issue(cert: x509.Certificate, *, trusted: bool) -> bool:
     """CA check as OpenSSL applies it.
 
     Key usage, when present, must allow certificate signing, and
-    basicConstraints must mark a CA (or the certificate be version 1).
+    basicConstraints must mark a CA. Only a trust anchor may lack
+    basicConstraints: a self-issued version 1 certificate (an old-style
+    root), or one whose key usage allows certificate signing. OpenSSL holds
+    every certificate below the anchor to the strict rule.
     """
     usage = _extension_value(cert, x509.KeyUsage)
     if usage is not None and not usage.key_cert_sign:
@@ -563,7 +567,9 @@ def _may_issue(cert: x509.Certificate) -> bool:
     constraints = _extension_value(cert, x509.BasicConstraints)
     if constraints is not None:
         return bool(constraints.ca)
-    return cert.version == x509.Version.v1
+    if not trusted:
+        return False
+    return usage is not None or (cert.version == x509.Version.v1 and cert.subject == cert.issuer)
 
 
 def _time_error(cert: x509.Certificate, now: datetime) -> str | None:
@@ -671,8 +677,8 @@ def verify_chain_offline(
     name (checked on its own): every certificate on the path is within its
     validity period, carries no critical extension the verifier does not
     handle, and is signed by the next; every issuer may act as a CA
-    (basicConstraints, key usage, path length) and, when untrusted, allows
-    server authentication in its extended key usage; the leaf may serve TLS
+    (basicConstraints, key usage, path length) and allows server
+    authentication in its extended key usage, a trust anchor included; the leaf may serve TLS
     (extended key usage and key usage); every name below a CA with name
     constraints satisfies them; and the path ends at a trust anchor.
     ``intermediates`` are untrusted candidates, and like OpenSSL the path
@@ -818,13 +824,18 @@ class _ChainSearch:
 def _issuer_problem(
     issuer: x509.Certificate, depth: int, now: datetime, *, trusted: bool
 ) -> str | None:
-    """Why ``issuer`` cannot sign at this depth (``depth`` intermediates below it)."""
+    """Why ``issuer`` cannot sign at this depth (``depth`` intermediates below it).
+
+    A trust anchor's extended key usage must allow TLS servers too: OpenSSL
+    honours trust settings that would override it, which certificates loaded
+    as a CA bundle never carry.
+    """
     error = _time_error(issuer, now) or _critical_extension_error(issuer)
     if error is not None:
         return error
-    if not _may_issue(issuer):
+    if not _may_issue(issuer, trusted=trusted):
         return "invalid CA certificate"
-    if not trusted and _eku_error(issuer) is not None:
+    if _eku_error(issuer) is not None:
         return _PURPOSE_ERROR
     constraints = _extension_value(issuer, x509.BasicConstraints)
     path_length = constraints.path_length if constraints is not None else None
@@ -931,9 +942,37 @@ def _name_within(name: x509.GeneralName, base: x509.GeneralName) -> bool:
     ):
         return _uri_within(name.value, base.value)
     if isinstance(name, x509.DirectoryName) and isinstance(base, x509.DirectoryName):
-        rdns, prefix = list(name.value.rdns), list(base.value.rdns)
+        rdns, prefix = _canonical_rdns(name.value), _canonical_rdns(base.value)
         return rdns[: len(prefix)] == prefix
     return False
+
+
+#: Whitespace as OpenSSL's canonical name form knows it (ASCII only).
+_NAME_SPACE = " \t\n\v\f\r"
+_NAME_SPACE_RE = re.compile(f"[{_NAME_SPACE}]+")
+_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def _canonical_rdns(name: x509.Name) -> list[frozenset[tuple[str, str | bytes]]]:
+    """``name``'s RDNs in OpenSSL's canonical form, as its directory name constraints compare them.
+
+    A text value loses leading and trailing whitespace, has each run of
+    whitespace inside collapsed to one space and its ASCII letters
+    lowercased; any other value compares as it is.
+    """
+    return [
+        frozenset(
+            (attribute.oid.dotted_string, _canonical_value(attribute.value)) for attribute in rdn
+        )
+        for rdn in name.rdns
+    ]
+
+
+def _canonical_value(value: str | bytes) -> str | bytes:
+    """One attribute value in OpenSSL's canonical form (see :func:`_canonical_rdns`)."""
+    if not isinstance(value, str):
+        return value
+    return _NAME_SPACE_RE.sub(" ", value.strip(_NAME_SPACE)).translate(_ASCII_LOWER)
 
 
 def _dns_within(name: str, base: str) -> bool:

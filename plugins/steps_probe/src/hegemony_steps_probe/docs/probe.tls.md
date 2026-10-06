@@ -35,29 +35,35 @@ certificate is checked against.
 
 Each endpoint is contacted twice, each attempt bounded by Timeout (sec)
 (default 10), which also bounds each OCSP request and each download as a
-whole, the response body included. The first handshake reads what the server presents and accepts
-any certificate, even from servers that only offer outdated protocol
-versions; the second verifies the chain with the worker's normal TLS
-settings. A server that presents another certificate to the second
+whole, the response body included. The first handshake reads what the server
+presents and accepts any certificate, even from servers that only offer
+outdated protocol versions; the second verifies the chain with the worker's
+normal TLS settings. A server that presents another certificate to the second
 handshake than to the first (one that verifies) gets no chain verdict:
-`chain_ok` stays empty and `chain_error` says why. Chains are verified against the worker's system trust store or,
-when CA bundle is set, against only the certificates in that bundle. Every
-certificate in the bundle counts as trusted, so an internal intermediate or
-a single pinned server certificate works too. CA bundle takes PEM text or a
-secret reference, either bare (`vault://orgs/acme/secrets/tls/internal-ca`)
-or as a `{{ secret('...') }}` template. A pasted certificate is verified
-offline by the same rules, with the chain certificates you pasted as
-intermediates: every certificate is within its validity dates, signed by the
-next and free of critical extensions the verifier does not handle; every CA
-is marked as one, may sign certificates (key usage) and respects its path
-length; the server certificate's extended key usage and key usage allow a
-TLS server; and every name stays within the name constraints of the CAs
-above it. As with OpenSSL, a path never continues from a self-signed
-certificate to an untrusted one. Certificate PEM holds at most 20
-certificates, and the check spends at most 1,000 signature checks on them:
-pasted certificates that share names and keys can offer more issuer paths
-than that, and the chain is then reported as not verified (`chain_ok` empty,
-with the reason in `chain_error`).
+`chain_ok` stays empty and `chain_error` says why. Chains are verified against
+the worker's system trust store or, when CA bundle is set, against only the
+certificates in that bundle. Every certificate in the bundle counts as
+trusted, so an internal intermediate or a single pinned server certificate
+works too. CA bundle takes PEM text or a secret reference, either bare
+(`vault://orgs/acme/secrets/tls/internal-ca`) or as a `{{ secret('...') }}`
+template.
+
+A pasted certificate is verified offline by the same rules OpenSSL applies,
+with the chain certificates you pasted as intermediates: every certificate is
+within its validity dates, signed by the next and free of critical extensions
+the verifier does not handle; every CA is marked as one by basicConstraints,
+may sign certificates (key usage), allows a TLS server in its extended key
+usage (the trust anchor too) and respects its path length, while a trust
+anchor without basicConstraints counts as a CA only as a self-issued version 1
+root or when its key usage allows signing certificates; the server
+certificate's extended key usage and key usage allow a TLS server; and every
+name stays within the name constraints of the CAs above it, with directory
+names compared regardless of letter case and runs of spaces. A path never
+continues from a self-signed certificate to an untrusted one. Certificate PEM
+holds at most 20 certificates, and the check spends at most 1,000 signature
+checks on them: pasted certificates that share names and keys can offer more
+issuer paths than that, and the chain is then reported as not verified
+(`chain_ok` empty, with the reason in `chain_error`).
 
 The host name is checked against the certificate itself. A name must match
 one of its DNS names, where a wildcard covers exactly one left-most label:
@@ -78,31 +84,32 @@ days after it was produced. The same 7-day limit applies to a CRL without a
 next update.
 
 Check CRL downloads the certificate revocation list (CRL) the certificate
-names in its CRL distribution points and looks the certificate up in it.
-HTTP and HTTPS addresses are tried in order, at most three of them, until
-one gives an answer; others, such as `ldap://`, are skipped. A list counts only when it is a
-complete CRL (not a delta CRL) from the certificate's own issuer, its
-signature verifies with the issuer's key, the issuer's key usage allows CRL
-signing, its next update has not passed, and its scope covers the
+names in its CRL distribution points and looks the certificate up in it. HTTP
+and HTTPS addresses are tried in order, at most three of them, until one
+gives an answer; others, such as `ldap://`, are skipped. A list counts only
+when it is a complete CRL (not a delta CRL) from the certificate's own
+issuer, its signature verifies with the issuer's key, the issuer's key usage
+allows CRL signing, its next update has not passed, and its scope covers the
 certificate: an issuing distribution point on the list, when present, must
 name the distribution point the list came from and must not leave this kind
 of certificate out. Indirect CRLs and lists that cover only some revocation
 reasons are reported as errors. The issuer certificate comes from the same
 places as for OCSP. Each list is downloaded once per step, up to 20 MiB, and
 shared by every endpoint whose issuer names it; a list that fails these
-checks is not kept, only the reason. All downloads of one step together,
-OCSP responses, issuer certificates and CRLs, stop at 64 MiB: a request past
-that is an `error` (or, for an issuer certificate, `unavailable`) for its
-endpoint, saying the step reached its download limit. Like Check OCSP, it checks the
-server certificate, not the CAs above it; `crl_next_update` says when the
-issuer publishes its next list, which a flow can watch to catch a CA that
-stopped publishing. An OCSP response or CRL the step cannot read, such as one
-signed with an algorithm it does not know, is an `error` for that endpoint
-only; the other endpoints keep their results. The same holds for a
+checks is not kept, only the reason. All downloads of one step together, OCSP
+responses, issuer certificates and CRLs, stop at 64 MiB: a request past that
+is an `error` (or, for an issuer certificate, `unavailable`) for its
+endpoint, saying the step reached its download limit. Like Check OCSP, it
+checks the server certificate, not the CAs above it; `crl_next_update` says
+when the issuer publishes its next list, which a flow can watch to catch a CA
+that stopped publishing. An OCSP response or CRL the step cannot read, such
+as one signed with an algorithm it does not know, is an `error` for that
+endpoint only; the other endpoints keep their results. The same holds for a
 certificate: an extension holding a name form the step cannot read (such as
 an x400Address) counts as absent, and a certificate it cannot describe at all
 leaves that endpoint's certificate fields empty with the reason in `error`,
-which fails a pasted certificate and, with Require reachable on, the endpoint.
+which fails a pasted certificate and, with Require reachable on, the
+endpoint.
 
 Parallel checks (default 10, up to 50) sets how many endpoints are checked at
 once. When the flow runs under an egress policy, every connection the step

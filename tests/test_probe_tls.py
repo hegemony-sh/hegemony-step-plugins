@@ -1709,6 +1709,7 @@ def _chain_case(
     leaf_extensions: tuple[tuple[x509.ExtensionType, bool], ...] = (),
     leaf_sans: tuple[str, ...] = ("leaf.example.test",),
     leaf_eku: tuple[x509.ObjectIdentifier, ...] | None = (ExtendedKeyUsageOID.SERVER_AUTH,),
+    leaf_subject: x509.Name | None = None,
 ) -> tuple[Leaf, str]:
     """A root -> intermediate -> leaf chain; returns the served leaf and the anchor PEM."""
     inter_key = ec.generate_private_key(ec.SECP256R1())
@@ -1729,8 +1730,110 @@ def _chain_case(
         sans=leaf_sans,
         eku=leaf_eku,
         extensions=leaf_extensions,
+        subject=leaf_subject,
     )
     return Leaf(leaf, leaf_key, (inter,)), pki.root_pem
+
+
+def _der_element(data: bytes, offset: int) -> tuple[int, int, int]:
+    """``(tag, content start, end)`` of the DER element at ``offset``."""
+    tag, length, start = data[offset], data[offset + 1], offset + 2
+    if length & 0x80:
+        size = length & 0x7F
+        length = int.from_bytes(data[start : start + size], "big")
+        start += size
+    return tag, start, start + length
+
+
+def _der(tag: int, content: bytes) -> bytes:
+    """One DER element."""
+    length = len(content)
+    if length < 0x80:
+        return bytes([tag, length]) + content
+    raw = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([tag, 0x80 | len(raw)]) + raw + content
+
+
+def _version_1(
+    subject: x509.Name, key: SigningKey, issuer: x509.Name, issuer_key: ec.EllipticCurvePrivateKey
+) -> x509.Certificate:
+    """A version 1 certificate (no version field, no extensions) that ``issuer_key`` signs.
+
+    The X.509 library only builds version 3, so this builds one without
+    extensions, drops its version field and signs the result again.
+    """
+    template = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(NOW - timedelta(days=1))
+        .not_valid_after(NOW + timedelta(days=60))
+        .sign(issuer_key, hashes.SHA256())
+        .public_bytes(serialization.Encoding.DER)
+    )
+    _, outer_start, _ = _der_element(template, 0)
+    _, tbs_start, tbs_end = _der_element(template, outer_start)
+    fields, offset = [], tbs_start
+    while offset < tbs_end:
+        tag, _, end = _der_element(template, offset)
+        if tag != 0xA0:  # [0] version
+            fields.append(template[offset:end])
+        offset = end
+    tbs = _der(0x30, b"".join(fields))
+    _, _, algorithm_end = _der_element(template, tbs_end)
+    signature = issuer_key.sign(tbs, ec.ECDSA(hashes.SHA256()))
+    signed = tbs + template[tbs_end:algorithm_end] + _der(0x03, b"\x00" + signature)
+    cert = x509.load_der_x509_certificate(_der(0x30, signed))
+    assert cert.version == x509.Version.v1
+    return cert
+
+
+def _anchor_purpose_case() -> tuple[Leaf, str]:
+    """A chain to a trust anchor whose extended key usage allows only client authentication."""
+    root_key = ec.generate_private_key(ec.SECP256R1())
+    client_only = x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH])
+    root = issue("Client Root", root_key, ca=True, extensions=((client_only, False),))
+    pki = Pki(root, root_key, root, root_key, {})
+    return _chain_case(pki)
+
+
+def _version_1_root_case() -> tuple[Leaf, str]:
+    """A chain to a self-signed version 1 root, which may act as a CA as a trust anchor."""
+    root_key = ec.generate_private_key(ec.SECP256R1())
+    root = _version_1(_name("Old Root"), root_key, _name("Old Root"), root_key)
+    leaf, _ = _chain_case(Pki(root, root_key, root, root_key, {}))
+    return leaf, pem_of(root)
+
+
+def _anchor_without_basic_constraints_case() -> tuple[Leaf, str]:
+    """A chain to a trust anchor that has key usage but no basicConstraints."""
+    root_key = ec.generate_private_key(ec.SECP256R1())
+    root = issue("Usage Root", root_key, ca=True, basic_constraints=False, extensions=(_CA_USAGE,))
+    return _chain_case(Pki(root, root_key, root, root_key, {}))
+
+
+def _version_1_intermediate_case(pki: Pki) -> tuple[Leaf, str]:
+    """A chain through a version 1 intermediate, which may not act as a CA."""
+    assert isinstance(pki.root_key, ec.EllipticCurvePrivateKey)
+    inter_key = ec.generate_private_key(ec.SECP256R1())
+    inter = _version_1(_name("Old Intermediate"), inter_key, pki.root.subject, pki.root_key)
+    leaf_key = ec.generate_private_key(ec.SECP256R1())
+    leaf = issue(
+        "leaf.example.test",
+        leaf_key,
+        issuer=inter,
+        issuer_key=inter_key,
+        sans=("leaf.example.test",),
+    )
+    return Leaf(leaf, leaf_key, (inter,)), pki.root_pem
+
+
+def _organization(*values: str) -> x509.Name:
+    """A name of organization attributes followed by the leaf's common name."""
+    attributes = [x509.NameAttribute(NameOID.ORGANIZATION_NAME, value) for value in values]
+    return x509.Name([*attributes, x509.NameAttribute(NameOID.COMMON_NAME, "leaf.example.test")])
 
 
 def _pinned_case() -> tuple[Leaf, str]:
@@ -1844,6 +1947,49 @@ _PARITY_CASES: dict[str, tuple[Any, bool | None]] = {
             ),
         ),
         False,
+    ),
+    "directory-name-excluded-in-other-case": (
+        lambda pki: _chain_case(
+            pki,
+            inter_extensions=(
+                _CA_USAGE,
+                _constraints(
+                    excluded=[
+                        x509.DirectoryName(
+                            x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Evil Corp")])
+                        )
+                    ]
+                ),
+            ),
+            leaf_subject=_organization("EVIL CORP"),
+        ),
+        False,
+    ),
+    "directory-name-permitted-with-other-spacing": (
+        lambda pki: _chain_case(
+            pki,
+            inter_extensions=(
+                _CA_USAGE,
+                _constraints(
+                    [
+                        x509.DirectoryName(
+                            x509.Name(
+                                [x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Allowed Org")]
+                            )
+                        )
+                    ]
+                ),
+            ),
+            leaf_subject=_organization("  ALLOWED \t  org "),
+        ),
+        True,
+    ),
+    "anchor-extended-key-usage": (lambda pki: _anchor_purpose_case(), False),
+    "version-1-root": (lambda pki: _version_1_root_case(), True),
+    "version-1-intermediate": (_version_1_intermediate_case, False),
+    "anchor-without-basic-constraints": (
+        lambda pki: _anchor_without_basic_constraints_case(),
+        True,
     ),
     "pinned-client-certificate": (lambda pki: _pinned_case(), False),
     "self-signed-copies-in-chain": (lambda pki: _self_signed_copies_case(), False),
