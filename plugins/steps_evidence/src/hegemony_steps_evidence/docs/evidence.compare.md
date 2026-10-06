@@ -24,8 +24,9 @@ multi-line commands with similar artifact names are compared separately;
 other artifacts are paired by name. The newest artifact of each pair is
 used when a step ran more than once. A precheck artifact with no postcheck
 pair fails the step, because the device or command it covered was not
-checked after the change. So does a pair whose postcheck capture failed:
-the device could not be reached or the command returned an error.
+checked after the change. So does a pair whose capture failed on either
+side, whatever the comparison mode: the device could not be reached or the
+command returned an error, so there is no output to compare.
 Artifacts found only in the postcheck are listed but do not fail the step.
 "Only this artifact" narrows the comparison to one exact artifact name, and
 "Only artifacts matching" filters names with a glob (ignored when the exact
@@ -64,9 +65,9 @@ which were found only there, the comparison mode, the overall pass flag,
 and per-artifact diff details — for text artifacts a unified diff plus the
 full before and after text for side-by-side display in the run view. The
 subset and superset modes also list the removed and added lines, the JSON
-mode records whether both sides parsed as JSON, and a failed postcheck
-capture records its error. The summary counts the missing and
-postcheck-only artifacts.
+mode records whether both sides parsed as JSON, and a failed capture
+records its error as `precheck_error` or `postcheck_error`. The summary
+counts the failed captures and the missing and postcheck-only artifacts.
 
 ## When It Fails
 
@@ -77,7 +78,7 @@ fetches use a 30-second API timeout, and a fetch error leaves that step's
 artifact list empty, failing the comparison as missing evidence.
 
 The step also fails when any precheck artifact has no postcheck pair, or
-when a postcheck capture failed. Otherwise the verdict follows the mode:
+when a capture failed on either side. Otherwise the verdict follows the mode:
 "Must match" and the JSON mode fail when any compared artifact differs,
 "Must differ" fails when any compared artifact is unchanged - every artifact
 must differ, so exclude volatile-free outputs you expect to stay identical,

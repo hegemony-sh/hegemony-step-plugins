@@ -42,6 +42,9 @@ _MAX_MASK_INPUT_CHARS = 1_000_000
 #: How many labels an error message names before it summarizes the rest.
 _PREVIEW_LABELS = 5
 
+#: The two sides of a comparison, as named in messages and diff details.
+_SIDES = ("precheck", "postcheck")
+
 
 def _content(artifact: dict[str, Any]) -> Any:
     """An artifact's content: its text (CLI output), else its JSON content."""
@@ -277,7 +280,9 @@ class CompareEvidenceHandler(BaseHandler):
             )
             artifacts_compared = [artifact_name]
             failed_labels = [] if passed else [artifact_name]
-            capture_failed = [artifact_name] if "postcheck_error" in diff_details else []
+            capture_failed = {
+                side: [artifact_name] if f"{side}_error" in diff_details else [] for side in _SIDES
+            }
             missing_in_postcheck: list[str] = []
             only_in_postcheck: list[str] = []
         else:
@@ -304,7 +309,7 @@ class CompareEvidenceHandler(BaseHandler):
 
             diff_details = {}
             failed_labels = []
-            capture_failed = []
+            capture_failed = {side: [] for side in _SIDES}
             for key in common_keys:
                 item_passed, diff = self._compare_captures(
                     precheck_by_key[key],
@@ -316,8 +321,9 @@ class CompareEvidenceHandler(BaseHandler):
                 diff_details[labels[key]] = {"passed": item_passed, "diff": diff}
                 if not item_passed:
                     failed_labels.append(labels[key])
-                if "postcheck_error" in diff:
-                    capture_failed.append(labels[key])
+                for side in _SIDES:
+                    if f"{side}_error" in diff:
+                        capture_failed[side].append(labels[key])
 
             artifacts_compared = [labels[key] for key in common_keys]
             passed = bool(common_keys) and not failed_labels and not missing_in_postcheck
@@ -363,7 +369,10 @@ class CompareEvidenceHandler(BaseHandler):
                 evidence=evidence,
             )
 
-        mismatched = len(failed_labels) - len(capture_failed)
+        # An item whose capture failed on either side was not compared.
+        mismatched = len(
+            set(failed_labels) - {label for side in _SIDES for label in capture_failed[side]}
+        )
 
         reasons = []
         summary_parts = []
@@ -374,9 +383,10 @@ class CompareEvidenceHandler(BaseHandler):
             else:
                 reasons.append("differences found")
                 summary_parts.append(f"Pre/post check mismatch in {mismatched} of {n} artifact(s)")
-        if capture_failed:
-            reasons.append(f"postcheck capture failed for {_preview(capture_failed)}")
-            summary_parts.append(f"{len(capture_failed)} postcheck capture(s) failed")
+        for side in _SIDES:
+            if capture_failed[side]:
+                reasons.append(f"{side} capture failed for {_preview(capture_failed[side])}")
+                summary_parts.append(f"{len(capture_failed[side])} {side} capture(s) failed")
         if missing_in_postcheck:
             reasons.append(f"missing in postcheck: {_preview(missing_in_postcheck)}")
         if not artifacts_compared and not missing_in_postcheck:
@@ -397,10 +407,19 @@ class CompareEvidenceHandler(BaseHandler):
         ignore_fields: list[str],
         ignore_patterns: list[re.Pattern[str]],
     ) -> tuple[bool, dict]:
-        """Compare two artifacts; a failed postcheck capture never passes."""
-        postcheck_error = capture_error(postcheck)
-        if postcheck_error is not None:
-            return False, {"comparison_type": comparison_type, "postcheck_error": postcheck_error}
+        """Compare two artifacts; a capture that failed on either side never passes.
+
+        A failed capture holds an error, often with empty output, not the
+        device's state, so comparing it would let 'changed', 'subset' and
+        'superset' pass on a precheck that never ran.
+        """
+        errors = {
+            f"{side}_error": error
+            for side, artifact in zip(_SIDES, (precheck, postcheck), strict=True)
+            if (error := capture_error(artifact)) is not None
+        }
+        if errors:
+            return False, {"comparison_type": comparison_type, **errors}
         return self._compare(
             _content(precheck), _content(postcheck), comparison_type, ignore_fields, ignore_patterns
         )
