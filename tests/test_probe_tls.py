@@ -748,7 +748,7 @@ def test_offline_chain_untrusted_root(pki):
         pki.leaves["rsa"].cert, [pki.inter, pki.root], [other_root], now=NOW
     )
     assert ok is False
-    assert error == "self-signed certificate in chain"
+    assert error == "self-signed certificate in certificate chain"
 
 
 def test_offline_chain_expired_leaf(pki):
@@ -800,6 +800,103 @@ def test_offline_chain_checks_the_leaf_purpose(pki):
         False,
         "unsuitable certificate purpose",
     )
+
+
+def _cross_signed(count: int) -> tuple[x509.Certificate, list[x509.Certificate]]:
+    """A leaf under ``count`` CAs named A and ``count`` named B that each issue the other.
+
+    Every A certificate is signed with B's key and every B certificate with
+    A's, so the untrusted certificates chain in every possible order.
+    """
+    a_key = ec.generate_private_key(ec.SECP256R1())
+    b_key = ec.generate_private_key(ec.SECP256R1())
+    b_name = issue("Cross B", b_key, ca=True)
+    a_certs = [
+        issue("Cross A", a_key, issuer=b_name, issuer_key=b_key, ca=True) for _ in range(count)
+    ]
+    b_certs = [
+        issue("Cross B", b_key, issuer=a_certs[0], issuer_key=a_key, ca=True) for _ in range(count)
+    ]
+    leaf_key = ec.generate_private_key(ec.SECP256R1())
+    leaf = issue("leaf.example.test", leaf_key, issuer=a_certs[0], issuer_key=a_key)
+    return leaf, a_certs + b_certs
+
+
+def test_offline_chain_stops_at_a_self_signed_untrusted_certificate(pki):
+    """Copies of one self-signed CA verify each other; no ordering of them is tried."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    copies = [issue("Loop CA", key, ca=True) for _ in range(12)]
+    leaf = issue(
+        "leaf.example.test",
+        ec.generate_private_key(ec.SECP256R1()),
+        issuer=copies[0],
+        issuer_key=key,
+    )
+    started = time.perf_counter()
+    assert verify_chain_offline(leaf, copies, [pki.root], now=NOW) == (
+        False,
+        "self-signed certificate in certificate chain",
+    )
+    assert time.perf_counter() - started < 1.0
+
+
+def test_offline_chain_search_remembers_what_cannot_succeed(pki, monkeypatch):
+    # Without remembering failed searches this takes over 2000 signature checks.
+    monkeypatch.setattr(tls_certs, "MAX_CHAIN_SIGNATURE_CHECKS", 1000)
+    leaf, cross = _cross_signed(4)
+    assert verify_chain_offline(leaf, cross, [pki.root], now=NOW) == (
+        False,
+        "unable to get local issuer certificate",
+    )
+
+
+async def test_offline_chain_search_gives_up_after_its_signature_checks(pki):
+    leaf, cross = _cross_signed(9)
+    assert len(cross) + 1 <= tls_certs.MAX_PEM_CERTIFICATES
+    reason = (
+        "the certificates offer too many issuer paths to check "
+        f"(stopped after {tls_certs.MAX_CHAIN_SIGNATURE_CHECKS} signature checks)"
+    )
+    started = time.perf_counter()
+    assert verify_chain_offline(leaf, cross, [pki.root], now=NOW) == (None, reason)
+    assert time.perf_counter() - started < 2.0
+
+    result = await run_step(
+        {"pem": pem_of(leaf, *cross), "ca_bundle": pki.root_pem, "require_valid_chain": True}
+    )
+    [record] = result.output["endpoints"]
+    assert (record["chain_ok"], record["chain_error"]) == (None, reason)
+    assert result.success is False
+    assert f"chain not verified: {reason}" in (result.error or "")
+
+
+async def test_a_pasted_chain_is_checked_off_the_event_loop(pki, monkeypatch):
+    real_verify = tls_certs.verify_chain_offline
+    threads: list[threading.Thread] = []
+
+    def verify(*args: Any, **kwargs: Any) -> tuple[bool | None, str | None]:
+        threads.append(threading.current_thread())
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(tls_certs, "verify_chain_offline", verify)
+    result = await run_step(
+        {"pem": pem_of(pki.leaves["rsa"].cert, pki.inter), "ca_bundle": pki.root_pem}
+    )
+    assert result.output["endpoints"][0]["chain_ok"] is True
+    assert threads and threading.main_thread() not in threads
+
+
+async def test_a_pasted_chain_holds_at_most_twenty_certificates(pki):
+    too_many = pem_of(*([pki.leaves["rsa"].cert] + [pki.inter] * 20))
+    assert TlsProbeHandler().validate_config({"pem": too_many}) == [
+        "pem: at most 20 certificates are allowed"
+    ]
+    assert TlsProbeHandler().validate_config({"pem": pem_of(pki.inter)}) == []
+    refused = await run_step({"pem": too_many})
+    assert refused.error == "Invalid probe.tls config: pem: at most 20 certificates are allowed"
+    # Text the editor cannot check (it still looks like a template) is checked at run time.
+    unchecked = await run_step({"pem": too_many + "\n# {{ placeholder }}\n"})
+    assert unchecked.error == "Invalid certificate PEM: 21 certificates (at most 20)"
 
 
 # --- OCSP response evaluation -------------------------------------------------
@@ -1524,6 +1621,22 @@ def _pinned_case() -> tuple[Leaf, str]:
     return Leaf(cert, key, ()), pem_of(cert)
 
 
+def _self_signed_copies_case() -> tuple[Leaf, str]:
+    """A leaf served with twelve copies of one self-signed CA, none of them trusted."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    copies = tuple(issue("Loop CA", key, ca=True) for _ in range(12))
+    leaf_key = ec.generate_private_key(ec.SECP256R1())
+    leaf = issue(
+        "leaf.example.test",
+        leaf_key,
+        issuer=copies[0],
+        issuer_key=key,
+        sans=("leaf.example.test",),
+    )
+    unrelated = issue("Unrelated Root", ec.generate_private_key(ec.SECP256R1()), ca=True)
+    return Leaf(leaf, leaf_key, copies), pem_of(unrelated)
+
+
 _PARITY_CASES: dict[str, tuple[Any, bool | None]] = {
     "valid": (_chain_case, True),
     "issuer-key-usage": (
@@ -1609,6 +1722,7 @@ _PARITY_CASES: dict[str, tuple[Any, bool | None]] = {
         False,
     ),
     "pinned-client-certificate": (lambda pki: _pinned_case(), False),
+    "self-signed-copies-in-chain": (lambda pki: _self_signed_copies_case(), False),
 }
 
 

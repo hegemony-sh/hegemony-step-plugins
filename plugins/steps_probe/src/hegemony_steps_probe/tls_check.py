@@ -661,8 +661,9 @@ class _TlsRun:
         if anchors is None:
             anchors = await asyncio.to_thread(tls_certs.load_system_anchors)
         if anchors:
-            record["chain_ok"], record["chain_error"] = tls_certs.verify_chain_offline(
-                leaf, chain, anchors, now=self.now
+            # The path search is CPU-bound (signature checks), so it runs off the event loop.
+            record["chain_ok"], record["chain_error"] = await asyncio.to_thread(
+                tls_certs.verify_chain_offline, leaf, chain, anchors, now=self.now
             )
         else:
             record["chain_error"] = (
@@ -1023,10 +1024,16 @@ class TlsProbeHandler(BaseHandler):
             if has_endpoints:
                 errors.append("pem: a pasted certificate cannot be combined with endpoints")
             try:
-                if not tls_certs.load_pem_certificates(pem):
-                    errors.append("pem: no PEM certificate found")
+                pasted = tls_certs.load_pem_certificates(pem)
             except ValueError as exc:
                 errors.append(f"pem: {exc}")
+            else:
+                if not pasted:
+                    errors.append("pem: no PEM certificate found")
+                elif len(pasted) > tls_certs.MAX_PEM_CERTIFICATES:
+                    errors.append(
+                        f"pem: at most {tls_certs.MAX_PEM_CERTIFICATES} certificates are allowed"
+                    )
         fingerprint = config.get("expected_fingerprint") or ""
         if isinstance(fingerprint, str) and fingerprint.strip() and not _templated(fingerprint):
             try:
@@ -1074,6 +1081,11 @@ class TlsProbeHandler(BaseHandler):
             return _config_error(f"Invalid certificate PEM: {exc}")
         if pem_text and not supplied:
             return _config_error("Invalid certificate PEM: no PEM certificate found")
+        if len(supplied) > tls_certs.MAX_PEM_CERTIFICATES:
+            return _config_error(
+                f"Invalid certificate PEM: {len(supplied)} certificates "
+                f"(at most {tls_certs.MAX_PEM_CERTIFICATES})"
+            )
 
         plans = _endpoint_plans(ctx, config, listed)
         if supplied and plans:

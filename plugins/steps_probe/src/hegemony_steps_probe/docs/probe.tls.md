@@ -49,7 +49,12 @@ next and free of critical extensions the verifier does not handle; every CA
 is marked as one, may sign certificates (key usage) and respects its path
 length; the server certificate's extended key usage and key usage allow a
 TLS server; and every name stays within the name constraints of the CAs
-above it.
+above it. As with OpenSSL, a path never continues from a self-signed
+certificate to an untrusted one. Certificate PEM holds at most 20
+certificates, and the check spends at most 1,000 signature checks on them:
+pasted certificates that share names and keys can offer more issuer paths
+than that, and the chain is then reported as not verified (`chain_ok` empty,
+with the reason in `chain_error`).
 
 The host name is checked against the certificate itself. A name must match
 one of its DNS names, where a wildcard covers exactly one left-most label:
@@ -172,7 +177,8 @@ Configuration problems stop the step before any connection: nothing to check
 (no targets, endpoints, or certificate), a pasted certificate combined with
 targets or endpoints, a malformed endpoint, more than 500 endpoints, a
 fingerprint that is not 64 hex digits, a CA bundle or certificate PEM
-without a readable certificate, a CA bundle reference that resolves to
+without a readable certificate, a certificate PEM with more than 20
+certificates, a CA bundle reference that resolves to
 nothing, or a platform that cannot apply the flow's network policy to the
 step's connections (only a pasted certificate without revocation checks runs
 there).

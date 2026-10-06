@@ -44,6 +44,14 @@ MAX_ENDPOINTS = 500
 #: Longest issuer chain the offline validator walks before giving up.
 MAX_CHAIN_DEPTH = 10
 
+#: Most certificates a pasted chain may hold, the server certificate included.
+MAX_PEM_CERTIFICATES = 20
+
+#: Most signatures the offline validator checks for one certificate. Untrusted
+#: certificates that share names and keys can offer more issuer paths than
+#: can be tried; past this the chain counts as not verified.
+MAX_CHAIN_SIGNATURE_CHECKS = 1000
+
 #: Clock skew tolerated on OCSP ``thisUpdate``/``nextUpdate``.
 OCSP_CLOCK_SKEW = timedelta(minutes=5)
 
@@ -656,7 +664,7 @@ def verify_chain_offline(
     anchors: Sequence[x509.Certificate],
     *,
     now: datetime,
-) -> tuple[bool, str | None]:
+) -> tuple[bool | None, str | None]:
     """Validate ``leaf`` up to one of ``anchors`` without any network access.
 
     The checks OpenSSL's verifier makes for a TLS server, minus the host
@@ -667,11 +675,16 @@ def verify_chain_offline(
     server authentication in its extended key usage; the leaf may serve TLS
     (extended key usage and key usage); every name below a CA with name
     constraints satisfies them; and the path ends at a trust anchor.
-    ``intermediates`` are untrusted candidates. A leaf that is itself an
-    anchor (a pinned self-signed certificate) needs only to be current,
-    usable for TLS and free of unhandled critical extensions. Errors use
-    OpenSSL's wording, so a supplied certificate and a served one read the
-    same.
+    ``intermediates`` are untrusted candidates, and like OpenSSL the path
+    never continues from a self-signed certificate to an untrusted one. A
+    leaf that is itself an anchor (a pinned self-signed certificate) needs
+    only to be current, usable for TLS and free of unhandled critical
+    extensions. Errors use OpenSSL's wording, so a supplied certificate and
+    a served one read the same.
+
+    Returns ``(True, None)`` for a valid path, ``(False, reason)`` when
+    there is none, and ``(None, reason)`` when the search used up
+    ``MAX_CHAIN_SIGNATURE_CHECKS`` before it could tell.
     """
     anchor_fingerprints = {fingerprint_sha256(anchor) for anchor in anchors}
     if fingerprint_sha256(leaf) in anchor_fingerprints:
@@ -680,67 +693,126 @@ def verify_chain_offline(
     error = _critical_extension_error(leaf) or _purpose_error(leaf)
     if error is not None:
         return False, error
-    error = _walk(
-        leaf, list(intermediates), list(anchors), now, depth=0, used=frozenset(), path=(leaf,)
-    )
+    search = _ChainSearch(intermediates, anchors, now)
+    try:
+        error = search.walk(leaf, depth=0, used=frozenset(), path=(leaf,))
+    except _SearchExhausted:
+        return None, (
+            "the certificates offer too many issuer paths to check (stopped after "
+            f"{MAX_CHAIN_SIGNATURE_CHECKS} signature checks)"
+        )
     return (error is None, error)
 
 
-def _walk(
-    cert: x509.Certificate,
-    intermediates: list[x509.Certificate],
-    anchors: list[x509.Certificate],
-    now: datetime,
-    *,
-    depth: int,
-    used: frozenset[str],
-    path: tuple[x509.Certificate, ...],
-) -> str | None:
-    """Depth-first issuer search; None when a valid path to an anchor exists, else why not.
+class _SearchExhausted(Exception):
+    """The offline path search used up its signature checks."""
 
-    ``path`` holds the certificates from the leaf up to ``cert``.
-    """
-    error = _time_error(cert, now)
-    if error is not None:
-        return error
-    if depth >= MAX_CHAIN_DEPTH:
-        return "certificate chain too long"
-    first_error: str | None = None
-    for anchor in anchors:
-        if anchor.subject != cert.issuer or not _signed_by(cert, anchor):
-            continue
-        problem = _issuer_problem(anchor, depth, now, trusted=True) or _name_constraints_error(
-            (*path, anchor)
-        )
-        if problem is None:
-            return None
-        first_error = first_error or problem
-    for candidate in intermediates:
-        fingerprint = fingerprint_sha256(candidate)
-        if fingerprint in used or candidate.subject != cert.issuer:
-            continue
-        if not _signed_by(cert, candidate):
-            first_error = first_error or "certificate signature failure"
-            continue
-        problem = _issuer_problem(candidate, depth, now, trusted=False)
-        if problem is None:
-            problem = _walk(
-                candidate,
-                intermediates,
-                anchors,
-                now,
-                depth=depth + 1,
-                used=used | {fingerprint},
-                path=(*path, candidate),
-            )
-        if problem is None:
-            return None
-        first_error = first_error or problem
-    if first_error is not None:
-        return first_error
-    if cert.issuer == cert.subject and _signed_by(cert, cert):
-        return "self-signed certificate" if depth == 0 else "self-signed certificate in chain"
-    return "unable to get local issuer certificate"
+
+class _ChainSearch:
+    """One offline issuer search: its candidates, the checks it has left, and what failed."""
+
+    def __init__(
+        self,
+        intermediates: Sequence[x509.Certificate],
+        anchors: Sequence[x509.Certificate],
+        now: datetime,
+    ) -> None:
+        """Prepare a search through ``intermediates`` to ``anchors`` at ``now``."""
+        self.intermediates = [(fingerprint_sha256(cert), cert) for cert in intermediates]
+        self.anchors = list(anchors)
+        self.now = now
+        self.checks_left = MAX_CHAIN_SIGNATURE_CHECKS
+        # Every time an anchor's name and key matched: a search that left the
+        # count unchanged never consulted the path below it.
+        self.anchor_matches = 0
+        # Searches that failed without meeting an anchor, by certificate and
+        # the untrusted certificates below it (which fix its depth), with why.
+        self.failed: dict[tuple[str, frozenset[str]], str] = {}
+
+    def signed_by(self, cert: x509.Certificate, issuer: x509.Certificate) -> bool:
+        """:func:`_signed_by`, counted against the search's signature checks."""
+        if self.checks_left <= 0:
+            raise _SearchExhausted
+        self.checks_left -= 1
+        return _signed_by(cert, issuer)
+
+    def walk(
+        self,
+        cert: x509.Certificate,
+        *,
+        depth: int,
+        used: frozenset[str],
+        path: tuple[x509.Certificate, ...],
+    ) -> str | None:
+        """Depth-first issuer search; None when a valid path to an anchor exists, else why not.
+
+        ``path`` holds the certificates from the leaf up to ``cert``, and
+        ``used`` the fingerprints of its untrusted issuers.
+        """
+        error = _time_error(cert, self.now)
+        if error is not None:
+            return error
+        if depth >= MAX_CHAIN_DEPTH:
+            return "certificate chain too long"
+        first_error: str | None = None
+        for anchor in self.anchors:
+            if anchor.subject != cert.issuer or not self.signed_by(cert, anchor):
+                continue
+            self.anchor_matches += 1
+            problem = _issuer_problem(
+                anchor, depth, self.now, trusted=True
+            ) or _name_constraints_error((*path, anchor))
+            if problem is None:
+                return None
+            first_error = first_error or problem
+        self_signed = cert.issuer == cert.subject and self.signed_by(cert, cert)
+        # OpenSSL extends a chain with untrusted issuers only up to the first
+        # self-signed certificate.
+        for fingerprint, candidate in [] if self_signed else self.intermediates:
+            if fingerprint in used or candidate.subject != cert.issuer:
+                continue
+            if not self.signed_by(cert, candidate):
+                first_error = first_error or "certificate signature failure"
+                continue
+            problem = _issuer_problem(candidate, depth, self.now, trusted=False)
+            if problem is None:
+                problem = self.walk_above(
+                    candidate, depth=depth + 1, used=used | {fingerprint}, path=(*path, candidate)
+                )
+            if problem is None:
+                return None
+            first_error = first_error or problem
+        if first_error is not None:
+            return first_error
+        if self_signed:
+            if depth == 0:
+                return "self-signed certificate"
+            return "self-signed certificate in certificate chain"
+        return "unable to get local issuer certificate"
+
+    def walk_above(
+        self,
+        cert: x509.Certificate,
+        *,
+        depth: int,
+        used: frozenset[str],
+        path: tuple[x509.Certificate, ...],
+    ) -> str | None:
+        """:meth:`walk` from an untrusted issuer, remembering the searches that cannot succeed.
+
+        A search that failed without meeting an anchor depends only on the
+        certificate and the set of untrusted certificates below it, not on
+        their order, so reaching it again the same way fails the same way.
+        """
+        key = (fingerprint_sha256(cert), used)
+        known = self.failed.get(key)
+        if known is not None:
+            return known
+        matches = self.anchor_matches
+        problem = self.walk(cert, depth=depth, used=used, path=path)
+        if problem is not None and self.anchor_matches == matches:
+            self.failed[key] = problem
+        return problem
 
 
 def _issuer_problem(
