@@ -16,9 +16,12 @@ from enum import Enum
 
 
 class StepKind(str, Enum):  # noqa: UP042 - (str, Enum) keeps str() parity with platform enums
-    """Behavior category for a step.
+    """Category a handler declares in ``BaseHandler.supported_kinds``.
 
-    Determines how the engine treats the step and what handlers are valid.
+    Informational only. The platform lists a handler's kinds as its plugin's
+    capabilities; the engine and the flow editor do not use them, and a step's
+    free-form ``kind`` tag has no effect on how the step runs (timeouts,
+    retries, approvals) and is not checked against its handler's kinds.
     """
 
     CHECK = "CHECK"

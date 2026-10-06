@@ -45,6 +45,8 @@ def test_public_surface():
         "ImageBuild",
         "BUILD_NETWORK_DEFAULT",
         "BUILD_NETWORK_NONE",
+        "DEFAULT_RUN_TIMEOUT_MARGIN_SECONDS",
+        "InvalidConfigError",
     ):
         assert hasattr(sdk, name), name
 
@@ -402,3 +404,64 @@ def test_command_label_shortens_script_shaped_commands():
     assert label.endswith("…")
     assert label.startswith("FAIL=0; for t in")
     assert command_label("   ") == ""
+
+
+def test_run_timeout_defaults_off():
+    assert sdk.BaseHandler.run_timeout_field is None
+    assert (
+        sdk.BaseHandler.run_timeout_margin_seconds == sdk.DEFAULT_RUN_TIMEOUT_MARGIN_SECONDS == 60
+    )
+
+
+def _parsing_handler():
+    from pydantic import AliasChoices, BaseModel, Field
+
+    class Config(BaseModel):
+        duration_seconds: int = Field(
+            default=30, ge=1, validation_alias=AliasChoices("duration_seconds", "seconds")
+        )
+
+    class Handler(sdk.BaseHandler):
+        handler_id = "test.parse"
+        config_model = Config
+
+        def validate_config(self, config):
+            errors = super().validate_config(config)
+            if config.get("duration_seconds") == 13:
+                errors.append("duration_seconds: unlucky")
+            return errors
+
+        async def execute(self, ctx):  # pragma: no cover - not executed
+            return sdk.HandlerResult(success=True)
+
+    return Handler(), Config
+
+
+def test_parse_config_returns_the_model_with_defaults_conversion_and_old_names():
+    handler, config_model = _parsing_handler()
+    assert handler.parse_config({}, config_model).duration_seconds == 30
+    assert handler.parse_config({"duration_seconds": "5"}, config_model).duration_seconds == 5
+    assert handler.parse_config({"seconds": 7}, config_model).duration_seconds == 7
+
+
+def test_parse_config_refuses_with_validate_config_errors():
+    import pytest
+
+    handler, config_model = _parsing_handler()
+    for config, message in [
+        ({"duration_seconds": 0}, "duration_seconds: Input should be greater than or equal to 1"),
+        ({"duration_seconds": 13}, "duration_seconds: unlucky"),
+    ]:
+        with pytest.raises(sdk.InvalidConfigError) as caught:
+            handler.parse_config(config, config_model)
+        assert caught.value.errors == [message]
+        result = caught.value.result()
+        assert result.success is False
+        assert result.error == f"Invalid test.parse config: {message}"
+        assert result.summary == "Config validation failed"
+
+
+def test_step_kind_is_documented_as_informational():
+    doc = sdk.StepKind.__doc__ or ""
+    assert "Informational only" in doc
+    assert "Determines how the engine treats the step" not in doc
