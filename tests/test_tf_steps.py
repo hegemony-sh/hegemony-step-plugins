@@ -353,6 +353,10 @@ def test_scripts_stop_the_tool_at_the_step_deadline():
         ({"targets": ["a\nb"]}, "one resource address"),
         ({"replace": ["aws_instance.web\tx"]}, "one resource address"),
         ({"destroy": True, "refresh_only": True}, "cannot be combined"),
+        ({"destroy": True, "replace": ["aws_instance.web"]}, "combined with 'destroy'"),
+        ({"refresh_only": True, "replace": ["aws_instance.web"]}, "combined with 'refresh_only'"),
+        # Rendered templates arrive as text.
+        ({"destroy": "true", "refresh_only": "True"}, "cannot be combined"),
         ({"engine": "terraform", "state_encryption_key": "vault://k/x"}, "opentofu engine"),
         ({"lock_timeout": "soon"}, "lock_timeout"),
         ({"image": "/tmp/x"}, "Invalid image reference"),
@@ -395,6 +399,19 @@ def test_keyed_resource_instances_can_be_targeted_and_replaced():
     assert """'-target=module.site["prod east"].aws_vpc.main'""" in script
     assert """'-replace=aws_instance.web["blue"]'""" in script
     _assert_parses(script)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"destroy": "false", "refresh_only": "true"},
+        {"destroy": "False", "replace": ["aws_instance.web"]},
+        {"refresh_only": "false", "replace": ["aws_instance.web"]},
+    ],
+)
+def test_plan_validation_reads_rendered_plan_modes(config):
+    """A templated switch rendered as "false" is off, as the plan runs with it."""
+    assert TfPlanHandler().validate_config({"state_name": "core", **config}) == []
 
 
 def test_plan_validation_accepts_defaults():

@@ -147,7 +147,8 @@ plan's digest cannot be read back (so `tf.apply` could not check the plan), when
 plan or apply holds the state lock for longer than Lock timeout (the error
 names the holder from the lock's Who and Info lines), or before running
 anything when the config is
-invalid, a secret resolves to nothing, or the platform cannot serve managed
+invalid (Plan a destroy, Refresh only and Replace each exclude the other
+two), a secret resolves to nothing, or the platform cannot serve managed
 state (for example, no state encryption key is configured). Provider downloads and remote state
 need network access to those endpoints under the flow's egress policy. The
 timeout covers the whole run, image pull included. The tool receives

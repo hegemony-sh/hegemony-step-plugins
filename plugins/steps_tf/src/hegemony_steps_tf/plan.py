@@ -416,10 +416,14 @@ class TfPlanHandler(BaseHandler):
             errors += managed_timeout_errors(config.get("timeout_seconds"))
         errors += address_list_errors("targets", config.get("targets"))
         errors += address_list_errors("replace", config.get("replace"))
-        if config.get("destroy") and config.get("refresh_only"):
+        # The plan modes as the plan runs with them: a rendered "false" is false.
+        modes = TfPlanConfig.model_validate(config)
+        if modes.destroy and modes.refresh_only:
             errors.append("'destroy' and 'refresh_only' cannot be combined")
-        if config.get("destroy") and config.get("replace"):
+        if modes.destroy and modes.replace:
             errors.append("'replace' cannot be combined with 'destroy'")
+        if modes.refresh_only and modes.replace:
+            errors.append("'replace' cannot be combined with 'refresh_only'")
         if config.get("state_encryption_key") and config.get("engine") == "terraform":
             errors.append("'state_encryption_key' needs the opentofu engine")
         errors += common_errors(config)
