@@ -53,6 +53,7 @@ from .iosxe_common import (
     run_checked,
     run_config,
     same_file_path,
+    same_version,
     save_config,
     stage_image,
     undo_boot_change,
@@ -177,7 +178,7 @@ class IOSXEBundleDriver(UpgradeDriver):
 
             # Check if target version already running
             target_version_installed = False
-            if target_version and target_version.lower() in current_version.lower():
+            if target_version and same_version(current_version, target_version):
                 target_version_installed = True
                 logger.info("Target version %s already running", target_version)
 
@@ -408,11 +409,11 @@ class IOSXEBundleDriver(UpgradeDriver):
             # Check version match
             version_match = False
             if target_version:
-                version_match = target_version.lower() in current_version.lower()
+                version_match = same_version(current_version, target_version)
 
             # Check version changed
             version_changed = True
-            if preflight_version and preflight_version.lower() in current_version.lower():
+            if preflight_version and same_version(current_version, preflight_version):
                 logger.error(
                     "Upgrade FAILED: version unchanged (before: '%s', after: '%s')",
                     preflight_version,

@@ -50,6 +50,7 @@ from .iosxe_common import (
     run_checked,
     run_config,
     same_file_path,
+    same_version,
     save_config,
     stage_image,
     undo_boot_change,
@@ -295,10 +296,10 @@ class IOSXEInstallDriver(UpgradeDriver):
             else:
                 install_mode_supported = True
 
-                # Check if target version is already committed
+                # Check if target version is already committed ("IMG  C  17.09.04a.0.6")
                 if target_version:
-                    committed_pattern = rf"\bC\s+{re.escape(target_version)}"
-                    if re.search(committed_pattern, summary_output):
+                    committed = re.findall(r"\bC\s+(\d\S*)", summary_output)
+                    if any(same_version(version, target_version) for version in committed):
                         target_version_installed = True
                         logger.info("Target version %s already committed", target_version)
 
@@ -544,11 +545,11 @@ class IOSXEInstallDriver(UpgradeDriver):
             # Check version match
             version_match = False
             if target_version:
-                version_match = target_version.lower() in current_version.lower()
+                version_match = same_version(current_version, target_version)
 
             # Check version changed
             version_changed = True
-            if preflight_version and preflight_version.lower() in current_version.lower():
+            if preflight_version and same_version(current_version, preflight_version):
                 logger.error(
                     "Upgrade FAILED: version unchanged (before: '%s', after: '%s')",
                     preflight_version,

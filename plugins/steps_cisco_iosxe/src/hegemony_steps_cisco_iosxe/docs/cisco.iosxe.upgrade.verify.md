@@ -19,16 +19,20 @@ the device answers, retrying every Retry Interval seconds for up to Max Wait
 seconds (defaults: every 30 seconds, up to 600 seconds). Once the device is
 reachable, verification runs.
 
-Target Version, when set, is matched as a substring of the running version
-from `show version` — for example `17.09.04a`. Leave it empty to skip the
-version comparison. Pre-upgrade Version, when set, is the version the
-devices ran before the upgrade (for example from the preflight step's
-output); a device still running it fails. Upgrade Mode selects what else is
-checked: in install mode the step reads `show install summary` and requires
-the new software to be committed; with Auto-commit on (the default) it runs
-`install commit` itself when the software is activated but uncommitted, then
-re-checks. In bundle mode there is no commit concept — the step records the
-boot configuration and checks the version only.
+Target Version, when set, must be the running version from `show version`
+— for example `17.09.04a`. Leave it empty to skip the version comparison.
+Pre-upgrade Version, when set, is the version the devices ran before the
+upgrade (for example from the preflight step's output); a device still
+running it fails. Versions are compared as releases: the major, minor and
+rebuild numbers and the letter suffix must all be equal, so `17.9.4a` is
+`17.09.04a`, but `17.09.04` is not `17.09.04a`.
+
+Upgrade Mode selects what else is checked: in install mode the step reads
+`show install summary` and requires the new software to be committed; with
+Auto-commit on (the default) it runs `install commit` itself when the
+software is activated but uncommitted, then re-checks. In bundle mode there
+is no commit concept — the step records the boot configuration and checks
+the version only.
 
 Max Parallel Devices controls how many devices are verified concurrently.
 
@@ -53,10 +57,10 @@ live logs.
 
 A device that does not come back within Max Wait seconds fails with a
 timeout; the evidence records the last connection error. A reachable device
-fails verification when its running version does not contain the configured
-Target Version, when it still runs the Pre-upgrade Version (the version
-did not change), or — in install mode — when the software is not
-committed even after the auto-commit attempt. A verification command that
+fails verification when its running version is not the configured Target
+Version, when it still runs the Pre-upgrade Version (the version did not
+change), or — in install mode — when the software is not committed even
+after the auto-commit attempt. A verification command that
 fails, including `install commit`, also fails that device.
 
 All devices must verify for the step to succeed; per-device evidence is

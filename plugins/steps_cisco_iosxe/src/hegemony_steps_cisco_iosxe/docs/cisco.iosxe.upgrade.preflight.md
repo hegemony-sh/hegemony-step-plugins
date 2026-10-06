@@ -33,7 +33,9 @@ re-transfers anyway - no checksum to verify, or overwrite turned on -
 still needs the space. Target Version is also optional; in install mode it is
 matched against committed versions in `show install summary`, and in bundle
 mode against the running version, so a device that already runs the target is
-reported rather than failed.
+reported rather than failed. Versions are compared as releases (major, minor
+and rebuild numbers and the letter suffix), so `17.9.4a` matches `17.09.04a`
+but `17.09.04` does not.
 
 Max Parallel Devices controls how many devices are checked concurrently
 (1 means one at a time). Config fields accept `{{ ... }}` templates,

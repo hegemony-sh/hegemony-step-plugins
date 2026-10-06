@@ -58,7 +58,10 @@ class UpgradeVerifyConfig(BaseModel):
     target_version: str = Field(
         default="",
         title="Target Version",
-        description="Expected version after upgrade",
+        description=(
+            "Expected version after upgrade, compared as a release: 17.9.4a "
+            "matches 17.09.04a, but 17.09.04 does not"
+        ),
         json_schema_extra={"x_placeholder": "17.09.04a"},
     )
     preflight_version: str = Field(
