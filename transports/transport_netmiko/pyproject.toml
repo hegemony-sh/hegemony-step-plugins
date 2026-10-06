@@ -4,14 +4,14 @@
 
 [project]
 name = "hegemony-transport-netmiko"
-version = "0.14.0"
+version = "0.15.0"
 description = "Netmiko network-CLI device transport for Hegemony"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.14.0",
+    "hegemony-step-sdk==0.15.0",
     "netmiko>=4.3.0",
 ]
 

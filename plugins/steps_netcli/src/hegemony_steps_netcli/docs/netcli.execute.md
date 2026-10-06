@@ -20,11 +20,22 @@ Targets are chosen with the role-based target picker; there is no
 additional-IP list for this step.
 
 When the first line is `configure terminal` (or `conf t` / `config t`), the
-whole set is treated as one configuration session: the session transcript is
-saved as a single consolidated "Configuration" evidence artifact per device,
-and the recorded command list omits mode wrappers (`configure terminal`,
-`end`, `exit`) and `write`/`copy run` save commands. Any other first line
-means show/exec mode: each command gets its own evidence artifact, named
+list is a configuration session. `configure terminal` starts a configuration
+block and only `end` closes it. `exit` is sent to the device like any other
+configuration line, so it can leave an interface or other sub-mode without
+ending the block. Each block is sent as one configuration set. Lines after
+`end` and before the next `configure terminal`, and `write` or `copy run`
+save commands, run at the exec prompt. Everything runs in the order written.
+When a command fails, the commands after it do not run and are recorded as
+skipped, so a `write memory` never saves a change that failed part way.
+When the run is cancelled part way through, the commands that have not run
+are recorded as skipped because the run was cancelled, not because a command
+failed.
+
+A configuration session's transcript is saved as a single consolidated
+"Configuration" evidence artifact per device, and the recorded command list
+omits `configure terminal`, `end` and the save commands. Any other first
+line means show/exec mode: each command gets its own evidence artifact, named
 after the command (first line, shortened to 80 characters), with the device
 name appended when more than one device is targeted.
 
@@ -33,6 +44,12 @@ strictly one after another, higher values run up to that many devices
 concurrently (capped at 32). Results are always aggregated in device order.
 Command output reaches the step's live log per device, once that device's
 whole command batch has finished.
+
+Command timeout (30 seconds by default, at most 3600) limits how long one
+command may run on a device; a command that runs longer fails. With the
+netmiko transport each configuration block is sent as one command, so the
+limit covers the whole block. The step's own timeout still applies to the
+whole step, so it must leave time for every command on every device.
 
 ## Output
 
@@ -50,9 +67,11 @@ devices).
 The step fails immediately when no target devices or no commands are
 configured. Per device, it fails when the device has no management host,
 when the connection or execution raises an error, or when any command
-returns a non-zero exit code. One failing device does not stop the others:
+returns a non-zero exit code. With the netmiko and scrapli transports, a
+device error message in the output, such as `% Invalid input detected`, also
+counts as a failed command. One failing device does not stop the others:
 every device is still processed and its evidence kept, but all devices must
 succeed for the step to succeed. In a configuration session the error
 text lists each failing device with its first failure detail; in show/exec
-mode every failing command contributes its own entry. The handler imposes no timeout of its own on
-command execution.
+mode every failing command contributes its own entry. A command that runs
+past Command timeout counts as failed.

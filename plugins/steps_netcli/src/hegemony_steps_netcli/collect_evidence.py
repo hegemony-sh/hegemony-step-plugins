@@ -14,6 +14,7 @@ from hegemony_step_sdk import (
     BaseHandler,
     HandlerContext,
     HandlerResult,
+    HandlerTargeting,
     StepKind,
     command_label,
     for_each_target_device,
@@ -21,6 +22,8 @@ from hegemony_step_sdk import (
 )
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_COMMAND_TIMEOUT_SECONDS = 30
 
 
 class CollectEvidenceConfig(BaseModel):
@@ -51,6 +54,17 @@ class CollectEvidenceConfig(BaseModel):
         title="Max Parallel Devices",
         description="Devices processed concurrently (1 = sequential)",
     )
+    command_timeout_seconds: int = Field(
+        _DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        ge=1,
+        le=3600,
+        title="Command timeout (seconds)",
+        description=(
+            "How long one command may run on a device before it fails. Raise it "
+            "for slow commands such as show tech-support. The step timeout must "
+            "still cover every command on every device. Defaults to 30 seconds."
+        ),
+    )
 
 
 @dataclass
@@ -75,6 +89,8 @@ class CollectEvidenceHandler(BaseHandler):
     display_name = "Collect Evidence"
     description = "Capture CLI command outputs from devices as evidence."
     category = "Checks"
+    # Devices come from roles only: an additional IP has no login details.
+    targeting = HandlerTargeting(roles=True, ips=False)
     config_model = CollectEvidenceConfig
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
@@ -110,6 +126,9 @@ class CollectEvidenceHandler(BaseHandler):
             )
 
         services = ctx.require_services()
+        command_timeout = float(
+            ctx.config.get("command_timeout_seconds") or _DEFAULT_COMMAND_TIMEOUT_SECONDS
+        )
 
         async def _process_device(device: dict) -> _DeviceOutcome:
             outcome = _DeviceOutcome()
@@ -130,7 +149,14 @@ class CollectEvidenceHandler(BaseHandler):
                 return outcome
 
             try:
-                ssh = services.connect(device, platform=device.get("platform"))
+                # step_run_id registers the session, so cancelling the run
+                # closes it.
+                ssh = services.connect(
+                    device,
+                    platform=device.get("platform"),
+                    command_timeout=command_timeout,
+                    step_run_id=ctx.step_run_id,
+                )
                 # Execute all commands together for efficiency
                 results = await ssh.execute_commands(commands)
                 for result in results:

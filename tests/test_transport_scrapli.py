@@ -6,8 +6,10 @@
 
 Covers registration under hegemony.device_transports, spec-based construction
 and platform mapping, show/config execution paths (per-response result
-mapping, post-command skip on config failure), timing-mode prompt answering,
-and the explicit NotImplementedError staging seam.
+mapping, `exit` kept inside its config block, blocks and exec commands in the
+order written, nothing run after the first failure or a cancellation),
+timing-mode prompt answering, and the explicit NotImplementedError staging
+seam.
 """
 
 from __future__ import annotations
@@ -20,6 +22,8 @@ from scrapli.exceptions import ScrapliAuthenticationFailed, ScrapliTimeout
 import hegemony_transport_scrapli
 from hegemony_step_sdk import DeviceConnectionSpec
 from hegemony_transport_scrapli.transport import (
+    _CANCELLED_ERROR,
+    _SKIPPED_ERROR,
     ScrapliTransport,
     _NullCancellationRegistry,
 )
@@ -151,11 +155,195 @@ async def test_config_failure_skips_post_and_marks_unattempted():
         results = await transport.execute_commands(commands)
 
     assert connection.send_command.await_count == 0
-    assert all(r.command != "write memory" for r in results)
     assert any(r.command == "bork" and r.exit_code == 1 for r in results)
     skipped = [r for r in results if r.command == "name x"]
     assert len(skipped) == 1 and skipped[0].exit_code == -1
     assert "Skipped" in (skipped[0].error or "")
+    # The save after the failed block is reported as not run, not left out.
+    assert (results[-1].command, results[-1].exit_code) == ("write memory", -1)
+    assert results[-1].error == _SKIPPED_ERROR
+
+
+async def _run_on_connection(commands: list[str], connection: MagicMock):
+    transport = _make_transport()
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        return await transport.execute_commands(commands)
+
+
+async def test_exit_inside_a_config_block_is_sent_as_a_config_line():
+    # Only `end` closes a config block. An ` exit` that leaves an interface
+    # sub-mode used to end the block, so the rest of it ran at the exec prompt.
+    commands = [
+        "configure terminal",
+        "interface GigabitEthernet1",
+        " description uplink",
+        " exit",
+        "interface GigabitEthernet2",
+        " no shutdown",
+        "end",
+        "write memory",
+    ]
+    connection = _connection()
+    connection.send_configs.return_value = [_response() for _ in range(5)]
+    connection.send_command.return_value = _response("Building configuration...\n[OK]")
+
+    results = await _run_on_connection(commands, connection)
+
+    connection.send_configs.assert_awaited_once_with(commands[1:6], stop_on_failed=True)
+    assert [c.args[0] for c in connection.send_command.await_args_list] == ["write memory"]
+    assert [r.command for r in results] == commands[1:6] + ["write memory"]
+    assert all(r.exit_code == 0 for r in results)
+
+
+async def test_failed_post_command_fails_and_skips_the_rest():
+    connection = _connection()
+    connection.send_configs.return_value = [_response()]
+    connection.send_command.return_value = _response(
+        "        ^\n% Invalid input detected at '^' marker."
+    )
+
+    results = await _run_on_connection(
+        ["configure terminal", "hostname r1", "end", "show bork", "write memory"], connection
+    )
+
+    assert connection.send_command.await_count == 1
+    assert [r.command for r in results] == ["hostname r1", "show bork", "write memory"]
+    assert results[1].exit_code == 1
+    assert results[1].error == "% Invalid input detected at '^' marker."
+    assert (results[2].exit_code, results[2].error) == (-1, _SKIPPED_ERROR)
+
+
+async def test_config_blocks_and_exec_commands_run_in_written_order():
+    calls: list[tuple[str, object]] = []
+
+    async def send_configs(lines, **kwargs):
+        calls.append(("config", list(lines)))
+        return [_response() for _ in lines]
+
+    async def send_command(command, **kwargs):
+        calls.append(("exec", command))
+        return _response("ok")
+
+    connection = _connection()
+    connection.send_configs.side_effect = send_configs
+    connection.send_command.side_effect = send_command
+
+    results = await _run_on_connection(
+        [
+            "configure terminal",
+            "hostname r1",
+            "end",
+            "show clock",
+            "conf t",
+            "ntp server 192.0.2.5",
+            "end",
+            "write memory",
+        ],
+        connection,
+    )
+
+    assert calls == [
+        ("config", ["hostname r1"]),
+        ("exec", "show clock"),
+        ("config", ["ntp server 192.0.2.5"]),
+        ("exec", "write memory"),
+    ]
+    assert [r.command for r in results] == [
+        "hostname r1",
+        "show clock",
+        "ntp server 192.0.2.5",
+        "write memory",
+    ]
+    assert all(r.exit_code == 0 for r in results)
+
+
+class _Cancellation(_NullCancellationRegistry):
+    """Cancellation registry whose run is cancelled once ``cancelled`` is set."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def is_cancelled(self, key: str | None) -> bool:
+        return self.cancelled
+
+
+async def _run_with_cancellation(
+    commands: list[str], connection: MagicMock, cancellation: _Cancellation
+):
+    transport = _make_transport()
+    transport.step_run_id = "sr-1"
+    transport._cancellation_registry = cancellation
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        return await transport.execute_commands(commands)
+
+
+async def test_commands_after_a_cancellation_say_the_run_was_cancelled():
+    cancellation = _Cancellation()
+
+    async def send_command(command, **kwargs):
+        cancellation.cancelled = True  # the run is cancelled while this runs
+        return _response("10:00")
+
+    connection = _connection()
+    connection.send_configs.return_value = [_response()]
+    connection.send_command.side_effect = send_command
+
+    results = await _run_with_cancellation(
+        [
+            "configure terminal",
+            "hostname r1",
+            "end",
+            "show clock",
+            "conf t",
+            "ntp server 192.0.2.5",
+            "ntp server 192.0.2.6",
+            "end",
+            "write memory",
+        ],
+        connection,
+        cancellation,
+    )
+
+    connection.send_configs.assert_awaited_once()
+    assert connection.send_command.await_count == 1
+    assert [(r.command, r.exit_code, r.error) for r in results] == [
+        ("hostname r1", 0, None),
+        ("show clock", 0, None),
+        ("ntp server 192.0.2.5", -1, "Cancelled"),
+        ("ntp server 192.0.2.6", -1, _CANCELLED_ERROR),
+        ("write memory", -1, _CANCELLED_ERROR),
+    ]
+
+
+async def test_a_command_cut_off_by_a_cancellation_skips_the_rest_as_cancelled():
+    cancellation = _Cancellation()
+
+    async def send_configs(lines, **kwargs):
+        # Cancelling closes the session: the first line fails, and
+        # stop_on_failed leaves the rest of the block unattempted.
+        cancellation.cancelled = True
+        return [_response(failed=True)]
+
+    connection = _connection()
+    connection.send_configs.side_effect = send_configs
+
+    results = await _run_with_cancellation(
+        ["configure terminal", "hostname r1", "ntp server 192.0.2.5", "end", "write memory"],
+        connection,
+        cancellation,
+    )
+
+    assert connection.send_command.await_count == 0
+    assert [(r.command, r.exit_code) for r in results] == [
+        ("hostname r1", 1),
+        ("ntp server 192.0.2.5", -1),
+        ("write memory", -1),
+    ]
+    assert [r.error for r in results[1:]] == [_CANCELLED_ERROR, _CANCELLED_ERROR]
 
 
 async def test_auth_failure_fills_all_results():

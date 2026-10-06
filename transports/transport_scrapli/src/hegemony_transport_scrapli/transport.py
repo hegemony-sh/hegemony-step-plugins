@@ -159,6 +159,69 @@ _TIMING_POLL_SECONDS = 2.5
 _QUIET_READS_DONE = 3
 
 
+#: Lines that open a config block. Only ``end`` closes one: ``exit`` inside a
+#: block leaves a sub-mode on the device and is sent like any config line.
+_CONFIG_ENTER_COMMANDS = ("configure terminal", "conf t", "config t")
+
+#: Error of a result for a command not run because an earlier one failed.
+_SKIPPED_ERROR = "Skipped: earlier command failed"
+
+#: Error of a result for a command not run because the run was cancelled.
+_CANCELLED_ERROR = "Skipped: the run was cancelled"
+
+
+def _is_sent(command: str) -> bool:
+    """False for blank lines and the 'configure terminal' / 'end' wrappers.
+
+    scrapli's send_configs enters and leaves config mode itself, and results
+    cover only the lines actually sent.
+    """
+    command_lower = command.strip().lower()
+    return bool(command_lower) and command_lower not in (*_CONFIG_ENTER_COMMANDS, "end")
+
+
+def _is_save_command(command_lower: str) -> bool:
+    """'write ...' / 'copy run ...': always run at privilege-exec."""
+    return command_lower.startswith("write") or command_lower.startswith("copy run")
+
+
+def _plan_config_set(commands: list[str]) -> list[tuple[bool, list[str]]]:
+    """Split a config command set into ordered steps of lines to send.
+
+    A step is ``(True, lines)`` for a config block, sent with one
+    send_configs, or ``(False, [line])`` for one command run at
+    privilege-exec. A block opens at 'configure terminal' and closes only at
+    'end'. A save command inside a block splits it and runs between the two
+    halves. Running the steps in turn keeps the order the commands were
+    written in. Same rules as the netmiko transport.
+    """
+    steps: list[tuple[bool, list[str]]] = []
+    block: list[str] | None = None
+    in_config = False
+    for cmd in commands:
+        cmd_lower = cmd.strip().lower()
+        if cmd_lower in _CONFIG_ENTER_COMMANDS:
+            in_config = True
+        if in_config and not _is_save_command(cmd_lower):
+            if block is None:
+                block = []
+                steps.append((True, block))
+            if _is_sent(cmd):
+                block.append(cmd)
+            if cmd_lower == "end":
+                in_config = False
+                block = None
+        elif _is_sent(cmd):
+            block = None
+            steps.append((False, [cmd]))
+    return [(is_config, lines) for is_config, lines in steps if lines]
+
+
+def _skipped(command: str, reason: str) -> ScrapliResult:
+    """Result for a command not run, with ``reason`` as its error."""
+    return ScrapliResult(command=command, output="", exit_code=-1, error=reason)
+
+
 class ScrapliTransport:
     """SSH transport client for network device CLI access using scrapli."""
 
@@ -347,12 +410,24 @@ class ScrapliTransport:
         """
         Check if commands are a configuration command set.
 
-        Config commands start with 'configure terminal' and end with 'end' or 'exit'.
+        A config command set starts with 'configure terminal' (or 'conf t' /
+        'config t'); see ``_plan_config_set`` for how it is run.
         """
         if not commands:
             return False
         first_cmd = commands[0].strip().lower()
-        return first_cmd in ("configure terminal", "conf t", "config t")
+        return first_cmd in _CONFIG_ENTER_COMMANDS
+
+    def _skip_reason(self) -> str:
+        """Why the commands after a failure are not run.
+
+        Cancelling the run closes the session, so the command running then
+        fails; the rest are skipped because of the cancellation, not that
+        failure.
+        """
+        if self._cancellation_registry.is_cancelled(self.step_run_id):
+            return _CANCELLED_ERROR
+        return _SKIPPED_ERROR
 
     @staticmethod
     def _result_from_response(command: str, response: Any) -> ScrapliResult:
@@ -375,31 +450,42 @@ class ScrapliTransport:
             latency_ms=latency_ms,
         )
 
-    def _split_config_set(self, commands: list[str]) -> tuple[list[str], list[str]]:
-        """Split a config command set into config commands and post commands.
+    async def _send_exec_command(self, connection, command: str) -> ScrapliResult:
+        """Run one command at privilege-exec; a CLI error pattern gives exit code 1."""
+        try:
+            response = await connection.send_command(command)
+        except Exception as e:
+            logger.error(f"Command '{command}' failed: {e}")
+            return ScrapliResult(command=command, output="", exit_code=-1, error=str(e))
+        result = self._result_from_response(command, response)
+        if result.exit_code == 0:
+            logger.info(f"Command '{command}' completed in {result.latency_ms:.0f}ms")
+        else:
+            logger.warning(f"Command '{command}' returned CLI error: {result.error}")
+        return result
 
-        Strips the 'configure terminal' / 'end' framing (scrapli's send_configs
-        enters and leaves config mode itself); 'write memory'-style commands and
-        anything outside config mode run afterwards at privilege-exec.
-        """
-        config_commands: list[str] = []
-        post_commands: list[str] = []
-        in_config = False
-        for cmd in commands:
-            cmd_lower = cmd.strip().lower()
-            if not cmd_lower:
-                continue
-            if cmd_lower in ("configure terminal", "conf t", "config t"):
-                in_config = True
-            elif cmd_lower in ("end", "exit") and in_config:
-                in_config = False
-            elif cmd_lower.startswith("write") or cmd_lower.startswith("copy run"):
-                post_commands.append(cmd)
-            elif in_config:
-                config_commands.append(cmd)
-            else:
-                post_commands.append(cmd)
-        return config_commands, post_commands
+    async def _send_config_block(self, connection, block: list[str]) -> list[ScrapliResult]:
+        """Send one config block with send_configs; one result per line."""
+        try:
+            responses = await connection.send_configs(block, stop_on_failed=True)
+        except Exception as e:
+            logger.error(f"Config set failed: {e}")
+            return [
+                ScrapliResult(command=cmd, output="", exit_code=-1, error=str(e)) for cmd in block
+            ]
+        # MultiResponse is list-like: one Response per attempted config
+        # command; with stop_on_failed a failure truncates it.
+        results = [
+            self._result_from_response(cmd, response)
+            for cmd, response in zip(block, responses, strict=False)
+        ]
+        for result in results:
+            if result.exit_code != 0:
+                logger.warning(f"Config command '{result.command}' failed: {result.error}")
+        if len(results) < len(block):
+            reason = self._skip_reason()
+            results.extend(_skipped(cmd, reason) for cmd in block[len(results) :])
+        return results
 
     async def execute_commands(self, commands: list[str]) -> list[ScrapliResult]:
         """
@@ -429,46 +515,30 @@ class ScrapliTransport:
                 self._cancellation_registry.register(self.step_run_id, connection)
 
             if self._is_config_command_set(commands):
-                config_commands, post_commands = self._split_config_set(commands)
-
-                config_failed = False
-                if config_commands:
-                    responses = await connection.send_configs(config_commands, stop_on_failed=True)
-                    # MultiResponse is list-like: one Response per attempted
-                    # config command; with stop_on_failed a failure truncates it.
-                    for cmd, response in zip(config_commands, responses, strict=False):
-                        result = self._result_from_response(cmd, response)
-                        results.append(result)
-                        if result.exit_code != 0:
-                            config_failed = True
-                            logger.warning(f"Config command '{cmd}' failed: {result.error}")
-                    unattempted = config_commands[len(list(responses)) :]
-                    for cmd in unattempted:
-                        config_failed = True
+                # Config blocks and exec commands run in the order written.
+                # After the first failure or a cancellation nothing more
+                # runs, so a save command never stores a half-applied change.
+                skip_reason: str | None = None
+                for is_config, step in _plan_config_set(commands):
+                    if skip_reason is not None:
+                        results.extend(_skipped(cmd, skip_reason) for cmd in step)
+                        continue
+                    if self._cancellation_registry.is_cancelled(self.step_run_id):
                         results.append(
                             ScrapliResult(
-                                command=cmd,
-                                output="",
-                                exit_code=-1,
-                                error="Skipped: earlier config command failed",
+                                command=step[0], output="", exit_code=-1, error="Cancelled"
                             )
                         )
-
-                # Post commands (write memory, ...) only run on config success,
-                # mirroring the netmiko transport's semantics.
-                if config_failed:
-                    logger.warning("Skipping post-config commands due to config failure")
-                else:
-                    for cmd in post_commands:
-                        if self._cancellation_registry.is_cancelled(self.step_run_id):
-                            results.append(
-                                ScrapliResult(
-                                    command=cmd, output="", exit_code=-1, error="Cancelled"
-                                )
-                            )
-                            break
-                        response = await connection.send_command(cmd)
-                        results.append(self._result_from_response(cmd, response))
+                        results.extend(_skipped(cmd, _CANCELLED_ERROR) for cmd in step[1:])
+                        skip_reason = _CANCELLED_ERROR
+                        continue
+                    if is_config:
+                        step_results = await self._send_config_block(connection, step)
+                    else:
+                        step_results = [await self._send_exec_command(connection, step[0])]
+                    results.extend(step_results)
+                    if any(r.exit_code != 0 for r in step_results):
+                        skip_reason = self._skip_reason()
             else:
                 for command in commands:
                     if not command.strip():
@@ -480,28 +550,7 @@ class ScrapliTransport:
                             )
                         )
                         break
-                    try:
-                        response = await connection.send_command(command)
-                        result = self._result_from_response(command, response)
-                        results.append(result)
-                        if result.exit_code == 0:
-                            logger.info(
-                                f"Command '{command}' completed in {result.latency_ms:.0f}ms"
-                            )
-                        else:
-                            logger.warning(
-                                f"Command '{command}' returned CLI error: {result.error}"
-                            )
-                    except Exception as e:
-                        results.append(
-                            ScrapliResult(
-                                command=command,
-                                output="",
-                                exit_code=-1,
-                                error=str(e),
-                            )
-                        )
-                        logger.error(f"Command '{command}' failed: {e}")
+                    results.append(await self._send_exec_command(connection, command))
 
         except ScrapliAuthenticationFailed as e:
             logger.error(f"Authentication failed to {self.host}: {e}")
