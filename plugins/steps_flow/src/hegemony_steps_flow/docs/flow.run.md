@@ -37,6 +37,10 @@ child run is created and does not track it further. The default step
 timeout is 2 hours; if the step is cancelled or times out while waiting,
 the handler asks the platform to cancel the child run as well.
 
+A template in Version, Wait for completion or Poll interval is read as that
+setting's type once rendered: `3` pins version 3, and `false` turns waiting
+off.
+
 ## Output
 
 Later steps can read `steps.NODE_ID.child_run_id`,
@@ -53,8 +57,8 @@ step starts and waits; no evidence artifacts are produced.
 
 The step fails before starting anything when the configuration is invalid:
 both or neither of flow id and flow name set, a malformed flow id, a bad
-version, or field/target mapping entries missing a valid mode or a required
-value. It fails when the platform rejects creating the child run, and —
+version, a poll interval outside 1-60 seconds, or field/target mapping
+entries missing a valid mode or a required value. It fails when the platform rejects creating the child run, and —
 while waiting — when polling the child errors out (the reported status is
 then `UNKNOWN`) or the child run ends FAILED or CANCELLED, in which case
 the child's error message becomes the step error. A child that succeeds but
