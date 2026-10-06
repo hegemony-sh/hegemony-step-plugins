@@ -696,6 +696,25 @@ def test_a_prompt_in_the_first_output_is_answered_once():
     assert sent == ["y"]
 
 
+def test_a_prompt_split_across_reads_is_answered():
+    connection = MagicMock()
+    connection.send_command_timing.return_value = "Proceed with reload? [y/"
+    connection.read_channel.side_effect = ["n]", "", "SUCCESS"]
+
+    result = _run_timing(
+        connection,
+        "install activate",
+        read_timeout=60.0,
+        answers={"[y/n]": "y"},
+        wait_for_patterns=["SUCCESS"],
+    )
+
+    assert result.exit_code == 0
+    sent = [c.args[0] for c in connection.send_command_timing.call_args_list[1:]]
+    sent += [c.args[0] for c in connection.write_channel.call_args_list]
+    assert sent == ["y\n"]
+
+
 def test_http_transfer_url_is_not_logged(caplog):
     caplog.set_level(logging.DEBUG)
     url = f"https://files.example.test/a/{_SECRET}/image.bin"

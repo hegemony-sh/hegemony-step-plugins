@@ -124,6 +124,35 @@ async def _close_connection(connection) -> None:
             await tunnel.wait_closed()
 
 
+def _next_prompt(
+    output: str, start: int, answers: dict[str, str], answered: set[str]
+) -> tuple[str | None, str, int]:
+    """The first prompt in ``output`` from ``start`` that is not answered yet.
+
+    Matches ignore case. Returns ``(prompt, answer, resume)``: the prompt and
+    its answer, or None and "" when none is there, and where the next scan
+    starts. That is just past the prompt found, so a second question in the
+    same output is found next; or, when none was found, the last characters
+    of ``output`` that could begin a prompt, so a prompt that one read cut in
+    two is found once the rest arrives. The prompt found joins ``answered``.
+    """
+    output_lower = output.lower()
+    found: tuple[int, str, str] | None = None
+    for prompt, answer in answers.items():
+        key = prompt.lower()
+        if not key or key in answered:
+            continue
+        index = output_lower.find(key, start)
+        if index >= 0 and (found is None or index < found[0]):
+            found = (index, prompt, answer)
+    if found is None:
+        longest = max((len(prompt) for prompt in answers), default=1)
+        return None, "", max(start, len(output_lower) - longest + 1)
+    index, prompt, answer = found
+    answered.add(prompt.lower())
+    return prompt, answer, index + len(prompt)
+
+
 class AsyncSSHTransport:
     """SSH exec-channel transport for server-like devices using asyncssh."""
 
@@ -541,19 +570,16 @@ class AsyncSSHTransport:
                 else:
                     quiet_reads += 1
 
-                # Answer known prompts, each at most once, scanning only new output.
-                if answers:
-                    new_output_lower = combined_output[prompt_check_start_pos:].lower()
-                    for prompt_pattern, answer in answers.items():
-                        pattern_lower = prompt_pattern.lower()
-                        if pattern_lower in answered_prompts:
-                            continue
-                        if pattern_lower in new_output_lower:
-                            logger.info(f"Matched prompt '{prompt_pattern}', sending answer")
-                            answered_prompts.add(pattern_lower)
-                            process.stdin.write(answer + "\n")
-                            break
-                    prompt_check_start_pos = len(combined_output)
+                # Answer known prompts, each at most once, scanning only output
+                # not scanned yet (see _next_prompt).
+                while answers:
+                    prompt, answer, prompt_check_start_pos = _next_prompt(
+                        combined_output, prompt_check_start_pos, answers, answered_prompts
+                    )
+                    if prompt is None:
+                        break
+                    logger.info(f"Matched prompt '{prompt}', sending answer")
+                    process.stdin.write(answer + "\n")
 
                 if wait_for_patterns:
                     for pattern in wait_for_patterns:

@@ -9,7 +9,8 @@ the rules that split a configuration session into config blocks and exec
 commands, and of the result a command that is not run gets. These tests run
 the same sessions through both copies and fail when they drift apart. The
 asyncssh transport, which also stops a configuration session at the first
-failure, must report the commands it does not run the same way.
+failure, must report the commands it does not run the same way. All three
+scan a timing command's output for the prompts they answer the same way.
 """
 
 from __future__ import annotations
@@ -194,3 +195,41 @@ def test_asyncssh_reports_a_command_not_run_like_the_cli_transports() -> None:
             asyncssh_result.exit_code,
             asyncssh_result.error,
         )
+
+
+# ── Timing-mode prompt answers ───────────────────────────────────────────────
+
+_PROMPT_SCANNERS = [asyncssh._next_prompt, netmiko._next_prompt, scrapli._next_prompt]
+_ANSWERS = {"[y/n]": "y", "[yes/no]": "yes"}
+
+
+@pytest.mark.parametrize("next_prompt", _PROMPT_SCANNERS)
+def test_a_prompt_cut_in_two_by_a_read_is_found_when_the_rest_arrives(next_prompt) -> None:
+    answered: set[str] = set()
+    output = "Install will reload the system. Proceed? [y/"
+
+    prompt, _answer, resume = next_prompt(output, 0, _ANSWERS, answered)
+    assert prompt is None
+
+    output += "n]"
+    assert next_prompt(output, resume, _ANSWERS, answered)[:2] == ("[y/n]", "y")
+    assert answered == {"[y/n]"}
+
+
+@pytest.mark.parametrize("next_prompt", _PROMPT_SCANNERS)
+def test_each_prompt_in_one_read_is_found_in_order(next_prompt) -> None:
+    answered: set[str] = set()
+    output = "Save config? [yes/no]: \nProceed with reload? [Y/N] "
+
+    first, _answer, resume = next_prompt(output, 0, _ANSWERS, answered)
+    second, _answer, resume = next_prompt(output, resume, _ANSWERS, answered)
+    third, _answer, _resume = next_prompt(output, resume, _ANSWERS, answered)
+
+    assert (first, second, third) == ("[yes/no]", "[y/n]", None)
+
+
+@pytest.mark.parametrize("next_prompt", _PROMPT_SCANNERS)
+def test_an_answered_prompt_is_not_found_again(next_prompt) -> None:
+    answered = {"[y/n]"}
+
+    assert next_prompt("Proceed? [y/n]", 0, _ANSWERS, answered)[0] is None

@@ -269,6 +269,35 @@ def _skipped(command: str, reason: str) -> SSHResult:
     return SSHResult(command=command, output="", exit_code=-1, error=reason)
 
 
+def _next_prompt(
+    output: str, start: int, answers: dict[str, str], answered: set[str]
+) -> tuple[str | None, str, int]:
+    """The first prompt in ``output`` from ``start`` that is not answered yet.
+
+    Matches ignore case. Returns ``(prompt, answer, resume)``: the prompt and
+    its answer, or None and "" when none is there, and where the next scan
+    starts. That is just past the prompt found, so a second question in the
+    same output is found next; or, when none was found, the last characters
+    of ``output`` that could begin a prompt, so a prompt that one read cut in
+    two is found once the rest arrives. The prompt found joins ``answered``.
+    """
+    output_lower = output.lower()
+    found: tuple[int, str, str] | None = None
+    for prompt, answer in answers.items():
+        key = prompt.lower()
+        if not key or key in answered:
+            continue
+        index = output_lower.find(key, start)
+        if index >= 0 and (found is None or index < found[0]):
+            found = (index, prompt, answer)
+    if found is None:
+        longest = max((len(prompt) for prompt in answers), default=1)
+        return None, "", max(start, len(output_lower) - longest + 1)
+    index, prompt, answer = found
+    answered.add(prompt.lower())
+    return prompt, answer, index + len(prompt)
+
+
 class SSHTransport:
     """SSH transport client for network device CLI access using Netmiko."""
 
@@ -1194,21 +1223,15 @@ class SSHTransport:
                 # Check for prompts in initial output BEFORE entering the loop
                 # Prompts may already be present from send_command_timing;
                 # the ones the answers loop above answered are skipped.
-                if answers:
-                    output_lower = combined_output.lower()
-                    for prompt_pattern, answer in answers.items():
-                        if prompt_pattern.lower() in answered_prompts:
-                            continue
-                        prompt_pos = output_lower.find(prompt_pattern.lower())
-                        if prompt_pos >= 0:
-                            logger.info(
-                                f"Matched prompt '{prompt_pattern}' in initial output at pos "
-                                f"{prompt_pos}, sending answer"
-                            )
-                            answered_prompts.add(prompt_pattern.lower())
-                            connection.write_channel(answer + "\n")
-                            time.sleep(0.5)
-                    prompt_check_start_pos = len(combined_output)
+                while answers:
+                    prompt, answer, prompt_check_start_pos = _next_prompt(
+                        combined_output, prompt_check_start_pos, answers, answered_prompts
+                    )
+                    if prompt is None:
+                        break
+                    logger.info(f"Matched prompt '{prompt}' in initial output, sending answer")
+                    connection.write_channel(answer + "\n")
+                    time.sleep(0.5)
 
                 while (time.perf_counter() - start_time) < read_timeout:
                     # Check for cancellation at start of each iteration
@@ -1239,25 +1262,21 @@ class SSHTransport:
                             # Handle prompts that appear during long-running commands
                             # This is critical for IOS-XE install which prompts mid-execution
                             # IMPORTANT: Only check NEW output to avoid re-answering old prompts
-                            if answers:
-                                # Only search in the new portion of output
-                                new_output_lower = combined_output[prompt_check_start_pos:].lower()
-                                for prompt_pattern, answer in answers.items():
-                                    pattern_lower = prompt_pattern.lower()
-                                    # Skip patterns we've already answered
-                                    if pattern_lower in answered_prompts:
-                                        continue
-                                    if pattern_lower in new_output_lower:
-                                        logger.info(
-                                            f"Matched prompt '{prompt_pattern}' in new output, "
-                                            "sending answer"
-                                        )
-                                        answered_prompts.add(pattern_lower)
-                                        connection.write_channel(answer + "\n")
-                                        time.sleep(0.5)  # Brief pause after answering
-                                        break
-                                # Update the position marker
-                                prompt_check_start_pos = len(combined_output)
+                            while answers:
+                                # Only output not scanned yet (see _next_prompt)
+                                prompt, answer, prompt_check_start_pos = _next_prompt(
+                                    combined_output,
+                                    prompt_check_start_pos,
+                                    answers,
+                                    answered_prompts,
+                                )
+                                if prompt is None:
+                                    break
+                                logger.info(
+                                    f"Matched prompt '{prompt}' in new output, sending answer"
+                                )
+                                connection.write_channel(answer + "\n")
+                                time.sleep(0.5)  # Brief pause after answering
 
                         # Log progress periodically so we can see what's happening
                         current_time = time.perf_counter()

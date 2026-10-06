@@ -211,6 +211,29 @@ async def test_execute_command_timing_answers_prompts():
     process.terminate.assert_called_once()
 
 
+async def test_execute_command_timing_answers_a_prompt_split_across_reads():
+    transport = _make_transport()
+    connection = _connection()
+    process = MagicMock()
+    process.exit_status = None
+    process.stdin.write = MagicMock()
+    process.stdout.read = AsyncMock(
+        side_effect=["Proceed with reload? [y/", "n]", "", "SUCCESS", "", "", ""]
+    )
+    connection.create_process = AsyncMock(return_value=process)
+
+    with patch.object(asyncssh, "connect", AsyncMock(return_value=connection)):
+        result = await transport.execute_command_timing(
+            "install activate",
+            read_timeout=30.0,
+            answers={"[y/n]": "y"},
+            wait_for_patterns=["SUCCESS"],
+        )
+
+    assert result.exit_code == 0
+    process.stdin.write.assert_called_once_with("y\n")
+
+
 # ── Command text stays out of the logs ──────────────────────────────────────
 
 #: Stands for a value a step rendered from {{ secret(...) }}: the platform has

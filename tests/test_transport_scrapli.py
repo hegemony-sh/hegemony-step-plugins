@@ -509,6 +509,28 @@ async def test_timing_mode_answers_prompts_and_finds_pattern():
     assert "\n" in written[1:]  # the [confirm] answer
 
 
+async def test_timing_mode_answers_a_prompt_split_across_reads():
+    transport = _make_transport()
+    connection = _connection()
+    connection.channel.read = AsyncMock(
+        side_effect=[b"Proceed with reload? [y/", b"n]", ScrapliTimeout("no data"), b"SUCCESS"]
+    )
+
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        result = await transport.execute_command_timing(
+            "install activate",
+            read_timeout=30.0,
+            answers={"[y/n]": "y"},
+            wait_for_patterns=["SUCCESS"],
+        )
+
+    assert result.exit_code == 0
+    written = [call.args[0] for call in connection.channel.write.call_args_list]
+    assert written == ["install activate\n", "y\n"]
+
+
 async def test_timing_mode_settles_when_channel_goes_quiet():
     transport = _make_transport()
     connection = _connection()
