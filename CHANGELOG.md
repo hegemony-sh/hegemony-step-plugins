@@ -1,3 +1,17 @@
+## [0.20.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.19.0...v0.20.0) (2026-10-06)
+
+### Features
+
+* **http:** add http.request to call HTTP APIs from a flow ([aa1de08](https://github.com/hegemony-sh/hegemony-step-plugins/commit/aa1de0899ecf54d1cffa62932d27935ac0bcc7dc))
+
+### Bug Fixes
+
+* **http:** bound decompression, refuse short secrets, tighten pagination ([a36bdf7](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a36bdf765aaf510e251c54066f11951f40e2bdb2))
+* **http:** check the dialled host name and harden http.request responses ([7c1c8dc](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7c1c8dc0848c3ef7ffb7c103764b6a8d97070101))
+* **http:** redact the whole body before cutting previews; redact numeric echoes ([be40c68](https://github.com/hegemony-sh/hegemony-step-plugins/commit/be40c68bf9242bd1343ab30b76fd73e6bdb38b82))
+* **http:** refuse to send credentials to a plain http:// URL ([47ef0e4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/47ef0e4a05460e142aa7ba0a81a61be05f5592f8))
+* **http:** refuse to send when no egress gate can check the request ([9299df4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/9299df4bfe55d725207192830dbe1496d067956f))
+
 ## [0.19.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.18.0...v0.19.0) (2026-10-06)
 
 ### ⚠ BREAKING CHANGES
