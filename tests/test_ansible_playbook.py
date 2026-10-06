@@ -1144,6 +1144,37 @@ async def test_extra_vars_never_start_with_a_template_header(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_target_roles_matching_no_device_are_reported(monkeypatch):
+    # Roles that match no device leave an empty inventory: Ansible exits 0 with
+    # an empty recap, which must not read like a clean run on the devices.
+    _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
+    progress: list[str] = []
+
+    async def _progress(message, device_id=None, attrs=None):
+        progress.append(message)
+        return True
+
+    ctx = _ctx({"playbook": "site.yml", "device_credentials": False}, [])
+    ctx._emit_progress = _progress
+    result = await AnsiblePlaybookHandler().execute(ctx)
+
+    assert result.success is True, result.error
+    assert result.metrics["target_devices"] == 0
+    assert "no device matched the target roles: routers" in result.summary
+    assert any("No device matched the target roles (routers)" in m for m in progress)
+
+
+@pytest.mark.asyncio
+async def test_matched_target_roles_add_no_note(monkeypatch):
+    _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
+    ctx = _ctx({"playbook": "site.yml", "device_credentials": False}, [_device("r1")])
+    result = await AnsiblePlaybookHandler().execute(ctx)
+
+    assert result.metrics["target_devices"] == 1
+    assert "no device matched" not in result.summary
+
+
+@pytest.mark.asyncio
 async def test_run_scope_includes_every_role(monkeypatch):
     state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
     result = await AnsiblePlaybookHandler().execute(
