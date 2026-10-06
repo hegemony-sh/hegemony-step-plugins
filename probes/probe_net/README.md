@@ -17,7 +17,7 @@ tick loop and the one-shot `probe.*` step handlers (through
 |----------------|-------------------------------------------------------|
 | `tcp_connect`  | `asyncio.open_connection`, reports `connect_ms`       |
 | `icmp_ping`    | system `ping`, reports rtt/jitter/packet-loss         |
-| `http_health`  | `httpx` GET, ok on status < 400                       |
+| `http_health`  | `httpx` GET, ok on status < 400, no redirects         |
 | `dns_resolve`  | stdlib `getaddrinfo`, reports resolved address count  |
 
 Probe ids are a small global vocabulary (they appear in monitor configs and run

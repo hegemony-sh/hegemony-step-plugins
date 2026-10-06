@@ -6,9 +6,10 @@
 
 Handlers that iterate target devices can opt into parallel processing via a
 ``max_parallel_devices`` config value (default 1 = strictly sequential, the
-classic loop). :func:`for_each_target_device` bounds concurrency with a
-semaphore and returns results in device order, so aggregation stays
-deterministic regardless of completion order. Live output from concurrent
+classic loop, unless the handler passes its own default to
+:func:`max_parallel_from_config`). :func:`for_each_target_device` bounds
+concurrency with a semaphore and returns results in device order, so
+aggregation stays deterministic regardless of completion order. Live output from concurrent
 devices interleaves in the Logs tab, where lines are already labelled with
 ``attrs.device_name``.
 """
@@ -26,14 +27,19 @@ R = TypeVar("R")
 MAX_PARALLEL_DEVICES_LIMIT = 32
 
 
-def max_parallel_from_config(config: Mapping[str, Any]) -> int:
+def max_parallel_from_config(config: Mapping[str, Any], *, default: int = 1) -> int:
     """Read ``max_parallel_devices`` from a step config, clamped and safe.
 
-    Anything unparsable degrades to 1 (sequential) rather than failing the
-    step over a display-level knob.
+    A missing or empty value means ``default``: 1 (sequential) unless the
+    handler declares another default for its field. Anything unparsable
+    degrades to 1 (sequential) rather than failing the step over a
+    display-level knob.
     """
+    value = config.get("max_parallel_devices")
+    if value is None or value == "":
+        value = default
     try:
-        value = int(config.get("max_parallel_devices", 1) or 1)
+        value = int(value)
     except (TypeError, ValueError):
         return 1
     return max(1, min(value, MAX_PARALLEL_DEVICES_LIMIT))
