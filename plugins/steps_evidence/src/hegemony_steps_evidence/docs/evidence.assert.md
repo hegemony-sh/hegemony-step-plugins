@@ -54,7 +54,8 @@ are recorded as evidence. Each checked artifact produces one
 artifact, or `assertion:<artifact name>` when several devices were checked —
 capturing the operator, the expected and actual values (actual truncated to
 500 characters), whether it passed, and in line scope the line filter, how
-many lines were selected and passed, and the first failing line.
+many lines were selected and passed, and the first failing line. For a
+failed capture it records the capture's error instead of the line details.
 
 ## When It Fails
 
@@ -64,9 +65,13 @@ names can be resolved from the configuration, or when any artifact fails the
 comparison; the error lists each failing artifact unless a Custom Message
 replaces it. An ordering operator fails when the expected value or the
 compared content is not a number, and the error says which. An artifact
-that cannot be fetched from the run (the fetch uses a 30-second API
-timeout) counts as a failure for that artifact while the remaining
-artifacts are still checked. In line scope the step also fails when the
-artifact is not text, when the Line Filter regex is invalid, or when fewer
-than Minimum Lines lines are selected. Evidence records are written for the
-artifacts that were compared even when the step fails.
+whose capture failed - the device could not be reached or the command
+returned an error - fails without being compared, and the error names the
+device, the command and the capture's error: its output is empty or an
+error message, which would otherwise pass Does Not Contain, Does Not Match
+and Not Equals. An artifact that cannot be fetched from the run (the fetch
+uses a 30-second API timeout) counts as a failure for that artifact while
+the remaining artifacts are still checked. In line scope the step also
+fails when the artifact is not text, when the Line Filter regex is invalid,
+or when fewer than Minimum Lines lines are selected. Evidence records are
+written for the artifacts that were compared even when the step fails.

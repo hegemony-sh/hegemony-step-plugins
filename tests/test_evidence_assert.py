@@ -553,6 +553,83 @@ async def test_assert_does_not_order_a_version_line_as_text(operator: str) -> No
     assert result.evidence[0]["content_json"]["passed"] is False
 
 
+# ── Failed captures ──────────────────────────────────────────────────────────
+
+_TIMEOUT = "Connection timeout: TCP connection to device failed."
+
+
+def _failed_capture(artifact: dict, error: str, exit_code: int = -1) -> dict:
+    """``artifact`` as collect_evidence stores a command that failed."""
+    meta = {**artifact["content_json"], "success": False, "exit_code": exit_code, "error": error}
+    return {**artifact, "content_json": meta}
+
+
+@pytest.mark.parametrize(
+    ("operator", "expected"),
+    [("not_contains", "Down"), ("not_matches", r"Idle|Active"), ("ne", "x")],
+)
+async def test_assert_fails_on_an_unreachable_device(operator: str, expected: str) -> None:
+    # An unreachable device leaves empty output, which the negative
+    # operators used to pass.
+    r2 = {"id": "d2", "name": "r2"}
+    command = "show ip bgp summary"
+    artifacts = _collected("collect", {command: "Neighbor 10.0.0.2 Established"}) + [
+        _failed_capture(artifact, _TIMEOUT)
+        for artifact in _collected("collect", {command: ""}, device=r2)
+    ]
+    result = await _run_assert(_RunApi(artifacts), command, expected, [_R1, r2], operator)
+    assert result.success is False
+    assert result.error == f"r2:{command}: capture failed: {_TIMEOUT}"
+    assert result.summary == "Assertion failed for 1/2 artifact(s)"
+    records = [e["content_json"] for e in result.evidence]
+    assert [record["passed"] for record in records] == [True, False]
+    assert records[1]["capture_error"] == _TIMEOUT
+
+
+async def test_assert_fails_on_a_command_that_returned_an_error() -> None:
+    error = "% Invalid input detected at '^' marker."
+    artifacts = [
+        _failed_capture(artifact, error, exit_code=1)
+        for artifact in _collected("collect", {"show bgp summary": error})
+    ]
+    result = await _run_assert(_RunApi(artifacts), "show bgp summary", "Invalid", [_R1])
+    assert result.success is False
+    assert result.error == f"r1:show bgp summary: capture failed: {error}"
+
+
+async def test_assert_by_artifact_name_fails_on_a_failed_capture() -> None:
+    from typing import cast
+
+    from hegemony_step_sdk import HandlerContext, HandlerServices
+
+    api = _RunApi(
+        [
+            {
+                "step_id": "collect",
+                "kind": "error",
+                "name": "error_r1",
+                "content_text": "Device r1 has no mgmt_host configured",
+            }
+        ]
+    )
+    ctx = HandlerContext(
+        run_id="run-1",
+        flow_id="f",
+        step_run_id="sr-1",
+        step_id="assert",
+        config={
+            "artifact_step_id": "collect",
+            "artifact_name": "error_r1",
+            "operator": "not_contains",
+            "expected": "BGP",
+        },
+        services=cast(HandlerServices, api),
+    )
+    result = await _handler().execute(ctx)
+    assert result.success is False
+    assert result.error == "error_r1: capture failed: Device r1 has no mgmt_host configured"
+
+
 _DEVICES = [{"id": f"d{n}", "name": f"r{n}"} for n in (1, 2, 3)]
 
 

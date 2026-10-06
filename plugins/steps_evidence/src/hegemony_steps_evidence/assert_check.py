@@ -20,7 +20,7 @@ from hegemony_step_sdk import (
     command_label,
 )
 
-from .artifacts import find_command_artifact, latest_artifact
+from .artifacts import capture_error, find_command_artifact, latest_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -289,12 +289,13 @@ class AssertHandler(BaseHandler):
 
         for name, device, device_command in lookups:
             if device is None:
-                artifact_content = self._get_artifact_data(artifacts, artifact_step_id, name)
+                artifact = self._get_artifact(artifacts, artifact_step_id, name)
             else:
-                artifact_content = self._get_command_output(
+                artifact = self._get_command_artifact(
                     artifacts, artifact_step_id, device, device_command
                 )
-            if artifact_content is None:
+            artifact_content = None if artifact is None else self._artifact_content(artifact)
+            if artifact is None or artifact_content is None:
                 logger.warning(
                     "assert_artifact_fetch_failed",
                     extra={
@@ -308,9 +309,16 @@ class AssertHandler(BaseHandler):
 
             # The actual value is the artifact text content
             actual = artifact_content
-            passed, comparison_msg, scope_detail = self._assert_content(
-                actual, expected, operator, match_scope, line_filter, min_lines
-            )
+            error = capture_error(artifact)
+            if error is None:
+                passed, comparison_msg, scope_detail = self._assert_content(
+                    actual, expected, operator, match_scope, line_filter, min_lines
+                )
+            else:
+                # A failed capture holds an error, not the device's output:
+                # its empty output would pass not_contains, not_matches and ne.
+                passed, comparison_msg = False, f"capture failed: {error}"
+                scope_detail = {"capture_error": error}
             if not passed:
                 failed_messages.append(f"{name}: {comparison_msg}")
 
@@ -344,13 +352,13 @@ class AssertHandler(BaseHandler):
             evidence=assertion_evidence,
         )
 
-    def _get_artifact_data(
+    def _get_artifact(
         self,
         artifacts: list[dict] | None,
         artifact_step_id: str | None = None,
         artifact_name: str | None = None,
-    ) -> str | None:
-        """Get the content of a previous step's artifact by its name.
+    ) -> dict | None:
+        """Get a previous step's artifact by its name.
 
         ``artifacts`` is the run's artifact list, None when the fetch failed.
         """
@@ -366,17 +374,16 @@ class AssertHandler(BaseHandler):
         artifact = latest_artifact(artifacts, step_id=artifact_step_id, name=artifact_name)
         if artifact is None:
             logger.error(f"Artifact '{artifact_name}' not found in step '{artifact_step_id}'")
-            return None
-        return self._artifact_content(artifact)
+        return artifact
 
-    def _get_command_output(
+    def _get_command_artifact(
         self,
         artifacts: list[dict] | None,
         artifact_step_id: str | None,
         device: dict,
         command: str,
-    ) -> str | None:
-        """Get the output a previous step collected for ``device`` and ``command``.
+    ) -> dict | None:
+        """Get the artifact a previous step stored for ``device`` and ``command``.
 
         ``artifacts`` is the run's artifact list, None when the fetch failed.
         """
@@ -385,7 +392,7 @@ class AssertHandler(BaseHandler):
             return None
         if artifacts is None:
             return None
-        # Newest match: see _get_artifact_data.
+        # Newest match: see _get_artifact.
         artifact = find_command_artifact(
             artifacts, step_id=artifact_step_id, device=device, command=command
         )
@@ -394,8 +401,7 @@ class AssertHandler(BaseHandler):
                 f"No output of '{command_label(command)}' for device "
                 f"'{device.get('name')}' in step '{artifact_step_id}'"
             )
-            return None
-        return self._artifact_content(artifact)
+        return artifact
 
     async def _fetch_run_artifacts(self, ctx: HandlerContext) -> list[dict] | None:
         """Fetch the run's artifacts from the API; None when the fetch fails."""
