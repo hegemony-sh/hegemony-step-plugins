@@ -1499,6 +1499,41 @@ async def test_apply_without_changes_ends_a_hold_the_plan_kept(monkeypatch, plan
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("plan", "shared", "releases"),
+    [
+        # The plan step ran without a shared workspace (plan only).
+        (_plan_output(has_changes=False, apply_ready=False, working_dir=LOCAL_WORKDIR), True, []),
+        # This step has none.
+        (_plan_output(has_changes=False), False, []),
+        # Neither has one, and the run still holds the state for the apply.
+        (
+            _plan_output(
+                has_changes=False,
+                apply_ready=False,
+                working_dir=LOCAL_WORKDIR,
+                state="managed",
+                state_name="core",
+                state_held=True,
+            ),
+            False,
+            ["core"],
+        ),
+    ],
+)
+async def test_apply_without_changes_needs_no_shared_workspace(monkeypatch, plan, shared, releases):
+    """Nothing to apply needs no saved plan, so the workspaces do not matter."""
+    state = _install_docker(monkeypatch, out={})
+    services = _ReleasingServices(plan)
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services, shared=shared))
+    assert result.success is True, result.error
+    assert result.summary == "Nothing to apply: the plan has no changes"
+    assert result.output["applied"] is False
+    assert services.releases == releases
+    assert state["calls"] == []
+
+
+@pytest.mark.asyncio
 async def test_apply_without_changes_succeeds_when_the_hold_cannot_be_ended(monkeypatch):
     _install_docker(monkeypatch, out={})
     plan = _plan_output(has_changes=False, state="managed", state_name="core", state_held=True)

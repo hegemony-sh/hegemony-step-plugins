@@ -29,10 +29,11 @@ the same State encryption key the plan step used. With managed state, the
 apply gets its own short-lived access to the state the plan step named.
 
 When the plan has no changes, the step succeeds without starting a
-container, and its outputs are the ones the plan step read from the
-state, which nothing changed since. If the run still holds the managed
-state for that plan, the step ends the hold; when the platform cannot end
-it, the hold may last until the run ends, and the summary says so.
+container, whether or not either step has a shared workspace, and its
+outputs are the ones the plan step read from the state, which nothing
+changed since. If the run still holds the managed state for that plan, the
+step ends the hold; when the platform cannot end it, the hold may last
+until the run ends, and the summary says so.
 
 ## Output
 
@@ -45,13 +46,14 @@ in `sensitive_outputs` but their values are never kept.
 ## When It Fails
 
 The step fails before starting a container when Plan step names a step
-that is not a `tf.plan` step or did not succeed in this run, and when a
-step lacks a shared workspace: the error says whether the plan step ran
-without one (its saved plan is gone, so give it shared affinity and plan
-again) or this step has none (shared affinity missing, or the worker has
-shared workspaces disabled). It also fails when the apply itself fails,
-and when the saved plan changed since the plan step made it, so it is not
-the plan that was reviewed: plan again. A plan made by an older version of
+that is not a `tf.plan` step or did not succeed in this run, and when the
+plan has changes and a step lacks a shared workspace: the error says
+whether the plan step ran without one (its saved plan is gone, so give it
+shared affinity and plan again) or this step has none (shared affinity
+missing, or the worker has shared workspaces disabled). It also fails when
+the apply itself fails, and when the saved plan changed since the plan
+step made it, so it is not the plan that was reviewed: plan again. A plan
+made by an older version of
 `tf.plan`, which recorded no digest, is refused too: plan again. The tool refuses
 a saved plan made stale by a state change since planning: plan again (a
 `tf.plan` with Hold the state until apply keeps others from changing a

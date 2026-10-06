@@ -96,8 +96,9 @@ affinity on a worker with shared workspaces enabled: the plan's working
 directory, with its providers and lock file, lives in the run's shared
 workspace under `/shared/tf/<step id>`, and the apply runs there on the same
 worker. Otherwise the plan reports `apply_ready: false` and keeps a
-`plan_only_<step id>` note saying why a `tf.apply` would refuse it. A
-plan-only flow needs no shared affinity. The saved plan contains every variable value, secret ones
+`plan_only_<step id>` note saying why a `tf.apply` would refuse it (a
+plan with no changes is the exception: the apply has nothing to apply and
+succeeds). A plan-only flow needs no shared affinity. The saved plan contains every variable value, secret ones
 included; it stays inside the run's workspace, which is deleted when the run
 ends.
 
