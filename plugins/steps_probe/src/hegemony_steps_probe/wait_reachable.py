@@ -11,9 +11,9 @@ gate, SOCKS proxies, ICMP and IPv6 work the same way in both handlers.
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Self
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from hegemony_step_sdk import (
     MAX_PARALLEL_DEVICES_LIMIT,
@@ -92,8 +92,9 @@ class WaitReachableConfig(BaseModel):
         title="Stable (sec)",
         description=(
             "How long every target must remain continuously reachable before "
-            "the step succeeds, in seconds. A target that goes unreachable "
-            "restarts its window from zero. Defaults to 30."
+            "the step succeeds, in seconds; must be shorter than Max Wait "
+            "(sec). A target that goes unreachable restarts its window from "
+            "zero. Defaults to 30."
         ),
     )
     poll_interval_seconds: int = Field(
@@ -140,6 +141,17 @@ class WaitReachableConfig(BaseModel):
         title="Max Parallel Devices",
         description="Targets polled at the same time (1 = one after another). Defaults to 10.",
     )
+
+    @model_validator(mode="after")
+    def _window_fits_the_wait(self) -> Self:
+        """Refuse a stability window that cannot end before the deadline."""
+        if self.stable_seconds >= self.max_wait_seconds:
+            raise ValueError(
+                f"stable_seconds ({self.stable_seconds}) must be shorter than "
+                f"max_wait_seconds ({self.max_wait_seconds}), or no target can "
+                "complete its stability window before the deadline"
+            )
+        return self
 
 
 class WaitReachableHandler(BaseHandler):
@@ -208,6 +220,8 @@ class WaitReachableHandler(BaseHandler):
         # Per target, the loop time it answered from when it last became
         # reachable; None while it is not.
         stable_since: list[float | None] = [None] * len(target_devices)
+        # Per target, whether its latest answers span the whole window.
+        stable: list[bool] = [False] * len(target_devices)
         attempts = 0
 
         async def _poll(device: dict[str, Any]) -> float | None:
@@ -245,15 +259,26 @@ class WaitReachableHandler(BaseHandler):
             return loop.time() if result.ok else None
 
         def _timed_out() -> HandlerResult:
-            not_stable = [
-                d.get("name", d.get("mgmt_host"))
-                for d, since in zip(target_devices, stable_since, strict=True)
-                if since is None
-            ]
+            unreachable: list[str] = []
+            unsettled: list[str] = []
+            for device, since, settled in zip(target_devices, stable_since, stable, strict=True):
+                name = device.get("name", device.get("mgmt_host"))
+                if since is None:
+                    unreachable.append(name)
+                elif not settled:
+                    unsettled.append(name)
+            reasons = []
+            if unreachable:
+                reasons.append(f"not reachable: {', '.join(unreachable)}")
+            if unsettled:
+                reasons.append(
+                    f"reachable but not yet stable for {stable_seconds}s: {', '.join(unsettled)}"
+                )
+            state = "reachable" if unreachable else "stable"
             return HandlerResult(
                 success=False,
-                error=f"Timeout waiting for targets: {', '.join(not_stable)}",
-                summary=f"Targets not reachable after {max_wait_seconds}s",
+                error=f"Timeout waiting for targets - {'; '.join(reasons)}",
+                summary=f"Targets not {state} after {max_wait_seconds}s",
                 metrics={"attempts": attempts, "elapsed_seconds": loop.time() - started},
             )
 
@@ -286,6 +311,7 @@ class WaitReachableHandler(BaseHandler):
             ):
                 device_name = device.get("name", device.get("id", device.get("mgmt_host")))
                 since = stable_since[index]
+                stable[index] = False
                 if answered_at is None:
                     if since is not None:
                         logger.info(f"Device {device_name} went unreachable, resetting stability")
@@ -301,6 +327,7 @@ class WaitReachableHandler(BaseHandler):
                 elif answered_at - since < stable_seconds:
                     all_stable = False
                 else:
+                    stable[index] = True
                     logger.info(f"Device {device_name} stable for {answered_at - since:.1f}s")
 
             if all_stable:

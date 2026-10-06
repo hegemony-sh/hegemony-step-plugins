@@ -39,15 +39,16 @@ Resolve cannot use a proxy and reject a configured one.
 Three timings shape the wait. Poll Interval (sec) is the pause between polls
 (default 5). Stable (sec) is the stability window (default 30): a target
 must answer every poll for this long, counted from its first answer to its
-latest, and a target that stops answering has its window reset to zero. Max Wait (sec) is the overall deadline (default
-300): the step fails once it passes without every target completing its
-window. The step succeeds at the first moment all targets have been stable
-for the full window; expect it to take at least Stable (sec) even when
-everything is already up. The step's timeout is raised to Max Wait (sec)
-plus a minute when it is shorter, so the wait ends on its own deadline and
-the error names the targets that were not reachable. Steps saved with the
-older names keep working: `max_wait` for Max Wait (sec), and `poll_interval`
-or `check_interval` for Poll Interval (sec).
+latest, and a target that stops answering has its window reset to zero. Max
+Wait (sec) is the overall deadline (default 300): the step fails once it
+passes without every target completing its window, so Stable (sec) must be
+shorter than Max Wait (sec). The step succeeds at the first moment all
+targets have been stable for the full window; expect it to take at least
+Stable (sec) even when everything is already up. The step's timeout is
+raised to Max Wait (sec) plus a minute when it is shorter, so the wait ends
+on its own deadline and the error names the targets that held it up. Steps
+saved with the older names keep working: `max_wait` for Max Wait (sec), and
+`poll_interval` or `check_interval` for Poll Interval (sec).
 
 Each poll round checks every target, up to Max Parallel Devices at the same
 time (default 10, up to 32; 1 polls them one after another). No poll runs
@@ -72,16 +73,19 @@ recorded, with no evidence records.
 ## When It Fails
 
 The step fails immediately when no target devices or IPs are configured,
-when a setting is out of range or of the wrong type, or when any device has
-no management address (waiting would only time out). It fails on the first
-poll when an egress policy denies a target, when the check type is not
-registered on the worker, or when the check refuses its settings, such as
-ICMP Ping with a SOCKS5 Proxy, a SOCKS5 Proxy that is not a `socks5://` or
-`socks5h://` URL with a host and port, or DNS Resolve of an IP address: no
-later poll could pass. Otherwise the only failure is the deadline: after Max
-Wait (sec) the step fails, naming the targets that were unreachable at the
-last poll - a target that was reachable but still partway through its
-stability window caused the failure too, without being named. Momentary
-failures never fail the step by themselves — an unreachable poll, including
-one through a proxy that does not answer or refuses the login, just resets
-that target's stability window and the polling continues until the deadline.
+when a setting is out of range or of the wrong type, when Stable (sec) is
+not shorter than Max Wait (sec), or when any device has no management
+address (waiting would only time out). It fails on the first poll when an
+egress policy denies a target, when the check type is not registered on the
+worker, or when the check refuses its settings, such as ICMP Ping with a
+SOCKS5 Proxy, a SOCKS5 Proxy that is not a `socks5://` or `socks5h://` URL
+with a host and port, or DNS Resolve of an IP address: no later poll could
+pass. Otherwise the only failure is the deadline: after Max Wait (sec) the
+step fails, and its error names the targets that were not reachable at the
+last poll and, separately, those that were reachable but still partway
+through their stability window. The summary reads
+`Targets not reachable after Xs`, or `Targets not stable after Xs` when
+every target was reachable at the last poll. Momentary failures never fail
+the step by themselves — an unreachable poll, including one through a proxy
+that does not answer or refuses the login, just resets that target's
+stability window and the polling continues until the deadline.

@@ -467,7 +467,7 @@ class TestProbeHandlerParallelism:
 
     async def test_wait_reachable_keeps_its_deadline(self):
         """Six hanging targets, two at a time, a 5 s connect timeout: the step
-        still ends at its 1 s deadline instead of after 6 x 5 s."""
+        still ends at its 2 s deadline instead of after 6 x 5 s."""
         from hegemony_steps_probe.wait_reachable import WaitReachableHandler
 
         timeouts_ms: list[int] = []
@@ -479,7 +479,7 @@ class TestProbeHandlerParallelism:
                 return ProbeResult(ok=True)  # pragma: no cover - always cut off
 
         config = {
-            "max_wait_seconds": 1,
+            "max_wait_seconds": 2,
             "stable_seconds": 1,
             "poll_interval": 1,
             "connect_timeout_seconds": 5,
@@ -488,7 +488,7 @@ class TestProbeHandlerParallelism:
         loop = asyncio.get_running_loop()
         started = loop.time()
         result = await WaitReachableHandler().execute(_probe_ctx(config, _Services()))
-        assert loop.time() - started < 1.5
+        assert loop.time() - started < 2.5
         assert result.success is False
         assert (result.error or "").startswith("Timeout waiting for targets")
-        assert timeouts_ms and max(timeouts_ms) <= 1000
+        assert timeouts_ms and max(timeouts_ms) <= 2000

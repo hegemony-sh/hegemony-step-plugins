@@ -536,6 +536,79 @@ async def test_wait_reachable_refuses_an_invalid_config():
     assert "Invalid probe.wait_reachable config" in (result.error or "")
 
 
+@pytest.mark.parametrize(
+    ("config", "valid"),
+    [
+        ({"max_wait_seconds": 30, "stable_seconds": 30}, False),
+        ({"max_wait_seconds": 20}, False),  # the default 30 s window
+        ({"max_wait": 10, "stable_seconds": 12}, False),
+        ({"max_wait_seconds": 31}, True),
+        ({"max_wait_seconds": 2, "stable_seconds": 1}, True),
+    ],
+)
+def test_wait_reachable_refuses_a_window_as_long_as_the_wait(config, valid):
+    """No target can complete a window that does not end before the deadline."""
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    errors = WaitReachableHandler().validate_config(config)
+    if valid:
+        assert errors == []
+    else:
+        assert len(errors) == 1
+        assert "must be shorter than max_wait_seconds" in errors[0]
+
+
+async def test_wait_reachable_does_not_poll_with_a_window_as_long_as_the_wait():
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    probes = _FakeProbes()
+    config = {"max_wait_seconds": 30, "stable_seconds": 30}
+    result = await WaitReachableHandler().execute(_ip_target_ctx(config, ["192.0.2.7"], probes))
+    assert result.success is False
+    assert (result.error or "").startswith("Invalid probe.wait_reachable config: ")
+    assert "stable_seconds (30) must be shorter than max_wait_seconds (30)" in (result.error or "")
+    assert probes.calls == []
+
+
+@pytest.mark.parametrize(
+    ("ips", "error", "summary"),
+    [
+        (
+            ["192.0.2.1", "192.0.2.2", "192.0.2.3"],
+            "Timeout waiting for targets - not reachable: 192.0.2.2; "
+            "reachable but not yet stable for 1s: 192.0.2.3",
+            "Targets not reachable after 2s",
+        ),
+        (
+            ["192.0.2.3"],
+            "Timeout waiting for targets - reachable but not yet stable for 1s: 192.0.2.3",
+            "Targets not stable after 2s",
+        ),
+    ],
+    ids=["some_unreachable", "all_reachable"],
+)
+async def test_wait_reachable_names_unreachable_and_unsettled_targets_apart(ips, error, summary):
+    """At the deadline the error names the targets that were not reachable and,
+    apart from them, those still partway through their window. A wait where
+    every target answered used to fail naming none of them."""
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    class _Probes(_FakeProbes):
+        """192.0.2.1 always answers, 192.0.2.2 never, 192.0.2.3 from its second poll."""
+
+        async def run_probe(self, check_type, address, options):
+            polls = sum(1 for call in self.calls if call[1] == address)
+            self.calls.append((check_type, address, dict(options)))
+            ok = address == "192.0.2.1" or (address == "192.0.2.3" and polls >= 1)
+            return ProbeResult(ok=ok)
+
+    config = {"max_wait_seconds": 2, "stable_seconds": 1, "poll_interval": 1}
+    result = await WaitReachableHandler().execute(_ip_target_ctx(config, ips, _Probes()))
+    assert result.success is False
+    assert result.error == error
+    assert result.summary == summary
+
+
 def test_wait_reachable_check_type_is_registry_driven():
     from hegemony_steps_probe.wait_reachable import WaitReachableConfig
 
