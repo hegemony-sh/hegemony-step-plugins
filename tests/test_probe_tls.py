@@ -453,6 +453,48 @@ async def tls_server(tmp_path: Path, leaf: Leaf, *, with_chain: bool = True) -> 
             await asyncio.wait_for(server.wait_closed(), 2)
 
 
+@contextlib.asynccontextmanager
+async def alternating_tls_server(tmp_path: Path, first: Leaf, second: Leaf) -> AsyncIterator[int]:
+    """Serve ``first`` and ``second`` to alternate handshakes (chosen by SNI); yields the port."""
+    contexts = []
+    for leaf in (first, second):
+        serial = format(leaf.cert.serial_number, "x")
+        cert_file, key_file = tmp_path / f"{serial}-alt.pem", tmp_path / f"{serial}-alt-key.pem"
+        cert_file.write_text(pem_of(leaf.cert, *leaf.chain))
+        key_file.write_bytes(
+            leaf.key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert_file, key_file)
+        contexts.append(context)
+    handshakes = 0
+
+    def choose(ssl_object: ssl.SSLObject, server_name: str | None, _: ssl.SSLContext) -> None:
+        nonlocal handshakes
+        ssl_object.context = contexts[handshakes % 2]
+        handshakes += 1
+
+    front = contexts[0]
+    front.sni_callback = choose
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(Exception):
+            await reader.read()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=front)
+    try:
+        yield server.sockets[0].getsockname()[1]
+    finally:
+        server.close()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(server.wait_closed(), 2)
+
+
 def closed_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -1157,6 +1199,29 @@ async def test_live_chain_without_ca_bundle_and_missing_intermediate(pki, tmp_pa
     [record] = missing.output["endpoints"]
     assert record["chain_ok"] is False
     assert "unable to get local issuer certificate" in record["chain_error"]
+
+
+async def test_a_chain_verdict_for_another_certificate_is_not_reported(pki, tmp_path):
+    """A server that presents a self-signed certificate to the first handshake and a valid
+    one to the second must not have the self-signed one reported as verified."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    rogue = Leaf(issue("leaf.example.test", key, sans=("leaf.example.test",)), key, ())
+    async with alternating_tls_server(tmp_path, rogue, pki.leaves["rsa"]) as port:
+        result = await run_step(
+            {
+                "endpoints": f"127.0.0.1:{port}:leaf.example.test",
+                "ca_bundle": pki.root_pem,
+                "require_valid_chain": True,
+            }
+        )
+    [record] = result.output["endpoints"]
+    assert record["fingerprint_sha256"] == fingerprint_of(rogue.cert)
+    assert record["chain_ok"] is None
+    assert "presented a different certificate to the verifying handshake" in record["chain_error"]
+    assert result.success is False
+    assert "chain not verified: the server presented a different certificate" in (
+        result.error or ""
+    )
 
 
 async def test_wildcard_and_wrong_host_name(pki, tmp_path):

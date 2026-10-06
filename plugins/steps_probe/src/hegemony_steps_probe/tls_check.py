@@ -623,7 +623,9 @@ class _TlsRun:
             return record
 
         try:
-            await tls_handshake(address, port, sent_sni, self.verify_context(), self.timeout)
+            verified = await tls_handshake(
+                address, port, sent_sni, self.verify_context(), self.timeout
+            )
         except ssl.SSLCertVerificationError as exc:
             record["chain_ok"] = False
             record["chain_error"] = exc.verify_message or str(exc)
@@ -632,7 +634,14 @@ class _TlsRun:
                 f"verifying handshake failed: {describe_dial_error(exc, self.timeout)}"
             )
         else:
-            record["chain_ok"] = True
+            if verified.der == seen.der:
+                record["chain_ok"] = True
+            else:
+                # A verdict on another certificate says nothing about the one described.
+                record["chain_error"] = (
+                    "the server presented a different certificate to the verifying "
+                    "handshake, so the chain of the reported one was not verified"
+                )
 
         served_chain: list[x509.Certificate] = []
         for der in seen.chain_der[1:]:

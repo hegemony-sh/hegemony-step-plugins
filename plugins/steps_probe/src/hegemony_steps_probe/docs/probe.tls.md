@@ -37,7 +37,9 @@ Each endpoint is contacted twice, each attempt bounded by Timeout (sec)
 (default 10). The first handshake reads what the server presents and accepts
 any certificate, even from servers that only offer outdated protocol
 versions; the second verifies the chain with the worker's normal TLS
-settings. Chains are verified against the worker's system trust store or,
+settings. A server that presents another certificate to the second
+handshake than to the first (one that verifies) gets no chain verdict:
+`chain_ok` stays empty and `chain_error` says why. Chains are verified against the worker's system trust store or,
 when CA bundle is set, against only the certificates in that bundle. Every
 certificate in the bundle counts as trusted, so an internal intermediate or
 a single pinned server certificate works too. CA bundle takes PEM text or a
