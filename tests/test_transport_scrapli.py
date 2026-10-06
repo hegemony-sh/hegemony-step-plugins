@@ -198,6 +198,24 @@ async def test_exit_inside_a_config_block_is_sent_as_a_config_line():
     assert all(r.exit_code == 0 for r in results)
 
 
+async def test_a_leading_blank_line_keeps_the_configuration_session():
+    # A blank first line used to make the list a show/exec list, so the save
+    # ran even when a config line failed.
+    connection = _connection()
+    connection.send_configs.return_value = [
+        _response("% Invalid input detected at '^' marker.", failed=True)
+    ]
+
+    results = await _run_on_connection(
+        ["", "  ", "conf t", "hostname r1", "end", "write memory"], connection
+    )
+
+    connection.send_configs.assert_awaited_once_with(["hostname r1"], stop_on_failed=True)
+    assert connection.send_command.await_count == 0
+    assert [(r.command, r.exit_code) for r in results] == [("hostname r1", 1), ("write memory", -1)]
+    assert results[-1].error == _SKIPPED_ERROR
+
+
 async def test_failed_post_command_fails_and_skips_the_rest():
     connection = _connection()
     connection.send_configs.return_value = [_response()]

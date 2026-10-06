@@ -411,11 +411,11 @@ class ScrapliTransport:
         Check if commands are a configuration command set.
 
         A config command set starts with 'configure terminal' (or 'conf t' /
-        'config t'); see ``_plan_config_set`` for how it is run.
+        'config t'); see ``_plan_config_set`` for how it is run. The first
+        non-blank command decides, so a leading blank line does not turn
+        configuration mode off.
         """
-        if not commands:
-            return False
-        first_cmd = commands[0].strip().lower()
+        first_cmd = next((cmd.strip().lower() for cmd in commands if cmd.strip()), "")
         return first_cmd in _CONFIG_ENTER_COMMANDS
 
     def _skip_reason(self) -> str:

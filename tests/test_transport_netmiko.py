@@ -284,6 +284,23 @@ def test_config_blocks_and_exec_commands_run_in_written_order():
     assert all(r.exit_code == 0 for r in results)
 
 
+def test_a_leading_blank_line_keeps_the_configuration_session():
+    # A blank first line, which a template easily leaves, used to make the
+    # list a show/exec list: the config lines ran one by one at the exec
+    # prompt, and the save after them ran even when one of them failed.
+    commands = ["", "  ", "configure terminal", "hostname r1", "end", "write memory"]
+    connection = MagicMock()
+    connection.read_channel.return_value = ""
+    connection.send_config_set.return_value = "% Invalid input detected at '^' marker."
+
+    results = _run_on_connection(commands, connection)
+
+    assert [c.args[0] for c in connection.send_config_set.call_args_list] == [["hostname r1"]]
+    assert connection.send_command.call_count == 0
+    assert [r.command for r in results] == commands
+    assert (results[3].exit_code, results[-1].error) == (1, _SKIPPED_ERROR)
+
+
 def test_a_rejected_config_line_stops_its_block():
     # A config set used to be written to the device in one go, so the lines
     # after a rejected one were applied all the same.

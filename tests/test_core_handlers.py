@@ -1084,6 +1084,38 @@ async def test_execute_cli_connects_with_the_device_platform():
     assert connects == ["eos"]
 
 
+async def test_execute_cli_leading_blank_line_is_still_a_configuration_session():
+    """A blank first line, which a template easily leaves, used to turn the
+    configuration session into show/exec mode: one artifact per command and
+    no consolidated configuration transcript."""
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    class _Result:
+        def __init__(self, command: str) -> None:
+            self.command = command
+            self.output = f"echo of {command}" if command.strip() else ""
+            self.exit_code = 0
+            self.error = None
+            self.latency_ms = 1.0
+
+    class _Transport:
+        async def execute_commands(self, commands):
+            return [_Result(c) for c in commands]
+
+    class _Services:
+        def connect(self, device, **kwargs):
+            return _Transport()
+
+    commands = ["", "configure terminal", "hostname r1", "end", "write memory"]
+    result = await ExecuteCLIActionHandler().execute(_netcli_ctx(_Services(), commands=commands))
+
+    assert result.success is True, result.error
+    assert [e["name"] for e in result.evidence] == ["Configuration"]
+    assert "echo of hostname r1" in result.evidence[0]["content_text"]
+    assert "hostname r1" in result.evidence[0]["content_json"]["commands"]
+    assert "write memory" not in result.evidence[0]["content_json"]["commands"]
+
+
 def _netcli_ctx(services: Any, **config: Any) -> HandlerContext:
     return HandlerContext(
         run_id="r",

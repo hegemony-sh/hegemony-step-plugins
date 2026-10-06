@@ -19,13 +19,13 @@ for flow inputs and earlier step results, resolved before the step runs.
 Targets are chosen with the role-based target picker; there is no
 additional-IP list for this step.
 
-When the first line is `configure terminal` (or `conf t` / `config t`), the
-list is a configuration session. `configure terminal` starts a configuration
-block and only `end` closes it. `exit` is sent to the device like any other
-configuration line, so it can leave an interface or other sub-mode without
-ending the block. Lines after `end` and before the next
-`configure terminal`, and `write` or `copy run` save commands, run at the
-exec prompt. Everything runs in the order written. Configuration lines are
+When the first line that is not blank is `configure terminal` (or `conf t`
+/ `config t`), the list is a configuration session. `configure terminal`
+starts a configuration block and only `end` closes it. `exit` is sent to the
+device like any other configuration line, so it can leave an interface or
+other sub-mode without ending the block. Lines after `end` and before the
+next `configure terminal`, and `write` or `copy run` save commands, run at
+the exec prompt. Everything runs in the order written. Configuration lines are
 sent one at a time, and each is checked before the next is sent. When a
 command fails, including a configuration line the device rejects, the
 commands after it do not run and are recorded as skipped, so a
@@ -37,9 +37,10 @@ failed.
 A configuration session's transcript is saved as a single consolidated
 "Configuration" evidence artifact per device, and the recorded command list
 omits `configure terminal`, `end` and the save commands. Any other first
-line means show/exec mode: each command gets its own evidence artifact, named
-after the command (first line, shortened to 80 characters), with the device
-name appended when more than one device is targeted.
+line that is not blank means show/exec mode: each command gets its own
+evidence artifact, named after the command (first line, shortened to 80
+characters), with the device name appended when more than one device is
+targeted.
 
 Max Parallel Devices controls the fan-out: 1 (the default) processes devices
 strictly one after another, higher values run up to that many devices
