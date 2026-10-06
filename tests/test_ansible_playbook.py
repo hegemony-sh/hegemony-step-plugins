@@ -97,6 +97,12 @@ def _device(name: str, **extra: Any) -> dict[str, Any]:
         "{{{",
         "}}",
         "a{'b'}c",
+        # Ansible reads a leading '#jinja2:' line as delimiter overrides, so
+        # the rest would run with [[ ]] as the expression markers.
+        "#jinja2:variable_start_string:'[[', variable_end_string:']]'\n[[ lookup('pipe', 'id') ]]",
+        "#jinja2:",
+        # Only a header at the very start is read as one.
+        "note: #jinja2:variable_start_string:'[['",
     ],
 )
 def test_literal_renders_back_to_the_same_text_and_runs_nothing(value):
@@ -1119,6 +1125,22 @@ async def test_extra_vars_are_staged_as_data_not_templates(monkeypatch):
     staged = json.loads(state["roots"]["/hegemony/ansible/extra_vars.json"])
     assert staged == {"release": "1.2", "note": literal(injected)}
     assert "{{ lookup" not in state["roots"]["/hegemony/ansible/extra_vars.json"]
+
+
+@pytest.mark.asyncio
+async def test_extra_vars_never_start_with_a_template_header(monkeypatch):
+    # A run input that starts with Ansible's '#jinja2:' header would redefine
+    # the expression markers for the rest of the value.
+    injected = (
+        "#jinja2:variable_start_string:'[[', variable_end_string:']]'\n[[ lookup('pipe', 'id') ]]"
+    )
+    state = _install_docker(monkeypatch, collected=_results_json({}), exit_code=0)
+    config = {"playbook": "site.yml", "device_credentials": False, "extra_vars": {"note": injected}}
+    result = await AnsiblePlaybookHandler().execute(_ctx(config, [_device("r1")]))
+    assert result.success is True, result.error
+    staged = json.loads(state["roots"]["/hegemony/ansible/extra_vars.json"])
+    assert staged == {"note": literal(injected)}
+    assert not staged["note"].startswith("#jinja2:")
 
 
 @pytest.mark.asyncio

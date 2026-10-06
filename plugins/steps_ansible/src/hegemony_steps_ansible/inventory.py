@@ -81,10 +81,13 @@ DEVICE_ANSIBLE_VARS_ALLOWED = frozenset(
 )
 
 
-#: Where a Jinja expression, statement or comment starts. Ansible templates
-#: every string it reads from inventory, host_vars, group_vars and ``-e @file``
-#: files, so text from device records or secrets that contains one would run.
-_TEMPLATE_START_RE = re.compile(r"\{[{%#]")
+#: Where a Jinja expression, statement or comment starts, and Ansible's
+#: ``#jinja2:`` header at the very start of a value. Ansible templates every
+#: string it reads from inventory, host_vars, group_vars and ``-e @file`` files,
+#: so text from device records or secrets that contains one would run; the
+#: header's first line can also change the delimiters (``[[ ... ]]``), which the
+#: ``{``-based escape alone would not catch.
+_TEMPLATE_START_RE = re.compile(r"\{[{%#]|\A#jinja2:")
 
 
 def has_template(value: Any) -> bool:
@@ -103,6 +106,8 @@ def literal(value: Any) -> Any:
 
     ``{{`` becomes ``{{ '{{' }}`` (and likewise ``{%`` and ``{#``), which Jinja
     renders back to exactly ``{{``: the value is kept, and nothing in it runs.
+    A leading ``#jinja2:`` header becomes ``{{ '#jinja2:' }}`` the same way, so
+    the value no longer starts with it and Ansible applies no delimiter override.
     Text from device records and secrets goes through this before Ansible
     reads it; a password with braces in it then also works.
     """
