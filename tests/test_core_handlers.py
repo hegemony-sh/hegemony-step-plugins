@@ -741,6 +741,76 @@ async def test_http_probe_brackets_ipv6_literals_and_gates_every_hop(monkeypatch
     assert gated == [("2001:db8::7", 8080)]
 
 
+async def test_http_probe_fails_only_the_target_whose_request_cannot_be_made(monkeypatch):
+    """Only an IPv6 address is bracketed, and a URL that does not parse, or a
+    request that raises something other than an httpx.HTTPError, fails that
+    target alone: the others are still requested and keep their evidence."""
+    import httpx
+
+    from hegemony_steps_probe import http_check
+    from hegemony_steps_probe.http_check import HttpProbeHandler
+
+    sent: list[str] = []
+
+    def transport_handler(request: httpx.Request) -> httpx.Response:
+        """Answer 200, except for the host whose transport breaks."""
+        if request.url.host == "192.0.2.66":
+            raise ValueError("transport broke")
+        sent.append(str(request.url))
+        return httpx.Response(200, text="ok")
+
+    transport = httpx.MockTransport(transport_handler)
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        """The handler's own client, rerouted through the mock transport."""
+        kwargs["transport"] = transport
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(http_check.httpx, "AsyncClient", client_with_mock_transport)
+
+    hosts = {
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::7",
+        "bracketed": "[2001:db8::8]",
+        "host_port": "192.0.2.5:8443",
+        "broken": "192.0.2.66",
+    }
+    ctx = HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        config={"path": "/health", "port": 8080, "max_parallel_devices": 5},
+        target_roles=["primary"],
+        target_devices_by_role={
+            "primary": [{"name": name, "mgmt_host": host} for name, host in hosts.items()]
+        },
+        services=cast(HandlerServices, type("_Services", (), {})()),
+    )
+    result = await HttpProbeHandler().execute(ctx)
+
+    assert result.success is False
+    assert sorted(sent) == [
+        "http://192.0.2.1:8080/health",
+        "http://[2001:db8::7]:8080/health",
+        "http://[2001:db8::8]:8080/health",
+    ]
+    assert result.error == (
+        "Failed: host_port (invalid URL http://192.0.2.5:8443:8080/health: "
+        "Invalid port: '8443:8080'), broken (ValueError: transport broke)"
+    )
+    assert result.summary == "http GET /health: 3/5 targets OK"
+    assert [e["name"] for e in result.evidence] == [f"http_{name}" for name in hosts]
+    assert [e["content_json"]["success"] for e in result.evidence] == [
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
+
+
 async def test_http_probe_refuses_a_redirect_to_a_denied_destination(monkeypatch):
     """A redirect must not launder a denied destination through an allowed
     first hop: the request hook walks every hop past the gate, and the denial
