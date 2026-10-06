@@ -85,7 +85,7 @@ class UpgradeVerifyConfig(BaseModel):
         ge=5,
         # Steps saved before the rename carry retry_interval.
         validation_alias=AliasChoices("poll_interval_seconds", "retry_interval"),
-        title="Retry Interval (sec)",
+        title="Poll Interval (sec)",
         description="Seconds between reconnect attempts",
         json_schema_extra={"x_legacy_keys": ["retry_interval"]},
     )

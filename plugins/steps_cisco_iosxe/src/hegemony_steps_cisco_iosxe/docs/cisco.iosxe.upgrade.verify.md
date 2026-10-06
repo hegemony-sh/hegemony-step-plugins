@@ -15,7 +15,7 @@ has gone down, so this step does not reach a device still on its old image.
 ## Using It
 
 For each device the step repeatedly reconnects and runs `show clock` until
-the device answers, retrying every Retry Interval seconds for up to Max Wait
+the device answers, retrying every Poll Interval seconds for up to Max Wait
 seconds (defaults: every 30 seconds, up to 600 seconds). Once the device is
 reachable, verification runs.
 
@@ -67,4 +67,4 @@ All devices must verify for the step to succeed; per-device evidence is
 recorded either way. The step's overall default timeout is 7200 seconds, so
 with many devices verified sequentially, keep Max Wait and device count
 within that budget: Max Wait applies to each device in turn. Steps saved
-with Retry Interval's old name, `retry_interval`, keep working.
+with Poll Interval's old name, `retry_interval`, keep working.
