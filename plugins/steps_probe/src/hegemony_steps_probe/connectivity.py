@@ -17,14 +17,23 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     ProbeResult,
     StepKind,
+    for_each_target_device,
+    max_parallel_from_config,
 )
 
-from .targets import all_probe_targets
+from .checks import CHECK_TYPE_LABELS, PORT_CHECKS, CheckUnavailable, default_port
+from .targets import (
+    DEFAULT_MAX_PARALLEL_TARGETS,
+    TargetOutcome,
+    all_probe_targets,
+    merge_outcomes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,22 +59,21 @@ class ConnectivityCheckConfig(BaseModel):
         json_schema_extra={
             "x_widget": "select",
             "x_options_source": "probes",
-            "x_option_labels": {
-                "tcp_connect": "TCP Connect",
-                "icmp_ping": "ICMP Ping",
-                "http_health": "HTTP Health",
-                "dns_resolve": "DNS Resolve",
-            },
+            "x_option_labels": CHECK_TYPE_LABELS,
         },
     )
-    port: int = Field(
-        default=22,
+    port: int | None = Field(
+        default=None,
         ge=1,
         le=65535,
         title="Port",
-        description="For TCP/TLS/SSH checks",
+        description=(
+            "Port the port-based checks connect to. When empty, HTTP Health "
+            "uses 80 and the other checks 22. Ignored by ICMP Ping and DNS "
+            "Resolve."
+        ),
         json_schema_extra={
-            "x_placeholder": "22",
+            "x_placeholder": "22, or 80 for HTTP Health",
             "x_hide_when": {"field": "check_type", "value": "icmp_ping"},
         },
     )
@@ -98,8 +106,12 @@ class ConnectivityCheckConfig(BaseModel):
         default="",
         title="Hostname to Resolve",
         description=(
-            "DNS name the DNS Resolve check looks up against each target. "
-            "Ignored by every other check type."
+            "DNS name the DNS Resolve check looks up with the worker's system "
+            "resolver, once per target; the target is not asked. When empty, "
+            "each target's own name is looked up, so an IP address target "
+            "needs this field. An IP address here fails the check, as the "
+            "resolver returns it without a lookup. Ignored by every other "
+            "check type."
         ),
         json_schema_extra={
             "x_placeholder": "device.example.com",
@@ -120,6 +132,13 @@ class ConnectivityCheckConfig(BaseModel):
             "x_col_span": 2,
         },
     )
+    max_parallel_devices: int = Field(
+        default=DEFAULT_MAX_PARALLEL_TARGETS,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Targets checked at the same time (1 = one after another). Defaults to 10.",
+    )
 
 
 class ConnectivityCheckHandler(BaseHandler):
@@ -130,11 +149,12 @@ class ConnectivityCheckHandler(BaseHandler):
 
     Config:
         check_type: str - Type of check (default: tcp_connect)
-        port: int - Target port (default: 22)
+        port: int - Target port (default: 80 for http_health, else 22)
         timeout_sec: int - Timeout per attempt (default: 10)
         attempts: int - Number of attempts (default: 1)
         url_path: str - For http_health, the URL path (default: /health)
         hostname: str - For dns_resolve, hostname to resolve
+        max_parallel_devices: int - Targets checked at once (default: 10)
     """
 
     handler_id = "probe.connectivity"
@@ -143,7 +163,7 @@ class ConnectivityCheckHandler(BaseHandler):
     description = "One-shot connectivity probes (TCP/ICMP/HTTP/DNS) against targets."
     category = "Checks"
     config_model = ConnectivityCheckConfig
-    default_config = {"check_type": "tcp_connect", "port": 22, "timeout_sec": 10, "attempts": 1}
+    default_config = {"check_type": "tcp_connect", "timeout_sec": 10, "attempts": 1}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Run connectivity check against all targets (devices and direct IPs)."""
@@ -156,21 +176,20 @@ class ConnectivityCheckHandler(BaseHandler):
             )
 
         check_type = ctx.config.get("check_type", "tcp_connect")
-        port = ctx.config.get("port", 22)
+        # An empty Port means the check's own default: 80 for HTTP Health,
+        # 22 (the old fixed default) for the rest.
+        port = ctx.config.get("port") or default_port(check_type)
         timeout_sec = ctx.config.get("timeout_sec", 10)
         attempts = min(ctx.config.get("attempts", 1), 10)
 
-        # Build check options based on type. An unregistered check type is
-        # reported per-device below when run_probe raises KeyError — validity is
-        # the host probe registry, not a hardcoded allowlist here.
+        # Build check options based on type. An unregistered check type fails
+        # the step below when run_probe raises KeyError — validity is the host
+        # probe registry, not a hardcoded allowlist here.
         options: dict[str, Any] = {"timeout_ms": timeout_sec * 1000}
-        if check_type == "tcp_connect":
+        if check_type in PORT_CHECKS:
             options["port"] = port
-        elif check_type == "http_health":
-            options["port"] = port
+        if check_type == "http_health":
             options["url_path"] = ctx.config.get("url_path", "/health")
-        elif check_type in ("tls_handshake", "ssh_banner"):
-            options["port"] = port
         elif check_type == "icmp_ping":
             options["count"] = 1
         elif check_type == "dns_resolve":
@@ -185,21 +204,16 @@ class ConnectivityCheckHandler(BaseHandler):
             options["socks_proxy"] = socks_proxy
 
         services = ctx.require_services()
-        all_evidence = []
-        all_metrics = {}
-        failed_devices = []
-        success_count = 0
 
-        for device in target_devices:
+        async def _check(device: dict[str, Any]) -> TargetOutcome:
+            """Probe one target, retrying up to ``attempts`` times."""
             # None for a direct-IP target: it has no inventory identity, and
             # the artifact column behind evidence device_id is a UUID.
             device_id = device.get("id")
             device_name = device.get("name") or device_id or "unknown"
             host = device.get("mgmt_host")
-
             if not host:
-                failed_devices.append(f"{device_name} (no host)")
-                continue
+                return TargetOutcome(device_name, ok=False, error="no host")
 
             # Run checks with attempts, through the host's shared probe registry.
             best_result: ProbeResult | None = None
@@ -207,30 +221,25 @@ class ConnectivityCheckHandler(BaseHandler):
                 try:
                     result = await services.run_probe(check_type, host, options)
                 except KeyError:
-                    return HandlerResult(
-                        success=False,
-                        error=f"Check type '{check_type}' is not available on this worker",
-                        summary=f"Unsupported check type: {check_type}",
-                        evidence=all_evidence,
-                    )
-                if result.ok:
-                    best_result = result
-                    break
+                    raise CheckUnavailable from None
                 best_result = result
+                if result.ok:
+                    break
                 if attempt < attempts - 1:
                     await asyncio.sleep(0.5)  # Brief pause between retries
 
             if best_result and best_result.ok:
-                success_count += 1
                 # Extract primary metric
-                metric_key = f"{device_name}_ms"
+                latency_ms = None
                 if "rtt_ms" in best_result.metrics:
-                    all_metrics[metric_key] = best_result.metrics["rtt_ms"]
+                    latency_ms = best_result.metrics["rtt_ms"]
                 elif "connect_ms" in best_result.metrics:
-                    all_metrics[metric_key] = best_result.metrics["connect_ms"]
-
-                all_evidence.append(
-                    {
+                    latency_ms = best_result.metrics["connect_ms"]
+                return TargetOutcome(
+                    device_name,
+                    ok=True,
+                    latency_ms=latency_ms,
+                    evidence={
                         "kind": "transport_meta",
                         "name": f"connectivity_{check_type}_{device_name}",
                         "device_id": device_id,
@@ -242,26 +251,45 @@ class ConnectivityCheckHandler(BaseHandler):
                             "success": True,
                             "metrics": best_result.metrics,
                         },
-                    }
+                    },
                 )
-            else:
-                error_msg = best_result.error_detail if best_result else "unknown error"
-                failed_devices.append(f"{device_name} ({error_msg})")
-                all_evidence.append(
-                    {
-                        "kind": "transport_meta",
-                        "name": f"connectivity_{check_type}_{device_name}",
+            error_msg = best_result.error_detail if best_result else "unknown error"
+            return TargetOutcome(
+                device_name,
+                ok=False,
+                error=error_msg,
+                evidence={
+                    "kind": "transport_meta",
+                    "name": f"connectivity_{check_type}_{device_name}",
+                    "device_id": device_id,
+                    "content_json": {
                         "device_id": device_id,
-                        "content_json": {
-                            "device_id": device_id,
-                            "device_name": device_name,
-                            "host": host,
-                            "check_type": check_type,
-                            "success": False,
-                            "error": error_msg,
-                        },
-                    }
-                )
+                        "device_name": device_name,
+                        "host": host,
+                        "check_type": check_type,
+                        "success": False,
+                        "error": error_msg,
+                    },
+                },
+            )
+
+        # Egress denials raised by run_probe propagate and cancel the rest.
+        try:
+            outcomes = await for_each_target_device(
+                target_devices,
+                _check,
+                max_parallel=max_parallel_from_config(
+                    ctx.config, default=DEFAULT_MAX_PARALLEL_TARGETS
+                ),
+            )
+        except CheckUnavailable:
+            return HandlerResult(
+                success=False,
+                error=f"Check type '{check_type}' is not available on this worker",
+                summary=f"Unsupported check type: {check_type}",
+            )
+        all_evidence, all_metrics, failed_devices = merge_outcomes(outcomes)
+        success_count = sum(outcome.ok for outcome in outcomes)
 
         total = len(target_devices)
         if failed_devices:

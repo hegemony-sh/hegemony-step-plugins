@@ -1,3 +1,40 @@
+## [0.16.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.15.0...v0.16.0) (2026-10-06)
+
+### ⚠ BREAKING CHANGES
+
+* **probe:** a probe.connectivity step using DNS Resolve with an IP
+address in Hostname to Resolve passed before and now fails. Set Hostname
+to Resolve to a DNS name.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+* **probe:** a probe.connectivity step or monitor.connectivity
+monitor using DNS Resolve on an IP address target without Hostname to
+Resolve passed before and now fails. Set Hostname to Resolve, or target
+a device by its name.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+
+### Features
+
+* **probe:** wait_reachable port, check type and proxy ([f9c3e69](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f9c3e69ab130f1328d56ddf286ebf1bb3926b65e))
+* **sdk:** let max_parallel_from_config take a default ([a32375b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a32375bea39f554fea166569645a9ea1a28889e7))
+
+### Bug Fixes
+
+* **probe:** bracket IPv6 addresses in the HTTP health check ([6f82c55](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6f82c552843fa15599a2946d9df78cc03e2aaddf))
+* **probe:** check targets in parallel ([695b44a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/695b44a1b68931fb6a530ba3435943a6516f0087))
+* **probe:** declare wait_reachable's connect timeout ([8e270af](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8e270af8af42d230fac3168317de79ab68c6d254))
+* **probe:** default the HTTP health port to 80 ([4bfd227](https://github.com/hegemony-sh/hegemony-step-plugins/commit/4bfd2275ee767bfc24f54fef92e37bdc7eb7c32d))
+* **probe:** kill the ping child when icmp_ping is cancelled ([3ea3b09](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3ea3b096fece20061b65ee37dc42f69254ef6691))
+* **probe:** measure wait_reachable stability per target ([f0c4e3f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f0c4e3ff209ac210512531297203c647db493aa6))
+* **probe:** refuse a DNS check of an IP target without a host name ([c6d2369](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c6d2369a785689688cbd0911175fb1b26dd03f42))
+* **probe:** refuse an IP address as the DNS check's host name ([99b468f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/99b468f01879775a03201d5f65f594f6b9b28660))
+* **probe:** report an invalid SOCKS proxy setting as config_error ([8a422d7](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8a422d7e3e96d6ef1a015a68ed140a857312d701))
+
 ## [0.15.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.14.0...v0.15.0) (2026-10-05)
 
 ### ⚠ BREAKING CHANGES
