@@ -1646,8 +1646,7 @@ def test_every_config_field_is_documented_and_the_page_meets_the_contract():
 
 
 async def test_ocsp_takes_the_issuer_from_the_served_chain(pki, responder, monkeypatch):
-    """Where the TLS library exposes the served chain (Python 3.13+), the
-    issuer comes from it and nothing is downloaded."""
+    """With the issuer in the served chain, nothing is downloaded."""
     leaf = pki.leaves["rsa"].cert
     served = [
         leaf.public_bytes(serialization.Encoding.DER),
@@ -1667,6 +1666,54 @@ async def test_ocsp_takes_the_issuer_from_the_served_chain(pki, responder, monke
     assert (record["tls_version"], record["cipher"]) == ("TLSv1.3", "TLS_AES_128_GCM_SHA256")
     assert record["chain_ok"] is True
     assert responder.requests[before:] == ["POST /ocsp"]
+
+
+async def test_the_served_chain_is_read_on_this_python(pki, tmp_path, responder):
+    """The issuer comes from the chain the server sent, not from a download."""
+    before = len(responder.requests)
+    async with tls_server(tmp_path, pki.leaves["rsa"]) as port:
+        result = await run_step(
+            {"endpoints": f"127.0.0.1:{port}", "ca_bundle": pki.root_pem, "check_ocsp": True}
+        )
+    [record] = result.output["endpoints"]
+    assert record["ocsp"] == "good", record["ocsp_detail"]
+    assert responder.requests[before:] == ["POST /ocsp"]
+
+
+class _PublicChain:
+    """An SSL object with the public chain call (Python 3.13+): DER bytes."""
+
+    def __init__(self, chain: list[bytes]) -> None:
+        self.chain = chain
+
+    def get_unverified_chain(self) -> list[bytes]:
+        return self.chain
+
+
+class _LibraryCertificate:
+    """A certificate as the TLS library returns it before Python 3.13."""
+
+    def __init__(self, cert: x509.Certificate) -> None:
+        self.cert = cert
+
+    def public_bytes(self) -> str:
+        return pem_of(self.cert)
+
+
+class _PrivateChain:
+    """An SSL object with the chain call only on its private ``_sslobj`` (Python 3.10-3.12)."""
+
+    def __init__(self, chain: list[x509.Certificate]) -> None:
+        self._sslobj = _PublicChain(cast(list[bytes], [_LibraryCertificate(c) for c in chain]))
+
+
+def test_served_chain_reads_every_form_of_the_tls_library(pki):
+    leaf = pki.leaves["rsa"].cert
+    der = [cert.public_bytes(serialization.Encoding.DER) for cert in (leaf, pki.inter)]
+    assert tls_check.served_chain(_PublicChain(der)) == der
+    assert tls_check.served_chain(_PrivateChain([leaf, pki.inter])) == der
+    assert tls_check.served_chain(_PublicChain(cast(list[bytes], None))) == []
+    assert tls_check.served_chain(object()) == []
 
 
 async def test_an_ocsp_request_the_egress_policy_denies_is_the_step_error(pki):
@@ -2457,9 +2504,10 @@ def test_crl_scope_follows_the_issuing_distribution_point(pki):
 async def test_crl_good_and_revoked_share_one_download(pki, tmp_path, responder):
     services = FakeServices()
     before = len(responder.requests)
+    # Served without the intermediate, so the issuer has to be downloaded too.
     async with (
-        tls_server(tmp_path, pki.leaves["crl_good"]) as good_port,
-        tls_server(tmp_path, pki.leaves["crl_revoked"]) as revoked_port,
+        tls_server(tmp_path, pki.leaves["crl_good"], with_chain=False) as good_port,
+        tls_server(tmp_path, pki.leaves["crl_revoked"], with_chain=False) as revoked_port,
     ):
         result = await run_step(
             {

@@ -73,10 +73,12 @@ subject common name counts only when the certificate carries no DNS or IP
 names at all.
 
 Check OCSP asks the responder named in each certificate whether the
-certificate has been revoked. The issuer certificate the question needs comes
-from the pasted or served chain where available, from CA bundle, or is
-downloaded from the addresses the certificate names (its first three
-caIssuers addresses). A response counts only
+certificate has been revoked. The issuer certificate the question needs is
+looked for among the certificates the server sent after its own in the
+handshake (or, for a pasted certificate, those pasted after it), which the
+step reads on every Python version it supports, then in CA bundle, and is
+otherwise downloaded from the first three caIssuers addresses the
+certificate names. A response counts only
 when the issuer, or a responder the issuer authorised whose own certificate
 is currently valid, signed it, only when it names this certificate, and only
 while it is current: before its next update, or, when it names none, for 7

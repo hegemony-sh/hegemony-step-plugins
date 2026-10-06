@@ -399,16 +399,11 @@ async def tls_handshake(
             if ssl_object is None:
                 raise ssl.SSLError("no TLS session was established")
             cipher = ssl_object.cipher()
-            chain: list[bytes] = []
-            get_chain = getattr(ssl_object, "get_unverified_chain", None)
-            if callable(get_chain):
-                with contextlib.suppress(Exception):
-                    chain = [item for item in (get_chain() or []) if isinstance(item, bytes)]
             return _Handshake(
                 der=ssl_object.getpeercert(binary_form=True),
                 version=ssl_object.version(),
                 cipher=cipher[0] if cipher else None,
-                chain_der=chain,
+                chain_der=served_chain(ssl_object),
             )
         finally:
             writer.close()
@@ -416,6 +411,26 @@ async def tls_handshake(
                 await asyncio.wait_for(writer.wait_closed(), 1.0)
 
     return await asyncio.wait_for(_run(), timeout)
+
+
+def served_chain(ssl_object: Any) -> list[bytes]:
+    """The certificates the server sent, its own first, as DER; empty when they cannot be read.
+
+    ``SSLObject.get_unverified_chain`` exists from Python 3.13 and returns
+    DER. Python 3.10 to 3.12 offer the same call only on the private
+    ``_sslobj``, returning certificate objects, which are converted.
+    """
+    get_chain = getattr(ssl_object, "get_unverified_chain", None)
+    if not callable(get_chain):
+        get_chain = getattr(getattr(ssl_object, "_sslobj", None), "get_unverified_chain", None)
+    if not callable(get_chain):
+        return []
+    with contextlib.suppress(Exception):
+        return [
+            item if isinstance(item, bytes) else ssl.PEM_cert_to_DER_cert(item.public_bytes())
+            for item in get_chain() or []
+        ]
+    return []
 
 
 def describe_dial_error(exc: BaseException, timeout: float) -> str:
