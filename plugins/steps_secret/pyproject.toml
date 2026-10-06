@@ -4,7 +4,7 @@
 
 [project]
 name = "hegemony-steps-secret"
-version = "0.18.0"
+version = "0.19.0"
 description = "Secret-store step handlers for Hegemony (write, swap and delete a secret)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -13,7 +13,7 @@ requires-python = ">=3.11"
 # Its own wheel: storing secrets from a flow is a security surface a
 # deployment can leave out by not installing this package.
 dependencies = [
-    "hegemony-step-sdk==0.18.0",
+    "hegemony-step-sdk==0.19.0",
 ]
 
 [project.entry-points."hegemony.step_handlers"]

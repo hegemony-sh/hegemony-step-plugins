@@ -13,12 +13,20 @@ from __future__ import annotations
 
 import pytest
 
+from hegemony_steps_cisco_iosxe.upgrade.handlers import verify as verify_module
 from hegemony_steps_cisco_iosxe.upgrade.handlers.cleanup import UpgradeCleanupHandler
 from hegemony_steps_cisco_iosxe.upgrade.handlers.install import UpgradeInstallHandler
 from hegemony_steps_cisco_iosxe.upgrade.handlers.preflight import UpgradePreflightHandler
 from hegemony_steps_cisco_iosxe.upgrade.handlers.stage import UpgradeStageHandler
 from hegemony_steps_cisco_iosxe.upgrade.handlers.verify import UpgradeVerifyHandler
-from tests.iosxe_fakes import UNREACHABLE, FakeServices, Result, ScriptedTransport, make_ctx
+from tests.iosxe_fakes import (
+    UNREACHABLE,
+    FakeServices,
+    InstantClock,
+    Result,
+    ScriptedTransport,
+    make_ctx,
+)
 
 STEPS = [
     ("preflight", UpgradePreflightHandler, {}),
@@ -28,9 +36,15 @@ STEPS = [
         {"source_url": "https://repo.example/i.bin", "dest_filename": "i.bin"},
     ),
     ("install", UpgradeInstallHandler, {"image_name": "i.bin"}),
-    ("verify", UpgradeVerifyHandler, {"max_wait_seconds": 1, "retry_interval": 0.01}),
+    # retry_interval: the name steps saved before poll_interval_seconds still use.
+    ("verify", UpgradeVerifyHandler, {"max_wait_seconds": 60, "retry_interval": 5}),
     ("cleanup", UpgradeCleanupHandler, {}),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _instant_verify_wait(monkeypatch):
+    monkeypatch.setattr(verify_module, "asyncio", InstantClock())
 
 
 @pytest.mark.parametrize(("handler", "config"), [s[1:] for s in STEPS], ids=[s[0] for s in STEPS])

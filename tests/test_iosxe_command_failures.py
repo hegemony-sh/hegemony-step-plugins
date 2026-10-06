@@ -20,16 +20,30 @@ import pytest
 from hegemony_steps_cisco_iosxe.upgrade.cisco.iosxe_bundle import IOSXEBundleDriver
 from hegemony_steps_cisco_iosxe.upgrade.cisco.iosxe_common import stage_image
 from hegemony_steps_cisco_iosxe.upgrade.cisco.iosxe_install import IOSXEInstallDriver
+from hegemony_steps_cisco_iosxe.upgrade.handlers import verify as verify_module
 from hegemony_steps_cisco_iosxe.upgrade.handlers.cleanup import UpgradeCleanupHandler
 from hegemony_steps_cisco_iosxe.upgrade.handlers.install import UpgradeInstallHandler
 from hegemony_steps_cisco_iosxe.upgrade.handlers.preflight import UpgradePreflightHandler
 from hegemony_steps_cisco_iosxe.upgrade.handlers.stage import UpgradeStageHandler
 from hegemony_steps_cisco_iosxe.upgrade.handlers.verify import UpgradeVerifyHandler
-from tests.iosxe_fakes import UNREACHABLE, FakeServices, Result, ScriptedTransport, make_ctx
+from tests.iosxe_fakes import (
+    UNREACHABLE,
+    FakeServices,
+    InstantClock,
+    Result,
+    ScriptedTransport,
+    make_ctx,
+)
 
 STAGE = {"source_url": "https://repo.example/img.bin", "dest_filename": "img.bin"}
-# Verify retries until the device answers; keep its wait short.
-VERIFY_WAIT = {"max_wait_seconds": 0.05, "retry_interval": 0.01}
+# Verify retries until the device answers, on an instant clock (see below).
+VERIFY_WAIT = {"max_wait_seconds": 60, "poll_interval_seconds": 5}
+
+
+@pytest.fixture(autouse=True)
+def _instant_verify_wait(monkeypatch):
+    monkeypatch.setattr(verify_module, "asyncio", InstantClock())
+
 
 STEPS = [
     ("preflight-install", UpgradePreflightHandler, {"upgrade_mode": "install"}),

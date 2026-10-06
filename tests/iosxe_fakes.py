@@ -130,3 +130,23 @@ def make_ctx(config: dict[str, Any], services: Any, *, step_run_id: str = "sr-1"
         config=config,
         services=services,
     )
+
+
+class InstantClock:
+    """Stands in for ``asyncio`` in the verify handler, whose waits then take no real time.
+
+    The verify step waits at least 60 s for a device to return; patched in as
+    the module's ``asyncio``, its clock jumps by each sleep instead.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def get_event_loop(self) -> InstantClock:
+        return self
+
+    def time(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds

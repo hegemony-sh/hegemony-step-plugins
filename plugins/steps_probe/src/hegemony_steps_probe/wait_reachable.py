@@ -20,6 +20,7 @@ from hegemony_step_sdk import (
     BaseHandler,
     HandlerContext,
     HandlerResult,
+    InvalidConfigError,
     StepKind,
     for_each_target_device,
 )
@@ -74,12 +75,14 @@ class WaitReachableConfig(BaseModel):
     max_wait_seconds: int = Field(
         default=300,
         ge=1,
+        # Steps saved under the editor's old name carry max_wait.
+        validation_alias=AliasChoices("max_wait_seconds", "max_wait"),
         title="Max Wait (sec)",
         description=(
             "Overall deadline for the wait, in seconds. The step fails once "
             "this much time passes without every target completing its "
-            "stability window. Defaults to 300; the step's own timeout must "
-            "be larger, or it ends the wait first."
+            "stability window. Defaults to 300. The step's timeout is raised "
+            "to cover it."
         ),
         json_schema_extra={"x_legacy_keys": ["max_wait"]},
     )
@@ -92,14 +95,16 @@ class WaitReachableConfig(BaseModel):
             "the step succeeds, in seconds. A target that goes unreachable "
             "restarts its window from zero. Defaults to 30."
         ),
-        json_schema_extra={"x_legacy_keys": ["stability_checks"]},
     )
-    poll_interval: int = Field(
+    poll_interval_seconds: int = Field(
         default=5,
         ge=1,
+        # Steps saved before the rename carry poll_interval, and steps saved
+        # under the editor's old name check_interval.
+        validation_alias=AliasChoices("poll_interval_seconds", "poll_interval", "check_interval"),
         title="Poll Interval (sec)",
         description="Seconds to wait between reachability polls. Defaults to 5.",
-        json_schema_extra={"x_legacy_keys": ["check_interval"]},
+        json_schema_extra={"x_legacy_keys": ["poll_interval", "check_interval"]},
     )
     connect_timeout_seconds: int = Field(
         default=5,
@@ -150,8 +155,9 @@ class WaitReachableHandler(BaseHandler):
         "check_type": "tcp_connect",
         "max_wait_seconds": 300,
         "stable_seconds": 30,
-        "poll_interval": 5,
+        "poll_interval_seconds": 5,
     }
+    run_timeout_field = "max_wait_seconds"
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Wait for all target devices to be reachable with stability window."""
@@ -165,18 +171,14 @@ class WaitReachableHandler(BaseHandler):
 
         # The validated model, not raw config gets: a value of the wrong type
         # (a string timeout) used to make every poll fail as "unreachable".
-        errors = self.validate_config(ctx.config)
-        if errors:
-            return HandlerResult(
-                success=False,
-                error=f"Invalid probe.wait_reachable config: {'; '.join(errors)}",
-                summary="Config validation failed",
-            )
-        config = WaitReachableConfig.model_validate(ctx.config)
+        try:
+            config = self.parse_config(ctx.config, WaitReachableConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
         check_type = config.check_type
         max_wait_seconds = config.max_wait_seconds
         stable_seconds = config.stable_seconds
-        poll_interval = config.poll_interval
+        poll_interval = config.poll_interval_seconds
         connect_timeout = config.connect_timeout_seconds
         socks_proxy = config.socks_proxy.strip()
 

@@ -13,6 +13,6 @@ step with no effect. To pause a flow on purpose, use the Sleep step
 (`general.sleep`) instead.
 
 The step accepts an optional delay in seconds (default 0, applied before
-it completes), targets no devices, and always succeeds with the summary
+it completes; the step's timeout is raised to fit it), targets no devices, and always succeeds with the summary
 "No-op completed" and a single `delay_seconds` metric. It produces no
 evidence and no chainable output keys.

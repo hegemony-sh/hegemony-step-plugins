@@ -14,8 +14,9 @@ calls :meth:`BaseHandler.execute`, and persists the returned
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
 from .enums import StepKind
@@ -23,6 +24,8 @@ from .services import HandlerServices
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
+
+_ConfigT = TypeVar("_ConfigT", bound="BaseModel")
 
 #: Maximum characters per stdout/stderr field stored in output for step chaining.
 MAX_CHAIN_OUTPUT_CHARS = 4096
@@ -45,6 +48,10 @@ OUTPUT_EVENT_MAX_CHARS = 65_536
 
 #: Marker line appended when an emission is cut at OUTPUT_EVENT_MAX_CHARS.
 OUTPUT_TRUNCATION_NOTICE = "… [output truncated — full output in artifacts]"
+
+#: Default for :attr:`BaseHandler.run_timeout_margin_seconds`: the time a
+#: handler gets past its own time limit to save its output and report back.
+DEFAULT_RUN_TIMEOUT_MARGIN_SECONDS = 60
 
 
 def _chunk_on_line_boundaries(text: str, chunk_chars: int) -> list[str]:
@@ -83,6 +90,19 @@ class HandlerResult:
     evidence: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
     output: dict[str, Any] = field(default_factory=dict)
+
+
+class InvalidConfigError(ValueError):
+    """A step's config failed its handler's validation (see :meth:`BaseHandler.parse_config`)."""
+
+    def __init__(self, handler_id: str, errors: list[str]) -> None:
+        self.handler_id = handler_id
+        self.errors = list(errors)
+        super().__init__(f"Invalid {handler_id or 'step'} config: {'; '.join(self.errors)}")
+
+    def result(self) -> HandlerResult:
+        """The failed step result that reports these errors."""
+        return HandlerResult(success=False, error=str(self), summary="Config validation failed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,7 +351,10 @@ class BaseHandler(ABC):
     # Handler ID used for registry lookup (e.g., "checks.connectivity")
     handler_id: str = ""
 
-    # What step kinds this handler supports
+    # Step kinds the handler suits. Informational only: the platform lists
+    # them as the plugin's capabilities, and neither the engine nor the flow
+    # editor reads them. A step's ``kind`` tag is free-form and changes nothing
+    # about how the step runs (timeouts, retries, approvals).
     supported_kinds: list[StepKind] = []
 
     # Config keys that must NOT be pre-resolved by the step template engine and
@@ -355,6 +378,16 @@ class BaseHandler(ABC):
     # declare hours here; the engine also derives its heartbeat treatment from
     # it, instead of string-matching on handler ids. None -> engine default.
     default_timeout_seconds: int | None = None
+    # Config field holding the handler's own time limit for the whole step, in
+    # seconds (container.run's ``timeout_seconds``, probe.wait_reachable's
+    # ``max_wait_seconds``). The handler stops its work at that limit; the host
+    # raises the step's timeout to the limit plus ``run_timeout_margin_seconds``
+    # so the step is not cancelled first, with its output lost. Declare it only
+    # for a field the handler enforces itself and that ``config_model`` has.
+    # A per-operation limit (one command, one probe attempt) is not one.
+    run_timeout_field: str | None = None
+    # Time the handler needs past its own limit to save its output and report.
+    run_timeout_margin_seconds: int = DEFAULT_RUN_TIMEOUT_MARGIN_SECONDS
     # Which target selectors the editor offers for this handler's steps.
     targeting: HandlerTargeting = HandlerTargeting()
     # True for handlers that launch step containers on the platform's sandbox
@@ -393,8 +426,10 @@ class BaseHandler(ABC):
     # with parallel iterations, as it does for set_vars.
     node_scoped_state: bool = False
     # Pydantic model describing the handler's config: the single source for UI
-    # field rendering (JSON schema + x_widget/x_show_when extensions) and for
-    # save/run-time validation. None until a handler declares one.
+    # field rendering (JSON schema + x_widget/x_show_when extensions), for
+    # save/run-time validation, and, through :meth:`parse_config`, for the
+    # values the handler runs with. Its defaults are the handler's defaults.
+    # None until a handler declares one.
     config_model: type[BaseModel] | None = None
     # Initial config the editor seeds for a newly added step of this handler.
     default_config: dict[str, Any] = {}
@@ -427,13 +462,37 @@ class BaseHandler(ABC):
         try:
             self.config_model.model_validate(config)
         except ValidationError as exc:
-            return [
-                ".".join(str(part) for part in error["loc"]) + f": {error['msg']}"
-                if error["loc"]
-                else error["msg"]
-                for error in exc.errors()
-            ]
+            return _validation_messages(exc)
         return []
+
+    def parse_config(self, config: Mapping[str, Any], model: type[_ConfigT]) -> _ConfigT:
+        """Validate a step's config and return it parsed as ``model``.
+
+        Validates against ``model``, then runs :meth:`validate_config` (the
+        schema and any semantic checks) with each value the step set under its
+        field's current name. Read the settings from the result rather than
+        with ``ctx.config.get``: the result carries the model's defaults, its
+        type conversion (a rendered template is a string), and the old names a
+        field still accepts through ``validation_alias``. ``model`` is normally
+        :attr:`config_model`.
+
+        Raises:
+            InvalidConfigError: the config is invalid; ``exc.result()`` is the
+                failed step result that reports it.
+        """
+        from pydantic import ValidationError
+
+        raw = dict(config)
+        try:
+            parsed = model.model_validate(raw)
+        except ValidationError as exc:
+            raise InvalidConfigError(self.handler_id, _validation_messages(exc)) from None
+        # The semantic checks see each value the step set under its field's
+        # current name, so a value given under an old name is checked too.
+        errors = self.validate_config({**raw, **parsed.model_dump(include=parsed.model_fields_set)})
+        if errors:
+            raise InvalidConfigError(self.handler_id, errors)
+        return parsed
 
     def template_errors(self, config: dict[str, Any]) -> list[str]:
         """Refuse template uses in ``config`` that would be unsafe once rendered.
@@ -449,6 +508,16 @@ class BaseHandler(ABC):
             List of error messages (empty if the templates are acceptable)
         """
         return []
+
+
+def _validation_messages(exc: Any) -> list[str]:
+    """One ``loc: msg`` line per error of a pydantic ``ValidationError``."""
+    return [
+        ".".join(str(part) for part in error["loc"]) + f": {error['msg']}"
+        if error["loc"]
+        else error["msg"]
+        for error in exc.errors()
+    ]
 
 
 def command_label(command: str, max_len: int = 80) -> str:

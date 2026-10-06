@@ -43,10 +43,11 @@ latest, and a target that stops answering has its window reset to zero. Max Wait
 300): the step fails once it passes without every target completing its
 window. The step succeeds at the first moment all targets have been stable
 for the full window; expect it to take at least Stable (sec) even when
-everything is already up. Max Wait (sec) defaults to the same 300 seconds
-as the default step timeout, so give the step a timeout larger than Max
-Wait (sec); otherwise the step timeout stops the wait first, and the error
-does not name the targets that were not reachable.
+everything is already up. The step's timeout is raised to Max Wait (sec)
+plus a minute when it is shorter, so the wait ends on its own deadline and
+the error names the targets that were not reachable. Steps saved with the
+older names keep working: `max_wait` for Max Wait (sec), and `poll_interval`
+or `check_interval` for Poll Interval (sec).
 
 Each poll round checks every target, up to Max Parallel Devices at the same
 time (default 10, up to 32; 1 polls them one after another). No poll runs
