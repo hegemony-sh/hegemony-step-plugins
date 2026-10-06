@@ -162,7 +162,8 @@ class TfPlanConfig(TfContainerConfig):
             "Keep the managed state for this run from this plan until the run applies or "
             "ends: meanwhile other runs and people cannot lock or change it, so the plan "
             "stays valid while the run waits (for an approval, say). Every other flow using "
-            "the state waits that long. A plan with no changes ends the hold at once."
+            "the state waits that long. A plan with no changes, or one that fails, ends the "
+            "hold at once."
         ),
         json_schema_extra={"x_show_when": {"field": "state", "value": "managed"}},
     )
@@ -444,6 +445,8 @@ class TfPlanHandler(BaseHandler):
         state_name = config.state_name.strip() if config.state == "managed" else None
         timeout = await container_timeout(ctx, config)
 
+        # Whether the tool may have locked the state, and with that taken the hold.
+        ran_tool = False
         try:
             async with managed_state_access(
                 ctx, state_name, timeout, hold_until_apply=config.hold_until_apply
@@ -473,16 +476,27 @@ class TfPlanHandler(BaseHandler):
                     # refused by any other, and the image's tag may move.
                     pin_image=True,
                 )
+                ran_tool = True
                 outcome = await run_container_job(ctx, job)
         except (ValueError, RuntimeError) as exc:
-            return HandlerResult(
+            result = HandlerResult(
                 success=False, error=str(exc), summary="Could not prepare the plan"
             )
-        if isinstance(outcome, HandlerResult):
-            return outcome
-        result = self._result(ctx, config, image, workdir, outcome)
+        else:
+            result = (
+                outcome
+                if isinstance(outcome, HandlerResult)
+                else self._result(ctx, config, image, workdir, outcome)
+            )
+        if not result.success:
+            if state_name and config.hold_until_apply and ran_tool:
+                # No apply follows a failed plan, so none will end a hold its
+                # lock may have taken: end it now. The run holds none when the
+                # tool failed before locking, so the failure gets no note.
+                await release_state_hold(ctx, state_name, reason="the plan failed")
+            return result
         output = result.output
-        if state_name and result.success and output["state_held"] and not output["has_changes"]:
+        if state_name and output["state_held"] and not output["has_changes"]:
             # Nothing to apply, so no apply will end the hold: end it now.
             note = await release_state_hold(ctx, state_name)
             output["state_held"] = bool(note)

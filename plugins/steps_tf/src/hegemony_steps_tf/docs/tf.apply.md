@@ -56,7 +56,7 @@ the plan that was reviewed: plan again. A plan made by an older version of
 a saved plan made stale by a state change since planning: plan again (a
 `tf.plan` with Hold the state until apply keeps others from changing a
 managed state meanwhile; this step's apply ends that hold, as does a plan
-with no changes). The
+with no changes or one that fails). The
 saved plan lives in the run's shared workspace; when that workspace is gone
 (for example cleaned up after a worker restart while the run waited a long
 time for approval), the step says so: plan again. The state lock is taken

@@ -1131,6 +1131,89 @@ async def test_a_hold_that_cannot_be_ended_lasts_until_the_run_ends(monkeypatch,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exit_code", "out"),
+    [
+        # The tool failed; a lock it took holds the state for the run.
+        (1, {}),
+        # The plan ran, but whether it has changes could not be read back.
+        (0, {"plan.txt": b"plan\n"}),
+    ],
+)
+async def test_a_failed_plan_ends_its_hold(monkeypatch, exit_code, out):
+    _install_docker(monkeypatch, out=out, exit_code=exit_code)
+    services = _ReleasingServices()
+    progress: list[str] = []
+
+    async def emit(message, device_id=None, attrs=None):
+        progress.append(message)
+        return True
+
+    ctx = _ctx(_HOLD, services)
+    ctx._emit_progress = emit
+    result = await TfPlanHandler().execute(ctx)
+
+    assert result.success is False
+    assert services.held == ["core"]
+    assert services.releases == ["core"]
+    assert "Ended the run's hold on managed state 'core': the plan failed" in progress
+
+
+@pytest.mark.asyncio
+async def test_a_plan_whose_container_fails_ends_its_hold(monkeypatch):
+    async def timed_out(ctx, job):
+        return HandlerResult(
+            success=False,
+            error="Container execution timed out after 300s",
+            summary="Container timed out",
+        )
+
+    monkeypatch.setattr("hegemony_steps_tf.plan.run_container_job", timed_out)
+    services = _ReleasingServices()
+    result = await TfPlanHandler().execute(_ctx(_HOLD, services))
+    assert result.summary == "Container timed out"
+    assert services.releases == ["core"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "services",
+    [_ReleasingServices(released=False), _NoReleaseServices(), _Services()],
+)
+async def test_a_failed_plan_adds_no_note_about_a_hold(monkeypatch, services):
+    """The run may hold nothing: the tool can fail before it locks the state."""
+    _install_docker(monkeypatch, out={}, exit_code=1)
+    result = await TfPlanHandler().execute(_ctx(_HOLD, services))
+    assert result.success is False
+    assert result.summary == "tofu plan failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "config",
+    [
+        # No hold asked for.
+        {"state_name": "core"},
+        # Refused before the tool ran: no lock, no hold.
+        {**_HOLD, "state_encryption_key": "vault://orgs/acme/secrets/enc"},
+    ],
+)
+async def test_a_failed_plan_ends_no_hold_it_cannot_have(monkeypatch, config):
+    state = _install_docker(monkeypatch, out={}, exit_code=1)
+
+    class ShortKey(_ReleasingServices):
+        async def resolve_secret_ref(self, ref, *, source):
+            return "short"
+
+    services = ShortKey()
+    result = await TfPlanHandler().execute(_ctx(config, services))
+    assert result.success is False
+    assert services.releases == []
+    if "state_encryption_key" in config:
+        assert state["calls"] == []
+
+
+@pytest.mark.asyncio
 async def test_plan_step_reports_unavailable_managed_state(monkeypatch):
     state = _install_docker(monkeypatch, out={})
     services = _Services()
