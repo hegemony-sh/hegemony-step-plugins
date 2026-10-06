@@ -278,6 +278,7 @@ class TfApplyHandler(BaseHandler):
     default_timeout_seconds = 3600
     config_model = TfApplyConfig
     default_config = {"timeout_seconds": 3600}
+    run_timeout_field = "timeout_seconds"
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         errors = super().validate_config(config)
@@ -347,7 +348,7 @@ class TfApplyHandler(BaseHandler):
         # plan requires, even if the image's tag moved since.
         image = handoff.image_digest.strip() or handoff.image.strip()
         workdir = handoff.working_dir
-        timeout = container_timeout(ctx, config)
+        timeout = await container_timeout(ctx, config)
         try:
             # The saved plan names the backend but not its address or credentials:
             # managed state access is opened again for this step.

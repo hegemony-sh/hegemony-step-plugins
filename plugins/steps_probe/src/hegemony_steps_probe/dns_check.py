@@ -12,16 +12,16 @@ from typing import Any, Literal
 
 import dns.asyncresolver
 import dns.exception
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from hegemony_step_sdk import (
     MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
+    InvalidConfigError,
     StepKind,
     for_each_target_device,
-    max_parallel_from_config,
 )
 
 from .targets import (
@@ -86,7 +86,8 @@ async def resolve_records(
 class DnsProbeConfig(BaseModel):
     """Config for ``probe.dns``."""
 
-    model_config = ConfigDict(extra="allow")
+    # A number written as an expected answer (a TXT value) is its text.
+    model_config = ConfigDict(extra="allow", coerce_numbers_to_str=True)
 
     query_name: str = Field(
         default="",
@@ -119,15 +120,18 @@ class DnsProbeConfig(BaseModel):
             "x_placeholder": "192.0.2.10\n192.0.2.11",
         },
     )
-    timeout_sec: int = Field(
+    attempt_timeout_seconds: int = Field(
         default=5,
         ge=1,
+        # Steps saved before the rename carry timeout_sec.
+        validation_alias=AliasChoices("attempt_timeout_seconds", "timeout_sec"),
         title="Timeout (sec)",
         description=(
             "Overall time budget for each resolution attempt, in seconds. A "
             "lookup that has not answered in time counts as a failed attempt. "
             "Defaults to 5."
         ),
+        json_schema_extra={"x_legacy_keys": ["timeout_sec"]},
     )
     attempts: int = Field(
         default=1, ge=1, le=10, title="Attempts", description="Number of attempts (1-10)"
@@ -159,7 +163,7 @@ class DnsProbeHandler(BaseHandler):
     description = "Resolve a DNS name (or each target's hostname) and assert the answers."
     category = "Checks"
     config_model = DnsProbeConfig
-    default_config = {"record_type": "A", "timeout_sec": 5}
+    default_config = {"record_type": "A", "attempt_timeout_seconds": 5}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         target_devices = all_probe_targets(ctx)
@@ -170,21 +174,16 @@ class DnsProbeHandler(BaseHandler):
                 summary="Missing targets",
             )
 
-        configured_name = str(ctx.config.get("query_name", "") or "").strip()
-        record_type = ctx.config.get("record_type", "A")
-        resolver_ip = str(ctx.config.get("resolver", "") or "").strip()
-        bad_resolver = resolver_error(resolver_ip)
-        if bad_resolver:
-            return HandlerResult(
-                success=False, error=bad_resolver, summary="DNS check configuration error"
-            )
-        timeout_sec = ctx.config.get("timeout_sec", 5)
-        attempts = min(int(ctx.config.get("attempts", 1)), 10)
-        expected = [
-            normalize_answer(str(value))
-            for value in ctx.config.get("expected_values", []) or []
-            if str(value).strip()
-        ]
+        try:
+            config = self.parse_config(ctx.config, DnsProbeConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        configured_name = config.query_name.strip()
+        record_type = config.record_type
+        resolver_ip = config.resolver.strip()
+        timeout_sec = config.attempt_timeout_seconds
+        attempts = config.attempts
+        expected = [normalize_answer(value) for value in config.expected_values if value.strip()]
 
         if resolver_ip:
             # The system resolver is the platform's own; a chosen nameserver is
@@ -278,7 +277,7 @@ class DnsProbeHandler(BaseHandler):
         outcomes = await for_each_target_device(
             target_devices,
             _check,
-            max_parallel=max_parallel_from_config(ctx.config, default=DEFAULT_MAX_PARALLEL_TARGETS),
+            max_parallel=config.max_parallel_devices,
         )
         all_evidence, all_metrics, failed_devices = merge_outcomes(outcomes)
         success_count = sum(outcome.ok for outcome in outcomes)

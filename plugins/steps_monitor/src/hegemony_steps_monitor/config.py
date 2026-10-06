@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class ConnectivityMonitorConfig(BaseModel):
@@ -97,26 +97,34 @@ class ConnectivityMonitorConfig(BaseModel):
         ),
         json_schema_extra={"x_show_when": {"field": "schedule_mode", "value": "count"}},
     )
-    duration_sec: int = Field(
+    duration_seconds: int = Field(
         default=60,
         ge=1,
+        # Steps saved before the rename carry duration_sec.
+        validation_alias=AliasChoices("duration_seconds", "duration_sec"),
         title="Duration (sec)",
         description=(
             "How long the monitor keeps sampling, in seconds, before it "
             "stops on its own. Only used when Schedule Mode is Duration. "
             "Defaults to 60; minimum 1."
         ),
-        json_schema_extra={"x_show_when": {"field": "schedule_mode", "value": "duration"}},
+        json_schema_extra={
+            "x_show_when": {"field": "schedule_mode", "value": "duration"},
+            "x_legacy_keys": ["duration_sec"],
+        },
     )
-    timeout_sec: int = Field(
+    attempt_timeout_seconds: int = Field(
         default=10,
         ge=1,
+        # Steps saved before the rename carry timeout_sec.
+        validation_alias=AliasChoices("attempt_timeout_seconds", "timeout_sec"),
         title="Timeout (sec)",
         description=(
             "Per-sample time limit in seconds: how long each probe waits for "
             "an answer before giving up on that sample. Defaults to 10; "
             "minimum 1."
         ),
+        json_schema_extra={"x_legacy_keys": ["timeout_sec"]},
     )
     url_path: str = Field(
         default="",

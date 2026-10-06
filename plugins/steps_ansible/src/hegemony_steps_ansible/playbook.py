@@ -47,6 +47,7 @@ from hegemony_steps_container.runner import (
     resolve_secret_values,
     run_container_job,
     secret_map_errors,
+    step_container_timeout,
 )
 
 from .inventory import (
@@ -74,7 +75,7 @@ from .results import (
 #: network collections. Built from images/ansible-runner in this repository; the
 #: Images workflow publishes it for every release as X.Y.Z and X.Y, and the tag
 #: here names this release's minor version (scripts/set_version.py moves it).
-DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.18"
+DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.19"
 
 ATTACHMENTS_ROOT = "/attachments"
 ANSIBLE_ROOT = "/hegemony/ansible"
@@ -637,6 +638,7 @@ class AnsiblePlaybookHandler(BaseHandler):
     default_timeout_seconds = 1800
     config_model = AnsiblePlaybookConfig
     default_config = {"playbook": "site.yml", "timeout_seconds": 1800}
+    run_timeout_field = "timeout_seconds"
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         errors = super().validate_config(config)
@@ -820,9 +822,8 @@ class AnsiblePlaybookHandler(BaseHandler):
                     has_extra_vars=bool(config.extra_vars),
                     has_secrets=bool(secrets),
                     vault_files=vault_files,
-                    # The runner stops the container at this step's timeout.
-                    deadline=int(time.time())
-                    + int(ctx.config.get("timeout_seconds") or ctx.timeout_seconds),
+                    # The runner stops the container at this time too.
+                    deadline=int(time.time()) + step_container_timeout(ctx, config.timeout_seconds),
                 ),
                 mode=0o755,
             )

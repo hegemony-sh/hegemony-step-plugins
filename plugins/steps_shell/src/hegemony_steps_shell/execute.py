@@ -13,10 +13,11 @@ implements it) is resolved from ``device.access_config`` via
 
 import logging
 import shlex
+import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
@@ -25,10 +26,10 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
     command_label,
     for_each_target_device,
-    max_parallel_from_config,
 )
 
 from .templates import command_template_problem
@@ -37,6 +38,23 @@ logger = logging.getLogger(__name__)
 
 #: Interpreters that accept the sh-style ``env``/``-c`` wrapping.
 _SH_FAMILY = frozenset({"sh", "bash"})
+
+#: Time the step keeps, before its timeout, to close its sessions and report.
+#: A command never runs past it, whatever its own limit, so the step returns
+#: the output it has instead of being cancelled with it.
+REPORT_MARGIN_SECONDS = 10
+
+
+def command_timeout(deadline: float, limit: float) -> float | None:
+    """The time limit for the next command: ``limit``, cut to what is left before ``deadline``.
+
+    ``deadline`` is a ``time.monotonic()`` value. ``None`` when less than a
+    second is left, so the command is not started.
+    """
+    left = deadline - time.monotonic()
+    if left < 1:
+        return None
+    return min(limit, left)
 
 
 def command_template_errors(commands: Any) -> list[str]:
@@ -98,7 +116,8 @@ def build_command(
 class ShellExecuteConfig(BaseModel):
     """Config for ``shell.execute``."""
 
-    model_config = ConfigDict(extra="allow")
+    # A number written as an environment value (PORT: 8080) is its text.
+    model_config = ConfigDict(extra="allow", coerce_numbers_to_str=True)
 
     commands: list[str] = Field(
         default_factory=list,
@@ -150,16 +169,20 @@ class ShellExecuteConfig(BaseModel):
         title="Stop on first failure",
         description="Skip remaining commands on a device after a non-zero exit code",
     )
-    command_timeout_sec: int = Field(
+    command_timeout_seconds: int = Field(
         default=60,
         ge=1,
+        # Steps saved before the rename carry command_timeout_sec.
+        validation_alias=AliasChoices("command_timeout_seconds", "command_timeout_sec"),
         title="Per-command timeout (sec)",
         description=(
             "Maximum time in seconds each command may run. The limit applies to "
             "every command individually, not to the step as a whole; a command "
             "that exceeds it fails the device and its remaining commands are "
-            "skipped. Defaults to 60 seconds."
+            "skipped. A command also stops when the step's own timeout is "
+            "about to run out. Defaults to 60 seconds."
         ),
+        json_schema_extra={"x_legacy_keys": ["command_timeout_sec"]},
     )
     max_parallel_devices: int = Field(
         default=1,
@@ -195,13 +218,15 @@ class ShellExecuteHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=True, ips=False)
     config_model = ShellExecuteConfig
-    default_config = {"shell": "default", "fail_fast": True, "command_timeout_sec": 60}
+    default_config = {"shell": "default", "fail_fast": True, "command_timeout_seconds": 60}
 
     def template_errors(self, config: dict[str, Any]) -> list[str]:
         """Refuse command lines whose ``{{ }}`` values would not be single literal words."""
         return command_template_errors(config.get("commands"))
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
+        # Commands stop in time for the step to report before its timeout.
+        deadline = time.monotonic() + ctx.timeout_seconds - REPORT_MARGIN_SECONDS
         target_devices = ctx.get_target_devices()
         if not target_devices:
             return HandlerResult(
@@ -210,7 +235,11 @@ class ShellExecuteHandler(BaseHandler):
                 summary="Missing target device",
             )
 
-        commands = ctx.config.get("commands", [])
+        try:
+            config = self.parse_config(ctx.config, ShellExecuteConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        commands = config.commands
         if not commands:
             return HandlerResult(
                 success=False,
@@ -218,13 +247,8 @@ class ShellExecuteHandler(BaseHandler):
                 summary="Missing command configuration",
             )
 
-        shell = ctx.config.get("shell", "default")
-        env = ctx.config.get("env") or {}
-        fail_fast = bool(ctx.config.get("fail_fast", True))
-        command_timeout = ctx.config.get("command_timeout_sec", 60)
-
         try:
-            composed = [build_command(cmd, shell=shell, env=env) for cmd in commands]
+            composed = [build_command(cmd, shell=config.shell, env=config.env) for cmd in commands]
         except ValueError as exc:
             return HandlerResult(
                 success=False,
@@ -266,7 +290,15 @@ class ShellExecuteHandler(BaseHandler):
 
             try:
                 for original, remote_command in zip(commands, composed, strict=True):
-                    result = await transport.run(remote_command, timeout=command_timeout)
+                    timeout = command_timeout(deadline, config.command_timeout_seconds)
+                    if timeout is None:
+                        outcome.success = False
+                        outcome.errors.append(
+                            f"{device_name}: the step's timeout ran out before "
+                            f"{command_label(original)!r}"
+                        )
+                        break
+                    result = await transport.run(remote_command, timeout=timeout)
                     outcome.executed += 1
                     ok = result.exit_code == 0
                     if result.stdout:
@@ -318,7 +350,7 @@ class ShellExecuteHandler(BaseHandler):
                             f"{device_name}: exit {result.exit_code}"
                             + (f" ({first_line})" if first_line else "")
                         )
-                        if fail_fast:
+                        if config.fail_fast:
                             break
             except Exception as exc:
                 outcome.success = False
@@ -333,7 +365,7 @@ class ShellExecuteHandler(BaseHandler):
         outcomes = await for_each_target_device(
             target_devices,
             _process_device,
-            max_parallel=max_parallel_from_config(ctx.config),
+            max_parallel=config.max_parallel_devices,
         )
 
         all_evidence = [item for outcome in outcomes for item in outcome.evidence]

@@ -14,15 +14,16 @@ to propagate — when there is nothing to poll and a plain delay is enough.
 ## Using It
 
 Duration sets the wait: the step pauses exactly that many
-seconds (the editor pre-fills 30; minimum 1) and then succeeds. The wait is a plain
+seconds (default 30; minimum 1) and then succeeds. The wait is a plain
 timer — nothing is checked or polled while it runs — and the step targets
-no devices, so there is no target picker.
+no devices, so there is no target picker. The step's timeout is raised to
+the duration plus a minute when it is shorter, so a long sleep is not cut
+off. A step saved with the setting's old name, `seconds`, still works.
 
 Message is an optional note explaining why the flow is waiting, e.g.
 "Waiting for BGP to converge". It is logged when the sleep starts and
-becomes the step's summary when it completes - a blank message means a
-blank summary. Only a definition that omits the field entirely gets the
-generated "Sleeping for N seconds" text. Like other config fields it
+becomes the step's summary when it completes. A blank or omitted message
+gives the generated "Sleeping for N seconds" text. Like other config fields it
 is resolved by the step template engine first, so it can reference flow
 inputs or earlier steps, e.g. `Settling after {{ steps.NODE_ID.summary }}`.
 
@@ -36,9 +37,9 @@ captures the duration and the message.
 
 ## When It Fails
 
-The step fails before sleeping when the duration is not a positive number
-(error: "Invalid sleep duration: must be > 0"); the editor form already
-enforces the minimum of 1, so this normally only occurs in hand-edited
-flow definitions - which also fail when they omit the field, since nothing
-supplies the editor's 30-second pre-fill there. Once the wait starts, the handler imposes no timeout or
+The step fails before sleeping when the duration is not a whole number of
+at least 1 (error: "Invalid general.sleep config: ..."); the editor form
+already enforces the minimum, so this normally only occurs in hand-edited
+flow definitions or with a template that renders something else. A
+definition that omits the duration sleeps the default 30 seconds. Once the wait starts, the handler imposes no timeout or
 interruption of its own — it sleeps the full duration and succeeds.

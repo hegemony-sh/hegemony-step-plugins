@@ -57,7 +57,10 @@ interpreter — that combination is rejected before anything runs.
 "Stop on first failure" (on by default) skips a device's remaining commands
 after the first non-zero exit code; turn it off to run every command and
 collect all failures. Each command is limited by the per-command timeout
-(60 seconds by default). Max Parallel Devices controls the fan-out: 1 (the
+(60 seconds by default; steps saved with its old name,
+`command_timeout_sec`, keep working). A command also stops when the step's
+own timeout is 10 seconds away, and the remaining commands do not start, so
+the step still returns the output it has. Max Parallel Devices controls the fan-out: 1 (the
 default) processes hosts strictly one after another, higher values run up to
 that many hosts concurrently (capped at 32). Results are always aggregated in
 device order, and command output streams into the step's live log as it

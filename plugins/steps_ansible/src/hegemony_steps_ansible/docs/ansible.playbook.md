@@ -133,7 +133,7 @@ are always complete, and `results_trimmed` names what was left out.
 
 ## Execution Image
 
-The default image, `ghcr.io/hegemony-sh/ansible-runner:0.18`, bundles
+The default image, `ghcr.io/hegemony-sh/ansible-runner:0.19`, bundles
 ansible-core, ansible-pylibssh, ncclient, and the network collections the
 platform maps device platforms onto. It is built from `images/ansible-runner/`
 in the hegemony-step-plugins repository and published on ghcr.io with every
@@ -181,6 +181,8 @@ that is not a host name or IP address, a jump host has only a password or a
 host, user name or port that is not plain (a host name or IP address; a user
 name of letters, digits and `. _ @ + -`), or a secret
 resolves to nothing. The timeout covers the whole run, image pull included.
+An empty Timeout uses the step's timeout; a longer Timeout raises the
+step's timeout to fit it plus a minute.
 At the timeout the play is also stopped from inside the container (SIGTERM,
 then SIGKILL five minutes later, with the image's `timeout` command), so it
 stops even when the worker that should stop the container is gone.

@@ -1,3 +1,18 @@
+## [0.19.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.18.0...v0.19.0) (2026-10-06)
+
+### ⚠ BREAKING CHANGES
+
+* **steps:** run each step with its model's settings, and fit its own time limit
+
+### Features
+
+* **sdk:** read step settings through the model, and declare a step's own time limit ([2c98cb9](https://github.com/hegemony-sh/hegemony-step-plugins/commit/2c98cb9ac25346c44d69e2e44dfe96794f5bc153))
+
+### Bug Fixes
+
+* **sdk:** check a value given under an old name, and keep verify's wait per device ([003f081](https://github.com/hegemony-sh/hegemony-step-plugins/commit/003f081721765462e75b9b4df6d81d2bda6fe27c))
+* **steps:** run each step with its model's settings, and fit its own time limit ([b4f7c58](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b4f7c58a909e337bb2d236fdde247a7be2016527))
+
 ## [0.18.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.17.0...v0.18.0) (2026-10-06)
 
 ### ⚠ BREAKING CHANGES
