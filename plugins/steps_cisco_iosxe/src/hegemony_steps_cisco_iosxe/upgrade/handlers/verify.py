@@ -61,6 +61,16 @@ class UpgradeVerifyConfig(BaseModel):
         description="Expected version after upgrade",
         json_schema_extra={"x_placeholder": "17.09.04a"},
     )
+    preflight_version: str = Field(
+        default="",
+        title="Pre-upgrade Version (optional)",
+        description=(
+            "Version the devices ran before the upgrade, for example from the "
+            "preflight step's output. A device still running it fails: the "
+            "upgrade did not change its version. Empty skips this check."
+        ),
+        json_schema_extra={"x_placeholder": "17.06.05"},
+    )
     max_wait_seconds: int = Field(
         default=600,
         ge=60,
@@ -165,13 +175,14 @@ class UpgradeVerifyHandler(BaseHandler):
             config = self.parse_config(ctx.config, UpgradeVerifyConfig)
         except InvalidConfigError as exc:
             return exc.result()
+        # Not a setting: only the IOS-XE drivers exist. Kept for steps that name it.
         platform = ctx.config.get("platform", DEFAULT_DEVICE_PLATFORM)
         upgrade_mode = (
             UpgradeMode.BUNDLE if config.upgrade_mode == "bundle" else UpgradeMode.INSTALL
         )
 
         target_version = config.target_version or None
-        preflight_version = ctx.config.get("preflight_version")
+        preflight_version = config.preflight_version or None
         auto_commit = config.auto_commit
         max_wait_seconds = config.max_wait_seconds
         retry_interval = config.poll_interval_seconds

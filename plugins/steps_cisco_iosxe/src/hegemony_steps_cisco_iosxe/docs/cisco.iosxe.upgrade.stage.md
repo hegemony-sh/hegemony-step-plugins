@@ -32,12 +32,13 @@ file already exists under the destination name, it is verified on the
 device with `verify /md5` and, if it matches, the transfer is skipped -
 that is what makes rerunning after a partial failure cheap. A file that
 fails the check, or an existing file with no checksum to prove it, is
-transferred again (advanced: a step's raw definition may carry an
-`expected_size` - with no checksum, a size match also skips the
-transfer, a weaker guarantee than a checksum); turn on the overwrite option to force a fresh transfer
-regardless. After every transfer the checksum, when given, is verified the
-same way. Only MD5 is checked on the device - IOS-XE's `verify` offers no
-SHA-256 - so there is no SHA-256 field.
+transferred again. With no checksum, the advanced Expected Size setting
+stands in: an existing file of that size is reused, a weaker guarantee than
+a checksum, and a transferred file of another size fails the device. Turn on
+the overwrite option to force a fresh transfer regardless. After every
+transfer the checksum, when given, is verified the same way. Only MD5 is
+checked on the device - IOS-XE's `verify` offers no SHA-256 - so there is no
+SHA-256 field.
 
 The checksum is 32 hexadecimal digits; it can come from a run input as a
 `{{ }}` template, and the step checks the value once it is filled in. The
@@ -66,18 +67,18 @@ line reports how many devices were staged and how many already had the file.
 ## When It Fails
 
 The step fails immediately when both or neither image source is configured,
-when the MD5 checksum is not 32 hexadecimal digits, when the selected
-repository file cannot be resolved to a device-reachable URL, or when no
-upgrade driver exists for the configured platform and mode.
+when a setting is invalid (such as a legacy `scp` or `tftp` transfer
+method), when the MD5 checksum is not 32 hexadecimal digits, when the
+selected repository file cannot be resolved to a device-reachable URL, or
+when no upgrade driver exists for the configured platform and mode.
 Per-device failures include a missing management host, a `dir` of the
 destination that fails, a failed HTTP transfer, an image missing from `dir`
 after the transfer, a checksum the device does not confirm, a non-HTTP(S)
-source URL, a legacy `scp` or `tftp` transfer method, and SSH errors. Any
-single device failing fails the whole step, though per-device evidence is
-still recorded.
+source URL, and SSH errors. Any single device failing fails the whole step,
+though per-device evidence is still recorded.
 
 The step's default timeout is 7200 seconds, and each device-side HTTP
 transfer is capped at one hour. Rerunning after a partial failure is cheap
 when an MD5 checksum is configured: devices whose staged image verifies are
-skipped. Without a checksum, a rerun transfers the image again unless the
-raw definition's `expected_size` matches the staged file.
+skipped. Without a checksum, a rerun transfers the image again unless
+Expected Size matches the staged file.

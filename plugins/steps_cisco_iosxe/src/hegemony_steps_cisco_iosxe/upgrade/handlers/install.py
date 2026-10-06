@@ -23,9 +23,9 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
     for_each_target_device,
-    max_parallel_from_config,
 )
 
 from ..driver import UpgradeMode, get_driver
@@ -179,23 +179,21 @@ class UpgradeInstallHandler(BaseHandler):
                 summary="Missing target device",
             )
 
-        # Get parameters
+        # The model requires a non-empty Image Filename.
+        try:
+            config = self.parse_config(ctx.config, UpgradeInstallConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        # Not a setting: only the IOS-XE drivers exist. Kept for steps that name it.
         platform = ctx.config.get("platform", DEFAULT_DEVICE_PLATFORM)
-        mode_str = ctx.config.get("upgrade_mode", "install")
-        upgrade_mode = UpgradeMode.BUNDLE if mode_str.lower() == "bundle" else UpgradeMode.INSTALL
+        mode_str = config.upgrade_mode
+        upgrade_mode = UpgradeMode.BUNDLE if mode_str == "bundle" else UpgradeMode.INSTALL
 
-        image_name = ctx.config.get("image_name")
-        if not image_name:
-            return HandlerResult(
-                success=False,
-                error="image_name is required",
-                summary="Missing required parameter",
-            )
-
-        dest_fs = ctx.config.get("dest_fs", "flash:")
-        activate = ctx.config.get("activate", True)
-        commit = ctx.config.get("commit", True)
-        fix_boot_config = bool(ctx.config.get("fix_boot_config", False))
+        image_name = config.image_name
+        dest_fs = config.dest_fs
+        activate = config.activate
+        commit = config.commit
+        fix_boot_config = config.fix_boot_config
 
         # Get driver for platform
         try:
@@ -366,7 +364,7 @@ class UpgradeInstallHandler(BaseHandler):
         outcomes = await for_each_target_device(
             target_devices,
             _process_device,
-            max_parallel=max_parallel_from_config(ctx.config),
+            max_parallel=config.max_parallel_devices,
         )
 
         # Merge per-device results in device order — deterministic regardless

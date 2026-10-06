@@ -23,8 +23,10 @@ instead. Devices that only support bundle mode fail the install-mode check,
 and a device that boots packages.conf runs in install mode and fails the
 bundle-mode check.
 
-Image Filename is optional; when set, the step looks for that file on the
-destination filesystem. If the image is already present, a shortfall against
+The destination filesystem must have at least Min Free Space free (default
+1 GB, which also applies to a step that does not set it). Image Filename is
+optional; when set, the step looks for that file on the destination
+filesystem. If the image is already present, a shortfall against
 Min Free Space is downgraded from a failure to a warning: staging can
 reuse the file already there when its MD5 checksum verifies. A stage that
 re-transfers anyway - no checksum to verify, or overwrite turned on -

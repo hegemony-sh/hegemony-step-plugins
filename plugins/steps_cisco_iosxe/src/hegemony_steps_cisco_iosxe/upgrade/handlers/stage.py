@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from hegemony_step_sdk import (
     DEFAULT_DEVICE_PLATFORM,
@@ -24,9 +24,9 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
     for_each_target_device,
-    max_parallel_from_config,
 )
 
 from ..api_client import get_file_device_download_url
@@ -91,6 +91,7 @@ class UpgradeStageConfig(BaseModel):
             "x_disabled_when": {"field": "source_url", "is_not_empty": True},
         },
     )
+
     source_url: str = Field(
         default="",
         title="Source URL",
@@ -144,10 +145,22 @@ class UpgradeStageConfig(BaseModel):
             "already on the device. When off (the default), an existing file "
             "that passes the MD5 check is reused and the transfer is skipped; "
             "with no checksum configured the image is transferred again, "
-            "unless the step's raw definition carries an expected_size that "
-            "matches the existing file."
+            "unless Expected Size is set and matches the existing file."
         ),
         json_schema_extra={"x_col_span": 2},
+    )
+    expected_size: int | None = Field(
+        default=None,
+        ge=0,
+        title="Expected Size (bytes, optional)",
+        description=(
+            "Size of the image in bytes. With no MD5 checksum, a file already "
+            "staged under the destination name with this size is reused "
+            "instead of transferred again, a weaker check than the checksum. "
+            "After a transfer, a file of another size fails the device. Empty "
+            "or 0 checks no size."
+        ),
+        json_schema_extra={"x_advanced": True},
     )
     max_parallel_devices: int = Field(
         default=1,
@@ -156,6 +169,12 @@ class UpgradeStageConfig(BaseModel):
         title="Max Parallel Devices",
         description="Devices staged concurrently (1 = sequential)",
     )
+
+    @field_validator("file_ids", mode="before")
+    @classmethod
+    def _single_file_id(cls, value: Any) -> Any:
+        # One id given as text, as a rendered template gives it, is a list of one.
+        return [value] if isinstance(value, str) else value
 
 
 @dataclass
@@ -225,9 +244,13 @@ class UpgradeStageHandler(BaseHandler):
                 ),
                 summary="Unsupported expected_sha256 configuration",
             )
+        try:
+            config = self.parse_config(ctx.config, UpgradeStageConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
         # The value is also sent to the device in "verify /md5", so a rendered
         # template must still be a plain MD5 hash.
-        expected_md5 = str(ctx.config.get("expected_md5") or "").strip() or None
+        expected_md5 = config.expected_md5.strip() or None
         if expected_md5 and not _MD5_RE.fullmatch(expected_md5):
             return HandlerResult(
                 success=False,
@@ -243,20 +266,15 @@ class UpgradeStageHandler(BaseHandler):
                 summary="Missing target device",
             )
 
-        # Get parameters
+        # Not a setting: only the IOS-XE drivers exist. Kept for steps that name it.
         platform = ctx.config.get("platform", DEFAULT_DEVICE_PLATFORM)
-        mode_str = ctx.config.get("upgrade_mode", "install")
-        upgrade_mode = UpgradeMode.BUNDLE if mode_str.lower() == "bundle" else UpgradeMode.INSTALL
+        upgrade_mode = (
+            UpgradeMode.BUNDLE if config.upgrade_mode == "bundle" else UpgradeMode.INSTALL
+        )
 
-        source_url = ctx.config.get("source_url")
-        dest_filename = ctx.config.get("dest_filename")
-        file_ids_raw = ctx.config.get("file_ids")
-
-        file_ids: list[str] = []
-        if isinstance(file_ids_raw, list):
-            file_ids = [str(v).strip() for v in file_ids_raw if str(v).strip()]
-        elif isinstance(file_ids_raw, str) and file_ids_raw.strip():
-            file_ids = [file_ids_raw.strip()]
+        source_url = config.source_url
+        dest_filename = config.dest_filename
+        file_ids = [file_id.strip() for file_id in config.file_ids if file_id.strip()]
 
         if source_url and file_ids:
             return HandlerResult(
@@ -294,10 +312,10 @@ class UpgradeStageHandler(BaseHandler):
                 summary="Missing required parameters",
             )
 
-        dest_fs = ctx.config.get("dest_fs", "flash:")
-        transfer_method = ctx.config.get("transfer_method", "auto")
-        expected_size = ctx.config.get("expected_size")
-        overwrite = ctx.config.get("overwrite", False)
+        dest_fs = config.dest_fs
+        transfer_method = config.transfer_method
+        expected_size = config.expected_size
+        overwrite = config.overwrite
 
         # Get driver for platform
         try:
@@ -474,7 +492,7 @@ class UpgradeStageHandler(BaseHandler):
         outcomes = await for_each_target_device(
             target_devices,
             _process_device,
-            max_parallel=max_parallel_from_config(ctx.config),
+            max_parallel=config.max_parallel_devices,
         )
 
         # Merge per-device results in device order — deterministic regardless
