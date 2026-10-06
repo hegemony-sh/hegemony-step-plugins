@@ -739,6 +739,11 @@ class _TlsRun:
         included, must finish within the attempt timeout: the client's own
         timeouts bound each read, which a responder that trickles its answer
         never trips.
+
+        Only an uncompressed body is read, as the bytes that arrive, so the
+        limits bound what the step holds: a compressed one could expand to
+        many times its size before any limit saw it. The request asks for
+        no compression, and a response compressed anyway is refused unread.
         """
         if self.client is None:
             raise _FetchError("the revocation client is not open")
@@ -749,13 +754,23 @@ class _TlsRun:
             async with (
                 asyncio.timeout(self.timeout),
                 self.client.stream(
-                    method, url, content=content, headers=headers, extensions={_EGRESS_KIND: kind}
+                    method,
+                    url,
+                    content=content,
+                    headers={**(headers or {}), "Accept-Encoding": "identity"},
+                    extensions={_EGRESS_KIND: kind},
                 ) as response,
             ):
                 if response.status_code != 200:
                     raise _FetchError(f"HTTP {response.status_code} from {url}")
+                compression = _compression(response)
+                if compression is not None:
+                    raise _FetchError(
+                        f"the server sent a {compression}-compressed response; "
+                        "only uncompressed responses are read"
+                    )
                 total = 0
-                async for chunk in response.aiter_bytes():
+                async for chunk in response.aiter_raw():
                     total += len(chunk)
                     if total > limit:
                         raise _FetchError(f"response from {url} exceeds {limit} bytes")
@@ -956,6 +971,16 @@ class _TlsRun:
 def _unreadable_reason(exc: BaseException) -> str:
     """The endpoint error for a certificate the checks cannot read."""
     return f"cannot read the certificate: {exc}"
+
+
+def _compression(response: httpx.Response) -> str | None:
+    """The content codings ``response`` applied to its body, or None when it is sent as is."""
+    codings = (
+        coding.strip().lower()
+        for coding in response.headers.get_list("Content-Encoding", split_commas=True)
+    )
+    applied = [coding for coding in codings if coding and coding != "identity"]
+    return ", ".join(applied) or None
 
 
 def _http_reason(exc: BaseException) -> str:

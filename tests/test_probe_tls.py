@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gzip
 import ipaddress
 import socket
 import ssl
@@ -39,6 +40,7 @@ from cryptography.x509.oid import (
     ExtensionOID,
     NameOID,
 )
+from httpx import _decoders
 
 from hegemony_step_sdk import MAX_PARALLEL_DEVICES_LIMIT, HandlerContext, HandlerServices
 from hegemony_step_sdk.docs import check_page, load_docs_bundle
@@ -513,6 +515,48 @@ async def trickling_http_server(seconds: float) -> AsyncIterator[int]:
     server = await asyncio.start_server(trickle, "127.0.0.1", 0)
     try:
         yield server.sockets[0].getsockname()[1]
+    finally:
+        server.close()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(server.wait_closed(), 2)
+
+
+@dataclass
+class FixedHttpServer:
+    """A running :func:`fixed_http_server`: its port and each request's headers, lower-cased."""
+
+    port: int
+    requests: list[dict[str, str]] = field(default_factory=list)
+
+
+@contextlib.asynccontextmanager
+async def fixed_http_server(headers: dict[str, str], body: bytes) -> AsyncIterator[FixedHttpServer]:
+    """An HTTP server answering every request 200 with ``headers`` and ``body``, whatever it asked."""
+    state = FixedHttpServer(port=0)
+
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(Exception):
+            head = await reader.readuntil(b"\r\n\r\n")
+            seen: dict[str, str] = {}
+            for line in head.decode("latin-1").split("\r\n")[1:]:
+                name, sep, value = line.partition(":")
+                if sep:
+                    seen[name.strip().lower()] = value.strip()
+            state.requests.append(seen)
+            await reader.readexactly(int(seen.get("content-length") or 0))
+            extra = "".join(f"{name}: {value}\r\n" for name, value in headers.items())
+            writer.write(
+                f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n{extra}"
+                "Connection: close\r\n\r\n".encode()
+            )
+            writer.write(body)
+            await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(answer, "127.0.0.1", 0)
+    state.port = server.sockets[0].getsockname()[1]
+    try:
+        yield state
     finally:
         server.close()
         with contextlib.suppress(Exception):
@@ -1575,6 +1619,74 @@ async def test_the_attempt_timeout_bounds_each_revocation_request_as_a_whole(pki
         "downloading the CRL failed: timed out after 1s",
     )
     assert elapsed < 4.0
+
+
+async def _revocation_record(pki: Pki, server: FixedHttpServer) -> dict[str, Any]:
+    """The record of a pasted leaf whose OCSP responder and CRL are both on ``server``."""
+    leaf = issue(
+        "fetched.example.test",
+        ec.generate_private_key(ec.SECP256R1()),
+        issuer=pki.inter,
+        issuer_key=pki.inter_key,
+        ocsp_url=f"http://127.0.0.1:{server.port}/ocsp",
+        crl_url=f"http://127.0.0.1:{server.port}/inter.crl",
+    )
+    async with asyncio.timeout(30):
+        result = await run_step(
+            {
+                "pem": pem_of(leaf, pki.inter),
+                "ca_bundle": pki.root_pem,
+                "check_ocsp": True,
+                "check_crl": True,
+            }
+        )
+    [record] = result.output["endpoints"]
+    return record
+
+
+async def test_a_compressed_revocation_response_is_refused_without_decoding(pki, monkeypatch):
+    """A small gzip body that expands far past the limits is never expanded."""
+    decoded: list[int] = []
+    real_decode = _decoders.GZipDecoder.decode
+
+    def decode(self: _decoders.GZipDecoder, data: bytes) -> bytes:
+        output = real_decode(self, data)
+        decoded.append(len(output))
+        return output
+
+    monkeypatch.setattr(_decoders.GZipDecoder, "decode", decode)
+    body = gzip.compress(bytes(32 * 1024 * 1024))
+    assert len(body) < tls_check.MAX_FETCH_BYTES
+    async with fixed_http_server({"Content-Encoding": "gzip"}, body) as server:
+        record = await _revocation_record(pki, server)
+    refused = "the server sent a gzip-compressed response; only uncompressed responses are read"
+    assert (record["ocsp"], record["ocsp_detail"]) == (
+        "error",
+        f"OCSP request to http://127.0.0.1:{server.port}/ocsp failed: {refused}",
+    )
+    assert (record["crl"], record["crl_detail"]) == (
+        "error",
+        f"downloading the CRL failed: {refused}",
+    )
+    assert decoded == []
+    # Both requests asked for an uncompressed answer; the server ignored that.
+    assert [request.get("accept-encoding") for request in server.requests] == ["identity"] * 2
+
+
+@pytest.mark.parametrize("headers", [{}, {"Content-Encoding": "identity"}])
+async def test_an_uncompressed_revocation_response_past_its_limit_is_an_error(pki, headers):
+    body = bytes(tls_check.MAX_FETCH_BYTES + 1)
+    async with fixed_http_server(headers, body) as server:
+        record = await _revocation_record(pki, server)
+    url = f"http://127.0.0.1:{server.port}/ocsp"
+    assert (record["ocsp"], record["ocsp_detail"]) == (
+        "error",
+        f"OCSP request to {url} failed: response from {url} exceeds "
+        f"{tls_check.MAX_FETCH_BYTES} bytes",
+    )
+    # The same body fits a CRL's larger limit, so it is read and fails to parse.
+    assert record["crl"] == "error"
+    assert record["crl_detail"].startswith("the CRL cannot be parsed")
 
 
 # --- Configuration -------------------------------------------------------------

@@ -101,7 +101,11 @@ shared by every endpoint whose issuer names it; a list that fails these
 checks is not kept, only the reason. All downloads of one step together, OCSP
 responses, issuer certificates and CRLs, stop at 64 MiB: a request past that
 is an `error` (or, for an issuer certificate, `unavailable`) for its
-endpoint, saying the step reached its download limit. Like Check OCSP, it
+endpoint, saying the step reached its download limit. Every OCSP request and
+download asks for an uncompressed response and counts the bytes as they
+arrive against these limits; a response the server compresses anyway (with
+gzip, for instance) is refused without being expanded, with the same result
+for its endpoint. Like Check OCSP, it
 checks the server certificate, not the CAs above it; `crl_next_update` says
 when the issuer publishes its next list, which a flow can watch to catch a CA
 that stopped publishing. An OCSP response or CRL the step cannot read, such
