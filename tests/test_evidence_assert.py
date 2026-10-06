@@ -13,6 +13,8 @@ neighbor row contains 'Full'" does not.
 
 from __future__ import annotations
 
+import pytest
+
 from hegemony_steps_evidence.assert_check import AssertHandler
 
 # FRR-style neighbor table: header + one row per adjacency, rows keyed by the
@@ -53,6 +55,66 @@ class TestNegativeOperators:
             is False
         )
         assert handler._compare_values(123, r"\d+", "not_matches")[0] is False
+
+
+_VERSION_LINE = "Cisco IOS XE Software, Version 17.09.04a"
+
+
+class TestOrderingOperators:
+    def test_numbers_compare_as_numbers(self) -> None:
+        handler = _handler()
+        # As text, '9' sorts after '10'.
+        assert handler._compare_values("10", "9", "gt")[0] is True
+        assert handler._compare_values(" 9\n", "10", "lt")[0] is True
+        assert handler._compare_values("17.9", "17.9", "ge")[0] is True
+        assert handler._compare_values("17.9", "17.9", "le")[0] is True
+        passed, msg = handler._compare_values("17.3", "17.9", "ge")
+        assert passed is False
+        assert msg == "Expected >= 17.9, got 17.3"
+
+    @pytest.mark.parametrize("operator", ["gt", "lt", "ge", "le"])
+    def test_output_that_is_not_a_number_fails(self, operator: str) -> None:
+        # Compared as text, the version line sorts after '17.9' whatever the
+        # version, so ge and gt passed for any version and le and lt never did.
+        passed, msg = _handler()._compare_values(_VERSION_LINE, "17.9", operator)
+        assert passed is False
+        assert msg.endswith(f"but the collected value '{_VERSION_LINE}' is not a number")
+
+    def test_an_expected_value_that_is_not_a_number_fails(self) -> None:
+        passed, msg = _handler()._compare_values("17", "17.9a", "ge")
+        assert passed is False
+        assert msg == "Expected >= 17.9a, but the expected value '17.9a' is not a number"
+
+    def test_both_values_that_are_not_numbers_are_named(self) -> None:
+        passed, msg = _handler()._compare_values("abc", "abd", "lt")
+        assert passed is False
+        assert msg == (
+            "Expected < abd, but the expected value 'abd' is not a number "
+            "and the collected value 'abc' is not a number"
+        )
+
+    def test_line_scope_says_when_a_line_is_not_a_number(self) -> None:
+        passed, msg, detail = _handler()._assert_content(
+            "uptime_days 42\n17\n", "10", "ge", "lines", "", 1
+        )
+        assert passed is False
+        assert msg == (
+            "1/2 selected line(s) failed ge '10'; first: 'uptime_days 42', which is not a number"
+        )
+        assert detail["lines_passed"] == 1
+
+    def test_line_scope_says_when_the_expected_value_is_not_a_number(self) -> None:
+        passed, msg, _ = _handler()._assert_content("17\n18\n", "v17", "ge", "lines", "", 1)
+        assert passed is False
+        assert msg == (
+            "2/2 selected line(s) failed ge 'v17'; first: '17'; "
+            "the expected value 'v17' is not a number"
+        )
+
+    def test_line_scope_numeric_failure_adds_no_note(self) -> None:
+        passed, msg, _ = _handler()._assert_content("17\n9\n", "10", "ge", "lines", "", 1)
+        assert passed is False
+        assert msg == "1/2 selected line(s) failed ge '10'; first: '9'"
 
 
 class TestOutputScope:
@@ -430,7 +492,9 @@ class _RunApi:
         return {"artifacts": self.artifacts}
 
 
-async def _run_assert(api: _RunApi, command: str, expected: str, devices: list[dict]):
+async def _run_assert(
+    api: _RunApi, command: str, expected: str, devices: list[dict], operator: str = "contains"
+):
     from typing import cast
 
     from hegemony_step_sdk import HandlerContext, HandlerServices
@@ -444,7 +508,7 @@ async def _run_assert(api: _RunApi, command: str, expected: str, devices: list[d
             "artifact_step_id": "collect",
             "target_role": "core",
             "command": command,
-            "operator": "contains",
+            "operator": operator,
             "expected": expected,
         },
         target_roles=["core"],
@@ -474,6 +538,19 @@ async def test_assert_fails_when_the_command_was_not_collected() -> None:
     result = await _assert_command(_collected("collect", {_LONG_A: "x"}), _LONG_B, "x")
     assert result.success is False
     assert "could not fetch artifact content" in (result.error or "")
+
+
+@pytest.mark.parametrize("operator", ["gt", "ge"])
+async def test_assert_does_not_order_a_version_line_as_text(operator: str) -> None:
+    command = "show version | include Version"
+    artifacts = _collected("collect", {command: _VERSION_LINE})
+    result = await _run_assert(_RunApi(artifacts), command, "17.9", [_R1], operator)
+    assert result.success is False
+    assert result.error == (
+        f"r1:{command}: Expected {'>' if operator == 'gt' else '>='} 17.9, "
+        f"but the collected value '{_VERSION_LINE}' is not a number"
+    )
+    assert result.evidence[0]["content_json"]["passed"] is False
 
 
 _DEVICES = [{"id": f"d{n}", "name": f"r{n}"} for n in (1, 2, 3)]

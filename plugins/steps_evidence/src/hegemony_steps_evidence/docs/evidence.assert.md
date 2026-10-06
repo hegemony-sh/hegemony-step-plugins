@@ -26,8 +26,11 @@ device is the one asserted.
 
 The Operator (default Contains) compares the content with the Expected
 Value / Pattern. The regex operators treat the expected value as a regular
-expression; the ordering operators compare numerically when both sides parse
-as numbers and as text otherwise. Very large artifacts are truncated to
+expression. The ordering operators compare numbers only: the expected value
+and the compared content (the whole output, or each selected line) must each
+be a number such as `42` or `17.9`, and the assertion fails when either is
+not. A version string such as `17.09.04a`, or a line that holds more than
+the number, is not a number. Very large artifacts are truncated to
 their first million characters - by the regex operators in whole-output
 scope, and by every operator in line scope.
 
@@ -59,9 +62,11 @@ The step succeeds only when every checked artifact satisfies the assertion.
 It fails when the chosen target is not bound to any device, when no artifact
 names can be resolved from the configuration, or when any artifact fails the
 comparison; the error lists each failing artifact unless a Custom Message
-replaces it. An artifact that cannot be fetched from the run (the fetch uses
-a 30-second API timeout) counts as a failure for that artifact while the
-remaining artifacts are still checked. In line scope the step also fails
-when the artifact is not text, when the Line Filter regex is invalid, or
-when fewer than Minimum Lines lines are selected. Evidence records are
-written for the artifacts that were compared even when the step fails.
+replaces it. An ordering operator fails when the expected value or the
+compared content is not a number, and the error says which. An artifact
+that cannot be fetched from the run (the fetch uses a 30-second API
+timeout) counts as a failure for that artifact while the remaining
+artifacts are still checked. In line scope the step also fails when the
+artifact is not text, when the Line Filter regex is invalid, or when fewer
+than Minimum Lines lines are selected. Evidence records are written for the
+artifacts that were compared even when the step fails.

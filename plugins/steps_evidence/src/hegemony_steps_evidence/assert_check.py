@@ -29,6 +29,17 @@ logger = logging.getLogger(__name__)
 # this much text, so a catastrophic pattern cannot stall the worker.
 _MAX_REGEX_INPUT_CHARS = 1_000_000
 
+#: The ordering operators and the symbols their messages show.
+_ORDERING_SYMBOLS = {"gt": ">", "lt": "<", "ge": ">=", "le": "<="}
+
+
+def _number(value: Any) -> float | None:
+    """``value`` read as a number; None when it is not one."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 
 class AssertConfig(BaseModel):
     """Config for ``evidence.assert``.
@@ -56,8 +67,8 @@ class AssertConfig(BaseModel):
         description=(
             "How the artifact content is compared with the expected value. "
             "Regex operators treat the expected value as a regular expression; "
-            "ordering operators compare numerically when both sides parse as "
-            "numbers, and as text otherwise. Defaults to Contains."
+            "ordering operators compare numbers and fail when either side is "
+            "not a number. Defaults to Contains."
         ),
         json_schema_extra={
             "x_option_labels": {
@@ -484,10 +495,17 @@ class AssertHandler(BaseHandler):
 
         if first_failed is not None:
             detail["first_failed_line"] = first_failed
+            # Ordering operators compare numbers only; say when that is why.
+            not_a_number = ""
+            if operator in _ORDERING_SYMBOLS:
+                if _number(expected) is None:
+                    not_a_number = f"; the expected value '{expected}' is not a number"
+                elif _number(first_failed) is None:
+                    not_a_number = ", which is not a number"
             return (
                 False,
                 f"{len(selected) - lines_passed}/{len(selected)} selected line(s) "
-                f"failed {operator} '{expected}'; first: '{first_failed}'",
+                f"failed {operator} '{expected}'; first: '{first_failed}'{not_a_number}",
                 detail,
             )
         return True, "", detail
@@ -501,17 +519,23 @@ class AssertHandler(BaseHandler):
             elif operator == "ne":
                 passed = actual != expected
                 msg = f"Expected not {expected}, got {actual}"
-            elif operator in ("gt", "lt", "ge", "le"):
-                # Attempt numeric coercion for ordering comparisons;
-                # only use floats if *both* values convert successfully.
-                try:
-                    num_actual: Any = float(actual)
-                    num_expected: Any = float(expected)
-                except (TypeError, ValueError):
-                    # Fall back to original values (string comparison)
-                    num_actual = actual
-                    num_expected = expected
-                if operator == "gt":
+            elif operator in _ORDERING_SYMBOLS:
+                # Ordering compares numbers only: as text, output that starts
+                # with a letter ('Cisco IOS XE Software, Version 17.09.04a')
+                # sorts after '17.9', whatever the version.
+                num_actual = _number(actual)
+                num_expected = _number(expected)
+                if num_actual is None or num_expected is None:
+                    passed = False
+                    msg = f"Expected {_ORDERING_SYMBOLS[operator]} {expected}, but " + " and ".join(
+                        f"the {side} value '{value}' is not a number"
+                        for side, value, number in (
+                            ("expected", expected, num_expected),
+                            ("collected", actual, num_actual),
+                        )
+                        if number is None
+                    )
+                elif operator == "gt":
                     passed = num_actual > num_expected
                     msg = f"Expected > {expected}, got {actual}"
                 elif operator == "lt":
