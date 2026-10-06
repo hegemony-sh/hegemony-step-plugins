@@ -266,7 +266,7 @@ def _restore(dir_fd: int, quarantine: str, name: str) -> str:
     return "left in place"
 
 
-def _scrub_one(root_fd: int, source: SourceFile) -> None:
+def _scrub_one(root_fd: int, source: SourceFile) -> str | None:
     """Overwrite and remove one source file, touching no file but the one read.
 
     The directory entry is first renamed to a private name in the same
@@ -275,6 +275,11 @@ def _scrub_one(root_fd: int, source: SourceFile) -> None:
     following links and must be the file read (same device, inode, size and
     modification time); only then is it overwritten and unlinked. Anything
     else found under the private name is put back.
+
+    Returns why the file was deleted without being overwritten, or None. A
+    file this worker may not write (one a container's root user wrote, say)
+    is opened for reading to check it is the file read, then deleted; so is
+    one whose overwriting fails.
     """
     label = f"file {source.path!r}"
     dir_fd, name = _open_parent(root_fd, source.path, label)
@@ -284,25 +289,34 @@ def _scrub_one(root_fd: int, source: SourceFile) -> None:
             os.rename(name, quarantine, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except FileNotFoundError:
             raise WorkspaceError(f"{label} is already gone") from None
+        flags = _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC
+        not_overwritten: str | None = None
         try:
-            fd = os.open(
-                quarantine, os.O_WRONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC, dir_fd=dir_fd
-            )
+            fd = os.open(quarantine, os.O_WRONLY | flags, dir_fd=dir_fd)
+        except PermissionError as exc:
+            not_overwritten = f"deleted without being overwritten ({_reason(exc)})"
+            try:
+                fd = os.open(quarantine, os.O_RDONLY | flags, dir_fd=dir_fd)
+            except OSError:
+                outcome = _restore(dir_fd, quarantine, name)
+                raise WorkspaceError(
+                    f"{label} cannot be opened ({_reason(exc)}); {outcome}"
+                ) from None
         except OSError:
             # Not a regular file any more (a link, a directory, a FIFO).
             outcome = _restore(dir_fd, quarantine, name)
             raise WorkspaceError(f"{label} changed since it was read; {outcome}") from None
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or _identity(info) != source.identity:
-                mismatch = True
-            else:
-                mismatch = False
-                # A file with other names (hard links) keeps its content under
-                # them; overwriting it would change those too, so it is only
-                # unlinked.
-                if info.st_nlink <= 1:
+            mismatch = not stat.S_ISREG(info.st_mode) or _identity(info) != source.identity
+            # A file with other names (hard links) keeps its content under
+            # them; overwriting it would change those too, so it is only
+            # unlinked.
+            if not mismatch and not_overwritten is None and info.st_nlink <= 1:
+                try:
                     _write_zeros(fd, info.st_size)
+                except OSError as exc:
+                    not_overwritten = f"deleted, but overwriting it failed ({_reason(exc)})"
         finally:
             os.close(fd)
         if mismatch:
@@ -311,26 +325,39 @@ def _scrub_one(root_fd: int, source: SourceFile) -> None:
         try:
             os.unlink(quarantine, dir_fd=dir_fd)
         except OSError as exc:
+            done = "neither overwritten nor" if not_overwritten else "overwritten but not"
             raise WorkspaceError(
-                f"{label} was overwritten but not removed ({_reason(exc)}); it is left as "
-                f"{quarantine!r}"
+                f"{label} was {done} removed ({_reason(exc)}); it is left as {quarantine!r}"
             ) from None
+        return not_overwritten
     finally:
         if dir_fd != root_fd:
             os.close(dir_fd)
 
 
-def scrub_source_files(root: str, sources: Sequence[SourceFile]) -> dict[str, str]:
+@dataclass(frozen=True, slots=True)
+class ScrubReport:
+    """What :func:`scrub_source_files` could not do, by path in the workspace; no content."""
+
+    #: ``{path: reason}`` for every source file left in the workspace.
+    not_removed: dict[str, str] = field(default_factory=dict)
+    #: ``{path: reason}`` for every source file deleted although overwriting
+    #: it first was refused or failed. A file with other names (hard links)
+    #: is never overwritten, and not listed for that.
+    not_overwritten: dict[str, str] = field(default_factory=dict)
+
+
+def scrub_source_files(root: str, sources: Sequence[SourceFile]) -> ScrubReport:
     """Overwrite each source file with zeros, then unlink it. Best effort.
 
     Not a secure wipe: a copy-on-write or journaling file system, a snapshot,
     or a backup may still hold the old bytes. A file that changed since it was
     read (another inode at the path) is left alone, and so is any file written
-    at the path while the step removes it (see :func:`_scrub_one`). Returns
-    ``{path: reason}`` for every file not removed; an empty dict means all are
-    gone.
+    at the path while the step removes it (see :func:`_scrub_one`). The report
+    names every file not removed, and every file deleted without being
+    overwritten; an empty report means all were overwritten and are gone.
     """
-    failures: dict[str, str] = {}
+    report = ScrubReport()
     try:
         _require_safe_open()
         if os.rename not in os.supports_dir_fd:
@@ -340,7 +367,8 @@ def scrub_source_files(root: str, sources: Sequence[SourceFile]) -> dict[str, st
             )
         root_fd = _open_root(root)
     except WorkspaceError as exc:
-        return {source.path: str(exc) for source in sources}
+        report.not_removed.update((source.path, str(exc)) for source in sources)
+        return report
     try:
         done: set[str] = set()
         for source in sources:
@@ -348,11 +376,16 @@ def scrub_source_files(root: str, sources: Sequence[SourceFile]) -> dict[str, st
                 continue
             done.add(source.path)
             try:
-                _scrub_one(root_fd, source)
+                not_overwritten = _scrub_one(root_fd, source)
             except WorkspaceError as exc:
-                failures[source.path] = str(exc)
+                report.not_removed[source.path] = str(exc)
             except OSError as exc:
-                failures[source.path] = f"file {source.path!r} not removed ({_reason(exc)})"
+                report.not_removed[source.path] = (
+                    f"file {source.path!r} not removed ({_reason(exc)})"
+                )
+            else:
+                if not_overwritten:
+                    report.not_overwritten[source.path] = not_overwritten
     finally:
         os.close(root_fd)
-    return failures
+    return report

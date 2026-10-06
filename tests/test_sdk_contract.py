@@ -145,17 +145,6 @@ def test_the_secret_store_defaults_say_a_host_does_not_support_them():
             raise AssertionError("a host without support must raise NotImplementedError")
 
 
-def test_a_host_without_the_secret_store_methods_lacks_them():
-    """What a handler sees on a host older than the secret services: no attribute."""
-
-    class _OldHost:
-        async def resolve_secret_ref(self, ref, *, source):  # pragma: no cover - not called
-            return None
-
-    for name in ("read_secret", "write_secret", "delete_secret"):
-        assert getattr(_OldHost(), name, None) is None
-
-
 def test_secret_write_result_carries_names_and_the_reference_only():
     """The result names what was stored; it has no field a value could travel in."""
     assert [f.name for f in dataclasses.fields(sdk.SecretWriteResult)] == [

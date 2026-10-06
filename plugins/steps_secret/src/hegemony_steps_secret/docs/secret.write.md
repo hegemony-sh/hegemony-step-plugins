@@ -21,8 +21,9 @@ Secret path names the secret under the organization's secret root, such as
 most 256 characters, with no leading `/`, no empty segment and no segment
 starting with `.` (so no `..`). A secret reference such as `vault://...` is
 refused here, because the platform builds the backend path itself. The path
-may use templates, for example `certs/{{ inputs.site }}`; it is checked again
-once rendered.
+may use templates with the step's variables, for example
+`certs/{{ inputs.site }}`; it is checked again once rendered. So may Keep
+previous values at, Swap with and the files in Keys from files.
 
 Operation picks what the step does:
 
@@ -61,8 +62,11 @@ plain copy does not outlive the step. The step first moves the file to a
 private name and checks it is the file it read, so a file a container writes
 at the same path meanwhile is never touched. This is best effort, not a secure wipe:
 a copy-on-write file system, a snapshot or a backup can still hold the old
-bytes. A file with other hard links is deleted without being overwritten. A
-file that cannot be deleted does not fail the step; the summary and the
+bytes. A file with other hard links is deleted without being overwritten. So
+is a file the worker may delete but not write (one a container's root user
+wrote, say), after the step checked it is the file it read, and a file whose
+overwriting fails. A file that cannot be deleted, or is deleted without being
+overwritten for either reason, does not fail the step; the summary and the
 evidence say which.
 
 ### Keys from values
@@ -74,6 +78,13 @@ Each line `KEY=value` is one of:
 - a template, such as `{{ secret('vault://orgs/acme/secrets/db/password') }}`,
   rendered by the platform;
 - anything else: a literal, stored exactly as written.
+
+Keys from values reaches the step as written, and each value is resolved on
+its own: a template here is rendered without the step's variables, so it can
+read a secret but not a run input or another step's output. A value is
+resolved only once, so a secret whose value looks like a template or a
+reference is stored as is. The path fields are different: the platform
+renders them with the step's variables before the step runs.
 
 Text shaped like `scheme://...` is always read as a reference, so a URL
 cannot be stored as a literal: store it in a secret backend and reference it.
@@ -94,6 +105,14 @@ held, so a later step can swap them back. Nothing is copied when no secret
 exists at Secret path yet; the summary says so. It must differ from Secret
 path.
 
+A step run again after a failure keeps the copy it made before: when Secret
+path already holds exactly what the step writes (every key written has the
+same value and, with Keep other keys off, no other key is there) and a secret
+exists at Keep previous values at, the step does not copy again, since that
+would replace the previous keys with the new ones. The summary then says the
+previous keys were kept by an earlier attempt, and `previous_path` names
+where they are.
+
 ## Output
 
 Later steps read the step's output as `steps.NODE_ID.output.KEY`:
@@ -113,15 +132,18 @@ Later steps read the step's output as `steps.NODE_ID.output.KEY`:
 
 Every key is present when the step fails too. Then `reference` is null,
 `keys` is empty and the flags are false, while `operation` and `path` name
-what was asked (null when the config itself was refused), and
-`previous_path` names where the previous keys were copied if that happened
-before the failure.
+what was asked, even when the config was refused for another reason; each is
+null only when the config gives no usable value for it (an unknown
+operation, a missing or empty path). `previous_path` names where the
+previous keys were copied if that happened before the failure.
 
 Metrics record `keys`, the number of keys written (for a swap, the keys now
 at Secret path), and for files `source_files` and `source_files_deleted`.
 One `step_result` evidence record, named `secret_OPERATION_STEPID`, holds the
 same fields plus which keys came from files and which from values, the file
-encoding, the source files and those that could not be deleted.
+encoding, the source files, those that could not be deleted and those
+deleted without being overwritten. After a swap that the platform reported
+as failed but both secrets show finished, it also holds that error.
 
 The step never outputs a secret value or a file's content: not in its
 output, evidence, summary or error.
@@ -149,12 +171,25 @@ path; a link, a path that leads out of the workspace, and anything but a
 regular file are refused. A container that wrote the workspace cannot make
 the step read the worker's own files.
 
-A swap is two writes, not one atomic change. When the second write fails,
-the step writes the first secret's original keys back and fails, so both
-hold what they held before; if that restore fails too, the error says which
-secret now holds what, to be put right by hand. Something else writing
-either secret during the swap can be overwritten, as it can during Keep
-other keys, which the platform carries out as a read followed by a write.
+A swap is two writes, not one atomic change, and a write the platform
+reports as failed may have been stored all the same (the store committed and
+then timed out, say). So when a write fails, the step reads both secrets
+back and goes by what they hold:
+
+- both hold the swapped keys: the swap is done, and the step succeeds; the
+  summary says the platform reported an error;
+- both hold their original keys: nothing changed, and the step fails;
+- one secret was written and the other not: the step writes the original
+  keys it read before the swap back to the written one and fails, saying so,
+  with both holding what they held before;
+- anything else, a restore that fails too, or secrets that cannot be read
+  back: the step fails, and the error says which secret holds (or may hold)
+  which keys, and whose original keys are stored at neither path, to be put
+  right by hand.
+
+Something else writing either secret during the swap can be overwritten, as
+it can during Keep other keys, which the platform carries out as a read
+followed by a write.
 
 ## When It Fails
 
@@ -178,5 +213,8 @@ the allowed prefixes, a read-only backend), rejects a path, or cannot reach
 the secret store. All files and values are read and resolved before the
 first write, so a failure there changes nothing. When copying the previous
 keys succeeded and the write itself then fails, the error says the previous
-keys were already copied. A delete fails when no secret exists and Succeed
-when absent is off.
+keys were already copied. A write or delete the platform reports as failed
+may have been carried out all the same; running the step again is safe, and
+keeps the previous keys copied the first time (see Keep previous values at).
+A delete fails when no secret exists and Succeed when absent is off. How a
+failed swap ends is described under Security.

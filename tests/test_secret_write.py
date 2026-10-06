@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import errno
 import json
 import os
 from pathlib import Path
 from typing import Any, cast
 
+import pydantic
 import pytest
 
 from hegemony_step_sdk import (
@@ -32,6 +34,7 @@ from hegemony_steps_secret import ALL_HANDLERS, register
 from hegemony_steps_secret.workspace import (
     MAX_FILE_BYTES,
     MAX_TOTAL_BYTES,
+    ScrubReport,
     read_source_files,
     scrub_source_files,
 )
@@ -76,6 +79,17 @@ SECRETS = [
 ]
 
 
+@dataclasses.dataclass
+class _Stored:
+    """A write outcome: the values are stored, then ``error`` is raised.
+
+    A backend that committed and then timed out, or an audit record that
+    failed afterwards: the host raises although the write took effect.
+    """
+
+    error: BaseException
+
+
 class _Store:
     """The host's secret store services, in memory, recording every call."""
 
@@ -85,15 +99,24 @@ class _Store:
         self.secrets: dict[str, dict[str, str]] = {}
         self.calls: list[tuple[Any, ...]] = []
         self.resolved: list[str] = []
-        # path -> outcomes of successive writes: None succeeds, an exception is raised.
-        self.write_outcomes: dict[str, list[BaseException | None]] = {}
+        self.resolve_sources: list[str] = []
+        # path -> outcomes of successive writes: None succeeds, an exception is
+        # raised before storing, _Stored(exception) is raised after storing.
+        self.write_outcomes: dict[str, list[BaseException | _Stored | None]] = {}
+        # Outcomes of successive reads, of any path: None succeeds, an exception is raised.
+        self.read_outcomes: list[BaseException | None] = []
         self.read_error: BaseException | None = None
         self.delete_error: BaseException | None = None
+        self.resolve_error: BaseException | None = None
 
     async def read_secret(self, path: str) -> dict[str, str] | None:
         self.calls.append(("read", path))
         if self.read_error is not None:
             raise self.read_error
+        if self.read_outcomes:
+            outcome = self.read_outcomes.pop(0)
+            if outcome is not None:
+                raise outcome
         held = self.secrets.get(path)
         return dict(held) if held is not None else None
 
@@ -102,13 +125,14 @@ class _Store:
     ) -> SecretWriteResult:
         self.calls.append(("write", path, tuple(sorted(values)), merge))
         outcomes = self.write_outcomes.get(path)
-        if outcomes:
-            outcome = outcomes.pop(0)
-            if outcome is not None:
-                raise outcome
+        outcome = outcomes.pop(0) if outcomes else None
+        if isinstance(outcome, BaseException):
+            raise outcome
         created = path not in self.secrets
         stored = {**self.secrets.get(path, {}), **values} if merge else dict(values)
         self.secrets[path] = stored
+        if isinstance(outcome, _Stored):
+            raise outcome.error
         return SecretWriteResult(
             path=path,
             reference=f"{REFERENCE_ROOT}/{path}",
@@ -134,6 +158,9 @@ class _Store:
     async def resolve_secret_ref(self, ref: str | None, *, source: str) -> str | None:
         assert ref is not None
         self.resolved.append(ref)
+        self.resolve_sources.append(source)
+        if self.resolve_error is not None:
+            raise self.resolve_error
         return BACKEND.get(ref)
 
     @property
@@ -478,7 +505,7 @@ def test_scrub_leaves_a_file_replaced_since_it_was_read(workspace):
     os.unlink(workspace / "out" / "cert.pem")
     replacement = _put(workspace, "out/cert.pem", "someone else's file")
 
-    failures = scrub_source_files(str(workspace), [source])
+    failures = scrub_source_files(str(workspace), [source]).not_removed
     assert "changed since it was read" in failures["out/cert.pem"]
     assert replacement.read_text(encoding="utf-8") == "someone else's file"
 
@@ -489,9 +516,113 @@ def test_scrub_unlinks_a_hard_linked_file_without_overwriting_it(workspace, tmp_
     os.link(cert, other_name)
     sources = read_source_files(str(workspace), {"cert": "out/cert.pem"})
 
-    assert scrub_source_files(str(workspace), sources) == {}
+    assert scrub_source_files(str(workspace), sources) == ScrubReport()
     assert not cert.exists()
     assert other_name.read_text(encoding="utf-8") == CERT_PEM
+
+
+def _refuse_opening(monkeypatch, refused) -> None:
+    """Make ``os.open`` raise EACCES for every call ``refused(name, flags)`` picks."""
+    real_open = os.open
+
+    def picky_open(path, flags, mode=0o777, *, dir_fd=None):
+        if refused(str(path), flags):
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr("hegemony_steps_secret.workspace.os.open", picky_open)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {picky_open})
+
+
+def test_a_file_the_worker_may_not_write_is_deleted_without_being_overwritten(
+    workspace, monkeypatch
+):
+    # A container's root user wrote it 0644; the worker may delete it, not write it.
+    cert = _put(workspace, "out/cert.pem", CERT_PEM)
+    sources = read_source_files(str(workspace), {"cert": "out/cert.pem"})
+    _refuse_opening(monkeypatch, lambda name, flags: bool(flags & os.O_WRONLY))
+
+    report = scrub_source_files(str(workspace), sources)
+    assert report == ScrubReport(
+        not_overwritten={"out/cert.pem": "deleted without being overwritten (Permission denied)"}
+    )
+    assert not cert.exists()
+    _no_leftovers(workspace / "out")
+
+
+def test_a_file_the_worker_can_neither_read_nor_write_goes_back_under_its_name(
+    workspace, monkeypatch
+):
+    cert = _put(workspace, "out/cert.pem", CERT_PEM)
+    sources = read_source_files(str(workspace), {"cert": "out/cert.pem"})
+    _refuse_opening(monkeypatch, lambda name, flags: name.startswith(".hegemony-scrub-"))
+
+    report = scrub_source_files(str(workspace), sources)
+    assert report.not_removed == {
+        "out/cert.pem": "file 'out/cert.pem' cannot be opened (Permission denied); left in place"
+    }
+    assert cert.read_text(encoding="utf-8") == CERT_PEM
+    _no_leftovers(workspace / "out")
+
+
+def test_a_file_whose_overwriting_fails_is_still_deleted(workspace, monkeypatch):
+    cert = _put(workspace, "out/cert.pem", CERT_PEM)
+    sources = read_source_files(str(workspace), {"cert": "out/cert.pem"})
+
+    def failing_fsync(fd):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr("hegemony_steps_secret.workspace.os.fsync", failing_fsync)
+    report = scrub_source_files(str(workspace), sources)
+    assert report == ScrubReport(
+        not_overwritten={"out/cert.pem": "deleted, but overwriting it failed (Input/output error)"}
+    )
+    assert not cert.exists()
+    _no_leftovers(workspace / "out")
+
+
+def test_a_file_neither_overwritten_nor_removed_is_named_by_where_it_is(workspace, monkeypatch):
+    _put(workspace, "out/cert.pem", CERT_PEM)
+    sources = read_source_files(str(workspace), {"cert": "out/cert.pem"})
+
+    def no_space(fd, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def refuse(name, *, dir_fd=None):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr("hegemony_steps_secret.workspace.os.write", no_space)
+    monkeypatch.setattr("hegemony_steps_secret.workspace.os.unlink", refuse)
+    report = scrub_source_files(str(workspace), sources)
+
+    (left,) = [p for p in (workspace / "out").iterdir() if p.name.startswith(".hegemony-scrub-")]
+    assert report.not_removed == {
+        "out/cert.pem": "file 'out/cert.pem' was neither overwritten nor removed (Operation "
+        f"not permitted); it is left as {left.name!r}"
+    }
+    assert report.not_overwritten == {}
+
+
+async def test_a_source_file_deleted_without_being_overwritten_is_reported(
+    store, workspace, monkeypatch
+):
+    cert = _put(workspace, "out/cert.pem", CERT_PEM)
+    _refuse_opening(
+        monkeypatch, lambda name, flags: bool(flags & os.O_WRONLY) and name.startswith(".")
+    )
+    result = await _run({"path": "certs/web", "files": {"cert": "out/cert.pem"}}, store)
+    assert result.success is True, result.error
+    assert result.summary == (
+        "wrote 1 key to certs/web (1 source file deleted without being overwritten)"
+    )
+    details = result.evidence[0]["content_json"]
+    assert details["source_files_deleted"] == ["out/cert.pem"]
+    assert details["source_files_not_deleted"] == {}
+    assert details["source_files_not_overwritten"] == {
+        "out/cert.pem": "deleted without being overwritten (Permission denied)"
+    }
+    assert result.metrics["source_files_deleted"] == 1
+    assert not cert.exists()
 
 
 # ── write: refused files ────────────────────────────────────────────────────
@@ -539,7 +670,7 @@ async def test_a_symlink_inside_the_workspace_is_refused_too(store, workspace):
 def test_a_symlink_swapped_in_after_the_realpath_check_is_still_refused(
     workspace, tmp_path, monkeypatch
 ):
-    """The open itself follows no link: the realpath check is only the clear message."""
+    """The checks after the realpath one refuse a link it let through."""
     outside = tmp_path / "worker-secret.txt"
     outside.write_text("worker-only content", encoding="utf-8")
     (workspace / "out").mkdir()
@@ -549,6 +680,34 @@ def test_a_symlink_swapped_in_after_the_realpath_check_is_still_refused(
     )
     with pytest.raises(ValueError, match="symbolic link"):
         read_source_files(str(workspace), {"cert": "out/cert.pem"})
+
+
+def test_a_symlink_swapped_in_after_the_checks_is_not_followed_by_the_open(
+    workspace, tmp_path, monkeypatch
+):
+    """The open itself follows no link, whatever the checks before it saw.
+
+    Between the file's last check and its open, the file is moved out of the
+    workspace and a link to it takes its name. Followed, the link would lead
+    to the very file checked, which the identity check after the open accepts.
+    """
+    cert = _put(workspace, "out/cert.pem", "worker-only content")
+    outside = tmp_path / "worker-secret.txt"
+    real_stat = os.stat
+    swapped: list[bool] = []
+
+    def swapping_stat(path, *, dir_fd=None, follow_symlinks=True):
+        info = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+        if dir_fd is not None and path == "cert.pem" and not swapped:
+            swapped.append(True)
+            os.rename(cert, outside)
+            os.symlink(outside, cert)
+        return info
+
+    monkeypatch.setattr("hegemony_steps_secret.workspace.os.stat", swapping_stat)
+    with pytest.raises(ValueError, match="cannot be opened"):
+        read_source_files(str(workspace), {"cert": "out/cert.pem"})
+    assert swapped
 
 
 async def test_non_regular_files_are_refused(store, workspace):
@@ -656,6 +815,8 @@ async def test_write_from_values_resolves_references_and_templates(store):
         "{{ secret('vault://orgs/acme/secrets/db/password') }}",
         "{{ secret('vault://orgs/acme/secrets/api/token') }}",
     ]
+    # Named like other handlers' fields: <handler id>.<field>.
+    assert store.resolve_sources == ["secret.write.values", "secret.write.values"]
     assert result.output["keys"] == ["password", "token", "user"]
     assert result.summary == "wrote 3 keys to app/login"
     assert result.metrics == {"keys": 3}
@@ -789,6 +950,86 @@ async def test_a_failed_write_after_keeping_says_the_copy_was_made(store, worksp
     _assert_no_values(result)
 
 
+async def test_a_failed_copy_to_keep_previous_at_leaves_the_secret_unchanged(store):
+    store.secrets["certs/web"] = {"cert": OLD_VALUE}
+    store.write_outcomes["certs/web-previous"] = [RuntimeError("store down")]
+    result = await _run(
+        {
+            "path": "certs/web",
+            "values": {"user": LITERAL},
+            "keep_previous_at": "certs/web-previous",
+        },
+        store,
+    )
+    assert result.success is False
+    assert result.error == (
+        "Could not keep the current keys of certs/web at certs/web-previous; certs/web is "
+        "unchanged: store down"
+    )
+    assert result.output["previous_path"] is None
+    assert store.secrets == {"certs/web": {"cert": OLD_VALUE}}
+    assert [call[1] for call in store.store_calls if call[0] == "write"] == ["certs/web-previous"]
+    _assert_no_values(result)
+
+
+async def test_a_retry_after_a_write_that_was_stored_keeps_the_first_copy(store):
+    """A write reported as failed may be stored; the retry must not copy the new keys over."""
+    store.secrets["app/login"] = {"user": OLD_VALUE}
+    store.write_outcomes["app/login"] = [_Stored(RuntimeError("backend timed out"))]
+    config = {"path": "app/login", "values": {"user": LITERAL}, "keep_previous_at": "app/login-old"}
+
+    first = await _run(config, store)
+    assert first.success is False
+    assert store.secrets == {"app/login": {"user": LITERAL}, "app/login-old": {"user": OLD_VALUE}}
+
+    store.calls.clear()
+    retry = await _run(config, store)
+    assert retry.success is True, retry.error
+    assert store.secrets["app/login-old"] == {"user": OLD_VALUE}
+    assert store.store_calls == [
+        ("read", "app/login"),
+        ("read", "app/login-old"),
+        ("write", "app/login", ("user",), False),
+    ]
+    assert retry.output["previous_path"] == "app/login-old"
+    assert retry.summary == (
+        "wrote 1 key to app/login (previous kept at app/login-old by an earlier attempt that "
+        "stored these keys)"
+    )
+    _assert_no_values(retry)
+
+
+async def test_keys_equal_to_the_new_ones_are_copied_when_nothing_was_kept_yet(store):
+    store.secrets["app/login"] = {"user": LITERAL}
+    result = await _run(
+        {"path": "app/login", "values": {"user": LITERAL}, "keep_previous_at": "app/login-old"},
+        store,
+    )
+    assert result.success is True, result.error
+    assert store.secrets["app/login-old"] == {"user": LITERAL}
+    assert result.summary == "wrote 1 key to app/login (previous kept at app/login-old)"
+
+
+@pytest.mark.parametrize(("merge", "copied"), [(False, True), (True, False)])
+async def test_other_keys_count_as_written_only_with_merge(store, merge, copied):
+    # The written key is stored already; the other key stays only with merge.
+    store.secrets["app/login"] = {"user": LITERAL, "kept": OLD_VALUE}
+    store.secrets["app/login-old"] = {"user": OLD_VALUE}
+    result = await _run(
+        {
+            "path": "app/login",
+            "values": {"user": LITERAL},
+            "merge": merge,
+            "keep_previous_at": "app/login-old",
+        },
+        store,
+    )
+    assert result.success is True, result.error
+    copy = {"user": LITERAL, "kept": OLD_VALUE} if copied else {"user": OLD_VALUE}
+    assert store.secrets["app/login-old"] == copy
+    assert result.output["previous_path"] == "app/login-old"
+
+
 # ── host errors ─────────────────────────────────────────────────────────────
 
 
@@ -830,6 +1071,35 @@ async def test_an_unexpected_host_error_reports_only_its_type(store):
     result = await _run({"path": "app/login", "values": {"user": LITERAL}}, store)
     assert result.success is False
     assert "unexpected KeyError" in (result.error or "")
+    _assert_no_values(result)
+
+
+def _validation_error() -> pydantic.ValidationError:
+    """A ``ValueError`` subclass whose message quotes the value it was given."""
+
+    class _Request(pydantic.BaseModel):
+        retries: int
+
+    with pytest.raises(pydantic.ValidationError) as caught:
+        _Request.model_validate({"retries": LITERAL})
+    assert isinstance(caught.value, ValueError) and LITERAL in str(caught.value)
+    return caught.value
+
+
+@pytest.mark.parametrize("raised_by", ["write_secret", "resolve_secret_ref"])
+async def test_a_subclass_of_a_documented_error_reports_only_its_type(store, raised_by):
+    error = _validation_error()
+    if raised_by == "write_secret":
+        store.write_outcomes["app/login"] = [error]
+    else:
+        store.resolve_error = error
+    result = await _run(
+        {"path": "app/login", "values": {"pw": "vault://orgs/acme/secrets/db/password"}},
+        store,
+    )
+    assert result.success is False
+    assert "unexpected ValidationError" in (result.error or "")
+    assert "input" not in (result.error or "")
     _assert_no_values(result)
 
 
@@ -929,6 +1199,179 @@ async def test_swap_reports_a_failed_restore(store):
     _assert_no_values(result)
 
 
+SWAP = {"operation": "swap", "path": "certs/web", "swap_with": "certs/web-previous"}
+SWAPPED = {"certs/web": {"cert": OLD_VALUE}, "certs/web-previous": {"cert": CERT_PEM}}
+
+
+def _before_swap(store: _Store) -> None:
+    store.secrets.update(
+        {"certs/web": {"cert": CERT_PEM}, "certs/web-previous": {"cert": OLD_VALUE}}
+    )
+
+
+def _writes(store: _Store) -> list[str]:
+    return [call[1] for call in store.store_calls if call[0] == "write"]
+
+
+async def test_a_failed_read_before_a_swap_writes_nothing(store):
+    _before_swap(store)
+    store.read_outcomes = [None, RuntimeError("store down")]
+    result = await _run(SWAP, store)
+    assert result.success is False
+    assert result.error == (
+        "Could not read certs/web and certs/web-previous to swap them: store down"
+    )
+    assert _writes(store) == []
+    _assert_no_values(result)
+
+
+async def test_a_failed_first_swap_write_that_stored_nothing_changes_nothing(store):
+    _before_swap(store)
+    store.write_outcomes["certs/web"] = [RuntimeError("backend timed out")]
+    result = await _run(SWAP, store)
+    assert result.success is False
+    assert result.summary == "Secret store unavailable"
+    assert result.error == (
+        "Could not write certs/web-previous's keys to certs/web; nothing changed: backend timed out"
+    )
+    assert _writes(store) == ["certs/web"]
+    assert store.secrets == {
+        "certs/web": {"cert": CERT_PEM},
+        "certs/web-previous": {"cert": OLD_VALUE},
+    }
+    _assert_no_values(result)
+
+
+async def test_a_second_swap_write_stored_before_it_failed_finishes_the_swap(store):
+    """Both secrets hold the swapped keys: restoring now would lose one of them."""
+    _before_swap(store)
+    store.write_outcomes["certs/web-previous"] = [_Stored(RuntimeError("backend timed out"))]
+    result = await _run(SWAP, store)
+    assert result.success is True, result.error
+    assert store.secrets == SWAPPED
+    assert _writes(store) == ["certs/web", "certs/web-previous"]
+    assert result.summary == (
+        "swapped certs/web and certs/web-previous (the platform reported an error, yet both "
+        "hold the swapped keys)"
+    )
+    assert result.output["swapped_with"] == "certs/web-previous"
+    details = result.evidence[0]["content_json"]
+    assert details["write_error"] == "writing certs/web-previous failed (backend timed out)"
+    _assert_no_values(result)
+
+
+async def test_a_first_swap_write_stored_before_it_failed_is_restored(store):
+    _before_swap(store)
+    store.write_outcomes["certs/web"] = [_Stored(RuntimeError("backend timed out"))]
+    result = await _run(SWAP, store)
+    assert result.success is False
+    assert result.summary == "Swap failed, restored"
+    assert result.error == (
+        "Swap failed: writing certs/web failed (backend timed out); certs/web was restored, "
+        "so both secrets hold their original keys"
+    )
+    assert store.secrets == {
+        "certs/web": {"cert": CERT_PEM},
+        "certs/web-previous": {"cert": OLD_VALUE},
+    }
+    assert _writes(store) == ["certs/web", "certs/web"]
+    _assert_no_values(result)
+
+
+async def test_a_restore_stored_before_it_failed_counts_as_restored(store):
+    _before_swap(store)
+    store.write_outcomes["certs/web-previous"] = [RuntimeError("backend timed out")]
+    store.write_outcomes["certs/web"] = [None, _Stored(RuntimeError("audit record failed"))]
+    result = await _run(SWAP, store)
+    assert result.success is False
+    assert result.summary == "Swap failed, restored"
+    error = result.error or ""
+    assert "restoring certs/web reported an error too (audit record failed)" in error
+    assert error.endswith("so both secrets hold their original keys")
+    assert store.secrets == {
+        "certs/web": {"cert": CERT_PEM},
+        "certs/web-previous": {"cert": OLD_VALUE},
+    }
+    _assert_no_values(result)
+
+
+@pytest.mark.parametrize(
+    ("failing", "state"),
+    [
+        (
+            "certs/web",
+            "certs/web now holds its own keys or the keys certs/web-previous held; "
+            "certs/web-previous now holds its own keys; certs/web's original keys may be "
+            "stored at neither path",
+        ),
+        (
+            "certs/web-previous",
+            "certs/web now holds the keys certs/web-previous held; certs/web-previous now "
+            "holds its own keys or the keys certs/web held; certs/web's original keys may be "
+            "stored at neither path",
+        ),
+    ],
+)
+async def test_a_swap_that_cannot_be_read_back_says_what_may_be_where(store, failing, state):
+    _before_swap(store)
+    store.write_outcomes[failing] = [_Stored(RuntimeError("backend timed out"))]
+    store.read_outcomes = [None, None, RuntimeError("store down")]
+    result = await _run(SWAP, store)
+    assert result.success is False
+    assert result.summary == "Swap state unknown"
+    assert result.error == (
+        f"Swap failed: writing {failing} failed (backend timed out), and reading both secrets "
+        f"back failed (store down), so what they hold is not known: {state}. Check both by hand"
+    )
+    _assert_no_values(result)
+
+
+async def test_a_failed_restore_that_cannot_be_read_back_says_what_may_be_where(store):
+    _before_swap(store)
+    store.write_outcomes["certs/web-previous"] = [RuntimeError("backend timed out")]
+    store.write_outcomes["certs/web"] = [None, RuntimeError("backend still down")]
+    store.read_outcomes = [None, None, None, None, RuntimeError("store down")]
+    result = await _run(SWAP, store)
+    assert result.success is False
+    assert result.summary == "Swap state unknown"
+    error = result.error or ""
+    assert "restoring certs/web failed too (backend still down)" in error
+    assert (
+        "certs/web now holds the keys certs/web-previous held or its own keys; "
+        "certs/web-previous now holds its own keys; certs/web's original keys may be stored "
+        "at neither path"
+    ) in error
+    _assert_no_values(result)
+
+
+class _MeddledStore(_Store):
+    """Something else writes the second secret while the swap writes it."""
+
+    async def write_secret(self, path, values, *, merge=False):
+        if path == "certs/web-previous":
+            self.calls.append(("write", path, tuple(sorted(values)), merge))
+            self.secrets[path] = {"cert": "written by another flow"}
+            raise RuntimeError("version conflict")
+        return await super().write_secret(path, values, merge=merge)
+
+
+async def test_a_swap_found_changed_by_something_else_is_left_as_found(shared_root):
+    store = _MeddledStore(shared_root)
+    _before_swap(store)
+    result = await _run(SWAP, store)
+    assert result.success is False
+    assert result.summary == "Swap failed"
+    assert result.error == (
+        "Swap failed: writing certs/web-previous failed (version conflict), and the secrets "
+        "hold neither their original nor the swapped keys: certs/web now holds the keys "
+        "certs/web-previous held; certs/web-previous now holds keys this step did not write; "
+        "certs/web's original keys are stored at neither path. Something else may have "
+        "written them meanwhile; check both by hand"
+    )
+    assert _writes(store) == ["certs/web", "certs/web-previous"]
+    _assert_no_values(result)
+
+
 # ── delete ──────────────────────────────────────────────────────────────────
 
 
@@ -991,7 +1434,7 @@ def test_a_file_written_at_the_path_during_removal_is_never_touched(workspace, m
     # A container writes a new file at the same path while the step removes the old one.
     _while_removing(monkeypatch, lambda: _put(workspace, "out/cert.pem", "a new file"))
 
-    assert scrub_source_files(str(workspace), sources) == {}
+    assert scrub_source_files(str(workspace), sources) == ScrubReport()
     assert (workspace / "out" / "cert.pem").read_text(encoding="utf-8") == "a new file"
     _no_leftovers(workspace / "out")
 
@@ -1002,7 +1445,7 @@ def test_a_replaced_file_goes_back_under_its_name(workspace):
     os.unlink(workspace / "out" / "cert.pem")
     os.symlink("/etc/passwd", workspace / "out" / "cert.pem")
 
-    failures = scrub_source_files(str(workspace), [source])
+    failures = scrub_source_files(str(workspace), [source]).not_removed
     assert failures["out/cert.pem"].endswith("changed since it was read; left in place")
     assert os.readlink(workspace / "out" / "cert.pem") == "/etc/passwd"
     _no_leftovers(workspace / "out")
@@ -1015,7 +1458,7 @@ def test_a_replaced_file_is_never_put_over_a_newer_one(workspace, monkeypatch):
     _put(workspace, "out/cert.pem", "replacement")
     _while_removing(monkeypatch, lambda: _put(workspace, "out/cert.pem", "newest"))
 
-    failures = scrub_source_files(str(workspace), [source])
+    failures = scrub_source_files(str(workspace), [source]).not_removed
     assert "a newer file took its name" in failures["out/cert.pem"]
     assert (workspace / "out" / "cert.pem").read_text(encoding="utf-8") == "newest"
     (kept,) = [p for p in (workspace / "out").iterdir() if p.name.startswith(".hegemony-scrub-")]
@@ -1038,6 +1481,8 @@ OUTPUT_KEYS = {
     ("config", "prepare", "operation", "path"),
     [
         ({"files": {"cert": "out/cert.pem"}}, None, "write", None),
+        ({"path": "certs/web"}, None, "write", "certs/web"),
+        ({"operation": "rotate", "path": " certs/web "}, None, None, "certs/web"),
         ({"path": "certs/web", "files": {"cert": "out/missing.pem"}}, None, "write", "certs/web"),
         (
             {"path": "certs/web", "values": {"pw": "vault://orgs/acme/secrets/unknown"}},
@@ -1061,7 +1506,16 @@ OUTPUT_KEYS = {
             "certs/web",
         ),
     ],
-    ids=["config", "source-file", "unresolved-value", "store-error", "swap-missing", "delete"],
+    ids=[
+        "config",
+        "config-with-path",
+        "config-unknown-operation",
+        "source-file",
+        "unresolved-value",
+        "store-error",
+        "swap-missing",
+        "delete",
+    ],
 )
 async def test_a_failure_still_carries_every_output_key(store, config, prepare, operation, path):
     if prepare is not None:

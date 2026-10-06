@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,7 +37,13 @@ from hegemony_step_sdk import (
 
 from .paths import secret_path_error, templated, workspace_file_error
 from .values import key_name_error, resolve_values, value_map_errors
-from .workspace import SourceFile, WorkspaceError, read_source_files, scrub_source_files
+from .workspace import (
+    ScrubReport,
+    SourceFile,
+    WorkspaceError,
+    read_source_files,
+    scrub_source_files,
+)
 
 SecretOperation = Literal["write", "swap", "delete"]
 SecretEncoding = Literal["base64", "text"]
@@ -45,7 +53,7 @@ SecretEncoding = Literal["base64", "text"]
 SECRET_SERVICES = ("read_secret", "write_secret", "delete_secret")
 
 #: ``source`` passed to the host's reference resolver for ``values``.
-RESOLVE_SOURCE = "step.secret.write"
+RESOLVE_SOURCE = "secret.write.values"
 
 #: The host's documented error types: their messages name paths and keys only.
 _HOST_ERRORS = (PermissionError, ValueError, RuntimeError)
@@ -245,11 +253,12 @@ def _plural(count: int) -> str:
 def _describe(exc: BaseException) -> str:
     """A host error as text: the message of a documented error type, else only its type.
 
-    The host's documented errors name paths and keys; anything else might
-    carry a backend's request (and a value with it), so only its type is
-    reported.
+    The host's documented errors name paths and keys. Anything else might
+    carry a backend's request (and a value with it), a subclass of a
+    documented type too (pydantic's ``ValidationError`` is a ``ValueError``
+    that quotes its input), so only its type is reported.
     """
-    if isinstance(exc, _HOST_ERRORS):
+    if type(exc) in _HOST_ERRORS:
         return str(exc).strip() or type(exc).__name__
     return f"unexpected {type(exc).__name__} from the platform's secret store"
 
@@ -357,6 +366,106 @@ def _stored(result: Any, fallback_keys: list[str]) -> tuple[str, list[str], bool
     keys = getattr(result, "keys", None)
     names = sorted(str(k) for k in keys) if keys else sorted(fallback_keys)
     return reference, names, bool(getattr(result, "created", False))
+
+
+def _already_written(current: Mapping[str, str], values: Mapping[str, str], *, merge: bool) -> bool:
+    """Whether the secret holding ``current`` already holds what writing ``values`` leaves."""
+    if not merge and set(current) != set(values):
+        return False
+    return all(current.get(key) == value for key, value in values.items())
+
+
+def _holding(
+    held: Mapping[str, str] | None,
+    own: Mapping[str, str],
+    other_path: str,
+    other_own: Mapping[str, str],
+) -> str:
+    """What one secret of a swap holds, in words: names a path, never a value."""
+    if held is None:
+        return "no secret"
+    if held == own:
+        return "its own keys"
+    if held == other_own:
+        return f"the keys {other_path} held"
+    return "keys this step did not write"
+
+
+@dataclass(frozen=True, slots=True)
+class _Swap:
+    """A swap under way: both paths and the keys each held before it."""
+
+    path: str
+    other: str
+    first: dict[str, str] = field(repr=False)
+    second: dict[str, str] = field(repr=False)
+
+    def state(
+        self,
+        at_path: Sequence[Mapping[str, str] | None],
+        at_other: Sequence[Mapping[str, str] | None],
+    ) -> str:
+        """What each secret holds and whose original keys are lost, naming paths only.
+
+        ``at_path`` and ``at_other`` list what each secret may hold: one
+        entry when it was read back, two when a write of it raised and
+        reading it back failed.
+        """
+        sides = (
+            (self.path, at_path, self.first, self.other, self.second),
+            (self.other, at_other, self.second, self.path, self.first),
+        )
+        parts = [
+            f"{name} now holds "
+            + " or ".join(
+                dict.fromkeys(_holding(held, own, other_path, other_own) for held in held_now)
+            )
+            for name, held_now, own, other_path, other_own in sides
+        ]
+        for name, original in ((self.path, self.first), (self.other, self.second)):
+            if any(all(held == original for held in held_now) for held_now in (at_path, at_other)):
+                continue
+            if any(original in held_now for held_now in (at_path, at_other)):
+                parts.append(f"{name}'s original keys may be stored at neither path")
+            else:
+                parts.append(f"{name}'s original keys are stored at neither path")
+        return "; ".join(parts)
+
+
+def _swapped(
+    ctx: HandlerContext, swap: _Swap, written: Any, written_other: Any, *, failure: str = ""
+) -> HandlerResult:
+    """The result of a finished swap; ``failure`` names a write that raised all the same."""
+    reference, keys, _created = _stored(written, sorted(swap.second))
+    other_reference, other_keys, _ = _stored(written_other, sorted(swap.first))
+    output = _result_output(
+        "swap", swap.path, reference=reference, keys=keys, swapped_with=swap.other
+    )
+    summary = f"swapped {swap.path} and {swap.other}"
+    details: dict[str, Any] = {
+        "swapped_with_reference": other_reference or None,
+        "swapped_with_keys": other_keys,
+    }
+    if failure:
+        summary += " (the platform reported an error, yet both hold the swapped keys)"
+        details["write_error"] = failure
+    return _success(ctx, output, summary, metrics={"keys": len(keys)}, details=details)
+
+
+def _swap_unknown(
+    swap: _Swap,
+    failure: str,
+    read_exc: BaseException,
+    at_path: Sequence[Mapping[str, str] | None],
+    at_other: Sequence[Mapping[str, str] | None],
+) -> HandlerResult:
+    """The failure of a swap whose secrets could not be read back after a write raised."""
+    return _failure(
+        f"Swap failed: {failure}, and reading both secrets back failed ({_describe(read_exc)}), "
+        f"so what they hold is not known: {swap.state(at_path, at_other)}. Check both by hand",
+        "Swap state unknown",
+        output=_result_output("swap", swap.path),
+    )
 
 
 class _NoWorkspace(Exception):
@@ -486,13 +595,28 @@ class WriteSecretHandler(BaseHandler):
 
         previous_path: str | None = None
         keep = config.keep_previous_at.strip()
-        nothing_to_keep = False
+        keep_note = ""
         if keep:
             try:
                 current = await services.read_secret(path)
             except Exception as exc:  # noqa: BLE001 - mapped to a failed result
                 return _host_failure(f"read the current keys of {path}", exc, output=base)
-            if current:
+            kept: dict[str, str] | None = None
+            if current and _already_written(current, values, merge=config.merge):
+                # An earlier attempt stored these keys and failed afterwards (a
+                # write reported as failed may still be stored, or the worker
+                # stopped): the keys it kept at ``keep`` are the previous ones,
+                # and copying now would replace them with these.
+                try:
+                    kept = await services.read_secret(keep)
+                except Exception as exc:  # noqa: BLE001 - mapped to a failed result
+                    return _host_failure(f"read {keep}; {path} is unchanged", exc, output=base)
+            if not current:
+                keep_note = f"no previous secret to keep at {keep}"
+            elif kept:
+                previous_path = keep
+                keep_note = f"previous kept at {keep} by an earlier attempt that stored these keys"
+            else:
                 try:
                     await services.write_secret(keep, dict(current), merge=False)
                 except Exception as exc:  # noqa: BLE001 - mapped to a failed result
@@ -502,8 +626,7 @@ class WriteSecretHandler(BaseHandler):
                         output=base,
                     )
                 previous_path = keep
-            else:
-                nothing_to_keep = True
+                keep_note = f"previous kept at {keep}"
 
         try:
             result = await services.write_secret(path, values, merge=config.merge)
@@ -516,20 +639,24 @@ class WriteSecretHandler(BaseHandler):
             )
         reference, keys, created = _stored(result, written)
 
-        not_removed: dict[str, str] = {}
+        scrubbed = ScrubReport()
         if sources and config.delete_source_files:
-            not_removed = await asyncio.to_thread(scrub_source_files, workspace, sources)
+            scrubbed = await asyncio.to_thread(scrub_source_files, workspace, sources)
+        not_removed = scrubbed.not_removed
 
         notes: list[str] = []
         if config.merge:
             notes.append(f"merged, {_plural(len(keys))} stored")
-        if previous_path:
-            notes.append(f"previous kept at {previous_path}")
-        elif nothing_to_keep:
-            notes.append(f"no previous secret to keep at {keep}")
+        if keep_note:
+            notes.append(keep_note)
         if not_removed:
             count = len(not_removed)
             notes.append(f"{count} source file{'s' if count != 1 else ''} not deleted")
+        if scrubbed.not_overwritten:
+            count = len(scrubbed.not_overwritten)
+            notes.append(
+                f"{count} source file{'s' if count != 1 else ''} deleted without being overwritten"
+            )
         summary = f"wrote {_plural(len(written))} to {path}"
         if notes:
             summary += f" ({'; '.join(notes)})"
@@ -565,6 +692,7 @@ class WriteSecretHandler(BaseHandler):
                 "source_files": sorted({s.path for s in sources}),
                 "source_files_deleted": removed,
                 "source_files_not_deleted": dict(sorted(not_removed.items())),
+                "source_files_not_overwritten": dict(sorted(scrubbed.not_overwritten.items())),
             },
         )
 
@@ -586,43 +714,93 @@ class WriteSecretHandler(BaseHandler):
                 output=base,
             )
 
+        swap = _Swap(path, other, first, second)
+        written: Any = None
+        failed = path
         try:
             written = await services.write_secret(path, dict(second), merge=False)
-        except Exception as exc:  # noqa: BLE001 - mapped to a failed result
-            return _host_failure(
-                f"write {other}'s keys to {path}; nothing changed", exc, output=base
-            )
-        try:
+            failed = other
             written_other = await services.write_secret(other, dict(first), merge=False)
-        except Exception as exc:  # noqa: BLE001 - restore, then report
-            reason = _describe(exc)
-            try:
-                await services.write_secret(path, dict(first), merge=False)
-            except Exception as restore_exc:  # noqa: BLE001 - both failures reported
-                return _failure(
-                    f"Swap failed half-way: {path} now holds the keys {other} held, and "
-                    f"{other} still holds its own. Writing {other} failed ({reason}), and "
-                    f"restoring {path} failed too ({_describe(restore_exc)}): restore {path} "
-                    "by hand",
-                    "Swap failed half-way",
-                    output=_result_output("swap", path, swapped_with=None),
-                )
+        except Exception as exc:  # noqa: BLE001 - settled from what the store holds
+            return await self._settle_swap(ctx, services, swap, failed, exc, written)
+        return _swapped(ctx, swap, written, written_other)
+
+    async def _settle_swap(
+        self,
+        ctx: HandlerContext,
+        services: HandlerServices,
+        swap: _Swap,
+        failed: str,
+        exc: BaseException,
+        written: Any,
+    ) -> HandlerResult:
+        """Settle a swap whose write of ``failed`` raised, from what both secrets hold now.
+
+        A write that raised may still have been stored (the backend committed
+        and then timed out, or the audit record failed afterwards), so both
+        secrets are read back. A finished swap succeeds; a half-done one is
+        restored from the keys read before the swap; anything else is
+        reported as found.
+        """
+        path, other = swap.path, swap.other
+        failure = f"writing {failed} failed ({_describe(exc)})"
+        try:
+            held = (await services.read_secret(path), await services.read_secret(other))
+        except Exception as read_exc:  # noqa: BLE001 - reported with what may be where
+            if failed == path:
+                at_path, at_other = [swap.first, swap.second], [swap.second]
+            else:
+                at_path, at_other = [swap.second], [swap.second, swap.first]
+            return _swap_unknown(swap, failure, read_exc, at_path, at_other)
+        if held == (swap.second, swap.first):
+            return _swapped(ctx, swap, written, None, failure=failure)
+        if held == (swap.first, swap.second):
+            action = f"{other}'s keys to {path}" if failed == path else f"{path}'s keys to {other}"
+            return _host_failure(
+                f"write {action}; nothing changed", exc, output=_result_output("swap", path)
+            )
+        if held == (swap.second, swap.second):
+            side, original = path, swap.first
+        elif held == (swap.first, swap.first):
+            side, original = other, swap.second
+        else:
             return _failure(
-                f"Swap failed: writing {other} failed ({reason}). {path} was restored, so "
-                "both secrets hold their original keys",
-                "Swap failed, restored",
-                output=_result_output("swap", path, swapped_with=None),
+                f"Swap failed: {failure}, and the secrets hold neither their original nor the "
+                f"swapped keys: {swap.state([held[0]], [held[1]])}. Something else may have "
+                "written them meanwhile; check both by hand",
+                "Swap failed",
+                output=_result_output("swap", path),
             )
 
-        reference, keys, _created = _stored(written, sorted(second))
-        other_reference, other_keys, _ = _stored(written_other, sorted(first))
-        output = _result_output("swap", path, reference=reference, keys=keys, swapped_with=other)
-        return _success(
-            ctx,
-            output,
-            f"swapped {path} and {other}",
-            metrics={"keys": len(keys)},
-            details={"swapped_with_reference": other_reference, "swapped_with_keys": other_keys},
+        restored = f"{side} was restored"
+        try:
+            await services.write_secret(side, dict(original), merge=False)
+        except Exception as restore_exc:  # noqa: BLE001 - settled from what the store holds
+            restore_error = _describe(restore_exc)
+            changed = held[0] if side == path else held[1]
+            try:
+                held = (await services.read_secret(path), await services.read_secret(other))
+            except Exception as read_exc:  # noqa: BLE001 - reported with what may be where
+                maybe = [changed, original]
+                at_path, at_other = (maybe, [held[1]]) if side == path else ([held[0]], maybe)
+                failure += f", and restoring {side} failed too ({restore_error})"
+                return _swap_unknown(swap, failure, read_exc, at_path, at_other)
+            if held != (swap.first, swap.second):
+                return _failure(
+                    f"Swap failed half-way: {failure}, and restoring {side} failed too "
+                    f"({restore_error}): {swap.state([held[0]], [held[1]])}. Restore {side} "
+                    "by hand",
+                    "Swap failed half-way",
+                    output=_result_output("swap", path),
+                )
+            restored = (
+                f"restoring {side} reported an error too ({restore_error}), yet it holds its "
+                "original keys again"
+            )
+        return _failure(
+            f"Swap failed: {failure}; {restored}, so both secrets hold their original keys",
+            "Swap failed, restored",
+            output=_result_output("swap", path),
         )
 
     async def _delete(

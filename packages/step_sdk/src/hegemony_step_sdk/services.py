@@ -356,6 +356,15 @@ class HandlerServices(Protocol):
     #   before the host emits anything about it.
     # - Every call records an audit event naming the run, the step, the
     #   path and, for writes, the key names (never values).
+    # - A write or delete that raises may still have been applied (the
+    #   backend stored the values and then timed out, or the audit event
+    #   failed afterwards). A caller that needs to know what the store holds
+    #   after an error reads it back with ``read_secret``.
+    # - On a store that keeps versions (a KV v2 engine, say), a replaced or
+    #   deleted secret's old values must not stay readable through the
+    #   store's history: the host destroys the versions it replaces or
+    #   deletes, or keeps at most one version. ``read_secret`` treats a
+    #   secret whose latest version is deleted (soft-deleted) as absent.
     # - Hosts older than this SDK version lack these methods. A handler checks
     #   ``getattr(services, "write_secret", None)`` (and the others it uses)
     #   before calling, and fails with a clear message when they are missing.
@@ -367,6 +376,8 @@ class HandlerServices(Protocol):
         """Read every key of the secret at ``path`` in the run organization's store.
 
         Returns ``{key: value}``, or None when no secret exists at ``path``.
+        On a store that keeps versions, a secret whose latest version is
+        deleted (soft-deleted) does not exist: None, never an older version.
         The values are registered for redaction before this returns. Only for
         handlers declaring ``writes_secrets``; the path rules and errors are
         those of :meth:`write_secret` (a read-only backend is not refused).
@@ -403,11 +414,18 @@ class HandlerServices(Protocol):
         which carries the reference later steps read the keys through and
         never the values.
 
+        On a store that keeps versions, the values this write replaces must
+        not stay readable through the store's history: the host destroys the
+        version it replaces, or keeps at most one.
+
         Raises ``PermissionError`` (refused), ``ValueError`` (malformed path,
         no keys, an invalid key name, a non-string value) or ``RuntimeError``
-        (store unavailable). Hosts without support raise
-        ``NotImplementedError``; a platform older than this method has no
-        such attribute at all, so look it up with ``getattr`` and fail clearly.
+        (store unavailable). A call that raised may still have stored the
+        values (the backend committed and then timed out, or the audit event
+        failed afterwards): read the secret back to learn what it holds.
+        Hosts without support raise ``NotImplementedError``; a platform older
+        than this method has no such attribute at all, so look it up with
+        ``getattr`` and fail clearly.
         """
         raise NotImplementedError
 
@@ -415,9 +433,13 @@ class HandlerServices(Protocol):
         """Delete the secret at ``path`` in the run organization's store, every key of it.
 
         Returns True when a secret was deleted, False when none existed at
-        ``path``. Only for handlers declaring ``writes_secrets``; the path
-        rules, refusals (a read-only backend included), audit event and
-        errors are those of :meth:`write_secret`. Hosts without support raise
+        ``path``. On a store that keeps versions, every version is destroyed,
+        not only marked deleted, so no old value stays readable through the
+        store's history. Only for handlers declaring ``writes_secrets``; the
+        path rules, refusals (a read-only backend included), audit event and
+        errors are those of :meth:`write_secret`, and like a write, a delete
+        that raised may still have been applied: read the path back to learn
+        whether the secret is gone. Hosts without support raise
         ``NotImplementedError``; a platform older than this method has no
         such attribute at all, so look it up with ``getattr``.
         """
