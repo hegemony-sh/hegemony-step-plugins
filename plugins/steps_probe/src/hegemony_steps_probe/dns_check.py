@@ -24,7 +24,6 @@ from hegemony_step_sdk import (
     for_each_target_device,
 )
 
-from .egress import enforce_egress_off_loop
 from .targets import (
     DEFAULT_MAX_PARALLEL_TARGETS,
     TargetOutcome,
@@ -202,12 +201,8 @@ class DnsProbeHandler(BaseHandler):
                     ),
                     summary="DNS check configuration error",
                 )
-            # In a worker thread: the platform's gate can block on DNS while
-            # it resolves the policy's service:port rules.
             for proto in DNS_PROTOCOLS:
-                await enforce_egress_off_loop(
-                    enforce, resolver_ip, DNS_PORT, proto=proto, kind="dns query"
-                )
+                await enforce(resolver_ip, DNS_PORT, proto=proto, kind="dns query")
 
         async def _check(device: dict[str, Any]) -> TargetOutcome:
             """Resolve one target's question, retrying up to ``attempts`` times."""
