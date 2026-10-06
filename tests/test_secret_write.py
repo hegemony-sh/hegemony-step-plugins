@@ -286,6 +286,7 @@ async def test_malformed_paths_are_refused_before_the_host_is_asked(store, path,
     result = await _run(config, store)
     assert result.success is False
     assert result.summary == "Config validation failed"
+    assert (result.error or "").startswith("Invalid secret.write config: ")
     assert store.calls == []
     _assert_no_values(result)
 

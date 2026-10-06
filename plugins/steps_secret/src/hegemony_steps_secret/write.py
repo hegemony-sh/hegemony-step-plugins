@@ -29,6 +29,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerServices,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
 )
 
@@ -413,17 +414,14 @@ class WriteSecretHandler(BaseHandler):
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Run the configured operation through the host's secret store services."""
-        errors = self.validate_config(ctx.config)
-        if not errors:
+        try:
+            config = self.parse_config(ctx.config, SecretWriteConfig)
             # Rendered now: a templated path must hold up as well.
             errors = semantic_errors(ctx.config, allow_templates=False)
-        if errors:
-            return _failure(
-                f"Invalid secret step config: {'; '.join(errors)}",
-                "Config validation failed",
-                output=_requested_output(ctx.config),
-            )
-        config = SecretWriteConfig.model_validate(ctx.config)
+            if errors:
+                raise InvalidConfigError(self.handler_id, errors)
+        except InvalidConfigError as exc:
+            return _failure(str(exc), exc.result().summary, output=_requested_output(ctx.config))
 
         services = ctx.require_services()
         missing = [name for name in SECRET_SERVICES if not callable(getattr(services, name, None))]
