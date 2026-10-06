@@ -14,6 +14,7 @@ settings.
 import asyncio
 import contextlib
 import logging
+import re
 import socket
 import time
 from dataclasses import dataclass
@@ -31,12 +32,14 @@ try:
     from netmiko.exceptions import (
         NetmikoAuthenticationException,
         NetmikoTimeoutException,
+        ReadTimeout,
     )
 except ImportError:
     # Netmiko unavailable - provide stubs for type checking
     ConnectHandler: Any = None
     NetmikoAuthenticationException: type[Exception] = Exception
     NetmikoTimeoutException: type[Exception] = Exception
+    ReadTimeout: type[Exception] = TimeoutError
 
 try:
     # Netmiko's own SSH library; used only for the optional jump-host hop.
@@ -186,6 +189,17 @@ _SKIPPED_ERROR = "Skipped: earlier command failed"
 #: Error of a result for a command not run because the run was cancelled.
 _CANCELLED_ERROR = "Skipped: the run was cancelled"
 
+#: Config lines that start free text (a banner, a macro body, a certificate's
+#: hex), which the device takes without a prompt after each line. netmiko
+#: waits for the echo and the prompt after every line it checks, so, like
+#: netmiko's own ``bypass_commands`` for a banner, a block holding one is
+#: sent without those checks: each line then waits for the channel to go
+#: quiet instead.
+_FREE_TEXT_ENTRY = re.compile(
+    r"^\s*(?:banner|macro\s+name|crypto\s+(?:pki|ca)\s+certificate\s+chain)\s",
+    re.IGNORECASE,
+)
+
 
 def _is_mode_wrapper(command: str) -> bool:
     """'configure terminal' / 'end': the transport switches modes itself."""
@@ -201,12 +215,12 @@ def _is_save_command(command_lower: str) -> bool:
 def _plan_config_set(commands: list[str]) -> list[tuple[bool, list[int]]]:
     """Split a config command set into ordered steps of command indexes.
 
-    A step is ``(True, indexes)`` for a config block, sent as one config set,
-    or ``(False, [index])`` for one command run at privilege-exec. A block
-    opens at 'configure terminal' and closes only at 'end'; both wrappers
-    belong to their block. A save command inside a block splits it and runs
-    between the two halves. Running the steps in turn keeps the order the
-    commands were written in.
+    A step is ``(True, indexes)`` for a config block, sent in one stay in
+    config mode, or ``(False, [index])`` for one command run at
+    privilege-exec. A block opens at 'configure terminal' and closes only at
+    'end'; both wrappers belong to their block. A save command inside a block
+    splits it and runs between the two halves. Running the steps in turn
+    keeps the order the commands were written in.
     """
     steps: list[tuple[bool, list[int]]] = []
     block: list[int] | None = None
@@ -508,69 +522,101 @@ class SSHTransport:
         return SSHResult(command=command, output=output, exit_code=0, latency_ms=latency_ms)
 
     def _run_config_block(self, connection, block: list[str]) -> list[SSHResult]:
-        """Send one config block as a single config set; one result per line.
+        """Send one config block a line at a time; one result per line.
 
-        The mode wrappers are not sent (send_config_set enters and leaves
-        config mode itself) and get an empty result.
+        Each line is its own send_config_set, so the device's answer to it
+        is checked before the next line goes out: at the first line the
+        device rejects the block stops, and every line after it is recorded
+        as skipped, not sent. The first call enters config mode and the last
+        one leaves it, as a single config set would, so the mode wrappers
+        are not sent and get an empty result.
         """
-        sent = [cmd for cmd in block if not _is_mode_wrapper(cmd)]
+        sent = [idx for idx, cmd in enumerate(block) if not _is_mode_wrapper(cmd)]
         if not sent:
             return [SSHResult(command=cmd, output="", exit_code=0) for cmd in block]
+        cmd_verify = not any(_FREE_TEXT_ENTRY.match(block[idx]) for idx in sent)
 
-        start = time.perf_counter()
-        try:
-            output = connection.send_config_set(
-                sent,
-                read_timeout=self.command_timeout,
-                cmd_verify=False,
-            )
-        except Exception as e:
-            latency_ms = (time.perf_counter() - start) * 1000
-            logger.error(f"Config set failed: {e}")
-            return [
-                SSHResult(
-                    command=cmd,
-                    output="",
-                    exit_code=-1,
-                    error=str(e),
-                    latency_ms=latency_ms / len(block),
-                )
-                for cmd in block
-            ]
-        latency_ms = (time.perf_counter() - start) * 1000
-
-        # Guard against None output
-        if output is None:
-            output = ""
-
-        config_error = _detect_cli_error(output)
-        if config_error:
-            logger.error(f"Config set returned CLI error: {config_error}")
-        else:
-            logger.info(f"Config set executed in {latency_ms:.0f}ms: {sent}")
-
-        # Attach the full config-set session output to exactly one result —
-        # the LAST sent line — counted by position. Comparing by value
-        # (cmd == sent[-1]) is unsafe because duplicate values (e.g. blank
-        # lines from Jinja {% endif %}) all match the trailing entry and would
-        # duplicate the session text in the evidence artifact.
         results: list[SSHResult] = []
-        remaining = len(sent)
-        for cmd in block:
+        transcript = ""
+        last_run: SSHResult | None = None
+        skip_reason: str | None = None
+        line_number = 0
+        block_start = time.perf_counter()
+        for idx, cmd in enumerate(block):
+            if skip_reason is not None:
+                results.append(_skipped(cmd, skip_reason))
+                continue
             if _is_mode_wrapper(cmd):
                 results.append(SSHResult(command=cmd, output="", exit_code=0))
                 continue
-            remaining -= 1
-            results.append(
-                SSHResult(
-                    command=cmd,
-                    output=output if remaining == 0 else "",
-                    exit_code=1 if config_error else 0,
-                    error=config_error,
-                    latency_ms=latency_ms / len(sent),
+            line_number += 1
+            mode_options: dict[str, bool] = {}
+            if idx != sent[0]:
+                mode_options["enter_config_mode"] = False
+            if idx != sent[-1]:
+                mode_options["exit_config_mode"] = False
+            start = time.perf_counter()
+            try:
+                output = connection.send_config_set(
+                    [cmd],
+                    read_timeout=self.command_timeout,
+                    cmd_verify=cmd_verify,
+                    **mode_options,
                 )
+            except Exception as e:
+                latency_ms = (time.perf_counter() - start) * 1000
+                logger.error(
+                    f"Config line {line_number} of {len(sent)} on {self.host} failed: "
+                    f"{type(e).__name__}"
+                )
+                last_run = SSHResult(
+                    command=cmd,
+                    output="",
+                    exit_code=-1,
+                    error=self._exception_error(e),
+                    latency_ms=latency_ms,
+                )
+                results.append(last_run)
+                skip_reason = self._skip_reason()
+                continue
+            latency_ms = (time.perf_counter() - start) * 1000
+            output = "" if output is None else str(output)
+            transcript += output
+            config_error = _detect_cli_error(output)
+            last_run = SSHResult(
+                command=cmd,
+                output="",
+                exit_code=1 if config_error else 0,
+                error=config_error,
+                latency_ms=latency_ms,
             )
+            results.append(last_run)
+            if config_error:
+                logger.warning(
+                    f"Config line {line_number} of {len(sent)} on {self.host} returned a CLI error"
+                )
+                skip_reason = self._skip_reason()
+        if skip_reason is None:
+            block_ms = (time.perf_counter() - block_start) * 1000
+            logger.info(f"Config block of {len(sent)} lines ran on {self.host} in {block_ms:.0f}ms")
+
+        # The block's whole session transcript goes on exactly one result,
+        # the last line that ran, as the transcript of a single config set
+        # did: the handler joins the outputs into one evidence artifact.
+        if last_run is not None:
+            last_run.output = transcript
         return results
+
+    def _exception_error(self, error: Exception) -> str:
+        """The error text of a command that raised ``error``.
+
+        netmiko's ReadTimeout names the pattern it waited for, and for a
+        command's echo that is the command itself, regex-escaped: a secret in
+        it would then no longer match the host's redaction of secret values.
+        """
+        if isinstance(error, ReadTimeout):
+            return f"Timed out after {self.command_timeout:g} seconds reading the device's answer"
+        return str(error)
 
     def _execute_commands_sync(self, commands: list[str]) -> list[SSHResult]:
         """

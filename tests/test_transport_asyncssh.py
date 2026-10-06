@@ -5,9 +5,10 @@
 """Tests for the asyncssh device transport wheel.
 
 Covers registration under hegemony.device_transports, spec-based construction,
-exec-channel result mapping (genuine exit codes, stderr surfacing), timing-mode
-prompt answering on a PTY, SFTP upload semantics, and the remote-curl HTTP
-transfer command shape.
+exec-channel result mapping (genuine exit codes, stderr surfacing), a
+configuration session stopping at its first failure, timing-mode prompt
+answering on a PTY, SFTP upload semantics, and the remote-curl HTTP transfer
+command shape.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ import pytest
 import hegemony_transport_asyncssh
 from hegemony_step_sdk import DeviceConnectionSpec, JumpHostSpec
 from hegemony_transport_asyncssh.transport import (
+    _CANCELLED_ERROR,
+    _SKIPPED_ERROR,
     AsyncSSHTransport,
     _NullCancellationRegistry,
 )
@@ -99,6 +102,76 @@ async def test_execute_commands_maps_exit_codes_and_stderr():
     # Blank commands are skipped, not sent
     assert connection.run.await_count == 2
     connection.close.assert_called_once()
+
+
+async def test_a_configuration_session_stops_at_the_first_failure():
+    # Like the CLI transports: once a command of a configuration session
+    # fails, the rest do not run, so a later save never stores a change that
+    # failed part way.
+    transport = _make_transport()
+    connection = _connection()
+    connection.run.side_effect = [
+        _completed(),
+        _completed(stderr="% Invalid input detected", exit_status=1),
+    ]
+    commands = ["", "configure terminal", "bork", "hostname r1", "", "write memory"]
+
+    with patch.object(asyncssh, "connect", AsyncMock(return_value=connection)):
+        results = await transport.execute_commands(commands)
+
+    assert [c.args[0] for c in connection.run.await_args_list] == ["configure terminal", "bork"]
+    assert [(r.command, r.exit_code, r.error) for r in results] == [
+        ("configure terminal", 0, None),
+        ("bork", 1, "% Invalid input detected"),
+        ("hostname r1", -1, _SKIPPED_ERROR),
+        ("write memory", -1, _SKIPPED_ERROR),
+    ]
+
+
+async def test_other_command_lists_run_every_command_after_a_failure():
+    transport = _make_transport()
+    connection = _connection()
+    connection.run.side_effect = [_completed(exit_status=2), _completed(stdout="up\n")]
+
+    with patch.object(asyncssh, "connect", AsyncMock(return_value=connection)):
+        results = await transport.execute_commands(["cat /nope", "uptime"])
+
+    assert [r.exit_code for r in results] == [2, 0]
+
+
+class _Cancellation(_NullCancellationRegistry):
+    """Cancellation registry whose run is cancelled once ``cancelled`` is set."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def is_cancelled(self, key: str | None) -> bool:
+        return self.cancelled
+
+
+async def test_a_cancelled_configuration_session_says_the_rest_were_cancelled():
+    cancellation = _Cancellation()
+    transport = _make_transport()
+    transport.step_run_id = "sr-1"
+    transport._cancellation_registry = cancellation
+    connection = _connection()
+
+    async def run(command, **kwargs):
+        cancellation.cancelled = True  # cancelling closes the connection
+        raise OSError("Connection lost")
+
+    connection.run.side_effect = run
+
+    with patch.object(asyncssh, "connect", AsyncMock(return_value=connection)):
+        results = await transport.execute_commands(
+            ["configure terminal", "hostname r1", "write memory"]
+        )
+
+    assert [(r.command, r.exit_code, r.error) for r in results] == [
+        ("configure terminal", -1, "Connection lost"),
+        ("hostname r1", -1, _CANCELLED_ERROR),
+        ("write memory", -1, _CANCELLED_ERROR),
+    ]
 
 
 async def test_connect_failure_fills_all_results():

@@ -82,6 +82,27 @@ _QUIET_READS_DONE = 3
 #: so every existing close path tears the tunnel down with the session.
 _JUMP_TUNNEL_ATTR = "_hegemony_jump_tunnel"
 
+#: First lines that make a command list a configuration session (same as the
+#: CLI transports).
+_CONFIG_ENTER_COMMANDS = ("configure terminal", "conf t", "config t")
+
+#: Error of a result for a command not run because an earlier one failed.
+_SKIPPED_ERROR = "Skipped: earlier command failed"
+
+#: Error of a result for a command not run because the run was cancelled.
+_CANCELLED_ERROR = "Skipped: the run was cancelled"
+
+
+def _is_config_session(commands: list[str]) -> bool:
+    """True when the first non-blank command enters configuration mode."""
+    first = next((cmd.strip().lower() for cmd in commands if cmd.strip()), "")
+    return first in _CONFIG_ENTER_COMMANDS
+
+
+def _skipped(command: str, reason: str) -> ExecResult:
+    """Result for a command not run, with ``reason`` as its error."""
+    return ExecResult(command=command, output="", exit_code=-1, error=reason)
+
 
 async def _close_connection(connection) -> None:
     """Close an asyncssh connection (and its jump tunnel), suppressing errors.
@@ -257,6 +278,17 @@ class AsyncSSHTransport:
         logger.info(f"Connected to {self.host} in {connect_time:.0f}ms")
         return connection
 
+    def _skip_reason(self) -> str:
+        """Why the commands after a failure are not run.
+
+        Cancelling the run closes the connection, so the command running then
+        fails; the rest are skipped because of the cancellation, not that
+        failure.
+        """
+        if self._cancellation_registry.is_cancelled(self.step_run_id):
+            return _CANCELLED_ERROR
+        return _SKIPPED_ERROR
+
     @staticmethod
     def _result_from_completed(command: str, completed: Any, latency_ms: float) -> ExecResult:
         """Map one asyncssh completed process onto the SDK result shape."""
@@ -281,6 +313,12 @@ class AsyncSSHTransport:
         """
         Execute multiple commands over one SSH connection, one exec channel each.
 
+        In a configuration session (the first non-blank command is
+        'configure terminal' or an abbreviation) nothing runs after the first
+        failure or a cancellation, as on the CLI transports: the commands left
+        are recorded as skipped, so a later save never stores a change that
+        failed part way. Otherwise every command runs.
+
         Args:
             commands: List of commands to execute
 
@@ -299,14 +337,22 @@ class AsyncSSHTransport:
             if self.step_run_id:
                 self._cancellation_registry.register(self.step_run_id, connection)
 
+            config_session = _is_config_session(commands)
+            skip_reason: str | None = None
             for command in commands:
                 if not command.strip():
+                    continue
+                if skip_reason is not None:
+                    results.append(_skipped(command, skip_reason))
                     continue
                 if self._cancellation_registry.is_cancelled(self.step_run_id):
                     results.append(
                         ExecResult(command=command, output="", exit_code=-1, error="Cancelled")
                     )
-                    break
+                    if not config_session:
+                        break
+                    skip_reason = _CANCELLED_ERROR
+                    continue
                 start = time.perf_counter()
                 try:
                     completed = await asyncio.wait_for(
@@ -315,7 +361,6 @@ class AsyncSSHTransport:
                     )
                     latency_ms = (time.perf_counter() - start) * 1000
                     result = self._result_from_completed(command, completed, latency_ms)
-                    results.append(result)
                     if result.exit_code == 0:
                         logger.info(f"Command '{command}' completed in {latency_ms:.0f}ms")
                     else:
@@ -324,28 +369,27 @@ class AsyncSSHTransport:
                         )
                 except TimeoutError:
                     latency_ms = (time.perf_counter() - start) * 1000
-                    results.append(
-                        ExecResult(
-                            command=command,
-                            output="",
-                            exit_code=-1,
-                            error=f"Command timeout after {self.command_timeout}s",
-                            latency_ms=latency_ms,
-                        )
+                    result = ExecResult(
+                        command=command,
+                        output="",
+                        exit_code=-1,
+                        error=f"Command timeout after {self.command_timeout}s",
+                        latency_ms=latency_ms,
                     )
                     logger.error(f"Command '{command}' timed out")
                 except Exception as e:
                     latency_ms = (time.perf_counter() - start) * 1000
-                    results.append(
-                        ExecResult(
-                            command=command,
-                            output="",
-                            exit_code=-1,
-                            error=str(e),
-                            latency_ms=latency_ms,
-                        )
+                    result = ExecResult(
+                        command=command,
+                        output="",
+                        exit_code=-1,
+                        error=str(e),
+                        latency_ms=latency_ms,
                     )
                     logger.error(f"Command '{command}' failed: {e}")
+                results.append(result)
+                if config_session and result.exit_code != 0:
+                    skip_reason = self._skip_reason()
 
         except asyncssh.PermissionDenied as e:
             logger.error(f"Authentication failed to {self.host}: {e}")

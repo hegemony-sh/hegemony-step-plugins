@@ -56,10 +56,9 @@ class ExecuteCliConfig(BaseModel):
         le=3600,
         title="Command timeout (seconds)",
         description=(
-            "How long one command may run on a device before it fails. With the "
-            "netmiko transport a configuration block is sent as one command, so "
-            "the limit covers the whole block. The step timeout must still cover "
-            "every command on every device. Defaults to 30 seconds."
+            "How long one command, or one configuration line, may run on a "
+            "device before it fails. The step timeout must still cover every "
+            "command on every device. Defaults to 30 seconds."
         ),
     )
 

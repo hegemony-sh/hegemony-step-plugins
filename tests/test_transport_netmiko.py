@@ -8,8 +8,9 @@ Covers registration under hegemony.device_transports, spec-based construction,
 and config-set result building (regression: the full send_config_set session
 output must attach to exactly one result, not every entry equal to the trailing
 command), and how a config command set runs: `exit` stays inside its block,
-blocks and exec commands run in the order written, and nothing runs after the
-first failure or a cancellation.
+blocks and exec commands run in the order written, config lines go out one at
+a time, and nothing runs after the first failure (a rejected config line
+included) or a cancellation.
 """
 
 from __future__ import annotations
@@ -85,6 +86,11 @@ def _make_transport() -> SSHTransport:
     return t
 
 
+def _echo_config_lines(lines, **kwargs):
+    """send_config_set stand-in: echo each line after a config prompt."""
+    return "".join(f"sw(config)#{line}\n" for line in lines)
+
+
 def test_config_set_output_not_duplicated_with_blank_lines():
     transport = _make_transport()
 
@@ -99,16 +105,10 @@ def test_config_set_output_not_duplicated_with_blank_lines():
         "end",
         "write memory",
     ]
-    session_output = (
-        "configure terminal\n"
-        "cml-switch02(config)#vlan 75\n"
-        "cml-switch02(config-vlan)#name vlan_75\n"
-        "cml-switch02(config-if)#no shutdown\n"
-        "cml-switch02(config-if)#end\ncml-switch02#"
-    )
+    session_output = "".join(_echo_config_lines([line]) for line in commands[1:7])
 
     connection = MagicMock()
-    connection.send_config_set.return_value = session_output
+    connection.send_config_set.side_effect = _echo_config_lines
     connection.find_prompt.return_value = "cml-switch02#"
     connection.send_command.return_value = "Building configuration...\n[OK]"
 
@@ -120,9 +120,12 @@ def test_config_set_output_not_duplicated_with_blank_lines():
     ):
         results = transport._execute_commands_sync(commands)
 
-    assert connection.send_config_set.call_count == 1
+    # One call per line, blank lines included, and the block's transcript
+    # lands on exactly one result.
+    assert connection.send_config_set.call_count == 6
     outputs_with_session = [r for r in results if session_output in (r.output or "")]
     assert len(outputs_with_session) == 1
+    assert sum((r.output or "").count("vlan 75\n") for r in results) == 1
     assert connection.send_command.call_count == 1
     write_results = [r for r in results if r.command == "write memory"]
     assert len(write_results) == 1
@@ -204,13 +207,13 @@ def test_exit_inside_a_config_block_is_sent_as_a_config_line():
         "write memory",
     ]
     connection = MagicMock()
-    connection.send_config_set.return_value = "r1(config)#end\nr1#"
+    connection.send_config_set.return_value = "r1(config)#"
     connection.send_command.return_value = "Building configuration...\n[OK]"
 
     results = _run_on_connection(commands, connection)
 
-    connection.send_config_set.assert_called_once()
-    assert connection.send_config_set.call_args.args[0] == commands[1:6]
+    sent = [c.args[0] for c in connection.send_config_set.call_args_list]
+    assert sent == [[line] for line in commands[1:6]]
     assert [c.args[0] for c in connection.send_command.call_args_list] == ["write memory"]
     assert [r.command for r in results] == commands
     assert all(r.exit_code == 0 for r in results)
@@ -275,6 +278,105 @@ def test_config_blocks_and_exec_commands_run_in_written_order():
     assert all(r.exit_code == 0 for r in results)
 
 
+def test_a_rejected_config_line_stops_its_block():
+    # A config set used to be written to the device in one go, so the lines
+    # after a rejected one were applied all the same.
+    commands = [
+        "configure terminal",
+        "interface GigabitEthernet1",
+        " ip address 10.0.0.1",
+        " no shutdown",
+        "end",
+        "write memory",
+    ]
+
+    def send_config_set(lines, **kwargs):
+        if lines == [" ip address 10.0.0.1"]:
+            return " ip address 10.0.0.1\n% Incomplete command.\n\nr1(config-if)#"
+        return f"{lines[0]}\nr1(config-if)#"
+
+    connection = MagicMock()
+    connection.send_config_set.side_effect = send_config_set
+
+    results = _run_on_connection(commands, connection)
+
+    sent = [c.args[0] for c in connection.send_config_set.call_args_list]
+    assert sent == [["interface GigabitEthernet1"], [" ip address 10.0.0.1"]]
+    assert connection.send_command.call_count == 0
+    assert [(r.command, r.exit_code, r.error) for r in results] == [
+        ("configure terminal", 0, None),
+        ("interface GigabitEthernet1", 0, None),
+        (" ip address 10.0.0.1", 1, "% Incomplete command."),
+        (" no shutdown", -1, _SKIPPED_ERROR),
+        ("end", -1, _SKIPPED_ERROR),
+        ("write memory", -1, _SKIPPED_ERROR),
+    ]
+    # The transcript of what ran goes on the line that failed.
+    assert "% Incomplete command." in results[2].output
+    assert "interface GigabitEthernet1" in results[2].output
+
+
+def test_config_mode_is_entered_before_the_first_line_and_left_after_the_last():
+    commands = ["configure terminal", "hostname r1", "ip domain-name lab", "ntp server 192.0.2.5"]
+    connection = MagicMock()
+    connection.send_config_set.return_value = "r1(config)#"
+
+    _run_on_connection(commands, connection)
+
+    calls = connection.send_config_set.call_args_list
+    assert [c.args[0] for c in calls] == [[line] for line in commands[1:]]
+    # Like one config set: enter before the first line, leave after the last.
+    assert [
+        (c.kwargs.get("enter_config_mode", True), c.kwargs.get("exit_config_mode", True))
+        for c in calls
+    ] == [(True, False), (False, False), (False, True)]
+    # Each line's echo and prompt are checked, within the command timeout.
+    assert all(c.kwargs["cmd_verify"] is True for c in calls)
+    assert all(c.kwargs["read_timeout"] == 30.0 for c in calls)
+
+
+def test_a_block_with_banner_text_is_sent_without_echo_checks():
+    # Banner text lines get no prompt back, so waiting for one after each
+    # line would time out: like netmiko's own bypass for a banner, the whole
+    # block is sent without echo checks.
+    commands = [
+        "configure terminal",
+        "hostname r1",
+        "banner motd ^",
+        "Authorised access only",
+        "^",
+        "end",
+    ]
+    connection = MagicMock()
+    connection.send_config_set.return_value = "r1(config)#"
+
+    results = _run_on_connection(commands, connection)
+
+    calls = connection.send_config_set.call_args_list
+    assert len(calls) == 4
+    assert all(c.kwargs["cmd_verify"] is False for c in calls)
+    assert all(r.exit_code == 0 for r in results)
+
+
+def test_a_config_line_timeout_does_not_repeat_the_line_in_its_error():
+    # netmiko's ReadTimeout names the pattern it waited for, the escaped
+    # line itself; escaped, a secret would slip past the host's redaction.
+    from netmiko.exceptions import ReadTimeout
+
+    secret_line = "username admin secret Very.Secret-Value"
+    connection = MagicMock()
+    connection.send_config_set.side_effect = ReadTimeout(
+        "Pattern not detected: 'username\\ admin\\ secret\\ Very\\.Secret\\-Value'"
+    )
+
+    results = _run_on_connection(["configure terminal", secret_line, "end"], connection)
+
+    failed = results[1]
+    assert (failed.command, failed.exit_code) == (secret_line, -1)
+    assert failed.error == "Timed out after 30 seconds reading the device's answer"
+    assert "Secret" not in (failed.error or "")
+
+
 class _Cancellation(_NullCancellationRegistry):
     """Cancellation registry whose run is cancelled once ``cancelled`` is set."""
 
@@ -309,9 +411,13 @@ def test_commands_after_a_cancellation_say_the_run_was_cancelled():
         results = transport._execute_commands_sync(commands)
 
     assert connection.send_command.call_count == 0
-    assert [r.command for r in results] == commands
-    assert [r.error for r in results[:3]] == ["Socket is closed"] * 3
-    assert [(r.exit_code, r.error) for r in results[3:]] == [(-1, _CANCELLED_ERROR)] * 2
+    assert [(r.command, r.exit_code, r.error) for r in results] == [
+        ("configure terminal", 0, None),
+        ("hostname r1", -1, "Socket is closed"),
+        ("end", -1, _CANCELLED_ERROR),
+        ("show clock", -1, _CANCELLED_ERROR),
+        ("write memory", -1, _CANCELLED_ERROR),
+    ]
 
 
 async def test_execute_step_fails_when_a_post_command_fails():

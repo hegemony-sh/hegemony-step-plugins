@@ -7,13 +7,16 @@
 The two transport wheels share only the SDK, so each keeps its own copy of
 the rules that split a configuration session into config blocks and exec
 commands, and of the result a command that is not run gets. These tests run
-the same sessions through both copies and fail when they drift apart.
+the same sessions through both copies and fail when they drift apart. The
+asyncssh transport, which also stops a configuration session at the first
+failure, must report the commands it does not run the same way.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from hegemony_transport_asyncssh import transport as asyncssh
 from hegemony_transport_netmiko import transport as netmiko
 from hegemony_transport_scrapli import transport as scrapli
 
@@ -151,4 +154,26 @@ def test_both_transports_report_a_command_not_run_alike() -> None:
             scrapli_result.output,
             scrapli_result.exit_code,
             scrapli_result.error,
+        )
+
+
+def test_asyncssh_reports_a_command_not_run_like_the_cli_transports() -> None:
+    # asyncssh runs a configuration session command by command, but stops
+    # after a failure with the same results as the CLI transports.
+    assert asyncssh._CONFIG_ENTER_COMMANDS == netmiko._CONFIG_ENTER_COMMANDS
+    assert asyncssh._SKIPPED_ERROR == netmiko._SKIPPED_ERROR
+    assert asyncssh._CANCELLED_ERROR == netmiko._CANCELLED_ERROR
+    for reason in (netmiko._SKIPPED_ERROR, netmiko._CANCELLED_ERROR):
+        netmiko_result = netmiko._skipped("write memory", reason)
+        asyncssh_result = asyncssh._skipped("write memory", reason)
+        assert (
+            netmiko_result.command,
+            netmiko_result.output,
+            netmiko_result.exit_code,
+            netmiko_result.error,
+        ) == (
+            asyncssh_result.command,
+            asyncssh_result.output,
+            asyncssh_result.exit_code,
+            asyncssh_result.error,
         )

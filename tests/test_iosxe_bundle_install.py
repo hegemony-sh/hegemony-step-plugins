@@ -65,6 +65,7 @@ class EmulatedIOS:
         class Connection:
             remote_conn_pre = None
             remote_conn = None
+            in_config = False
 
             def enable(self) -> None:
                 pass
@@ -77,14 +78,34 @@ class EmulatedIOS:
                     return ""
                 return INVALID  # configuration commands typed in exec mode
 
-            def send_config_set(self, commands: list[str], **kwargs: Any) -> str:
-                device.config_sessions.append(list(commands))
+            def send_config_set(
+                self,
+                commands: list[str],
+                *,
+                enter_config_mode: bool = True,
+                exit_config_mode: bool = True,
+                **kwargs: Any,
+            ) -> str:
+                # Like netmiko: one configuration session runs from the call
+                # that enters config mode to the one that leaves it.
+                output = ""
+                if enter_config_mode and not self.in_config:
+                    self.in_config = True
+                    device.config_sessions.append([])
+                    output += "configure terminal\n"
+                if not self.in_config:
+                    return INVALID  # configuration commands typed in exec mode
+                device.config_sessions[-1].extend(commands)
                 for command in commands:
                     if command == "no boot system":
                         device.boot = []
                     elif command.startswith("boot system "):
                         device.boot.append(command.split(" ", 2)[2])
-                return "configure terminal\n" + "\n".join(commands) + "\nend\n"
+                output += "\n".join(commands) + "\n"
+                if exit_config_mode:
+                    self.in_config = False
+                    output += "end\n"
+                return output
 
             def send_command_timing(self, command: str, **kwargs: Any) -> str:
                 if command == "write memory":
