@@ -68,7 +68,8 @@ still fail, and the device's error then says so.
 One evidence artifact is saved per device, named `Install: <device>` -
 success or failure; a device that could not be attempted at all (no
 management host, an unexpected error) gets `Install Error: <device>`
-instead - with the full install-session transcript and status flags. The
+instead - with the full install-session transcript and status flags,
+including whether a reloading device went down and after how long. The
 transcript includes `show boot` before and after, and the configuration
 session when the step changed the boot setting. The summary line reports
 how many devices started installing and how many are rebooting.
@@ -92,7 +93,15 @@ reload.
 
 The SSH session ends when the device reloads. A session that closes counts
 as the reload only when the output already shows that activation finished or
-the reload was confirmed; a session that closes earlier fails the device. This
-step does not wait for devices to come back; use
+the reload was confirmed; a session that closes earlier fails the device.
+
+A device can keep answering from its old image for a while after it reports
+its reload. So once a device has started its reload, in either mode, the
+step waits for it to go down: every 5 seconds it opens a new session and
+runs `show clock`, until that fails, for up to Reload Wait seconds (default
+300). A device that still answers then fails, since it has not reloaded and
+a verify step would read its old image. A Reload Wait of 0 skips this check.
+The step does not wait for devices to come back; use
 `cisco.iosxe.upgrade.verify` for that. The step's default timeout is 7200
-seconds.
+seconds; with devices installed one at a time, each device's install and
+Reload Wait count against it.

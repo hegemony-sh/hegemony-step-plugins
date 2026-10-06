@@ -8,7 +8,9 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 `cisco.iosxe.upgrade.verify` waits for each targeted Cisco IOS-XE device to
 come back after the install step's reload, then confirms the upgrade took
-effect. Place it after `cisco.iosxe.upgrade.install` in the flow.
+effect. Place it after `cisco.iosxe.upgrade.install` in the flow; unless its
+Reload Wait is 0, the install step finishes only once each reloading device
+has gone down, so this step does not reach a device still on its old image.
 
 ## Using It
 

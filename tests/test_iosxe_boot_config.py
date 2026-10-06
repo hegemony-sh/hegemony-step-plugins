@@ -151,7 +151,8 @@ def test_fix_boot_config_is_off_by_default():
 
 
 async def test_handler_passes_the_option_and_reports_the_change():
-    ssh = _fixing_device()
+    # The device goes down for its reload at once, so the step does not wait.
+    ssh = _fixing_device(**{"show clock": UNREACHABLE})
     result = await UpgradeInstallHandler().execute(
         make_ctx(
             {"image_name": "img.bin", "dest_fs": "bootflash:", "fix_boot_config": True},

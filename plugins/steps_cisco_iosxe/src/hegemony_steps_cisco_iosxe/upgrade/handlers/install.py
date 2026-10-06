@@ -10,6 +10,7 @@ This handler should run in IMPLEMENTATION phase during the
 maintenance window. It will cause device reboot.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -31,6 +32,9 @@ from hegemony_step_sdk import (
 from ..driver import UpgradeMode, get_driver
 
 logger = logging.getLogger(__name__)
+
+# How often the step checks whether a device that started its reload is down.
+_DOWN_POLL_SECONDS = 5
 
 
 class UpgradeInstallConfig(BaseModel):
@@ -94,6 +98,17 @@ class UpgradeInstallConfig(BaseModel):
         ),
         json_schema_extra={"x_show_when": {"field": "upgrade_mode", "value": "install"}},
     )
+    reload_wait_seconds: int = Field(
+        default=300,
+        ge=0,
+        title="Reload Wait (sec)",
+        description=(
+            "Once a device starts its reload, how long to wait for it to stop "
+            "answering, checked every 5 seconds with a new session. A device "
+            "that still answers then fails: it has not reloaded, and a verify "
+            "step would read its old image. 0 skips the check."
+        ),
+    )
     max_parallel_devices: int = Field(
         default=1,
         ge=1,
@@ -140,6 +155,8 @@ class UpgradeInstallHandler(BaseHandler):
         commit: Commit change to prevent rollback (default: true)
         fix_boot_config: Install mode: set the boot variable to packages.conf
             and save it instead of failing (default: false)
+        reload_wait_seconds: How long to wait for a reloading device to go
+            down (default: 300; 0 skips the check)
 
     Output context:
         install.reboot_triggered: Whether device is rebooting
@@ -149,8 +166,9 @@ class UpgradeInstallHandler(BaseHandler):
             setting (not whether it was saved)
         install.previous_boot: Boot entries before the step
 
-    Note: After this handler completes, the device will be rebooting.
-    Use cisco.iosxe.upgrade.verify in a subsequent step after device comes back up.
+    Note: After this handler completes, a device that started its reload has
+    gone down (unless reload_wait_seconds is 0). Use cisco.iosxe.upgrade.verify
+    in a subsequent step to wait for it to come back up.
     """
 
     handler_id = "cisco.iosxe.upgrade.install"
@@ -194,6 +212,7 @@ class UpgradeInstallHandler(BaseHandler):
         activate = config.activate
         commit = config.commit
         fix_boot_config = config.fix_boot_config
+        reload_wait_seconds = config.reload_wait_seconds
 
         # Get driver for platform
         try:
@@ -206,6 +225,35 @@ class UpgradeInstallHandler(BaseHandler):
             )
 
         services = ctx.require_services()
+
+        async def _answers(device: dict[str, Any]) -> bool:
+            """Whether the device answers a command in a new session."""
+            try:
+                probe = services.connect(device, platform=platform, step_run_id=ctx.step_run_id)
+                answer = await probe.execute_command("show clock")
+            except Exception as e:
+                logger.debug(f"Down check for {device.get('name')}: {e}")
+                return False
+            # A session that failed is exit code -1; a CLI error is still an answer.
+            return answer.exit_code >= 0
+
+        async def _wait_until_down(device: dict[str, Any]) -> tuple[bool, float]:
+            """Wait up to Reload Wait for the device to stop answering.
+
+            A device that has not gone down yet still answers from its old
+            image, so a verify step started now could read the old version.
+            Returns whether it went down and the seconds waited.
+            """
+            loop = asyncio.get_event_loop()
+            start = loop.time()
+            while True:
+                answered = await _answers(device)
+                elapsed = loop.time() - start
+                if not answered:
+                    return True, elapsed
+                if elapsed >= reload_wait_seconds:
+                    return False, elapsed
+                await asyncio.sleep(min(_DOWN_POLL_SECONDS, reload_wait_seconds - elapsed))
 
         async def _process_device(device: dict[str, Any]) -> _DeviceOutcome:
             outcome = _DeviceOutcome()
@@ -262,7 +310,26 @@ class UpgradeInstallHandler(BaseHandler):
                     # duplicate the whole transcript).
                     await ctx.emit_output(result.cli_output, device=device, command="install")
 
-                if result.success:
+                success = result.success
+                error = result.error
+                went_down: bool | None = None
+                down_elapsed = 0.0
+                if result.success and result.reboot_triggered and reload_wait_seconds:
+                    await ctx.emit_progress(
+                        f"Waiting for {device_name} to go down for its reload",
+                        device_id,
+                        {"phase": "install", "status": "waiting_down"},
+                    )
+                    went_down, down_elapsed = await _wait_until_down(device)
+                    if not went_down:
+                        success = False
+                        error = (
+                            f"The device reported its reload but still answered "
+                            f"{down_elapsed:.0f}s later: it did not go down within "
+                            f"Reload Wait ({reload_wait_seconds}s)"
+                        )
+
+                if success:
                     outcome.ok = True
 
                     if result.reboot_triggered:
@@ -282,7 +349,7 @@ class UpgradeInstallHandler(BaseHandler):
                 else:
                     outcome.failed_device = device_name
                     await ctx.emit_progress(
-                        f"Install failed: {result.error}",
+                        f"Install failed: {error}",
                         device_id,
                         {"phase": "install", "status": "failed"},
                     )
@@ -300,17 +367,19 @@ class UpgradeInstallHandler(BaseHandler):
                 content_lines = [
                     f"Device: {device_name}",
                     f"Platform: {platform} ({mode_str} mode)",
-                    f"Success: {result.success}",
+                    f"Success: {success}",
                     f"Reboot Triggered: {result.reboot_triggered}",
                     f"Activated: {result.activated}",
                     f"Committed: {result.committed}",
                     f"Boot Config Changed: {result.boot_config_changed}",
                     f"Previous Boot: {';'.join(result.previous_boot) or 'unknown'}",
                 ]
+                if went_down is not None:
+                    content_lines.append(f"Went Down: {went_down} (after {down_elapsed:.1f}s)")
                 if result.note:
                     content_lines.append(f"Note: {result.note}")
-                if result.error:
-                    content_lines.append(f"Error: {result.error}")
+                if error:
+                    content_lines.append(f"Error: {error}")
                 if result.cli_output:
                     content_lines.append(f"\n--- CLI Output ---\n{result.cli_output}")
 
@@ -324,14 +393,16 @@ class UpgradeInstallHandler(BaseHandler):
                         "device_name": device_name,
                         "platform": platform,
                         "upgrade_mode": mode_str,
-                        "success": result.success,
+                        "success": success,
                         "reboot_triggered": result.reboot_triggered,
                         "activated": result.activated,
                         "committed": result.committed,
                         "boot_config_changed": result.boot_config_changed,
                         "previous_boot": result.previous_boot,
+                        "went_down": went_down,
+                        "down_elapsed_sec": down_elapsed,
                         "note": result.note,
-                        "error": result.error,
+                        "error": error,
                     },
                 }
                 outcome.evidence.append(evidence_item)
