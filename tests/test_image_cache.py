@@ -463,9 +463,9 @@ def _install(
         captured["exec"].append((list(argv), kwargs.get("env")))
         proc = AsyncMock()
         proc.stdout = AsyncMock()
-        proc.stdout.readline = AsyncMock(return_value=b"")
+        proc.stdout.read = AsyncMock(return_value=b"")
         proc.stderr = AsyncMock()
-        proc.stderr.readline = AsyncMock(return_value=b"")
+        proc.stderr.read = AsyncMock(return_value=b"")
         proc.wait = AsyncMock(return_value=0)
         proc.returncode = 0
         proc.kill = AsyncMock()

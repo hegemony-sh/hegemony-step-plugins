@@ -52,6 +52,8 @@ from .common import (
     PLAN_TEXT_MISSING_NOTE,
     RUN_SCRIPT,
     SECRET_VARS_FILE,
+    SHA256_RE,
+    TF_ROOT,
     VARS_FILE,
     Engine,
     LockTimeout,
@@ -69,6 +71,7 @@ from .common import (
     managed_timeout_errors,
     public_outputs,
     relative_path_error,
+    release_state_hold,
     script_header,
     secret_environment,
     shared_workspace_mounted,
@@ -83,6 +86,14 @@ from .common import (
 from .summary import plan_line, summarize_plan
 
 PLAN_EXIT_FILE = f"{OUTPUT_DIR}/plan-exitcode"
+#: Where the tool saves the plan: this container's own folder, which no other
+#: step can write. The digest, the readable plan and the JSON plan all come
+#: from this one file, which is then copied to the shared working directory
+#: for tf.apply.
+PLAN_SNAPSHOT_FILE = f"{TF_ROOT}/{PLAN_FILE}"
+#: ``sha256sum`` of the saved plan: tf.apply applies the shared copy only while
+#: it still matches.
+PLAN_SHA256_FILE = f"{OUTPUT_DIR}/plan.sha256"
 PLAN_TEXT_FILE = f"{OUTPUT_DIR}/plan.txt"
 #: The JSON plan is by far the largest file, and collection shares one byte
 #: budget in the order of ``collect``: it comes from its own folder, last, so
@@ -151,7 +162,7 @@ class TfPlanConfig(TfContainerConfig):
             "Keep the managed state for this run from this plan until the run applies or "
             "ends: meanwhile other runs and people cannot lock or change it, so the plan "
             "stays valid while the run waits (for an approval, say). Every other flow using "
-            "the state waits that long."
+            "the state waits that long. A plan with no changes ends the hold at once."
         ),
         json_schema_extra={"x_show_when": {"field": "state", "value": "managed"}},
     )
@@ -247,11 +258,11 @@ class TfPlanConfig(TfContainerConfig):
         title="Image",
         description=(
             "Container image with the tool, run as root with a POSIX sh. Leave empty for "
-            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.16 for OpenTofu, "
+            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.18 for OpenTofu, "
             "hashicorp/terraform at a pinned version for Terraform."
         ),
         json_schema_extra={
-            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.16",
+            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.18",
             "x_advanced": True,
         },
     )
@@ -296,7 +307,7 @@ def build_plan_script(
         "-no-color",
         "-detailed-exitcode",
         f"-lock-timeout={config.lock_timeout.strip()}",
-        f"-out={PLAN_FILE}",
+        f"-out={PLAN_SNAPSHOT_FILE}",
     ]
     if config.destroy:
         plan.append("-destroy")
@@ -344,13 +355,22 @@ def build_plan_script(
         "set -e",
         'if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi',
         f'printf "%s" "$code" > {PLAN_EXIT_FILE}',
-        f"{run}{tf} show -no-color {PLAN_FILE} > {PLAN_TEXT_FILE}",
+        f"sha256sum {PLAN_SNAPSHOT_FILE} > {PLAN_SHA256_FILE}",
+        f"cp {PLAN_SNAPSHOT_FILE} {PLAN_FILE}",
+        f"{run}{tf} show -no-color {PLAN_SNAPSHOT_FILE} > {PLAN_TEXT_FILE}",
         f"mkdir -p {PLAN_JSON_DIR} {PLAN_OUTPUTS_DIR}",
-        f"{run}{tf} show -json {PLAN_FILE} > {PLAN_JSON_FILE}",
+        f"{run}{tf} show -json {PLAN_SNAPSHOT_FILE} > {PLAN_JSON_FILE}",
         # For a tf.apply with nothing to apply; the plan is made without them.
         f"if ! {run}{tf} output -json > {PLAN_OUTPUTS_FILE}; then rm -f {PLAN_OUTPUTS_FILE}; fi",
     ]
     return "\n".join(lines) + "\n"
+
+
+def saved_plan_digest(raw: bytes | None) -> str:
+    """The SHA-256 digest in ``sha256sum``'s output, or "" when there is none."""
+    words = (raw or b"").decode("utf-8", "replace").split()
+    digest = words[0].lower() if words else ""
+    return digest if SHA256_RE.fullmatch(digest) else ""
 
 
 class TfPlanHandler(BaseHandler):
@@ -455,7 +475,15 @@ class TfPlanHandler(BaseHandler):
             )
         if isinstance(outcome, HandlerResult):
             return outcome
-        return self._result(ctx, config, image, workdir, outcome)
+        result = self._result(ctx, config, image, workdir, outcome)
+        output = result.output
+        if state_name and result.success and output["state_held"] and not output["has_changes"]:
+            # Nothing to apply, so no apply will end the hold: end it now.
+            note = await release_state_hold(ctx, state_name)
+            output["state_held"] = bool(note)
+            result.summary += note
+            output["summary"] = result.summary
+        return result
 
     async def _files(
         self,
@@ -577,6 +605,32 @@ class TfPlanHandler(BaseHandler):
                 },
                 evidence=evidence,
             )
+        # Without the digest, tf.apply could not tell this plan from one
+        # written over it later: fail as for the exit code.
+        plan_sha256 = saved_plan_digest(outcome.collected.get(PLAN_SHA256_FILE))
+        if not plan_sha256:
+            copy_failure = collect_failure(outcome, PLAN_SHA256_FILE)
+            cause = (
+                f"the copy out of the container failed ({copy_failure})"
+                if copy_failure
+                else "it is missing or not a SHA-256 digest"
+            )
+            return HandlerResult(
+                success=False,
+                summary=f"{BINARIES[config.engine]} plan result missing",
+                error=(
+                    f"{BINARIES[config.engine]} plan finished, but the saved plan's digest "
+                    f"could not be read back from the container ({cause}); run the step again"
+                ),
+                metrics={
+                    "exit_code": exit_code,
+                    "duration_seconds": outcome.duration_seconds,
+                    "image_served": outcome.image_served,
+                    "image_source": outcome.image_source,
+                    "image_cached": outcome.image_cached,
+                },
+                evidence=evidence,
+            )
         has_changes = plan_code == "2"
         plan_text = (outcome.collected.get(PLAN_TEXT_FILE) or b"").decode("utf-8", "replace")
         summary_data: dict[str, Any] = {}
@@ -591,8 +645,14 @@ class TfPlanHandler(BaseHandler):
                 {
                     "kind": "step_result",
                     "name": f"plan_{ctx.step_id}.txt",
-                    "content_text": plan_text,
-                    "content_json": {"has_changes": has_changes, **summary_data},
+                    # The digest tf.apply checks, for whoever approves this plan.
+                    "content_text": plan_text.rstrip("\n")
+                    + f"\n\nSaved plan {PLAN_FILE}, SHA-256: {plan_sha256}\n",
+                    "content_json": {
+                        "has_changes": has_changes,
+                        **summary_data,
+                        "plan_sha256": plan_sha256,
+                    },
                 }
             )
 
@@ -638,9 +698,12 @@ class TfPlanHandler(BaseHandler):
             "image_digest": outcome.image_digest,
             # tf.apply pulls the plan's image the way the plan did.
             "cache_image": config.cache_image,
+            # tf.apply applies the saved plan only while it has this digest.
+            "plan_sha256": plan_sha256,
             "state": config.state,
             "state_name": config.state_name.strip() if config.state == "managed" else "",
-            # The run holds the state until it applies or ends (managed state only).
+            # The run holds the state until it applies or ends (managed state
+            # only); a plan with no changes ends the hold (see execute).
             "state_held": config.state == "managed" and config.hold_until_apply,
             "working_dir": workdir,
             "apply_ready": apply_ready,

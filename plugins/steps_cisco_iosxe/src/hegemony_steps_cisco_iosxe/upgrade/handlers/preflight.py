@@ -203,7 +203,7 @@ class UpgradePreflightHandler(BaseHandler):
             await ctx.emit_progress(f"Running preflight checks on {device_name}", device_id)
 
             try:
-                ssh = services.connect(device, platform=platform)
+                ssh = services.connect(device, platform=platform, step_run_id=ctx.step_run_id)
                 result = await driver.preflight(
                     ssh,
                     image_name=image_name,

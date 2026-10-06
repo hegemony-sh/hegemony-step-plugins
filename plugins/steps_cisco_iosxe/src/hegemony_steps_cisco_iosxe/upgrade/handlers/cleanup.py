@@ -191,7 +191,7 @@ class UpgradeCleanupHandler(BaseHandler):
             )
 
             try:
-                ssh = services.connect(device, platform=platform)
+                ssh = services.connect(device, platform=platform, step_run_id=ctx.step_run_id)
                 result = await driver.cleanup(
                     ssh,
                     remove_inactive=remove_inactive,

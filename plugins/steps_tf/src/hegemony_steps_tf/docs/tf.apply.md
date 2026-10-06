@@ -19,7 +19,9 @@ plan recorded, so a tag moved since the plan does not change the tool; when
 the plan ran a copy from the platform registry, that copy is what the apply
 pulls, and the plan's Cache image choice applies to the apply too. Give both steps shared (or
 explicit) execution affinity so they share the run's workspace and worker; the
-worker must have shared workspaces enabled.
+worker must have shared workspaces enabled. Every container step in the run
+can write that workspace, so the apply copies the saved plan out of it and
+applies the copy only when it has the SHA-256 digest the plan step recorded.
 
 Provider credentials are never stored in a plan, so give them again in
 Secret environment, as on the plan step. With OpenTofu state encryption, set
@@ -28,7 +30,9 @@ apply gets its own short-lived access to the state the plan step named.
 
 When the plan has no changes, the step succeeds without starting a
 container, and its outputs are the ones the plan step read from the
-state, which nothing changed since.
+state, which nothing changed since. If the run still holds the managed
+state for that plan, the step ends the hold; when the platform cannot end
+it, the hold may last until the run ends, and the summary says so.
 
 ## Output
 
@@ -45,11 +49,14 @@ that is not a `tf.plan` step or did not succeed in this run, and when a
 step lacks a shared workspace: the error says whether the plan step ran
 without one (its saved plan is gone, so give it shared affinity and plan
 again) or this step has none (shared affinity missing, or the worker has
-shared workspaces disabled). It also fails when the apply itself fails.
-The tool refuses
+shared workspaces disabled). It also fails when the apply itself fails,
+and when the saved plan changed since the plan step made it, so it is not
+the plan that was reviewed: plan again. A plan made by an older version of
+`tf.plan`, which recorded no digest, is refused too: plan again. The tool refuses
 a saved plan made stale by a state change since planning: plan again (a
 `tf.plan` with Hold the state until apply keeps others from changing a
-managed state meanwhile; this step's apply ends that hold). The
+managed state meanwhile; this step's apply ends that hold, as does a plan
+with no changes). The
 saved plan lives in the run's shared workspace; when that workspace is gone
 (for example cleaned up after a worker restart while the run waited a long
 time for approval), the step says so: plan again. The state lock is taken

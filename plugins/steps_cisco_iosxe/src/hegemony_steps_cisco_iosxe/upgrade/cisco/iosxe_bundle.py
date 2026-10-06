@@ -39,15 +39,31 @@ from ..driver import (
     register_driver,
 )
 from .iosxe_common import (
+    CommandError,
+    all_boot_images,
+    boot_change_failure,
     check_file_exists_in_dir,
+    checked,
+    cli_error_line,
+    has_boot_variable,
     normalize_filesystem,
     parse_boot_statements,
     parse_free_bytes,
     parse_version_from_show_version,
+    run_checked,
+    run_config,
+    same_file_path,
+    save_config,
     stage_image,
+    undo_boot_change,
 )
 
 logger = logging.getLogger(__name__)
+
+# The reload started: the device asked to confirm it, or said it is reloading.
+_RELOAD_STARTED_RE = re.compile(
+    r"Proceed with reload|%SYS-5-RELOAD|Reload requested|reloading, reason", re.IGNORECASE
+)
 
 
 @register_driver("ios-xe", UpgradeMode.BUNDLE)
@@ -98,16 +114,14 @@ class IOSXEBundleDriver(UpgradeDriver):
 
         try:
             # Get current version
-            version_result = await ssh.execute_commands(["show version"])
-            version_output = version_result[0].output if version_result else ""
+            version_output = await run_checked(ssh, "show version")
             cli_outputs["show version"] = version_output
             current_version = parse_version_from_show_version(version_output)
 
             await asyncio.sleep(0.1)
 
             # Check disk space
-            dir_result = await ssh.execute_commands([f"dir {dest_fs}"])
-            dir_output = dir_result[0].output if dir_result else ""
+            dir_output = await run_checked(ssh, f"dir {dest_fs}")
             cli_outputs[f"dir {dest_fs}"] = dir_output
             free_bytes = parse_free_bytes(dir_output)
 
@@ -142,8 +156,7 @@ class IOSXEBundleDriver(UpgradeDriver):
                 )
 
             # Get current boot configuration
-            boot_result = await ssh.execute_commands(["show boot"])
-            boot_output = boot_result[0].output if boot_result else ""
+            boot_output = await run_checked(ssh, "show boot")
             cli_outputs["show boot"] = boot_output
             current_boot_images = parse_boot_statements(boot_output)
 
@@ -151,9 +164,13 @@ class IOSXEBundleDriver(UpgradeDriver):
                 logger.info("Current boot config: %s", current_boot_images)
             else:
                 warnings.append("No boot system statement found")
-
-            # Check config saved (running vs startup)
-            config_saved = True  # Could add check if needed
+            # A device booting packages.conf runs in install mode; bundle mode
+            # would point it back at a single .bin image.
+            if current_boot_images and current_boot_images[0].lower().endswith("packages.conf"):
+                errors.append(
+                    f"The device boots {current_boot_images[0]} (install mode); "
+                    "use install mode for this device"
+                )
 
             # Bundle mode doesn't use install command
             install_mode_supported = False
@@ -174,13 +191,19 @@ class IOSXEBundleDriver(UpgradeDriver):
                 image_exists=image_exists,
                 target_version_installed=target_version_installed,
                 install_mode_supported=install_mode_supported,
-                config_saved=config_saved,
                 error="; ".join(errors) if errors else None,
                 warnings=warnings,
                 cli_outputs=cli_outputs,
                 extra={"current_boot_images": current_boot_images},
             )
 
+        except CommandError as e:
+            logger.warning("IOS-XE bundle preflight failed: %s", e)
+            return PreflightResult(
+                success=False,
+                error=str(e),
+                cli_outputs=cli_outputs,
+            )
         except Exception as e:
             logger.exception("IOS-XE bundle preflight failed")
             return PreflightResult(
@@ -226,6 +249,7 @@ class IOSXEBundleDriver(UpgradeDriver):
         dest_fs: str,
         activate: bool = True,
         commit: bool = True,
+        fix_boot_config: bool = False,
     ) -> InstallResult:
         """Configure boot system and trigger reload.
 
@@ -234,67 +258,74 @@ class IOSXEBundleDriver(UpgradeDriver):
         2. Set boot system to new image
         3. Save configuration
         4. Reload
+
+        Changing the boot variable is what bundle mode does, so
+        ``fix_boot_config`` (an install-mode option) does not apply.
         """
         dest_fs = normalize_filesystem(dest_fs)
         full_image_path = f"{dest_fs}{image_name}"
         cli_outputs: list[str] = []
+        previous_boot: list[str] = []
+        boot_config_changed = False
+
+        def _failed(error: str) -> InstallResult:
+            return InstallResult(
+                success=False,
+                error=error,
+                cli_output="\n".join(cli_outputs),
+                boot_config_changed=boot_config_changed,
+                previous_boot=previous_boot,
+            )
 
         try:
             # Get current boot config for rollback info
-            boot_result = await ssh.execute_commands(["show boot"])
-            boot_output = boot_result[0].output if boot_result else ""
+            boot_output = await run_checked(ssh, "show boot")
             cli_outputs.append(f"=== show boot (before) ===\n{boot_output}")
-            previous_boot_images = parse_boot_statements(boot_output)
+            if not has_boot_variable(boot_output):
+                return _failed("Could not read the boot variable from show boot")
+            previous_boot = parse_boot_statements(boot_output)
 
-            # Configure boot system
-            config_commands = [
+            # Keep the first other image as a fallback boot entry
+            fallback = next(
+                (image for image in previous_boot if not same_file_path(image, full_image_path)),
+                None,
+            )
+
+            # One configuration session: the transports send a list as config
+            # only when it starts with "configure terminal"; sent line by line,
+            # each line would run in exec mode and be rejected.
+            config_lines = [
                 "configure terminal",
-                "no boot system",  # Clear existing
+                "no boot system",
                 f"boot system {full_image_path}",
             ]
+            if fallback:
+                config_lines.append(f"boot system {fallback}")
+                logger.info("Added fallback boot image: %s", fallback)
+            config_lines.append("end")
+            try:
+                transcript = await run_config(ssh, config_lines)
+            except CommandError as e:
+                cli_outputs.append(f"=== boot configuration (failed) ===\n{e.transcript}")
+                restored = await undo_boot_change(ssh, previous_boot, cli_outputs)
+                boot_config_changed = not restored
+                return _failed(boot_change_failure(e, restored=restored))
+            boot_config_changed = True
+            cli_outputs.append(f"=== boot configuration ===\n{transcript}")
 
-            # Add previous image as backup (optional safety)
-            if previous_boot_images:
-                # Add first previous image as fallback
-                config_commands.append(f"boot system {previous_boot_images[0]}")
-                logger.info("Added fallback boot image: %s", previous_boot_images[0])
+            saved = await save_config(ssh)
+            cli_outputs.append(f"=== write memory ===\n{saved}")
 
-            config_commands.extend(
-                [
-                    "end",
-                ]
-            )
-
-            # Execute config
-            for cmd in config_commands:
-                result = await ssh.execute_commands([cmd])
-                if result:
-                    cli_outputs.append(f"=== {cmd} ===\n{result[0].output}")
-                await asyncio.sleep(0.2)
-
-            # Verify boot config was set correctly
-            verify_result = await ssh.execute_commands(["show boot"])
-            verify_output = verify_result[0].output if verify_result else ""
-            cli_outputs.append(f"=== show boot (after config) ===\n{verify_output}")
-
-            if image_name.lower() not in verify_output.lower():
-                return InstallResult(
-                    success=False,
-                    error=f"Boot system not set correctly to {image_name}",
-                    cli_output="\n".join(cli_outputs),
+            # The boot variable follows the saved configuration, so it is
+            # read back after the save. The new image must come first.
+            verify_output = await run_checked(ssh, "show boot")
+            cli_outputs.append(f"=== show boot (after) ===\n{verify_output}")
+            new_boot = parse_boot_statements(verify_output)
+            if not (new_boot and same_file_path(new_boot[0], full_image_path)):
+                return _failed(
+                    f"Boot variable is {';'.join(new_boot) or 'not set'} after the change, "
+                    f"expected {full_image_path} first"
                 )
-
-            # Save configuration
-            save_result = await ssh.execute_command_timing(
-                "write memory",
-                read_timeout=60,
-                answers={
-                    "[OK]": "",
-                    "[confirm]": "",
-                    "Overwrite the previous": "y",
-                },
-            )
-            cli_outputs.append(f"=== write memory ===\n{save_result.output}")
 
             if not activate:
                 # Just configure, don't reload yet
@@ -303,21 +334,34 @@ class IOSXEBundleDriver(UpgradeDriver):
                     reboot_triggered=False,
                     activated=False,
                     cli_output="\n".join(cli_outputs),
+                    boot_config_changed=boot_config_changed,
+                    previous_boot=previous_boot,
                 )
 
-            # Trigger reload
+            # Trigger reload. One key per prompt, so each is answered once and
+            # in the order the device asks: "Save? [yes/no]" (already saved),
+            # then "Proceed with reload? [confirm]".
             reload_result = await ssh.execute_command_timing(
                 "reload",
-                read_timeout=30,
+                read_timeout=60,
                 answers={
+                    "Save?": "no",
                     "Proceed with reload": "y",
-                    "confirm": "y",
-                    "[yes/no]": "yes",
-                    "Save?": "no",  # Already saved
-                    "System configuration has been modified": "no",
                 },
             )
-            cli_outputs.append(f"=== reload ===\n{reload_result.output}")
+            reload_output = reload_result.output or ""
+            cli_outputs.append(f"=== reload ===\n{reload_output}")
+            if reload_result.error:
+                cli_outputs.append(f"[reload session: {reload_result.error}]")
+
+            # The session drops when the device reloads, so exit code -1 is
+            # expected once the reload was confirmed - and a failure before.
+            error_line = cli_error_line(reload_output)
+            if error_line or not _RELOAD_STARTED_RE.search(reload_output):
+                reason = error_line or reload_result.error or reload_output.strip() or "no output"
+                return _failed(f"Reload did not start: {reason}")
+            if reload_result.exit_code > 0:
+                return _failed(f"Reload did not start: {reload_result.error or 'CLI error'}")
 
             return InstallResult(
                 success=True,
@@ -325,26 +369,18 @@ class IOSXEBundleDriver(UpgradeDriver):
                 activated=True,
                 committed=True,  # Bundle mode doesn't have separate commit
                 cli_output="\n".join(cli_outputs),
+                boot_config_changed=boot_config_changed,
+                previous_boot=previous_boot,
             )
 
+        except CommandError as e:
+            logger.warning("IOS-XE bundle install failed: %s", e)
+            return _failed(str(e))
         except Exception as e:
-            error_str = str(e).lower()
-            if "connection" in error_str or "timeout" in error_str or "ssh" in error_str:
-                logger.info("Connection lost after reload - expected")
-                return InstallResult(
-                    success=True,
-                    reboot_triggered=True,
-                    activated=True,
-                    committed=True,
-                    cli_output=f"Connection lost (expected during reboot): {e}",
-                )
-
+            # Transports report a dropped session in the result, not by
+            # raising, so an exception here is never the reload.
             logger.exception("IOS-XE bundle install failed")
-            return InstallResult(
-                success=False,
-                error=str(e),
-                cli_output="\n".join(cli_outputs) if cli_outputs else "",
-            )
+            return _failed(str(e))
 
     async def verify(
         self,
@@ -365,8 +401,7 @@ class IOSXEBundleDriver(UpgradeDriver):
 
         try:
             # Get current version
-            version_result = await ssh.execute_commands(["show version"])
-            version_output = version_result[0].output if version_result else ""
+            version_output = await run_checked(ssh, "show version")
             cli_outputs["show version"] = version_output
             current_version = parse_version_from_show_version(version_output)
 
@@ -394,9 +429,7 @@ class IOSXEBundleDriver(UpgradeDriver):
                 )
 
             # Verify boot config
-            boot_result = await ssh.execute_commands(["show boot"])
-            boot_output = boot_result[0].output if boot_result else ""
-            cli_outputs["show boot"] = boot_output
+            cli_outputs["show boot"] = await run_checked(ssh, "show boot")
 
             # Bundle mode is always "committed" since boot system is saved
             committed = True
@@ -409,9 +442,21 @@ class IOSXEBundleDriver(UpgradeDriver):
                 version_match=version_match,
                 version_changed=version_changed,
                 committed=committed,
+                error=(
+                    None
+                    if success
+                    else f"Running version {current_version or 'unknown'} is not {target_version}"
+                ),
                 cli_outputs=cli_outputs,
             )
 
+        except CommandError as e:
+            logger.warning("IOS-XE bundle verify failed: %s", e)
+            return VerifyResult(
+                success=False,
+                error=str(e),
+                cli_outputs=cli_outputs,
+            )
         except Exception as e:
             logger.exception("IOS-XE bundle verify failed")
             return VerifyResult(
@@ -439,17 +484,32 @@ class IOSXEBundleDriver(UpgradeDriver):
 
         cli_outputs: list[str] = []
         removed_packages: list[str] = []
+        failed_deletes: list[str] = []
 
         try:
             # Get current boot config
-            boot_result = await ssh.execute_commands(["show boot"])
-            boot_output = boot_result[0].output if boot_result else ""
+            boot_output = await run_checked(ssh, "show boot")
             cli_outputs.append(f"=== show boot ===\n{boot_output}")
-            current_boot_images = parse_boot_statements(boot_output)
+            # Both the current and the next-reload boot images stay.
+            current_boot_images = all_boot_images(boot_output)
 
-            # Get all .bin files in flash
-            dir_result = await ssh.execute_commands(["dir flash:*.bin"])
-            dir_output = dir_result[0].output if dir_result else ""
+            # With no image in the boot variable the device boots the first
+            # file it finds, so no image is known to be unused.
+            if not current_boot_images:
+                return CleanupResult(
+                    success=False,
+                    error="The boot variable names no image, so nothing was deleted",
+                    cli_output="\n".join(cli_outputs),
+                )
+
+            # Get all .bin files in flash. A wildcard that matches nothing
+            # answers "No such file", which is an empty listing.
+            dir_results = await ssh.execute_commands(["dir flash:*.bin"])
+            dir_result = dir_results[0] if dir_results else None
+            if dir_result and dir_result.exit_code >= 0 and "No such file" in dir_result.output:
+                dir_output = ""
+            else:
+                dir_output = checked(dir_result, "dir flash:*.bin")
             cli_outputs.append(f"=== dir flash:*.bin ===\n{dir_output}")
 
             # Parse .bin files from dir output
@@ -468,42 +528,49 @@ class IOSXEBundleDriver(UpgradeDriver):
                 if not is_boot_image:
                     files_to_delete.append(bin_file)
 
-            # Keep specified number of old versions (sort by name, assume version in name)
-            if len(files_to_delete) > keep_versions:
-                files_to_delete.sort()
-                files_to_delete = (
-                    files_to_delete[:-keep_versions] if keep_versions > 0 else files_to_delete
-                )
+            # Keep the newest old images (sorted by name, assume version in name)
+            files_to_delete.sort()
+            if keep_versions > 0:
+                files_to_delete = files_to_delete[:-keep_versions]
 
             # Delete files
             for filename in files_to_delete:
                 delete_cmd = f"delete /force flash:{filename}"
+                result = await ssh.execute_command_timing(
+                    delete_cmd,
+                    read_timeout=60,
+                    answers={"Delete filename": "", "[confirm]": ""},
+                )
+                cli_outputs.append(f"=== {delete_cmd} ===\n{result.output}")
                 try:
-                    result = await ssh.execute_command_timing(
-                        delete_cmd,
-                        read_timeout=60,
-                        answers={
-                            "Delete filename": "",
-                            "confirm": "",
-                            "[confirm]": "",
-                        },
-                    )
-                    cli_outputs.append(f"=== {delete_cmd} ===\n{result.output}")
-                    removed_packages.append(filename)
-                    logger.info("Deleted: %s", filename)
-                except Exception as e:
+                    checked(result, delete_cmd)
+                except CommandError as e:
                     logger.warning("Failed to delete %s: %s", filename, e)
+                    failed_deletes.append(str(e))
+                    continue
+                removed_packages.append(filename)
+                logger.info("Deleted: %s", filename)
 
             return CleanupResult(
-                success=True,
+                success=not failed_deletes,
                 removed_packages=removed_packages,
+                error="; ".join(failed_deletes) or None,
                 cli_output="\n".join(cli_outputs),
             )
 
+        except CommandError as e:
+            logger.warning("IOS-XE bundle cleanup failed: %s", e)
+            return CleanupResult(
+                success=False,
+                removed_packages=removed_packages,
+                error=str(e),
+                cli_output="\n".join(cli_outputs),
+            )
         except Exception as e:
             logger.exception("IOS-XE bundle cleanup failed")
             return CleanupResult(
                 success=False,
+                removed_packages=removed_packages,
                 error=str(e),
                 cli_output="\n".join(cli_outputs) if cli_outputs else "",
             )
