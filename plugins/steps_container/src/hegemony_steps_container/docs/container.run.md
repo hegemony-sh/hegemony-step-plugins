@@ -133,7 +133,9 @@ with a truncation marker beyond that - that also records the exit code, image, d
 stdout/stderr streams. Text files harvested from the new-artifacts folder are
 added as further evidence artifacts; binary files become downloadable run
 artifacts. Metrics record `exit_code`, `duration_seconds`, and `image`.
-While the container runs, its output streams into the step's live log.
+While the container runs, its output streams into the step's live log, up to
+5 MB. Past that the live log says so and shows no more; the container goes on,
+and the evidence keeps stdout and stderr as above.
 
 ## When It Fails
 

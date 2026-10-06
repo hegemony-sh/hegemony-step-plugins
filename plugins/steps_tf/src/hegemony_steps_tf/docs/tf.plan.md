@@ -44,8 +44,10 @@ State decides where the state lives:
   the run until the run applies or ends: meanwhile other runs and people
   cannot lock or change it (they wait, or fail after their Lock timeout,
   naming the run), so the plan stays valid however long an approval takes.
-  Every other flow using the state waits that long. An admin can end the
-  hold with Force unlock on the state's page.
+  Every other flow using the state waits that long. A plan with no changes
+  ends the hold at once, since there is nothing to apply; when the platform
+  cannot end it, the hold may last until the run ends, and the summary says
+  so. An admin can end the hold with Force unlock on the state's page.
 - `backend`: the configuration's own backend block, such as S3, Azure
   Storage, GCS, Consul, or PostgreSQL. Backend settings fill a partial block
   (bucket, key, and so on) from a file. A configuration without a backend
@@ -66,8 +68,8 @@ that have known vulnerabilities raised to fixed versions until an OpenTofu
 release carries them; the image lists the change. That tag names a minor version of the plugins and follows its
 newest patch release.
 Terraform runs in HashiCorp's `hashicorp/terraform` image at an exact
-version. Image replaces either; it needs a POSIX `sh` with `timeout` (as
-BusyBox and coreutils have) and must run as root, since the step writes the
+version. Image replaces either; it needs a POSIX `sh` with `timeout` and
+`sha256sum` (as BusyBox and coreutils have) and must run as root, since the step writes the
 run's shared workspace. An image in a registry that needs a login pulls with
 the organization's registry credential for that host, stored once by an
 admin; the step itself needs no login settings.
@@ -97,6 +99,12 @@ plan-only flow needs no shared affinity. The saved plan contains every variable 
 included; it stays inside the run's workspace, which is deleted when the run
 ends.
 
+Every container step in the run can write the shared workspace, so the tool
+saves the plan in the step container's own folder first. The SHA-256 digest,
+the readable plan and the JSON plan all come from that one file, which is then
+copied to the shared workspace; `tf.apply` applies the shared copy only while
+it still has that digest.
+
 The working directory and the apply's lookup of the plan are per step, not
 per execution, so `tf.plan` and `tf.apply` cannot be in the body of a loop
 with parallel iterations (the flow is refused when saved). A sequential loop
@@ -124,8 +132,9 @@ non-sensitive output values as the state held them when the plan was made
 not fail the plan: they are then empty. `handler` (`tf.plan`) marks the
 output for `tf.apply`, which refuses a step output without it. Branch on
 `steps.NODE_ID.output.has_changes`, or show the summary in an approval
-message. `state_held` is true when the step holds a managed state for the
-run until it applies. `image` is the image the plan ran, and `image_digest`
+message. `plan_sha256` is the saved plan's digest, which also ends the
+readable plan artifact. `state_held` is true when the run still holds the managed state
+for the apply. `image` is the image the plan ran, and `image_digest`
 the same image by digest (empty when it has none).
 
 ## When It Fails
@@ -133,7 +142,8 @@ the same image by digest (empty when it has none).
 The step succeeds when the plan is made, with or without changes. It fails
 when init, validate, or plan fails (see the container output), when backend
 state has no backend block, when the plan's result code cannot be read back
-from the container (so whether it has changes is unknown), when another
+from the container (so whether it has changes is unknown), when the saved
+plan's digest cannot be read back (so `tf.apply` could not check the plan), when another
 plan or apply holds the state lock for longer than Lock timeout (the error
 names the holder from the lock's Who and Info lines), or before running
 anything when the config is

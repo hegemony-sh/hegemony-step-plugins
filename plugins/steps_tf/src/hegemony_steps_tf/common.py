@@ -91,6 +91,8 @@ BACKEND_CONFIG_FILE = f"{TF_ROOT}/backend.hcl"
 VARS_FILE = f"{TF_ROOT}/vars.tfvars.json"
 SECRET_VARS_FILE = f"{TF_ROOT}/secret-vars.tfvars.json"
 PLAN_FILE = "plan.tfplan"
+#: A saved plan's digest as tf.plan records it: ``sha256sum``'s 64 hex digits.
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 #: Appended to a plan's summary when its readable plan could not be kept.
 PLAN_TEXT_MISSING_NOTE = " (the readable plan could not be collected)"
 #: Harvested as downloadable run artifacts after the container exits (the
@@ -328,6 +330,41 @@ HOLD_UNSUPPORTED_MESSAGE = (
     "This platform cannot hold a managed state until apply; upgrade Hegemony, or turn off "
     "'Hold the state until apply'"
 )
+#: Appended to the summary when a hold no apply will end could not be ended.
+HOLD_KEPT_NOTE = " (the run holds the state until it ends: this platform cannot end it sooner)"
+HOLD_NOT_ENDED_NOTE = (
+    " (the platform did not end the run's hold on the state, which may last until the run ends)"
+)
+
+
+async def release_state_hold(ctx: HandlerContext, name: str) -> str:
+    """End the run's hold on managed state ``name``, which no apply will end.
+
+    For a plan with nothing to apply. Returns "" when the hold was ended,
+    else a note for the step's summary: the hold may then last until the run
+    ends, which never fails the step.
+    """
+    release = getattr(ctx.require_services(), "release_state_hold", None)
+    if release is None:
+        return HOLD_KEPT_NOTE
+    try:
+        released = bool(await release(name))
+    except NotImplementedError:
+        return HOLD_KEPT_NOTE
+    except Exception as exc:  # noqa: BLE001 - the step itself succeeded
+        logger.warning(
+            "Could not end the run's hold on managed state %r: %s",
+            name,
+            exc,
+            extra={"run_id": ctx.run_id, "step_run_id": ctx.step_run_id},
+        )
+        released = False
+    if not released:
+        return HOLD_NOT_ENDED_NOTE
+    await ctx.emit_progress(
+        f"Ended the run's hold on managed state {name!r}: there is nothing to apply"
+    )
+    return ""
 
 
 def managed_timeout_errors(value: object) -> list[str]:
