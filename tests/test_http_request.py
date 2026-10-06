@@ -815,7 +815,7 @@ async def test_a_slow_response_times_out():
 
     recorder = Recorder(slow)
     result = await _handler(recorder).execute(
-        _ctx({"url": "https://api.example.test/", "timeout_sec": 1})
+        _ctx({"url": "https://api.example.test/", "request_timeout_seconds": 1})
     )
     assert result.success is False
     assert result.error == "the request timed out after 1 s"
@@ -1036,7 +1036,7 @@ def _errors(config: dict[str, Any]) -> list[str]:
         ({"url": "https://a.test/", "method": "POST", "json_body": "{nope"}, "not valid JSON"),
         ({"url": "https://a.test/", "expected_status": "2xx"}, "expected_status"),
         ({"url": "https://a.test/", "expected_status": "200-700"}, "expected_status"),
-        ({"url": "https://a.test/", "timeout_sec": 0}, "timeout_sec"),
+        ({"url": "https://a.test/", "request_timeout_seconds": 0}, "request_timeout_seconds"),
         ({"url": "https://a.test/", "max_response_bytes": 17 * 1024 * 1024}, "max_response"),
         ({"url": "https://a.test/", "headers": {"Bad Name": "x"}}, "not a valid header name"),
         ({"url": "https://a.test/", "headers": {"Host": "x"}}, "the step sets it"),
@@ -1254,7 +1254,7 @@ async def test_a_real_request_ignores_proxy_settings_of_the_worker(monkeypatch, 
         monkeypatch.delenv(name, raising=False)
     services = FakeServices()
     result = await HttpRequestHandler().execute(
-        _ctx({"url": f"{local_server}/v1/ping?x=1", "timeout_sec": 5}, services)
+        _ctx({"url": f"{local_server}/v1/ping?x=1", "request_timeout_seconds": 5}, services)
     )
     assert result.success is True, result.error
     assert result.output["data"] == {"path": "/v1/ping?x=1"}

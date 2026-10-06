@@ -36,6 +36,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerServices,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
 )
 
@@ -291,7 +292,7 @@ class HttpRequestConfig(BaseModel):
         ),
         json_schema_extra={"x_placeholder": "200-299"},
     )
-    timeout_sec: int = Field(
+    request_timeout_seconds: int = Field(
         default=30,
         ge=1,
         le=MAX_TIMEOUT_SECONDS,
@@ -830,18 +831,14 @@ class HttpRequestHandler(BaseHandler):
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Validate the rendered config, resolve credentials and TLS trust, then send."""
-        errors = self.validate_config(ctx.config)
-        config: HttpRequestConfig | None = None
-        if not errors:
-            config = HttpRequestConfig.model_validate(ctx.config)
-            # Rendered now: a templated value must hold up as well.
-            errors = config_errors(config, allow_templates=False)
-        if errors or config is None:
-            return HandlerResult(
-                success=False,
-                error=f"Invalid {HANDLER_ID} config: {'; '.join(errors)}",
-                summary="Config validation failed",
-            )
+        try:
+            config = self.parse_config(ctx.config, HttpRequestConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        # Rendered now: a templated value must hold up as well.
+        errors = config_errors(config, allow_templates=False)
+        if errors:
+            return InvalidConfigError(HANDLER_ID, errors).result()
 
         services = ctx.require_services()
         if getattr(services, "enforce_egress", None) is None:
@@ -980,7 +977,7 @@ class HttpRequestHandler(BaseHandler):
             "verify": verify,
             "trust_env": False,
             "follow_redirects": False,
-            "timeout": httpx.Timeout(config.timeout_sec),
+            "timeout": httpx.Timeout(config.request_timeout_seconds),
             "event_hooks": {"request": [gate]},
             # Only what _read_body can decode within the size budget.
             "headers": {"Accept-Encoding": ACCEPT_ENCODING},
@@ -1081,7 +1078,7 @@ class HttpRequestHandler(BaseHandler):
                 httpx.InvalidURL,
                 TimeoutError,
             ) as exc:
-                failure = _describe_error(exc, config.timeout_sec)
+                failure = _describe_error(exc, config.request_timeout_seconds)
 
         elapsed_ms = _elapsed_ms(started)
         last = exchanges[-1] if exchanges else None
@@ -1185,7 +1182,7 @@ class HttpRequestHandler(BaseHandler):
             started = time.perf_counter()
             next_request: httpx.Request | None = None
             try:
-                async with asyncio.timeout(config.timeout_sec):
+                async with asyncio.timeout(config.request_timeout_seconds):
                     response = await client.send(request, stream=True)
                     try:
                         exchange.status = response.status_code
@@ -1226,12 +1223,12 @@ class HttpRequestHandler(BaseHandler):
             request = next_request
 
 
-def _describe_error(exc: BaseException, timeout_sec: int) -> str:
+def _describe_error(exc: BaseException, timeout_seconds: int) -> str:
     """A step error for a request that failed before a usable response."""
     if isinstance(exc, (RequestRefused, _BodyError)):
         return str(exc)
     if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
-        return f"the request timed out after {timeout_sec} s"
+        return f"the request timed out after {timeout_seconds} s"
     detail = str(exc).strip()
     name = type(exc).__name__
     return f"request failed: {name}: {detail}" if detail else f"request failed: {name}"
