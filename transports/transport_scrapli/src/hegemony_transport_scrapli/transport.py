@@ -455,13 +455,13 @@ class ScrapliTransport:
         try:
             response = await connection.send_command(command)
         except Exception as e:
-            logger.error(f"Command '{command}' failed: {e}")
+            logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             return ScrapliResult(command=command, output="", exit_code=-1, error=str(e))
         result = self._result_from_response(command, response)
         if result.exit_code == 0:
-            logger.info(f"Command '{command}' completed in {result.latency_ms:.0f}ms")
+            logger.info(f"Command on {self.host} completed in {result.latency_ms:.0f}ms")
         else:
-            logger.warning(f"Command '{command}' returned CLI error: {result.error}")
+            logger.warning(f"Command on {self.host} returned a CLI error")
         return result
 
     async def _send_config_block(self, connection, block: list[str]) -> list[ScrapliResult]:
@@ -469,7 +469,7 @@ class ScrapliTransport:
         try:
             responses = await connection.send_configs(block, stop_on_failed=True)
         except Exception as e:
-            logger.error(f"Config set failed: {e}")
+            logger.error(f"Config set on {self.host} failed: {type(e).__name__}")
             return [
                 ScrapliResult(command=cmd, output="", exit_code=-1, error=str(e)) for cmd in block
             ]
@@ -479,9 +479,9 @@ class ScrapliTransport:
             self._result_from_response(cmd, response)
             for cmd, response in zip(block, responses, strict=False)
         ]
-        for result in results:
+        for line_number, result in enumerate(results, start=1):
             if result.exit_code != 0:
-                logger.warning(f"Config command '{result.command}' failed: {result.error}")
+                logger.warning(f"Config line {line_number} of {len(block)} on {self.host} failed")
         if len(results) < len(block):
             reason = self._skip_reason()
             results.extend(_skipped(cmd, reason) for cmd in block[len(results) :])
@@ -670,7 +670,7 @@ class ScrapliTransport:
         combined_output = ""
 
         try:
-            logger.info(f"Executing timing command on {self.host}: {command[:50]}...")
+            logger.info(f"Executing timing command on {self.host}")
             # Short per-read transport timeout so the loop below polls promptly.
             connection = await self._open_connection(timeout_transport=_TIMING_POLL_SECONDS)
 
@@ -734,8 +734,7 @@ class ScrapliTransport:
                         elapsed = int(current_time - start_time)
                         logger.info(
                             f"Still waiting for patterns after {elapsed}s. "
-                            f"Output length: {len(combined_output)}, last 200 chars: "
-                            f"{combined_output[-200:] if combined_output else '(empty)'}"
+                            f"Output length: {len(combined_output)}"
                         )
                         last_log_time = current_time
                 elif quiet_reads >= _QUIET_READS_DONE:
@@ -746,7 +745,7 @@ class ScrapliTransport:
             if wait_for_patterns and not pattern_found:
                 logger.warning(
                     f"Timeout waiting for patterns after {read_timeout}s. "
-                    f"Output so far: {combined_output[-500:] if combined_output else '(empty)'}"
+                    f"Output length: {len(combined_output)}"
                 )
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -770,7 +769,7 @@ class ScrapliTransport:
 
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            logger.error(f"Timing command failed on {self.host}: {e}")
+            logger.error(f"Timing command failed on {self.host}: {type(e).__name__}")
             return ScrapliResult(
                 command=command,
                 output=combined_output,

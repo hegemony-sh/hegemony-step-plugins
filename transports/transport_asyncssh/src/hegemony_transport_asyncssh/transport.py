@@ -362,11 +362,9 @@ class AsyncSSHTransport:
                     latency_ms = (time.perf_counter() - start) * 1000
                     result = self._result_from_completed(command, completed, latency_ms)
                     if result.exit_code == 0:
-                        logger.info(f"Command '{command}' completed in {latency_ms:.0f}ms")
+                        logger.info(f"Command on {self.host} completed in {latency_ms:.0f}ms")
                     else:
-                        logger.warning(
-                            f"Command '{command}' exited {result.exit_code}: {result.error}"
-                        )
+                        logger.warning(f"Command on {self.host} exited {result.exit_code}")
                 except TimeoutError:
                     latency_ms = (time.perf_counter() - start) * 1000
                     result = ExecResult(
@@ -376,7 +374,7 @@ class AsyncSSHTransport:
                         error=f"Command timeout after {self.command_timeout}s",
                         latency_ms=latency_ms,
                     )
-                    logger.error(f"Command '{command}' timed out")
+                    logger.error(f"Command on {self.host} timed out")
                 except Exception as e:
                     latency_ms = (time.perf_counter() - start) * 1000
                     result = ExecResult(
@@ -386,7 +384,7 @@ class AsyncSSHTransport:
                         error=str(e),
                         latency_ms=latency_ms,
                     )
-                    logger.error(f"Command '{command}' failed: {e}")
+                    logger.error(f"Command on {self.host} failed: {type(e).__name__}")
                 results.append(result)
                 if config_session and result.exit_code != 0:
                     skip_reason = self._skip_reason()
@@ -509,7 +507,7 @@ class AsyncSSHTransport:
         combined_output = ""
 
         try:
-            logger.info(f"Executing timing command on {self.host}: {command[:50]}...")
+            logger.info(f"Executing timing command on {self.host}")
             connection = await self._connect()
 
             if self.step_run_id:
@@ -576,7 +574,7 @@ class AsyncSSHTransport:
             if wait_for_patterns and not pattern_found:
                 logger.warning(
                     f"Timeout waiting for patterns after {read_timeout}s. "
-                    f"Output so far: {combined_output[-500:] if combined_output else '(empty)'}"
+                    f"Output length: {len(combined_output)}"
                 )
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -600,7 +598,7 @@ class AsyncSSHTransport:
 
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            logger.error(f"Timing command failed on {self.host}: {e}")
+            logger.error(f"Timing command failed on {self.host}: {type(e).__name__}")
             return ExecResult(
                 command=command,
                 output=combined_output,
@@ -730,7 +728,9 @@ class AsyncSSHTransport:
             output = f"{stdout}\n{stderr}".strip()
             transferred = completed.exit_status == 0
             if not transferred:
-                logger.error(f"HTTP transfer failed: {output}")
+                logger.error(
+                    f"HTTP transfer on {self.host} failed: curl exited {completed.exit_status}"
+                )
 
             return {
                 "transferred": transferred,
@@ -738,7 +738,7 @@ class AsyncSSHTransport:
                 "elapsed_ms": elapsed_ms,
             }
         except Exception as e:
-            logger.error(f"HTTP transfer on {self.host} failed: {e}")
+            logger.error(f"HTTP transfer on {self.host} failed: {type(e).__name__}")
             raise
         finally:
             if self.step_run_id and connection:

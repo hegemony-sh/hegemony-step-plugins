@@ -489,7 +489,7 @@ class SSHTransport:
                 )
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
-            logger.error(f"Command '{command}' failed: {e}")
+            logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             return SSHResult(
                 command=command,
                 output="",
@@ -503,14 +503,14 @@ class SSHTransport:
         output: str
         if raw_output is None:
             output = ""
-            logger.warning(f"Command '{command}' returned None output (connection issue?)")
+            logger.warning(f"Command on {self.host} returned no output (connection issue?)")
         else:
             output = str(raw_output)
 
         # Check for CLI error patterns in output
         cli_error = None if not command.strip() else _detect_cli_error(output)
         if cli_error:
-            logger.warning(f"Command '{command}' returned CLI error: {cli_error}")
+            logger.warning(f"Command on {self.host} returned a CLI error")
             return SSHResult(
                 command=command,
                 output=output,
@@ -518,7 +518,7 @@ class SSHTransport:
                 error=cli_error,
                 latency_ms=latency_ms,
             )
-        logger.info(f"Command '{command}' completed in {latency_ms:.0f}ms")
+        logger.info(f"Command on {self.host} completed in {latency_ms:.0f}ms")
         return SSHResult(command=command, output=output, exit_code=0, latency_ms=latency_ms)
 
     def _run_config_block(self, connection, block: list[str]) -> list[SSHResult]:
@@ -850,10 +850,6 @@ class SSHTransport:
             # The API returns HTTP 302 redirect to presigned S3 URLs.
             copy_cmd = f"copy {url} {dest_fs}{dest_filename}"
 
-            # Log the command without the full URL (may contain auth tokens)
-            safe_url = url.split("?")[0] if "?" in url else url
-            logger.info(f"Executing: copy {safe_url}... {dest_fs}{dest_filename}")
-
             # Use write_channel directly to send the escaped command
             # (send_command_timing might not handle Ctrl+V properly)
             connection.write_channel(copy_cmd + "\n")
@@ -953,7 +949,8 @@ class SSHTransport:
             has_error = any(err in output for err in error_patterns)
 
             if has_error:
-                logger.error(f"HTTP transfer failed: {output}")
+                # Not the output: the device echoes the copy command and its URL.
+                logger.error(f"HTTP transfer to {self.host} failed")
                 return {
                     "transferred": False,
                     "output": output,
@@ -971,7 +968,7 @@ class SSHTransport:
             }
 
         except Exception as e:
-            logger.error(f"HTTP transfer to {self.host} failed: {e}")
+            logger.error(f"HTTP transfer to {self.host} failed: {type(e).__name__}")
             raise
         finally:
             # Unregister from cancellation registry before disconnect
@@ -1041,7 +1038,7 @@ class SSHTransport:
         combined_output = ""
 
         try:
-            logger.info(f"Executing timing command on {self.host}: {command[:50]}...")
+            logger.info(f"Executing timing command on {self.host}")
             connection = self._connect_device()
 
             # Register connection for cancellation support
@@ -1066,7 +1063,7 @@ class SSHTransport:
             )
             # Ensure output is always a string
             if raw_output is None:
-                logger.warning(f"Command '{command}' returned None output (connection issue?)")
+                logger.warning(f"Command on {self.host} returned no output (connection issue?)")
             else:
                 combined_output += str(raw_output)
                 self._stream_from_thread(raw_output)
@@ -1119,9 +1116,7 @@ class SSHTransport:
             # long pauses (30-60+ seconds) between output chunks
             if wait_for_patterns:
                 logger.info(f"Waiting for patterns: {wait_for_patterns}")
-                logger.info(
-                    f"Initial output ({len(combined_output)} chars): {combined_output[:200] if combined_output else '(empty)'}..."
-                )
+                logger.info(f"Initial output: {len(combined_output)} chars")
                 pattern_found = False
                 read_interval = 2.0  # Check every 2 seconds
                 last_log_time = time.perf_counter()
@@ -1141,7 +1136,8 @@ class SSHTransport:
                         prompt_pos = output_lower.find(prompt_pattern.lower())
                         if prompt_pos >= 0:
                             logger.info(
-                                f"Matched prompt '{prompt_pattern}' in initial output at pos {prompt_pos}, sending '{answer}'"
+                                f"Matched prompt '{prompt_pattern}' in initial output at pos "
+                                f"{prompt_pos}, sending answer"
                             )
                             answered_prompt_patterns.add(prompt_pattern.lower())
                             connection.write_channel(answer + "\n")
@@ -1187,7 +1183,8 @@ class SSHTransport:
                                         continue
                                     if pattern_lower in new_output_lower:
                                         logger.info(
-                                            f"Matched prompt '{prompt_pattern}' in new output, sending '{answer}'"
+                                            f"Matched prompt '{prompt_pattern}' in new output, "
+                                            "sending answer"
                                         )
                                         answered_prompt_patterns.add(pattern_lower)
                                         connection.write_channel(answer + "\n")
@@ -1202,8 +1199,7 @@ class SSHTransport:
                             elapsed = int(current_time - start_time)
                             logger.info(
                                 f"Still waiting for patterns after {elapsed}s. "
-                                f"Output length: {len(combined_output)}, last 200 chars: "
-                                f"{combined_output[-200:] if combined_output else '(empty)'}"
+                                f"Output length: {len(combined_output)}"
                             )
                             last_log_time = current_time
 
@@ -1215,7 +1211,7 @@ class SSHTransport:
                 if not pattern_found:
                     logger.warning(
                         f"Timeout waiting for patterns after {read_timeout}s. "
-                        f"Output so far: {combined_output[-500:] if combined_output else '(empty)'}"
+                        f"Output length: {len(combined_output)}"
                     )
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -1240,7 +1236,7 @@ class SSHTransport:
 
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            logger.error(f"Timing command failed on {self.host}: {e}")
+            logger.error(f"Timing command failed on {self.host}: {type(e).__name__}")
             return SSHResult(
                 command=command,
                 output=combined_output,

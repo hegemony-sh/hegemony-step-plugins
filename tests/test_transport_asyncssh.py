@@ -13,6 +13,8 @@ command shape.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -207,6 +209,99 @@ async def test_execute_command_timing_answers_prompts():
     assert "upgrade complete" in result.output
     process.stdin.write.assert_called_once_with("pw\n")
     process.terminate.assert_called_once()
+
+
+# ── Command text stays out of the logs ──────────────────────────────────────
+
+#: Stands for a value a step rendered from {{ secret(...) }}: the platform has
+#: no log redaction, so command text must never reach a log message.
+_SECRET = "Sw0rdfish-42.x"
+
+
+async def _hang(*args, **kwargs):
+    await asyncio.sleep(60)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        _completed(stdout=f"{_SECRET}\n"),
+        _completed(stderr=f"sh: {_SECRET}: not found", exit_status=127),
+        OSError(f"channel closed running {_SECRET}"),
+        "timeout",
+    ],
+    ids=["success", "exit-status", "exception", "timeout"],
+)
+async def test_commands_are_not_logged(caplog, outcome):
+    caplog.set_level(logging.DEBUG, logger="hegemony_transport_asyncssh")
+    transport = _make_transport()
+    transport.command_timeout = 0.01
+    connection = _connection()
+    if outcome == "timeout":
+        connection.run.side_effect = _hang
+    elif isinstance(outcome, Exception):
+        connection.run.side_effect = outcome
+    else:
+        connection.run.return_value = outcome
+
+    with patch.object(asyncssh, "connect", AsyncMock(return_value=connection)):
+        await transport.execute_commands([f"echo {_SECRET}", f"printf {_SECRET}"])
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+async def test_timing_commands_and_output_are_not_logged(caplog):
+    caplog.set_level(logging.DEBUG, logger="hegemony_transport_asyncssh")
+    transport = _make_transport()
+    connection = _connection()
+    process = MagicMock()
+    process.exit_status = None
+    process.stdin.write = MagicMock()
+    # The command's output echoes the secret; the awaited pattern never comes.
+    process.stdout.read = AsyncMock(side_effect=[f"{_SECRET}\n", OSError("gone")])
+    connection.create_process = AsyncMock(return_value=process)
+
+    with patch.object(asyncssh, "connect", AsyncMock(return_value=connection)):
+        await transport.execute_command_timing(
+            f"sudo apply-upgrade {_SECRET}",
+            read_timeout=30.0,
+            wait_for_patterns=["upgrade complete"],
+        )
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+async def test_failed_timing_commands_are_not_logged(caplog):
+    caplog.set_level(logging.DEBUG, logger="hegemony_transport_asyncssh")
+    transport = _make_transport()
+    connection = _connection()
+    connection.create_process = AsyncMock(side_effect=OSError(f"cannot run {_SECRET}"))
+
+    with patch.object(asyncssh, "connect", AsyncMock(return_value=connection)):
+        result = await transport.execute_command_timing(f"sudo apply-upgrade {_SECRET}")
+
+    assert result.exit_code == -1
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+async def test_http_transfer_url_is_not_logged(caplog):
+    caplog.set_level(logging.DEBUG, logger="hegemony_transport_asyncssh")
+    transport = _make_transport()
+    url = f"https://files.example.test/a/{_SECRET}/fw.bin"
+    connection = _connection()
+    connection.run.return_value = _completed(
+        stderr=f"curl: (22) The requested URL returned error: 403 {url}", exit_status=22
+    )
+
+    with patch.object(asyncssh, "connect", AsyncMock(return_value=connection)):
+        result = await transport.http_transfer(url=url, dest_fs="/var/tmp", dest_filename="fw.bin")
+
+    assert result["transferred"] is False
+    assert caplog.records
+    assert _SECRET not in caplog.text
 
 
 async def test_scp_put_skips_existing_without_overwrite(tmp_path):

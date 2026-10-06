@@ -15,7 +15,11 @@ included) or a cancellation.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
+
+import pytest
+from netmiko.exceptions import ReadTimeout
 
 import hegemony_transport_netmiko
 from hegemony_step_sdk import DeviceConnectionSpec
@@ -83,6 +87,8 @@ def _make_transport() -> SSHTransport:
     t.step_run_id = None
     t.jump_host = None
     t._cancellation_registry = _NullCancellationRegistry()
+    t._output_sink = None
+    t.streams_timing_output = False
     return t
 
 
@@ -457,6 +463,133 @@ async def test_execute_step_fails_when_a_post_command_fails():
     assert result.success is False
     assert "% Invalid input detected" in (result.error or "")
     assert result.evidence[0]["content_json"]["success"] is False
+
+
+# ── Command text stays out of the logs ──────────────────────────────────────
+
+#: Stands for a value a step rendered from {{ secret(...) }}: the platform has
+#: no log redaction, so command text must never reach a log message.
+_SECRET = "Sw0rdfish-42.x"
+
+
+def _send_command(output: str | Exception):
+    def send_command(command, **kwargs):
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+    return send_command
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        f"{_SECRET} ok",
+        f"show {_SECRET}\n% Invalid input detected at '^' marker.",
+        ReadTimeout(f"Pattern not detected: 'show\\ {_SECRET}'"),
+    ],
+    ids=["success", "cli-error", "exception"],
+)
+def test_exec_commands_are_not_logged(caplog, outcome):
+    caplog.set_level(logging.DEBUG)
+    connection = MagicMock()
+    connection.send_command.side_effect = _send_command(outcome)
+
+    _run_on_connection([f"show running-config | include {_SECRET}"], connection)
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        f"r1(config)#username admin secret {_SECRET}\nr1(config)#",
+        f"username admin secret {_SECRET}\n% Invalid input detected at '^' marker.",
+        ReadTimeout(f"Pattern not detected: 'username\\ admin\\ secret\\ {_SECRET}'"),
+    ],
+    ids=["success", "cli-error", "exception"],
+)
+def test_config_lines_are_not_logged(caplog, outcome):
+    caplog.set_level(logging.DEBUG)
+    connection = MagicMock()
+    connection.send_config_set.side_effect = _send_command(outcome)
+    connection.send_command.return_value = "[OK]"
+
+    _run_on_connection(
+        ["configure terminal", f"username admin secret {_SECRET}", "end", "write memory"],
+        connection,
+    )
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+def _run_timing(connection: MagicMock, command: str, **kwargs):
+    transport = _make_transport()
+    with (
+        patch.object(
+            hegemony_transport_netmiko.transport, "ConnectHandler", return_value=connection
+        ),
+        patch.object(hegemony_transport_netmiko.transport, "_safe_disconnect"),
+        patch.object(hegemony_transport_netmiko.transport.time, "sleep"),
+    ):
+        return transport._execute_command_timing_sync(command, **kwargs)
+
+
+def test_timing_commands_and_answers_are_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    connection = MagicMock()
+    connection.send_command_timing.return_value = f"{_SECRET}\nPassword:"
+    # The device echoes the answer back before the awaited pattern.
+    connection.read_channel.side_effect = [f"{_SECRET}\n", "Install done"]
+
+    result = _run_timing(
+        connection,
+        f"install add file flash:{_SECRET}.bin",
+        read_timeout=60.0,
+        answers={"Password:": _SECRET},
+        wait_for_patterns=["Install done"],
+    )
+
+    assert result.exit_code == 0
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+def test_failed_timing_commands_are_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    connection = MagicMock()
+    connection.send_command_timing.side_effect = ReadTimeout(f"no prompt after {_SECRET}")
+
+    result = _run_timing(connection, f"install add file flash:{_SECRET}.bin")
+
+    assert result.exit_code == -1
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+def test_http_transfer_url_is_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    url = f"https://files.example.test/a/{_SECRET}/image.bin"
+    connection = MagicMock()
+    connection.read_channel.return_value = f"copy {url} flash:image.bin\n%Error opening {url}"
+    transport = _make_transport()
+
+    with (
+        patch.object(
+            hegemony_transport_netmiko.transport, "ConnectHandler", return_value=connection
+        ),
+        patch.object(hegemony_transport_netmiko.transport, "_safe_disconnect"),
+        patch.object(hegemony_transport_netmiko.transport.time, "sleep"),
+    ):
+        result = transport._http_transfer_sync(
+            url=url, dest_fs="flash:", dest_filename="image.bin", timeout_seconds=10
+        )
+
+    assert result["transferred"] is False
+    assert caplog.records
+    assert _SECRET not in caplog.text
 
 
 # ── Jump host (bastion) hop ──────────────────────────────────────────────────

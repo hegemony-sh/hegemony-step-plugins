@@ -14,6 +14,7 @@ seam.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -430,6 +431,95 @@ async def test_timing_mode_stops_on_hard_read_error():
     assert connection.channel.read.await_count == 2
     assert result.exit_code == 0
     assert "System going down" in result.output
+
+
+# ── Command text stays out of the logs ──────────────────────────────────────
+
+#: Stands for a value a step rendered from {{ secret(...) }}: the platform has
+#: no log redaction, so command text must never reach a log message.
+_SECRET = "Sw0rdfish-42.x"
+
+
+def _respond(outcome: object):
+    async def respond(*args, **kwargs):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    return respond
+
+
+_OUTCOMES = [
+    _response(f"{_SECRET} ok"),
+    _response(f"{_SECRET}\n% Invalid input detected at '^' marker.", failed=True),
+    ScrapliTimeout(f"timed out sending {_SECRET}"),
+]
+_OUTCOME_IDS = ["success", "cli-error", "exception"]
+
+
+@pytest.mark.parametrize("outcome", _OUTCOMES, ids=_OUTCOME_IDS)
+async def test_exec_commands_are_not_logged(caplog, outcome):
+    caplog.set_level(logging.DEBUG)
+    connection = _connection()
+    connection.send_command.side_effect = _respond(outcome)
+
+    await _run_on_connection([f"show running-config | include {_SECRET}"], connection)
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+@pytest.mark.parametrize("outcome", _OUTCOMES, ids=_OUTCOME_IDS)
+async def test_config_lines_are_not_logged(caplog, outcome):
+    caplog.set_level(logging.DEBUG)
+    connection = _connection()
+    configs = outcome if isinstance(outcome, Exception) else [outcome]
+    connection.send_configs.side_effect = _respond(configs)
+    connection.send_command.return_value = _response("[OK]")
+
+    await _run_on_connection(
+        ["configure terminal", f"username admin secret {_SECRET}", "end", "write memory"],
+        connection,
+    )
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+async def test_timing_commands_and_output_are_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    transport = _make_transport()
+    connection = _connection()
+    # The device echoes the command; the awaited pattern never comes.
+    connection.channel.read = AsyncMock(side_effect=[f"{_SECRET}\n".encode(), OSError("gone")])
+
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        await transport.execute_command_timing(
+            f"install add file flash:{_SECRET}.bin",
+            read_timeout=30.0,
+            wait_for_patterns=["Install done"],
+        )
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+async def test_failed_timing_commands_are_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    transport = _make_transport()
+    connection = _connection()
+    connection.channel.write.side_effect = OSError(f"write of {_SECRET} failed")
+
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        result = await transport.execute_command_timing(f"install add file flash:{_SECRET}.bin")
+
+    assert result.exit_code == -1
+    assert caplog.records
+    assert _SECRET not in caplog.text
 
 
 async def test_staging_methods_are_an_explicit_seam():
