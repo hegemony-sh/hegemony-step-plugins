@@ -1,3 +1,29 @@
+## [0.21.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.20.0...v0.21.0) (2026-10-06)
+
+### Features
+
+* **probe:** add probe.tls to inspect served TLS certificates ([a060ac2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a060ac20f5a9c8205f87e1fcdd53934c17b3fc64))
+* **probe:** check certificate revocation lists in probe.tls ([4f2a24c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/4f2a24cd50a0fba0035faaee09db4ed7d8c5821b))
+
+### Bug Fixes
+
+* **probe:** apply the Netscape certificate type in probe.tls offline checks ([bcd0970](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bcd0970f2e6c1a379d09a5d91e26bd76c2b02df4))
+* **probe:** bound each probe.tls revocation request by the attempt timeout ([52ce17a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/52ce17ad19fbb6112a1cbb065ae21949311ffc66))
+* **probe:** bound the age of an OCSP response or CRL without a next update ([b8d3e72](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b8d3e72fff0d332749f6af35527f7f96db05eea1))
+* **probe:** bound the offline chain search in probe.tls ([623e149](https://github.com/hegemony-sh/hegemony-step-plugins/commit/623e1493df605d4a028efe02fadb0b5f1723a2dd))
+* **probe:** call probe.tls parallelism max_parallel_devices like every handler ([a3a61e6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a3a61e6fba73817ca60794b72da09798123b9288))
+* **probe:** keep a certificate probe.tls cannot read with its endpoint ([0ee9f11](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0ee9f116d546d2d635b82b9e00a6dac123e62ac9))
+* **probe:** keep an unreadable OCSP response or CRL to its own endpoint ([66f591a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/66f591a1df82e15ea924cee75b36b33fb89c080c))
+* **probe:** limit what probe.tls downloads for revocation checks ([8c8653a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8c8653a4f2739781364f47a92a77c3e5442cf87a))
+* **probe:** match OpenSSL in probe.tls offline checks and harden OCSP ([75f9dd2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/75f9dd2d03aa70a873733eda9f09d00d49d0af1e))
+* **probe:** match OpenSSL's CA and name-constraint rules in probe.tls offline checks ([fc130ba](https://github.com/hegemony-sh/hegemony-step-plugins/commit/fc130bab686b71653588eeb413d29f5f3bae5e20))
+* **probe:** name probe.tls evidence after the server name too ([cb8012e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/cb8012ef87a6e9535b7e9715bd15f5c06bb33e19))
+* **probe:** parse PEM text in linear time in probe.tls ([015083a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/015083ad7a9eac7ee2f0ff9938725dcd32afe9cd))
+* **probe:** read probe.tls revocation responses uncompressed ([7a255ea](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7a255ea0e1be901dc5be1a3f6db7a7cd9cb410d6))
+* **probe:** read the served chain in probe.tls before Python 3.13 ([1265bda](https://github.com/hegemony-sh/hegemony-step-plugins/commit/1265bdaa72130aef3fd91854bffc584c5d675c4a))
+* **probe:** refuse TLS connections when no egress gate can check them ([5b43b86](https://github.com/hegemony-sh/hegemony-step-plugins/commit/5b43b86ffba348073a20931ed60bc12b58f7643d))
+* **probe:** report no chain verdict for a certificate probe.tls did not verify ([6fc4b66](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6fc4b666e4cfb91211ec36b67a897ba7b8615a2e))
+
 ## [0.20.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.19.0...v0.20.0) (2026-10-06)
 
 ### Features
