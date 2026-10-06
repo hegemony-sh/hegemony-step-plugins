@@ -507,7 +507,7 @@ def make_ctx(
 
 async def run_step(config: dict[str, Any], **kwargs: Any):
     kwargs.setdefault("services", FakeServices())
-    config = {"timeout_sec": 5, **config}
+    config = {"attempt_timeout_seconds": 5, **config}
     return await TlsProbeHandler().execute(make_ctx(config, **kwargs))
 
 
@@ -1297,7 +1297,14 @@ async def test_configuration_errors_stop_before_any_connection(pki):
     assert "cannot be combined" in (mixed.error or "")
 
     too_many = await run_step({"endpoints": [f"h{index}.example" for index in range(501)]})
-    assert "Too many endpoints: 501" in (too_many.error or "")
+    assert too_many.error == "Invalid probe.tls config: endpoints: at most 500 are allowed"
+    assert too_many.summary == "Config validation failed"
+
+    # Targets count towards the limit too, which only the run can see.
+    with_targets = await run_step(
+        {"endpoints": [f"h{index}.example" for index in range(500)]}, ips=["192.0.2.1"]
+    )
+    assert "Too many endpoints: 501" in (with_targets.error or "")
 
     bad_fp = await run_step({"endpoints": "a.example", "expected_fingerprint": "abc"})
     assert "SHA-256" in (bad_fp.error or "")

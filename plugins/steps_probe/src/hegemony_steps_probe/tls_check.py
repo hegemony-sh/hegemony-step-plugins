@@ -28,9 +28,15 @@ from typing import Any
 
 import httpx
 from cryptography import x509
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, StepKind
+from hegemony_step_sdk import (
+    BaseHandler,
+    HandlerContext,
+    HandlerResult,
+    InvalidConfigError,
+    StepKind,
+)
 from hegemony_step_sdk.concurrency import for_each_target_device
 
 from . import tls_certs
@@ -122,7 +128,7 @@ class TlsProbeConfig(BaseModel):
             "x_advanced": True,
         },
     )
-    timeout_sec: int = Field(
+    attempt_timeout_seconds: int = Field(
         default=10,
         ge=1,
         le=300,
@@ -489,7 +495,7 @@ class _TlsRun:
         self.enforce = enforce
         self.bundle_anchors = bundle_anchors
         self.bundle_pem = bundle_pem
-        self.timeout = float(self.config.timeout_sec)
+        self.timeout = float(self.config.attempt_timeout_seconds)
         self.client: httpx.AsyncClient | None = None
         self._observe: ssl.SSLContext | None = None
         self._verify: ssl.SSLContext | None = None
@@ -968,7 +974,7 @@ class TlsProbeHandler(BaseHandler):
     )
     category = "Checks"
     config_model = TlsProbeConfig
-    default_config = {"port": 443, "timeout_sec": 10, "require_reachable": True}
+    default_config = {"port": 443, "attempt_timeout_seconds": 10, "require_reachable": True}
     # The CA bundle may be a secret reference; it is resolved here, not by the
     # step template engine, so a bare reference is understood too.
     raw_config_keys = frozenset({"ca_bundle"})
@@ -1030,13 +1036,9 @@ class TlsProbeHandler(BaseHandler):
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Check every planned endpoint (or the pasted certificate) and assess the results."""
         try:
-            config = TlsProbeConfig.model_validate(ctx.config)
-        except ValidationError as exc:
-            problems = "; ".join(
-                ".".join(str(part) for part in error["loc"]) + f": {error['msg']}"
-                for error in exc.errors()
-            )
-            return _config_error(f"Invalid configuration: {problems}")
+            config = self.parse_config(ctx.config, TlsProbeConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
         try:
             settings = _Settings.from_config(config)
             listed = tls_certs.parse_endpoints(config.endpoints, default_port=config.port)
