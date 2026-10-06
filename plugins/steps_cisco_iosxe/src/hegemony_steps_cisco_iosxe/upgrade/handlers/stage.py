@@ -292,6 +292,8 @@ class UpgradeStageHandler(BaseHandler):
                 )
 
             selected_file_id = file_ids[0]
+            # Checks the file and gives its name; each device gets its own
+            # URL right before its transfer.
             try:
                 download_info = await get_file_device_download_url(services, selected_file_id)
             except ValueError as e:
@@ -356,9 +358,17 @@ class UpgradeStageHandler(BaseHandler):
 
             try:
                 ssh = services.connect(device, platform=platform, step_run_id=ctx.step_run_id)
+                device_source_url = source_url
+                if file_ids:
+                    # The repository's download URL expires (after an hour by
+                    # default), and devices are staged in turn, so a URL from
+                    # the start of the step can expire before a later
+                    # device's transfer begins. Each device gets a fresh one.
+                    download_info = await get_file_device_download_url(services, file_ids[0])
+                    device_source_url = download_info.url
                 result = await driver.stage(
                     ssh,
-                    source_url=source_url,
+                    source_url=device_source_url,
                     dest_fs=dest_fs,
                     dest_filename=dest_filename,
                     transfer_method=transfer_method,

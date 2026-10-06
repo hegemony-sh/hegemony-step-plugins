@@ -16,7 +16,9 @@ Pick exactly one image source. Either select a file from the platform's file
 repository (File Repository File), or enter a Source URL directly. When a
 repository file is selected, the platform issues a short-lived download URL
 that devices can reach, and Destination Filename defaults to the stored
-filename; with a manual Source URL, Destination Filename is required.
+filename; with a manual Source URL, Destination Filename is required. The
+step asks for a fresh URL for each device right before staging it, so a
+device staged late in a long step does not get an expired one.
 Configuring both sources at once fails the step before touching any device.
 
 Transfer Method defaults to auto, which prefers a device-side HTTPS or HTTP
@@ -71,11 +73,12 @@ when a setting is invalid (such as a legacy `scp` or `tftp` transfer
 method), when the MD5 checksum is not 32 hexadecimal digits, when the
 selected repository file cannot be resolved to a device-reachable URL, or
 when no upgrade driver exists for the configured platform and mode.
-Per-device failures include a missing management host, a `dir` of the
-destination that fails, a failed HTTP transfer, an image missing from `dir`
-after the transfer, a checksum the device does not confirm, a non-HTTP(S)
-source URL, and SSH errors. Any single device failing fails the whole step,
-though per-device evidence is still recorded.
+Per-device failures include a missing management host, a download URL that
+cannot be issued for the device, a `dir` of the destination that fails, a
+failed HTTP transfer, an image missing from `dir` after the transfer, a
+checksum the device does not confirm, a non-HTTP(S) source URL, and SSH
+errors. Any single device failing fails the whole step, though per-device
+evidence is still recorded.
 
 The step's default timeout is 7200 seconds, and each device-side HTTP
 transfer is capped at one hour. Rerunning after a partial failure is cheap
