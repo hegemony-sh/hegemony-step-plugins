@@ -17,7 +17,7 @@ from typing import Any
 
 from hegemony_step_sdk import BaseProbe, ProbeResult
 
-from .socks import SocksError, open_socks_connection, parse_socks_proxy
+from .socks import SocksError, SocksProxy, open_socks_connection, parse_socks_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +50,19 @@ class TcpConnectProbe(BaseProbe):
         timeout_ms = options.get("timeout_ms", 5000)
         timeout_sec = timeout_ms / 1000.0
         socks_proxy = (options.get("socks_proxy") or "").strip()
+        proxy: SocksProxy | None = None
+        if socks_proxy:
+            # A value that does not parse fails every attempt the same way:
+            # a config_error, which callers stop on. A socks_error is a
+            # handshake failure that a later attempt may get past.
+            try:
+                proxy = parse_socks_proxy(socks_proxy)
+            except SocksError as e:
+                return ProbeResult(ok=False, error_kind="config_error", error_detail=str(e))
         start_time = time.perf_counter()
 
         try:
-            if socks_proxy:
-                proxy = parse_socks_proxy(socks_proxy)
+            if proxy is not None:
                 _reader, writer = await open_socks_connection(
                     proxy, address, port, timeout=timeout_sec
                 )

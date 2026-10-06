@@ -2,25 +2,36 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""WaitReachableHandler: wait until devices are reachable and stable."""
+"""WaitReachableHandler: wait until devices are reachable and stable.
+
+Each poll runs a probe from the host's ``hegemony.probes`` registry through
+``ctx.services.run_probe``, like ``probe.connectivity``, so the flow egress
+gate, SOCKS proxies, ICMP and IPv6 work the same way in both handlers.
+"""
 
 import asyncio
-import contextlib
 import logging
-from datetime import UTC, datetime
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
     StepKind,
+    for_each_target_device,
 )
 
-from .targets import all_probe_targets
+from .checks import CHECK_TYPE_LABELS, PORT_CHECKS, CheckUnavailable, default_port
+from .targets import DEFAULT_MAX_PARALLEL_TARGETS, all_probe_targets
 
 logger = logging.getLogger(__name__)
+
+
+class _CheckMisconfigured(Exception):
+    """The probe refused its options (a ``config_error``); no poll can pass."""
 
 
 class WaitReachableConfig(BaseModel):
@@ -28,6 +39,38 @@ class WaitReachableConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    # Registry-driven like probe.connectivity's: the host injects the options
+    # from x_options_source, and run_probe decides validity at run time.
+    check_type: str = Field(
+        default="tcp_connect",
+        title="Check Type",
+        description=(
+            "Which probe each poll runs against each target; the list comes "
+            "from the checks registered on the worker. Defaults to a TCP "
+            "connection attempt (tcp_connect)."
+        ),
+        json_schema_extra={
+            "x_widget": "select",
+            "x_options_source": "probes",
+            "x_option_labels": CHECK_TYPE_LABELS,
+        },
+    )
+    port: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        title="Port",
+        description=(
+            "Port the port-based checks connect to. When empty, a device is "
+            "polled on its management port (22 when the inventory sets none), "
+            "an IP target on 22, and HTTP Health uses 80. Ignored by ICMP Ping "
+            "and DNS Resolve."
+        ),
+        json_schema_extra={
+            "x_placeholder": "management port",
+            "x_hide_when": {"field": "check_type", "value": "icmp_ping"},
+        },
+    )
     max_wait_seconds: int = Field(
         default=300,
         ge=1,
@@ -35,7 +78,8 @@ class WaitReachableConfig(BaseModel):
         description=(
             "Overall deadline for the wait, in seconds. The step fails once "
             "this much time passes without every target completing its "
-            "stability window. Defaults to 300."
+            "stability window. Defaults to 300; the step's own timeout must "
+            "be larger, or it ends the wait first."
         ),
         json_schema_extra={"x_legacy_keys": ["max_wait"]},
     )
@@ -57,6 +101,40 @@ class WaitReachableConfig(BaseModel):
         description="Seconds to wait between reachability polls. Defaults to 5.",
         json_schema_extra={"x_legacy_keys": ["check_interval"]},
     )
+    connect_timeout_seconds: int = Field(
+        default=5,
+        ge=1,
+        le=60,
+        # Steps saved before the field was declared carry connect_timeout.
+        validation_alias=AliasChoices("connect_timeout_seconds", "connect_timeout"),
+        title="Connect Timeout (sec)",
+        description=(
+            "Time limit for each poll of a target, in seconds. A target that "
+            "does not answer in time counts as unreachable for that poll. "
+            "Defaults to 5."
+        ),
+        json_schema_extra={"x_legacy_keys": ["connect_timeout"]},
+    )
+    socks_proxy: str = Field(
+        default="",
+        title="SOCKS5 Proxy",
+        description=(
+            "Route TCP-based checks through an authenticated SOCKS5 proxy "
+            "(socks5[h]://user:pass@host:port), e.g. the lab bastion. "
+            "icmp_ping rejects it — use tcp_connect for tunneled targets."
+        ),
+        json_schema_extra={
+            "x_placeholder": "socks5://user:{{ secret('vault://lab/bastion/password') }}@dind:1080",
+            "x_col_span": 2,
+        },
+    )
+    max_parallel_devices: int = Field(
+        default=DEFAULT_MAX_PARALLEL_TARGETS,
+        ge=1,
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Targets polled at the same time (1 = one after another). Defaults to 10.",
+    )
 
 
 class WaitReachableHandler(BaseHandler):
@@ -68,7 +146,12 @@ class WaitReachableHandler(BaseHandler):
     description = "Wait until targets stay reachable for a stability window."
     category = "Checks"
     config_model = WaitReachableConfig
-    default_config = {"max_wait_seconds": 300, "stable_seconds": 30, "poll_interval": 5}
+    default_config = {
+        "check_type": "tcp_connect",
+        "max_wait_seconds": 300,
+        "stable_seconds": 30,
+        "poll_interval": 5,
+    }
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Wait for all target devices to be reachable with stability window."""
@@ -80,10 +163,22 @@ class WaitReachableHandler(BaseHandler):
                 summary="Missing targets",
             )
 
-        max_wait_seconds = ctx.config.get("max_wait_seconds", 300)
-        stable_seconds = ctx.config.get("stable_seconds", 30)
-        poll_interval = ctx.config.get("poll_interval", 5)
-        connect_timeout = ctx.config.get("connect_timeout", 5)
+        # The validated model, not raw config gets: a value of the wrong type
+        # (a string timeout) used to make every poll fail as "unreachable".
+        errors = self.validate_config(ctx.config)
+        if errors:
+            return HandlerResult(
+                success=False,
+                error=f"Invalid probe.wait_reachable config: {'; '.join(errors)}",
+                summary="Config validation failed",
+            )
+        config = WaitReachableConfig.model_validate(ctx.config)
+        check_type = config.check_type
+        max_wait_seconds = config.max_wait_seconds
+        stable_seconds = config.stable_seconds
+        poll_interval = config.poll_interval
+        connect_timeout = config.connect_timeout_seconds
+        socks_proxy = config.socks_proxy.strip()
 
         # Fail fast if any device is missing mgmt_host — waiting would always time out
         for device in target_devices:
@@ -96,84 +191,118 @@ class WaitReachableHandler(BaseHandler):
                     summary=f"Device '{device_name}' missing mgmt_host — cannot check reachability",
                 )
 
-        # This handler opens its own socket rather than going through
-        # services.run_probe, which is where the host applies the flow egress
-        # gate — so without this the policy would never see these targets and
-        # the step would happily poll a host the flow is forbidden to reach.
-        # Checked once up front rather than per poll: a denial is a
-        # configuration fact, not a transient condition, so it should fail the
-        # step immediately with the policy's reason instead of after
-        # max_wait_seconds of pointless waiting.
-        enforce = getattr(ctx.require_services(), "enforce_egress", None)
-        if enforce is not None:
-            for device in target_devices:
-                await enforce(
-                    device["mgmt_host"],
-                    device.get("mgmt_port", 22),
-                    proto="tcp",
-                    kind="reachability check",
-                )
+        def _port(device: dict[str, Any]) -> int | None:
+            """The port polled on ``device``, or None for a check without one."""
+            if check_type not in PORT_CHECKS:
+                return None
+            if config.port is not None:
+                return config.port
+            return default_port(check_type, device.get("mgmt_port") or 22)
 
-        start_time = datetime.now(UTC)
-        # Track stability per device (all devices validated to have mgmt_host above)
-        device_stable_start: dict[str, datetime | None] = {
-            d.get("id", d.get("mgmt_host")): None for d in target_devices
-        }
+        services = ctx.require_services()
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        deadline = started + max_wait_seconds
+        # Per target, the loop time it answered from when it last became
+        # reachable; None while it is not.
+        stable_since: list[float | None] = [None] * len(target_devices)
         attempts = 0
-        all_evidence = []
+
+        async def _poll(device: dict[str, Any]) -> float | None:
+            """Poll one target; the loop time it answered, or None if it did not.
+
+            run_probe applies the flow egress gate, so a denied target raises
+            here on its first poll and fails the step with the policy's reason.
+            """
+            # A poll never outlasts the deadline, also when it starts late in
+            # a round with more targets than run at once.
+            timeout = min(connect_timeout, deadline - loop.time())
+            if timeout <= 0:
+                return None
+            options: dict[str, Any] = {"timeout_ms": max(1, int(timeout * 1000))}
+            port = _port(device)
+            if port is not None:
+                options["port"] = port
+            if check_type == "icmp_ping":
+                options["count"] = 1
+            if socks_proxy:
+                options["socks_proxy"] = socks_proxy
+            try:
+                result = await asyncio.wait_for(
+                    services.run_probe(check_type, device["mgmt_host"], options),
+                    timeout=timeout,
+                )
+            except TimeoutError:
+                return None
+            except KeyError:
+                raise CheckUnavailable from None
+            # A probe that refuses its options refuses them on every poll.
+            if result.error_kind == "config_error":
+                name = device.get("name", device["mgmt_host"])
+                raise _CheckMisconfigured(f"{name}: {result.error_detail}")
+            return loop.time() if result.ok else None
+
+        def _timed_out() -> HandlerResult:
+            not_stable = [
+                d.get("name", d.get("mgmt_host"))
+                for d, since in zip(target_devices, stable_since, strict=True)
+                if since is None
+            ]
+            return HandlerResult(
+                success=False,
+                error=f"Timeout waiting for targets: {', '.join(not_stable)}",
+                summary=f"Targets not reachable after {max_wait_seconds}s",
+                metrics={"attempts": attempts, "elapsed_seconds": loop.time() - started},
+            )
 
         while True:
-            elapsed = (datetime.now(UTC) - start_time).total_seconds()
-            if elapsed > max_wait_seconds:
-                not_stable = [
-                    d.get("name", d.get("mgmt_host"))
-                    for d in target_devices
-                    if device_stable_start.get(d.get("id", d.get("mgmt_host"))) is None
-                ]
-                return HandlerResult(
-                    success=False,
-                    error=f"Timeout waiting for targets: {', '.join(not_stable)}",
-                    summary=f"Targets not reachable after {max_wait_seconds}s",
-                    metrics={"attempts": attempts, "elapsed_seconds": elapsed},
-                    evidence=all_evidence,
-                )
+            if loop.time() >= deadline:
+                return _timed_out()
 
             attempts += 1
+            # One round polls every target, up to max_parallel_devices at once.
+            try:
+                answered = await for_each_target_device(
+                    target_devices, _poll, max_parallel=config.max_parallel_devices
+                )
+            except CheckUnavailable:
+                return HandlerResult(
+                    success=False,
+                    error=f"Check type '{check_type}' is not available on this worker",
+                    summary=f"Unsupported check type: {check_type}",
+                )
+            except _CheckMisconfigured as exc:
+                return HandlerResult(
+                    success=False,
+                    error=f"{check_type} cannot run against {exc}",
+                    summary=f"Check cannot run: {check_type}",
+                )
             all_stable = True
 
-            for device in target_devices:
-                device_id = device.get("id", device.get("mgmt_host"))
-                device_name = device.get("name", device_id)
-                host: str = device["mgmt_host"]  # validated non-None above
-                port = device.get("mgmt_port", 22)
-
-                reachable = await self._check_tcp(host, port, connect_timeout)
-
-                if reachable:
-                    if device_stable_start[device_id] is None:
-                        device_stable_start[device_id] = datetime.now(UTC)
-                        logger.info(
-                            f"Device {device_name} became reachable, starting stability window"
-                        )
-                        all_stable = False  # Just became reachable, not yet stable
-                    else:
-                        stable_start = device_stable_start[device_id]
-                        if stable_start is not None:
-                            stable_duration = (datetime.now(UTC) - stable_start).total_seconds()
-                            if stable_duration < stable_seconds:
-                                all_stable = False
-                            else:
-                                logger.info(
-                                    f"Device {device_name} stable for {stable_duration:.1f}s"
-                                )
-                else:
-                    if device_stable_start[device_id] is not None:
+            for index, (device, answered_at) in enumerate(
+                zip(target_devices, answered, strict=True)
+            ):
+                device_name = device.get("name", device.get("id", device.get("mgmt_host")))
+                since = stable_since[index]
+                if answered_at is None:
+                    if since is not None:
                         logger.info(f"Device {device_name} went unreachable, resetting stability")
-                    device_stable_start[device_id] = None
+                    stable_since[index] = None
                     all_stable = False
+                elif since is None:
+                    stable_since[index] = answered_at
+                    logger.info(f"Device {device_name} became reachable, starting stability window")
+                    all_stable = False  # Just became reachable, not yet stable
+                # A target is stable for the span of its own answers. The
+                # round's end would credit it with time spent polling the
+                # other targets, when nothing was asked of it.
+                elif answered_at - since < stable_seconds:
+                    all_stable = False
+                else:
+                    logger.info(f"Device {device_name} stable for {answered_at - since:.1f}s")
 
-            if all_stable and all(s is not None for s in device_stable_start.values()):
-                # All devices are stable
+            if all_stable:
+                all_evidence = []
                 for device in target_devices:
                     device_id = device.get("id", device.get("mgmt_host"))
                     device_name = device.get("name", device_id)
@@ -186,7 +315,8 @@ class WaitReachableHandler(BaseHandler):
                                 "device_id": device.get("id"),
                                 "device_name": device_name,
                                 "host": device.get("mgmt_host"),
-                                "port": device.get("mgmt_port", 22),
+                                "check_type": check_type,
+                                "port": _port(device),
                                 "success": True,
                                 "stable_seconds": stable_seconds,
                             },
@@ -197,30 +327,16 @@ class WaitReachableHandler(BaseHandler):
                     summary=f"All {len(target_devices)} target(s) stable for {stable_seconds}s",
                     metrics={
                         "attempts": attempts,
-                        "elapsed_seconds": elapsed,
+                        "elapsed_seconds": loop.time() - started,
                         "stable_seconds": stable_seconds,
                         "device_count": len(target_devices),
                     },
                     evidence=all_evidence,
                 )
 
-            await asyncio.sleep(poll_interval)
-
-    async def _check_tcp(self, host: str, port: int, timeout: float) -> bool:
-        """Check TCP connectivity, whatever family the target resolves to.
-
-        ``open_connection`` picks the socket family from the address itself,
-        so an IPv6 direct target (or a hostname resolving only to AAAA) is a
-        reachability question, not an automatic failure the AF_INET-only
-        socket used to report.
-        """
-        try:
-            _reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=timeout
-            )
-        except Exception:
-            return False
-        writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
-        return True
+            # Checked again after the round, so a round that ran into the
+            # deadline fails now rather than after one more poll interval.
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return _timed_out()
+            await asyncio.sleep(min(poll_interval, remaining))
