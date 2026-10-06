@@ -1,3 +1,34 @@
+## [0.15.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.14.0...v0.15.0) (2026-10-05)
+
+### ⚠ BREAKING CHANGES
+
+* **evidence:** evidence.compare fails when a precheck item has no
+postcheck pair or its postcheck capture failed; these used to be
+skipped. On text, subset and superset now compare lines (subset used to
+need identical text, and superset always failed).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+
+### Features
+
+* **netcli:** per-command timeout ([a85fff6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a85fff672100b5ab0ce6d3c50ca202ef0647a81f))
+
+### Bug Fixes
+
+* **evidence:** fail a comparison when items are missing ([dd200d4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/dd200d491582232da19758f5e652e05fad0ee4db))
+* **evidence:** find command output by its full text ([75bc623](https://github.com/hegemony-sh/hegemony-step-plugins/commit/75bc623991e70dece95f7bef22356988f6710bd6))
+* **evidence:** match old artifact names without surrounding whitespace ([c31ff40](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c31ff40231556770cf74dab014d4dd90b21ec2ee))
+* **netcli:** collect_evidence targets roles only ([0ccc58d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0ccc58dd32f5e4506e525fab2b16e5570add4c87))
+* **netcli:** let cancelling a run close device sessions ([c9d4206](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c9d4206611d968025f2d98a7f50f7b5325e0589b))
+* **transports:** run config blocks as written and stop after a failure ([b65d1fb](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b65d1fbcbc8b2895f2432e516d88900771e8fbe8))
+* **transports:** say a command was skipped because the run was cancelled ([61010d5](https://github.com/hegemony-sh/hegemony-step-plugins/commit/61010d5238b1cd3c1db1ca198ea592916f493da1))
+
+### Performance Improvements
+
+* **evidence:** fetch the run's artifacts once per step ([44a77fa](https://github.com/hegemony-sh/hegemony-step-plugins/commit/44a77fa761e5ab12dbca8cdb60d66d9a7bb5f5c0))
+
 ## [0.14.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.13.1...v0.14.0) (2026-10-05)
 
 ### ⚠ BREAKING CHANGES

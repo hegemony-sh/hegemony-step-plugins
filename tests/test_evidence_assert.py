@@ -278,3 +278,223 @@ def test_regex_paths_are_input_capped() -> None:
     # Line scope marks the truncation in the evidence detail.
     passed, _, detail = handler._assert_content(huge, "a", "contains", "lines", "", 1)
     assert detail.get("truncated") is True
+
+
+# ── Finding a command's output (netcli.collect_evidence artifacts) ───────────
+
+# An artifact name keeps the command's first line, cut to 80 characters, so
+# each pair below shares one artifact name.
+_LONG_A = (
+    "show ip bgp vpnv4 vrf CUSTOMER-PRODUCTION-BLUE-DC1 neighbors 192.168.100.100 "
+    "advertised-routes | include 10."
+)
+_LONG_B = (
+    "show ip bgp vpnv4 vrf CUSTOMER-PRODUCTION-BLUE-DC1 neighbors 192.168.100.100 "
+    "advertised-routes | include 172."
+)
+_MULTI = "show run | section bgp\nshow ip bgp summary"
+_SHORT = "show run | section bgp"
+_TRAILING_SPACE = "show version "
+_OUTPUTS = {
+    _LONG_A: "ADVERTISED 10.0.0.0/8",
+    _LONG_B: "RECEIVED 172.16.0.0/12",
+    _SHORT: "router bgp 65000 (section only)",
+    _MULTI: "router bgp 65000 ... + summary",
+    _TRAILING_SPACE: "Cisco IOS XE Software, Version 17.12.01",
+}
+_R1 = {"id": "d1", "name": "r1"}
+
+
+def _collected(step_id: str, outputs: dict[str, str], device=_R1) -> list[dict]:
+    """Artifacts shaped as netcli.collect_evidence stores them."""
+    from hegemony_step_sdk import command_label
+
+    return [
+        {
+            "step_id": step_id,
+            "kind": "cli_output",
+            "name": f"{device['name']}:{command_label(command)}",
+            "device_id": device["id"],
+            "content_text": output,
+            "content_json": {
+                "device_id": device["id"],
+                "device_name": device["name"],
+                "command": command,
+                "success": True,
+                "exit_code": 0,
+                "error": None,
+            },
+            "created_at": f"2026-10-05T10:00:{index:02d}+00:00",
+        }
+        for index, (command, output) in enumerate(outputs.items())
+    ]
+
+
+def test_command_names_collide_but_lookups_do_not() -> None:
+    from hegemony_step_sdk import command_label
+
+    assert command_label(_LONG_A) == command_label(_LONG_B)
+    assert command_label(_MULTI) == command_label(_SHORT)
+
+
+class TestFindCommandArtifact:
+    def test_each_command_finds_its_own_output(self) -> None:
+        from hegemony_steps_evidence.artifacts import find_command_artifact
+
+        artifacts = _collected("collect", _OUTPUTS)
+        for command, output in _OUTPUTS.items():
+            found = find_command_artifact(artifacts, step_id="collect", device=_R1, command=command)
+            assert found is not None, command
+            assert found["content_text"] == output
+
+    def test_surrounding_whitespace_is_ignored(self) -> None:
+        from hegemony_steps_evidence.artifacts import find_command_artifact
+
+        artifacts = _collected("collect", _OUTPUTS)
+        found = find_command_artifact(
+            artifacts, step_id="collect", device=_R1, command="show version"
+        )
+        assert found is not None and "17.12" in found["content_text"]
+
+    def test_device_and_step_must_match(self) -> None:
+        from hegemony_steps_evidence.artifacts import find_command_artifact
+
+        r2 = {"id": "d2", "name": "r2"}
+        artifacts = _collected("collect", {_SHORT: "r1 output"}) + _collected(
+            "collect", {_SHORT: "r2 output"}, device=r2
+        )
+        found = find_command_artifact(artifacts, step_id="collect", device=r2, command=_SHORT)
+        assert found is not None and found["content_text"] == "r2 output"
+        assert find_command_artifact(artifacts, step_id="other", device=r2, command=_SHORT) is None
+
+    def test_newest_capture_wins(self) -> None:
+        from hegemony_steps_evidence.artifacts import find_command_artifact
+
+        old, new = _collected("collect", {_LONG_A: "old"}), _collected("collect", {_LONG_A: "new"})
+        new[0]["created_at"] = "2026-10-05T11:00:00+00:00"
+        found = find_command_artifact(new + old, step_id="collect", device=_R1, command=_LONG_A)
+        assert found is not None and found["content_text"] == "new"
+
+    def test_artifacts_without_metadata_match_by_name(self) -> None:
+        from hegemony_steps_evidence.artifacts import find_command_artifact
+
+        artifacts = [
+            {"step_id": "collect", "name": "r1:show version", "content_text": "short"},
+            {"step_id": "collect", "name": "r1:" + _LONG_A[:79] + "…", "content_text": "long"},
+        ]
+        found = find_command_artifact(
+            artifacts, step_id="collect", device=_R1, command="show version"
+        )
+        assert found is not None and found["content_text"] == "short"
+        found = find_command_artifact(artifacts, step_id="collect", device=_R1, command=_LONG_A)
+        assert found is not None and found["content_text"] == "long"
+
+    def test_full_command_names_match_without_surrounding_whitespace(self) -> None:
+        # Older collect steps named an artifact after the full command. A
+        # command given with surrounding whitespace still finds it by name.
+        from hegemony_steps_evidence.artifacts import find_command_artifact
+
+        artifacts = [
+            {"step_id": "collect", "name": f"r1:{_LONG_A}", "content_text": "long"},
+            {"step_id": "collect", "name": f"r1:{_MULTI}", "content_text": "multi"},
+        ]
+        for command, output in ((_LONG_A, "long"), (_MULTI, "multi")):
+            found = find_command_artifact(
+                artifacts, step_id="collect", device=_R1, command=f"  {command}\n"
+            )
+            assert found is not None and found["content_text"] == output, command
+
+
+class _RunApi:
+    """Host services whose API serves one run's artifacts and counts the fetches."""
+
+    def __init__(self, artifacts: list[dict], status_code: int = 200) -> None:
+        self.artifacts = artifacts
+        self.status_code = status_code
+        self.fetches = 0
+
+    def open_api_client(self, timeout: float = 30) -> _RunApi:
+        return self
+
+    async def __aenter__(self) -> _RunApi:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def get(self, url: str) -> _RunApi:
+        self.fetches += 1
+        return self
+
+    def json(self) -> dict:
+        return {"artifacts": self.artifacts}
+
+
+async def _run_assert(api: _RunApi, command: str, expected: str, devices: list[dict]):
+    from typing import cast
+
+    from hegemony_step_sdk import HandlerContext, HandlerServices
+
+    ctx = HandlerContext(
+        run_id="run-1",
+        flow_id="f",
+        step_run_id="sr-1",
+        step_id="assert",
+        config={
+            "artifact_step_id": "collect",
+            "target_role": "core",
+            "command": command,
+            "operator": "contains",
+            "expected": expected,
+        },
+        target_roles=["core"],
+        target_devices_by_role={"core": devices},
+        services=cast(HandlerServices, api),
+    )
+    return await _handler().execute(ctx)
+
+
+async def _assert_command(artifacts: list[dict], command: str, expected: str):
+    return await _run_assert(_RunApi(artifacts), command, expected, [_R1])
+
+
+async def test_assert_reads_the_output_of_the_full_command() -> None:
+    artifacts = _collected("collect", _OUTPUTS)
+    for command, output in _OUTPUTS.items():
+        result = await _assert_command(artifacts, command, output)
+        assert result.success is True, (command, result.error)
+    # The short command reads its own output, not the multi-line command's
+    # output that shares its artifact name.
+    result = await _assert_command(artifacts, _SHORT, "+ summary")
+    assert result.success is False
+    assert result.evidence[0]["content_json"]["actual"] == _OUTPUTS[_SHORT]
+
+
+async def test_assert_fails_when_the_command_was_not_collected() -> None:
+    result = await _assert_command(_collected("collect", {_LONG_A: "x"}), _LONG_B, "x")
+    assert result.success is False
+    assert "could not fetch artifact content" in (result.error or "")
+
+
+_DEVICES = [{"id": f"d{n}", "name": f"r{n}"} for n in (1, 2, 3)]
+
+
+async def test_assert_fetches_the_run_artifacts_once_for_all_devices() -> None:
+    artifacts = [
+        artifact
+        for device in _DEVICES
+        for artifact in _collected("collect", {_SHORT: f"{device['name']} bgp"}, device=device)
+    ]
+    api = _RunApi(artifacts)
+    result = await _run_assert(api, _SHORT, "bgp", _DEVICES)
+    assert result.success is True, result.error
+    assert [e["content_json"]["actual"] for e in result.evidence] == ["r1 bgp", "r2 bgp", "r3 bgp"]
+    assert api.fetches == 1
+
+
+async def test_assert_fails_every_device_when_the_run_fetch_fails() -> None:
+    api = _RunApi([], status_code=500)
+    result = await _run_assert(api, _SHORT, "bgp", _DEVICES)
+    assert result.success is False
+    assert (result.error or "").count("could not fetch artifact content") == 3
+    assert api.fetches == 1
