@@ -28,11 +28,15 @@ chases redirects and asserts the final response; switch it off to assert the
 redirect response itself. Verify TLS certificate (on by default) applies to
 HTTPS and can be switched off for self-signed device certificates. Timeout
 (sec) bounds each request attempt (default 10), and Attempts (default 1, up
-to 10) retries failing targets with a half-second pause between tries.
+to 10) retries failing targets with a half-second pause between tries. Max
+Parallel Devices sets how many targets are requested at the same time
+(default 10, up to 32); 1 requests them one after another. Evidence and
+metrics always follow target order.
 
 When the flow runs under an egress policy, every request — each redirect hop
 included — is checked against it, and a denied destination raises the
-policy's reason as the step error rather than counting as a failed check.
+policy's reason as the step error rather than counting as a failed check;
+the requests still running are then stopped.
 
 ## Output
 

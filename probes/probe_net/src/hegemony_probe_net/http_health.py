@@ -5,8 +5,10 @@
 """HTTP health probe.
 
 GETs ``http://<address>[:port]<url_path>`` and reports ok for any status below
-400. The richer one-shot variant (https, methods, status specs, body matching)
-lives in the ``probe.http`` step handler.
+400. Redirects are not followed: a 3xx already counts as healthy, and the
+egress gate has only seen the first target. The richer one-shot variant
+(https, methods, status specs, body matching) lives in the ``probe.http`` step
+handler.
 """
 
 from __future__ import annotations
@@ -66,9 +68,11 @@ class _SocksAsyncTransport(httpx.AsyncBaseTransport):
         # Speak HTTP/1.1 over the tunneled stream ourselves: only the status
         # line matters for a health check, so read headers and stop.
         path = request.url.raw_path.decode()
+        # httpx's own Host header: an IPv6 host bracketed, a non-default port
+        # kept, as RFC 9112 requires.
         head = (
             f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}\r\n"
+            f"Host: {request.headers['host']}\r\n"
             "User-Agent: hegemony-probe/1\r\n"
             "Accept: */*\r\n"
             "Connection: close\r\n\r\n"
@@ -127,14 +131,26 @@ class HttpHealthProbe(BaseProbe):
         timeout_sec = options.get("timeout_ms", 5000) / 1000.0
         socks_proxy = (options.get("socks_proxy") or "").strip()
 
-        netloc = address if port in (None, 80) else f"{address}:{port}"
+        # A colon marks an IPv6 literal (hostnames and IPv4 cannot carry one),
+        # and a URL authority requires it bracketed.
+        authority = f"[{address}]" if ":" in address else address
+        netloc = authority if port in (None, 80) else f"{authority}:{port}"
         url = f"http://{netloc}{url_path}"
+
+        transport: _SocksAsyncTransport | None = None
+        if socks_proxy:
+            # A value that does not parse fails every attempt the same way:
+            # a config_error, which callers stop on. A socks_error is a
+            # handshake failure that a later attempt may get past.
+            try:
+                transport = _SocksAsyncTransport(socks_proxy, timeout_sec)
+            except SocksError as exc:
+                return ProbeResult(ok=False, error_kind="config_error", error_detail=str(exc))
 
         start = time.perf_counter()
         try:
-            transport = _SocksAsyncTransport(socks_proxy, timeout_sec) if socks_proxy else None
             async with httpx.AsyncClient(
-                timeout=timeout_sec, follow_redirects=True, transport=transport
+                timeout=timeout_sec, follow_redirects=False, transport=transport
             ) as client:
                 response = await client.get(url)
         except SocksError as exc:

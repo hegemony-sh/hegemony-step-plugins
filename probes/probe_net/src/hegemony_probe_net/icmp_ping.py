@@ -11,6 +11,7 @@ extracting RTT/jitter/packet-loss metrics.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import platform
 import re
@@ -90,13 +91,20 @@ class IcmpPingProbe(BaseProbe):
                     timeout=timeout_sec * count + 5,  # extra buffer
                 )
             except TimeoutError:
-                process.kill()
-                await process.wait()
                 return ProbeResult(
                     ok=False,
                     error_kind="timeout",
                     error_detail=f"Ping command timed out after {timeout_sec * count + 5}s",
                 )
+            finally:
+                # Our own timeout, or a caller cancelling the probe (a shorter
+                # poll deadline, a sibling target's egress denial), stops
+                # communicate() with ping still running. Kill and reap it
+                # before returning or re-raising, so no child outlives us.
+                if process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                    await process.wait()
 
             output = stdout.decode("utf-8", errors="replace")
             return self._parse_output(output, process.returncode, is_windows)

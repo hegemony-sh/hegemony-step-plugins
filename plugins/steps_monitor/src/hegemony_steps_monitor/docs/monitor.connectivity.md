@@ -20,8 +20,11 @@ Check Type picks the probe sent on every sample — a TCP connection attempt
 list is registry-driven, and the value is validated when the step runs. Port
 (default 22) applies to the port-based checks and is ignored by ICMP Ping and
 DNS Resolve. URL Path applies only to the HTTP Health check and falls back to
-`/health` when omitted. Interval (ms) sets the time between samples (default
-5000), and Timeout (sec) is the per-sample time limit (default 10).
+`/health` when omitted; HTTP Health passes on any status below 400 and does
+not follow redirects. DNS Resolve looks up each target's own name with the
+worker's system resolver, so every sample of an IP address target fails.
+Interval (ms) sets the time between samples (default 5000), and Timeout
+(sec) is the per-sample time limit (default 10).
 
 Schedule Mode decides when sampling stops: Fixed Count stops after Count
 samples (default 10), Duration stops after Duration (sec) seconds (default
