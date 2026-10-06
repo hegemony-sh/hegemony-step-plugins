@@ -214,6 +214,18 @@ def test_template_errors_ignores_non_list_commands():
     assert ShellExecuteHandler().template_errors({}) == []
 
 
+def test_env_names_must_be_identifiers():
+    """A name is written into the command line as is (export NAME=...), so it must
+    be a plain identifier; the value is the quoted part."""
+    errors = ShellExecuteHandler().validate_config(
+        {"commands": ["true"], "env": {"OK_1": "a", "A;touch x": "b", "1X": "c", "": "d"}}
+    )
+    assert len(errors) == 1
+    assert "'A;touch x'" in errors[0] and "'1X'" in errors[0] and "''" in errors[0]
+    assert "OK_1" not in errors[0]
+    assert ShellExecuteHandler().validate_config({"commands": ["true"], "env": {"_A": "x"}}) == []
+
+
 def test_build_command_bash_wraps_and_quotes():
     composed = build_command("echo 'x y'", shell="bash")
     assert composed == "bash -c 'echo '\"'\"'x y'\"'\"''"

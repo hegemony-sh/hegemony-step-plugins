@@ -52,7 +52,9 @@ in `pwsh -NoProfile -Command '...'` for PowerShell hosts. Environment
 variables are quoted and set for every command: with the default interpreter
 they are exported in the login shell first (`export KEY=VALUE; ...`, so a
 POSIX login shell is needed), with `sh` and `bash` they are prefixed as
-`env KEY=VALUE`. Either way `"$KEY"` works anywhere in the line. Their values
+`env KEY=VALUE`. Either way `"$KEY"` works anywhere in the line. Names are
+written into the command line as they are, so they must be letters, digits
+and `_`, not starting with a digit; the values are the quoted part. Their values
 appear on the remote command line (for example in the host's process list),
 so they are not a place for secrets. They cannot be combined with the `pwsh`
 interpreter — that combination is rejected before anything runs.

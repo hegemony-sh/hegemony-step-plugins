@@ -12,12 +12,13 @@ implements it) is resolved from ``device.access_config`` via
 """
 
 import logging
+import re
 import shlex
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
@@ -38,6 +39,10 @@ logger = logging.getLogger(__name__)
 
 #: Interpreters that accept the sh-style ``env``/``-c`` wrapping.
 _SH_FAMILY = frozenset({"sh", "bash"})
+
+#: An environment variable name: it is written into the command line as is
+#: (``export NAME=...``, ``env NAME=...``), so anything else could be syntax.
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 #: Time the step keeps, before its timeout, to close its sessions and report.
 #: A command never runs past it, whatever its own limit, so the step returns
@@ -153,9 +158,9 @@ class ShellExecuteConfig(BaseModel):
         title="Environment Variables",
         description=(
             "KEY=VALUE per line, quoted and set for every command, which reads them "
-            'as "$KEY". The safe way to pass run inputs or step results. Values '
-            "appear on the remote command line, so use secrets elsewhere. Not "
-            "supported with pwsh."
+            'as "$KEY". The safe way to pass run inputs or step results. Names are '
+            "letters, digits and _ (not starting with a digit). Values appear on the "
+            "remote command line, so use secrets elsewhere. Not supported with pwsh."
         ),
         json_schema_extra={
             "x_widget": "env-vars",
@@ -164,6 +169,18 @@ class ShellExecuteConfig(BaseModel):
             "x_placeholder": "APP_ENV=prod\nRETRIES=3",
         },
     )
+
+    @field_validator("env")
+    @classmethod
+    def _env_names_are_identifiers(cls, env: dict[str, str]) -> dict[str, str]:
+        bad = sorted(name for name in env if not _ENV_NAME_RE.match(name))
+        if bad:
+            raise ValueError(
+                "environment variable names must be letters, digits and _, not starting "
+                f"with a digit: {', '.join(repr(name) for name in bad)}"
+            )
+        return env
+
     fail_fast: bool = Field(
         default=True,
         title="Stop on first failure",
