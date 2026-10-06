@@ -118,9 +118,13 @@ timeout, normal Docker networking. Turn on "Disable network access" for full
 isolation, or set an egress policy mode with allow/deny rules for a
 per-step outbound firewall; an egress policy cannot be combined with the
 admin-only host-access options (network mode, sandbox Docker socket, privileged,
-PID namespace, extra bind mounts) or with disabled networking. Environment
-variables are passed through except keys starting with `HEGEMONY_`, which are
-reserved and ignored.
+PID namespace, extra bind mounts) or with disabled networking. A step with any
+of those host-access options takes no `{{ }}` or `{% %}` templates in its
+Command or Entrypoint: a value rendered into the script would run with the
+container's rights on the sandbox host, so the step is refused before it
+runs. Pass such values in Environment Variables and read them as `"$NAME"`.
+Environment variables are passed through except keys starting with
+`HEGEMONY_`, which are reserved and ignored.
 
 ## Output
 
@@ -141,7 +145,8 @@ and the evidence keeps stdout and stderr as above.
 
 The step succeeds only when the container exits with code 0; any non-zero
 exit code fails it with that code in the error. It also fails when config
-validation rejects the step, the image cannot be pulled, attachments or
+validation rejects the step (including a template in the Command or
+Entrypoint of a step with host-access options), the image cannot be pulled, attachments or
 selected artifacts cannot be provisioned, a secret file resolves to nothing,
 the Docker binary is missing on the worker, or the worker has no
 Docker-in-Docker sandbox configured: the step never runs on the worker's own

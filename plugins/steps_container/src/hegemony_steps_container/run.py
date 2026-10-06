@@ -1148,6 +1148,29 @@ def _container_run_result(ctx: HandlerContext, outcome: ContainerJobResult) -> H
     )
 
 
+#: The admin-only options that give the step's container rights on the sandbox
+#: host (its network, process namespace, Docker daemon, files, or all of it).
+#: Read from the fields' ``x_admin_only`` flag so the list cannot drift.
+_HOST_ACCESS_FIELDS: tuple[str, ...] = tuple(
+    name
+    for name, field in RunContainerConfig.model_fields.items()
+    if isinstance(field.json_schema_extra, dict) and field.json_schema_extra.get("x_admin_only")
+)
+
+#: Where Jinja template syntax starts: a value, a statement or a comment.
+_TEMPLATE_SYNTAX_RE = re.compile(r"\{[{%#]")
+
+
+def _host_access_enabled(config: dict[str, Any]) -> list[str]:
+    """The host-access options a step's config turns on (a template counts as on)."""
+    return [
+        name
+        for name in _HOST_ACCESS_FIELDS
+        if config.get(name) not in (None, False, "", [], {})
+        and not (isinstance(config.get(name), str) and not config[name].strip())
+    ]
+
+
 class RunContainerHandler(BaseHandler):
     """Handler for running commands inside Docker containers.
 
@@ -1183,6 +1206,30 @@ class RunContainerHandler(BaseHandler):
     # paths are absolute and opts are a comma list of alnum tokens (e.g.
     # `ro,shared`). No spaces, no `..` traversal, no leading dashes.
     _EXTRA_MOUNT_PATTERN = re.compile(r"^(/[^:\s]+):(/[^:\s]+)(?::([a-zA-Z][a-zA-Z0-9,]*))?$")
+
+    def template_errors(self, config: dict[str, Any]) -> list[str]:
+        """Refuse templates in the command of a step that has host-access options.
+
+        The host renders a step's ``{{ }}`` templates before the step runs, so a
+        value in the command or entrypoint becomes part of the script the
+        container runs. With admin-only host-access options on, that script runs
+        with rights on the sandbox host, so a run input there could take them
+        over. Such a step must take its values from Environment Variables.
+        """
+        enabled = _host_access_enabled(config)
+        if not enabled:
+            return []
+        errors: list[str] = []
+        for field_name in ("command", "entrypoint"):
+            value = config.get(field_name)
+            texts = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+            if any(isinstance(text, str) and _TEMPLATE_SYNTAX_RE.search(text) for text in texts):
+                errors.append(
+                    f"{field_name} cannot hold {{{{ }}}} or {{% %}} templates when "
+                    f"{', '.join(enabled)} is set: a value rendered into it would run with "
+                    'those rights. Pass values in Environment Variables and read them as "$NAME".'
+                )
+        return errors
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         """Validate container handler configuration."""

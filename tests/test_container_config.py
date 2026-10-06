@@ -12,6 +12,8 @@ optional paths/modes at their empty defaults) fails against its own defaults.
 
 from __future__ import annotations
 
+import pytest
+
 from hegemony_steps_container.run import RunContainerHandler
 
 
@@ -52,3 +54,63 @@ def test_nonempty_optional_fields_are_still_validated() -> None:
     )
     assert any("absolute path" in e for e in errors)
     assert any("pid_mode" in e for e in errors)
+
+
+# ── templates in a step with host-access options ─────────────────────────────
+
+_HOST_ACCESS = [
+    {"privileged": True},
+    {"attach_docker_socket": True},
+    {"network_mode": "host"},
+    {"pid_mode": "host"},
+    {"extra_mounts": ["/srv/data:/data:ro"]},
+    {"privileged": "{{ inputs.privileged }}"},
+]
+
+
+def test_host_access_options_are_the_admin_only_fields() -> None:
+    from hegemony_steps_container.run import _HOST_ACCESS_FIELDS
+
+    assert set(_HOST_ACCESS_FIELDS) == {
+        "privileged",
+        "attach_docker_socket",
+        "network_mode",
+        "pid_mode",
+        "extra_mounts",
+    }
+
+
+@pytest.mark.parametrize("options", _HOST_ACCESS)
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("command", ["echo {{ inputs.name }}"]),
+        ("command", ["{% if inputs.x %}rm -rf /data{% endif %}"]),
+        ("entrypoint", "{{ inputs.shell }}"),
+        ("entrypoint", ["/bin/sh", "-c", "{{ inputs.script }}"]),
+    ],
+)
+def test_templates_in_the_command_of_a_host_access_step_are_refused(options, field, value) -> None:
+    errors = RunContainerHandler().template_errors({"image": "alpine", field: value, **options})
+    assert len(errors) == 1
+    assert errors[0].startswith(f"{field} cannot hold")
+    assert next(iter(options)) in errors[0]
+
+
+def test_values_reach_a_host_access_step_through_environment_variables() -> None:
+    config = {
+        "image": "alpine",
+        "command": ['echo "$NAME"'],
+        "env": {"NAME": "{{ inputs.name }}"},
+        "privileged": True,
+    }
+    assert RunContainerHandler().template_errors(config) == []
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"privileged": False}, {"network_mode": "  "}, {"extra_mounts": []}, {"pid_mode": ""}],
+)
+def test_templates_stay_allowed_without_host_access(options) -> None:
+    config = {"image": "alpine", "command": ["echo {{ inputs.name }}"], **options}
+    assert RunContainerHandler().template_errors(config) == []
