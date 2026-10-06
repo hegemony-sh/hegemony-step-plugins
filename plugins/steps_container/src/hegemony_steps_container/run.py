@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
@@ -639,6 +639,25 @@ def _optional_str(value: Any, default: str = "") -> str:
     reaching here at all means the caller skipped it.
     """
     return value.strip() if isinstance(value, str) and value.strip() else default
+
+
+_BOOL_SETTING: TypeAdapter[bool] = TypeAdapter(bool)
+
+
+def _bool_setting(value: Any, default: bool) -> bool | None:
+    """A boolean field read the way its config model reads it.
+
+    A rendered template arrives as text, so ``"false"`` (or ``"False"``,
+    ``"0"``, ``"off"``) is False rather than a non-empty string that
+    ``bool()`` would call true. Absent is ``default``; None means the value
+    is not a boolean at all, which validation refuses.
+    """
+    if value is None:
+        return default
+    try:
+        return _BOOL_SETTING.validate_python(value)
+    except ValidationError:
+        return None
 
 
 _HOST_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
@@ -1272,6 +1291,9 @@ class RunContainerHandler(BaseHandler):
 
         errors.extend(secret_map_errors("secrets", config.get("secrets")))
 
+        if _bool_setting(config.get("cache_image"), True) is None:
+            errors.append("'cache_image' must be true or false")
+
         entrypoint = config.get("entrypoint")
         if entrypoint is not None:
             if isinstance(entrypoint, str):
@@ -1797,7 +1819,8 @@ class RunContainerHandler(BaseHandler):
         requested = requested_timeout(config.get("timeout_seconds"))
         timeout = step_container_timeout(ctx, requested)
         await report_timeout_cut(ctx, requested, timeout)
-        working_dir = config.get("working_dir", "/workspace")
+        # As build_docker_args reads it: blank is the default, not a path.
+        working_dir = _optional_str(config.get("working_dir"), "/workspace")
         # Where flow attachments are copied inside the container. Defaults to
         # /attachments; steps may override to any absolute path. Trailing
         # slashes are normalized off so the docker cp target is well-formed.
@@ -3104,7 +3127,8 @@ class RunContainerHandler(BaseHandler):
         is left of the step's deadline. Nothing here fails the step except the
         pull itself, or running out of time.
         """
-        wants_cache = bool(job.config.get("cache_image", True))
+        # Validated: a rendered "false" turns the cache off like a stored false.
+        wants_cache = bool(_bool_setting(job.config.get("cache_image"), True))
         plan = plan_cache(image, cache) if (wants_cache and cache is not None) else None
         if plan is None:
             failure = await self._pull_image(

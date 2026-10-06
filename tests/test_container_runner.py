@@ -198,6 +198,22 @@ async def test_container_run_stages_the_context_file(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("working_dir", ["", "   ", None])
+async def test_a_blank_working_dir_is_the_default_one(monkeypatch, working_dir):
+    """The editor sends "" for an unset working directory: the container starts in
+    /workspace, and that directory is created like any other root."""
+    state = _install_docker(monkeypatch)
+    result = await RunContainerHandler().execute(
+        _ctx({"image": "alpine:3.20", "working_dir": working_dir})
+    )
+
+    assert result.success is True, result.error
+    create = _create_args(state)
+    assert create[create.index("-w") + 1] == "/workspace"
+    assert "/workspace" in state["dirs"]
+
+
+@pytest.mark.asyncio
 async def test_container_run_output_json_becomes_output_data(monkeypatch):
     _install_docker(monkeypatch, out_files={"output.json": b'{"vpc_id": "vpc-1", "n": 3}'})
     result = await RunContainerHandler().execute(_ctx({"image": "alpine:3.20"}))

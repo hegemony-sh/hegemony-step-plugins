@@ -114,3 +114,12 @@ def test_values_reach_a_host_access_step_through_environment_variables() -> None
 def test_templates_stay_allowed_without_host_access(options) -> None:
     config = {"image": "alpine", "command": ["echo {{ inputs.name }}"], **options}
     assert RunContainerHandler().template_errors(config) == []
+
+
+def test_cache_image_takes_a_rendered_boolean() -> None:
+    # A templated switch is rendered as text before the step runs.
+    for value in (True, False, "true", "false", "False", "0"):
+        assert _errors({"image": "alpine:3.20", "cache_image": value}) == [], value
+    assert _errors({"image": "alpine:3.20", "cache_image": "maybe"}) == [
+        "'cache_image' must be true or false"
+    ]

@@ -515,6 +515,45 @@ async def test_cache_image_off_pulls_straight_from_upstream(monkeypatch) -> None
     assert _docker(captured, "push") == []
 
 
+@pytest.mark.parametrize("rendered", ["false", "False", "0"])
+async def test_a_rendered_false_turns_the_cache_off(monkeypatch, rendered) -> None:
+    """A templated switch reaches the step as text, which must not read as true."""
+    registries, captured = _install(monkeypatch)
+    events: list = []
+    ctx = _handler_ctx(
+        events, config={"image": "alpine:3.20", "command": ["echo hi"], "cache_image": rendered}
+    )
+    result = await RunContainerHandler().execute(ctx)
+    assert result.success is True
+    assert captured["pulled"] == ["alpine:3.20"]
+    assert registries.requests == []
+    assert _docker(captured, "push") == []
+
+
+@pytest.mark.parametrize(
+    ("handler_path", "config"),
+    [
+        ("hegemony_steps_ansible.playbook:AnsiblePlaybookHandler", {"playbook": "site.yml"}),
+        ("hegemony_steps_tf.plan:TfPlanHandler", {"state": "ephemeral"}),
+    ],
+)
+@pytest.mark.parametrize(("rendered", "cached"), [("false", False), ("True", True)])
+async def test_tool_steps_read_a_rendered_cache_switch(
+    monkeypatch, handler_path, config, rendered, cached
+) -> None:
+    """Tool steps hand their config to the runner through container_config_from."""
+    module_name, _, class_name = handler_path.partition(":")
+    handler = getattr(__import__(module_name, fromlist=[class_name]), class_name)()
+    registries, captured = _install(monkeypatch)
+    events: list = []
+    ctx = _handler_ctx(events, config={**config, "image": "alpine:3.20", "cache_image": rendered})
+    await handler.execute(ctx)
+    # The cache asks the image's registry first; without it, nothing is asked.
+    assert bool(registries.requests) is cached
+    if not cached:
+        assert captured["pulled"] == ["alpine:3.20"]
+
+
 async def test_a_miss_pulls_upstream_and_saves_a_copy_under_both_tags(monkeypatch) -> None:
     registries, captured = _install(monkeypatch)
     registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
