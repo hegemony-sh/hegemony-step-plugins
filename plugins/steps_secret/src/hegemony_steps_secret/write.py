@@ -268,7 +268,21 @@ def _failure(error: str, summary: str, *, output: dict[str, Any]) -> HandlerResu
     return HandlerResult(success=False, error=error, summary=summary, output=output)
 
 
+def _unavailable(reason: str, *, output: dict[str, Any]) -> HandlerResult:
+    """The failure for a platform that does not offer secret writes to steps."""
+    return _failure(
+        f"this platform does not provide secret writes to steps: {reason}. Upgrade the "
+        "platform to use this step",
+        "Secret writes unavailable",
+        output=output,
+    )
+
+
 def _host_failure(action: str, exc: BaseException, *, output: dict[str, Any]) -> HandlerResult:
+    """A failed result for a host error raised while trying to ``action``."""
+    if isinstance(exc, NotImplementedError):
+        # The host has the services but does not support them (the SDK default).
+        return _unavailable("its worker does not support the secret store services", output=output)
     return _failure(f"Could not {action}: {_describe(exc)}", _host_summary(exc), output=output)
 
 
@@ -414,10 +428,8 @@ class WriteSecretHandler(BaseHandler):
         services = ctx.require_services()
         missing = [name for name in SECRET_SERVICES if not callable(getattr(services, name, None))]
         if missing:
-            return _failure(
-                "this platform does not provide secret writes to steps: its worker lacks "
-                f"{', '.join(missing)}. Upgrade the platform to use this step",
-                "Secret writes unavailable",
+            return _unavailable(
+                f"its worker lacks {', '.join(missing)}",
                 output=_result_output(config.operation, config.path.strip()),
             )
 

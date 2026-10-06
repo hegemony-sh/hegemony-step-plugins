@@ -122,6 +122,27 @@ def test_handler_services_declares_the_secret_store_methods():
     ]
 
 
+def test_the_secret_store_defaults_say_a_host_does_not_support_them():
+    """A host subclassing the protocol without implementing them raises NotImplementedError."""
+
+    class Host(sdk.HandlerServices):
+        pass
+
+    host = Host()
+    calls = (
+        lambda: host.read_secret("certs/web"),
+        lambda: host.write_secret("certs/web", {"cert": "x"}),
+        lambda: host.delete_secret("certs/web"),
+    )
+    for call in calls:
+        try:
+            asyncio.run(call())
+        except NotImplementedError:
+            pass
+        else:
+            raise AssertionError("a host without support must raise NotImplementedError")
+
+
 def test_a_host_without_the_secret_store_methods_lacks_them():
     """What a handler sees on a host older than the secret services: no attribute."""
 

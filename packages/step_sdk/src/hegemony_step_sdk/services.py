@@ -359,6 +359,9 @@ class HandlerServices(Protocol):
     # - Hosts older than this SDK version lack these methods. A handler checks
     #   ``getattr(services, "write_secret", None)`` (and the others it uses)
     #   before calling, and fails with a clear message when they are missing.
+    #   A host that has them but does not support secret writes raises
+    #   ``NotImplementedError`` (the default here), which a handler reports
+    #   the same way.
 
     async def read_secret(self, path: str) -> dict[str, str] | None:
         """Read every key of the secret at ``path`` in the run organization's store.
@@ -369,10 +372,11 @@ class HandlerServices(Protocol):
         those of :meth:`write_secret` (a read-only backend is not refused).
 
         Raises ``PermissionError`` (refused), ``ValueError`` (malformed path)
-        or ``RuntimeError`` (store unavailable). Hosts older than this SDK
-        lack the method.
+        or ``RuntimeError`` (store unavailable). Hosts without support raise
+        ``NotImplementedError``; a platform older than this method has no
+        such attribute at all, so look it up with ``getattr``.
         """
-        ...
+        raise NotImplementedError
 
     async def write_secret(
         self, path: str, values: Mapping[str, str], *, merge: bool = False
@@ -401,10 +405,11 @@ class HandlerServices(Protocol):
 
         Raises ``PermissionError`` (refused), ``ValueError`` (malformed path,
         no keys, an invalid key name, a non-string value) or ``RuntimeError``
-        (store unavailable). Hosts older than this SDK lack the method;
-        check with ``getattr`` and fail clearly.
+        (store unavailable). Hosts without support raise
+        ``NotImplementedError``; a platform older than this method has no
+        such attribute at all, so look it up with ``getattr`` and fail clearly.
         """
-        ...
+        raise NotImplementedError
 
     async def delete_secret(self, path: str) -> bool:
         """Delete the secret at ``path`` in the run organization's store, every key of it.
@@ -412,10 +417,11 @@ class HandlerServices(Protocol):
         Returns True when a secret was deleted, False when none existed at
         ``path``. Only for handlers declaring ``writes_secrets``; the path
         rules, refusals (a read-only backend included), audit event and
-        errors are those of :meth:`write_secret`. Hosts older than this SDK
-        lack the method.
+        errors are those of :meth:`write_secret`. Hosts without support raise
+        ``NotImplementedError``; a platform older than this method has no
+        such attribute at all, so look it up with ``getattr``.
         """
-        ...
+        raise NotImplementedError
 
     def open_state_backend(
         self, name: str, *, ttl_seconds: int, hold_until_apply: bool = False

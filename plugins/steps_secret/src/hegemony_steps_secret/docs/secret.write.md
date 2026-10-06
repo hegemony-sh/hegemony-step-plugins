@@ -137,8 +137,9 @@ The platform decides what a step may write, not the step:
   held to the same rules, and the step reads back only paths it may write.
 - The organization's secret backend must be writable: one marked read-only
   refuses writes and deletes.
-- The worker must provide the secret store services; an older one cannot
-  run the step.
+- The worker must provide and support the secret store services; on an
+  older worker, or one that does not support them, the step fails as
+  "Secret writes unavailable" without changing anything.
 - Every value the step writes or reads is registered for redaction before
   anything about it is shown, and every write, read and delete is audited
   with the run and the step, naming paths and keys, never values.

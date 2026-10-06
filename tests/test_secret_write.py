@@ -1073,6 +1073,38 @@ async def test_a_failure_still_carries_every_output_key(store, config, prepare, 
     assert result.output["keys"] == []
 
 
+class _UnsupportingHost(_OldHost):
+    """A host with the secret store services that does not support them (the SDK default)."""
+
+    async def read_secret(self, path):
+        raise NotImplementedError
+
+    async def write_secret(self, path, values, *, merge=False):
+        raise NotImplementedError
+
+    async def delete_secret(self, path):
+        raise NotImplementedError
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"path": "certs/web", "values": {"user": LITERAL}},
+        {"path": "certs/web", "values": {"user": LITERAL}, "keep_previous_at": "certs/web-old"},
+        {"operation": "swap", "path": "certs/web", "swap_with": "certs/web-old"},
+        {"operation": "delete", "path": "certs/web"},
+    ],
+)
+async def test_a_host_that_does_not_support_the_services_fails_like_an_old_one(config):
+    result = await _run(config, _UnsupportingHost())
+    assert result.success is False
+    assert result.summary == "Secret writes unavailable"
+    assert "this platform does not provide secret writes to steps" in (result.error or "")
+    assert set(result.output) == OUTPUT_KEYS
+    assert result.output["path"] == "certs/web"
+    _assert_no_values(result)
+
+
 async def test_a_host_without_the_services_still_returns_every_output_key():
     result = await _run({"path": "certs/web", "values": {"user": "svc"}}, _OldHost())
     assert result.success is False
