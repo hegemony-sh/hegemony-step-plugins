@@ -212,7 +212,8 @@ class HttpRequestConfig(BaseModel):
             "How the request authenticates: none; a bearer token (Authorization: Bearer "
             "and the secret); basic, with a username and the secret as password; or a "
             "custom header carrying the secret. Credentials go only to the URL's own "
-            "scheme, host and port: a redirect elsewhere drops them."
+            "scheme, host and port: a redirect elsewhere drops them. They need an "
+            "https:// URL unless Allow credentials over HTTP is on."
         ),
         json_schema_extra={
             "x_option_labels": {
@@ -269,6 +270,17 @@ class HttpRequestConfig(BaseModel):
             "x_placeholder": "Token ",
             "x_show_when": {"field": "auth_type", "value": "header"},
         },
+    )
+    allow_insecure_auth: bool = Field(
+        default=False,
+        title="Allow credentials over HTTP",
+        description=(
+            "Send the Authentication credential to a plain http:// URL. Off by default, "
+            "because over HTTP the token or password travels unencrypted and anyone on "
+            "the network path can read it; turn on only for an internal endpoint that "
+            "offers no HTTPS."
+        ),
+        json_schema_extra={"x_advanced": True},
     )
     expected_status: str = Field(
         default="200-299",
@@ -526,6 +538,16 @@ def config_errors(config: HttpRequestConfig, *, allow_templates: bool) -> list[s
 
     if config.auth_type != "none" and not config.auth_secret.strip():
         errors.append(f"'auth_secret' is required for {config.auth_type} authentication")
+    if (
+        config.auth_type != "none"
+        and not config.allow_insecure_auth
+        and not unchecked(config.url)
+        and config.url.strip().lower().startswith("http://")
+    ):
+        errors.append(
+            "Authentication needs an https:// URL: over http:// the credential travels "
+            "unencrypted (turn on 'allow_insecure_auth' for an internal endpoint without HTTPS)"
+        )
     if config.auth_type == "basic":
         username = config.auth_username
         if not username.strip():

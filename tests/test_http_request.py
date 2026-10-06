@@ -1487,3 +1487,46 @@ async def test_a_redirect_off_the_first_origin_is_refused_while_paginating():
         result.error or ""
     )
     assert all(r.url.host == "api.example.test" for r in recorder.requests)
+
+
+# ── credentials over plain HTTP ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("auth_type", ["bearer", "basic", "header"])
+async def test_credentials_are_never_sent_to_a_plain_http_url_by_default(auth_type):
+    recorder = Recorder(lambda request: httpx.Response(200))
+    services = FakeServices()
+    config = {
+        "url": "http://api.example.test/v1/me",
+        "auth_type": auth_type,
+        "auth_secret": SECRET_REF,
+        "auth_username": "svc",
+    }
+    result = await _handler(recorder).execute(_ctx(config, services))
+    assert result.success is False
+    assert "Authentication needs an https:// URL" in (result.error or "")
+    assert recorder.urls == []
+    assert services.resolved == []  # refused before the secret is even resolved
+
+
+async def test_allow_insecure_auth_sends_credentials_over_http():
+    recorder = Recorder(lambda request: httpx.Response(200))
+    config = {
+        "url": "http://api.example.test/v1/me",
+        "auth_type": "bearer",
+        "auth_secret": SECRET_REF,
+        "allow_insecure_auth": True,
+    }
+    result = await _handler(recorder).execute(_ctx(config, FakeServices()))
+    assert result.success is True, result.error
+    assert recorder.requests[0].headers["authorization"] == f"Bearer {SECRET_VALUE}"
+
+
+def test_a_templated_url_is_checked_for_http_once_rendered():
+    handler = HttpRequestHandler()
+    saved = {"url": "{{ vars.api_base }}/v1/me", "auth_type": "bearer", "auth_secret": SECRET_REF}
+    assert handler.validate_config(saved) == []
+    rendered = {**saved, "url": "http://api.example.test/v1/me"}
+    assert any("https://" in error for error in handler.validate_config(rendered))
+    # Without credentials a plain http:// URL stays fine.
+    assert handler.validate_config({"url": "http://api.example.test/v1/me"}) == []

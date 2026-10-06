@@ -45,6 +45,9 @@ by the secret. Secret takes a bare secret reference such as
 `vault://orgs/acme/secrets/api/token`, a `{{ secret('...') }}` template, or
 literal text; any `scheme://...` text is read as a reference. A Header in
 Headers with the same name as the credential header is refused.
+Authentication needs an `https://` URL, so the credential never travels
+unencrypted; Allow credentials over HTTP (off by default) sends it to an
+`http://` URL anyway, for an internal endpoint that offers no HTTPS.
 
 Expected Status lists the status codes that count as success, as values and
 ranges such as `200-299,304`; the default is `200-299`. Timeout (sec), default
@@ -154,7 +157,8 @@ status, headers, size and SHA-256 remain. Extract cannot be combined with it.
 The step fails before sending anything when the config is invalid: a URL that
 is not `http(s)` or carries credentials, both bodies or a body on GET, HEAD or
 OPTIONS, JSON Body text that is not valid JSON once rendered, an Expected
-Status that does not parse, an invalid path, a missing Secret or Username, or
+Status that does not parse, an invalid path, a missing Secret or Username,
+Authentication on an `http://` URL without Allow credentials over HTTP, or
 incomplete pagination settings. It also fails when a secret reference
 resolves to nothing, the secret is shorter than 4 characters (too short to
 keep reliably out of the output), CA Bundle holds no certificate, or the
