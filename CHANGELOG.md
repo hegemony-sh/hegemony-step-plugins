@@ -1,3 +1,27 @@
+## [0.18.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.17.0...v0.18.0) (2026-10-06)
+
+### ⚠ BREAKING CHANGES
+
+* **tf:** tf.apply refuses a plan made by the previous version of
+tf.plan, which recorded no digest. Plan again after upgrading.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+
+### Features
+
+* **sdk:** let a step end its run's hold on a managed state ([91c4f3a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/91c4f3ab8aaa0849b50abaf5287ced3d20bf75ad))
+
+### Bug Fixes
+
+* **container:** cap live output ([fe2be08](https://github.com/hegemony-sh/hegemony-step-plugins/commit/fe2be0862eaec29af740a7b7d5d9f1fb31d83129))
+* **container:** count the live log as emitted, and mark output dropped at the budget ([7bbce80](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7bbce8061a32afeac0959127f254b0b4daae7146))
+* **container:** stop long output lines from hanging container.run ([a059c6b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a059c6be49e59cdd10f8ffe284b0c9fa137d77bf))
+* **tf:** end the state hold when there is nothing to apply ([a0a025e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a0a025eb3da287d343283c52639a484f9c8174f3))
+* **tf:** refuse to apply a plan file that changed after planning ([7eeaac7](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7eeaac738e32e102d1fdb82585c23fed247bb215))
+* **tf:** take the plan's digest and readable forms from one private file ([6adbd29](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6adbd295075c1eb1c5ef5c6ecdd8a42a8fcf6db5))
+
 ## [0.17.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.16.0...v0.17.0) (2026-10-06)
 
 ### ⚠ BREAKING CHANGES
