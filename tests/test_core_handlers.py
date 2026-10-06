@@ -811,6 +811,94 @@ async def test_http_probe_fails_only_the_target_whose_request_cannot_be_made(mon
     ]
 
 
+async def test_http_probe_runs_the_egress_gate_off_the_event_loop(monkeypatch):
+    """The platform's gate resolves names with a blocking getaddrinfo. Run
+    on the step's loop, a slow lookup for one target stalled every other
+    target's request; in a worker thread it does not, and the gate still
+    sees the step's context, where the platform binds the egress policy."""
+    import contextvars
+    import threading
+
+    import httpx
+
+    from hegemony_steps_probe import http_check
+    from hegemony_steps_probe.http_check import HttpProbeHandler
+
+    other_target_answered = threading.Event()
+
+    def transport_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "192.0.2.2":
+            other_target_answered.set()
+        return httpx.Response(200, text="ok")
+
+    transport = httpx.MockTransport(transport_handler)
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        """The handler's own client, rerouted through the mock transport."""
+        kwargs["transport"] = transport
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(http_check.httpx, "AsyncClient", client_with_mock_transport)
+
+    policy: contextvars.ContextVar[str | None] = contextvars.ContextVar("policy", default=None)
+    loop_thread = threading.get_ident()
+    gated: list[tuple[str, bool, str | None]] = []
+
+    class _Services:
+        async def enforce_egress(self, host, port, *, proto, kind):
+            if host == "192.0.2.1":
+                # A lookup that answers only once the other target has been
+                # requested: on the loop's own thread it never would.
+                assert other_target_answered.wait(timeout=5)
+            gated.append((host, threading.get_ident() != loop_thread, policy.get()))
+
+    token = policy.set("restricted")
+    try:
+        ctx = _ip_target_ctx(
+            {"max_parallel_devices": 2}, ["192.0.2.1", "192.0.2.2"], services=_Services()
+        )
+        result = await HttpProbeHandler().execute(ctx)
+    finally:
+        policy.reset(token)
+    assert result.success is True, result.error
+    assert sorted(gated) == [
+        ("192.0.2.1", True, "restricted"),
+        ("192.0.2.2", True, "restricted"),
+    ]
+
+
+async def test_dns_probe_runs_the_egress_gate_off_the_event_loop(monkeypatch):
+    """The resolver check goes through the same worker thread as probe.http's."""
+    import contextvars
+    import threading
+
+    from hegemony_steps_probe import dns_check
+    from hegemony_steps_probe.dns_check import DnsProbeHandler
+
+    async def fake_resolve(query_name, record_type, *, resolver_ip="", timeout_sec=5.0):
+        return ["192.0.2.7"]
+
+    monkeypatch.setattr(dns_check, "resolve_records", fake_resolve)
+    policy: contextvars.ContextVar[str | None] = contextvars.ContextVar("policy", default=None)
+    loop_thread = threading.get_ident()
+    gated: list[tuple[str, bool, str | None]] = []
+
+    class _Services:
+        async def enforce_egress(self, host, port, *, proto, kind):
+            gated.append((proto, threading.get_ident() != loop_thread, policy.get()))
+
+    token = policy.set("restricted")
+    try:
+        config = {"query_name": "device.example.com", "resolver": "192.0.2.53"}
+        ctx = _ip_target_ctx(config, ["192.0.2.7"], services=_Services())
+        result = await DnsProbeHandler().execute(ctx)
+    finally:
+        policy.reset(token)
+    assert result.success is True, result.error
+    assert gated == [("udp", True, "restricted"), ("tcp", True, "restricted")]
+
+
 async def test_http_probe_refuses_a_redirect_to_a_denied_destination(monkeypatch):
     """A redirect must not launder a denied destination through an allowed
     first hop: the request hook walks every hop past the gate, and the denial

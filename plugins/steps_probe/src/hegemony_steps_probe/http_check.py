@@ -23,6 +23,7 @@ from hegemony_step_sdk import (
     for_each_target_device,
 )
 
+from .egress import enforce_egress_off_loop
 from .targets import (
     DEFAULT_MAX_PARALLEL_TARGETS,
     TargetOutcome,
@@ -237,7 +238,9 @@ class HttpProbeHandler(BaseHandler):
         # because with follow_redirects every hop is a new destination and a
         # redirect must not launder a denied one through an allowed first
         # hop. A denial raises out of the request rather than being recorded
-        # as a failed check, so the step reports the policy's reason.
+        # as a failed check, so the step reports the policy's reason. The
+        # check runs in a worker thread: the platform's gate resolves names
+        # with a blocking getaddrinfo (see enforce_egress_off_loop).
         enforce = getattr(ctx.require_services(), "enforce_egress", None)
 
         async def _authorize_request(request: httpx.Request) -> None:
@@ -246,7 +249,9 @@ class HttpProbeHandler(BaseHandler):
                 return
             port = request.url.port or _SCHEME_DEFAULT_PORTS.get(request.url.scheme, 80)
             try:
-                await enforce(request.url.host, port, proto="tcp", kind="http check")
+                await enforce_egress_off_loop(
+                    enforce, request.url.host, port, proto="tcp", kind="http check"
+                )
             except Exception as exc:
                 raise _EgressRefused(exc) from exc
 
