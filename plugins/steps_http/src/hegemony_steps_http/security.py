@@ -274,11 +274,18 @@ class Scrubber:
         return value
 
     def tree(self, value: Any) -> Any:
-        """``value`` (dicts, lists, strings) with every known credential replaced."""
+        """``value`` (dicts, lists, strings, numbers) with every known credential replaced.
+
+        A number that contains a credential (a numeric one the server echoes as a
+        JSON number) is replaced whole; other numbers are kept.
+        """
         if not self._secrets:
             return value
         if isinstance(value, str):
             return self.text(value)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            rendered = json.dumps(value)
+            return REDACTED if any(secret in rendered for secret in self._secrets) else value
         if isinstance(value, dict):
             return {self.tree(k): self.tree(v) for k, v in value.items()}
         if isinstance(value, list):

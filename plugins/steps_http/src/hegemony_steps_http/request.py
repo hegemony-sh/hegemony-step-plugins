@@ -1161,7 +1161,9 @@ class HttpRequestHandler(BaseHandler):
         size_bytes = sum(len(page.body) for page in pages)
 
         if last_page is not None:
-            text = last_page.text
+            # Redacted whole, before any preview is cut from it: a credential
+            # crossing the cut would otherwise survive in part.
+            text = scrub.text(last_page.text)
             parsed, data = last_page.json
             if not parsed:
                 data = None

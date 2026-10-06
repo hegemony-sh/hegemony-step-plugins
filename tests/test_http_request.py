@@ -1912,6 +1912,53 @@ async def test_a_secret_the_response_repeats_json_escaped_is_redacted(auth, secr
 
 
 @pytest.mark.parametrize(
+    "limit", ["MAX_BODY_OUTPUT_CHARS", "EVIDENCE_PREVIEW_CHARS"], ids=["body", "evidence-preview"]
+)
+async def test_a_secret_crossing_the_preview_cut_is_redacted(limit):
+    secret = "super-secret-api-credential-123456"
+    services = FakeServices(secrets={SECRET_REF: secret})
+    # The secret starts just before the cut and ends one character after it.
+    text = "x" * (getattr(request_module, limit) - len(secret) + 1) + secret
+    recorder = Recorder(
+        lambda request: httpx.Response(200, text=text, headers={"Content-Type": "text/plain"})
+    )
+    result = await _handler(recorder).execute(
+        _ctx(
+            {"url": "https://api.example.test/", "auth_type": "bearer", "auth_secret": SECRET_REF},
+            services,
+        )
+    )
+    assert result.success is True, result.error
+    body = result.output["body"]
+    preview = result.evidence[0]["content_json"]["body_preview"]
+    for shown in (body, preview):
+        assert secret[:-1] not in shown and secret[:12] not in shown
+    assert body.endswith(security.REDACTED)
+
+
+async def test_a_numeric_secret_the_response_repeats_as_a_number_is_redacted():
+    services = FakeServices(secrets={SECRET_REF: "123456789"})
+    recorder = Recorder(
+        lambda request: httpx.Response(200, json={"token": 123456789, "count": 42, "ok": True})
+    )
+    result = await _handler(recorder).execute(
+        _ctx(
+            {
+                "url": "https://api.example.test/",
+                "auth_type": "bearer",
+                "auth_secret": SECRET_REF,
+                "extract": {"token": "token", "count": "count"},
+            },
+            services,
+        )
+    )
+    assert result.success is True, result.error
+    assert result.output["data"] == {"token": security.REDACTED, "count": 42, "ok": True}
+    assert result.output["extracted"] == {"token": security.REDACTED, "count": 42}
+    assert "123456789" not in _everything(result)
+
+
+@pytest.mark.parametrize(
     ("start", "target"),
     [
         ("https://api.example.test/start", "http://api.example.test/next"),

@@ -161,8 +161,10 @@ combined with it.
   body elsewhere is refused.
 - **What is recorded.** The secret, request header values and the request body
   never appear in the output, evidence, summary or error; request headers are
-  recorded by name only. A secret the response repeats, as is or escaped in
-  a JSON string, is replaced with `[redacted]` in the output and evidence.
+  recorded by name only. A secret the response repeats, as is, escaped in
+  a JSON string or as a JSON number, is replaced with `[redacted]` in the
+  output and evidence; the body is redacted whole before Body and the
+  evidence preview are cut from it.
 - **Redaction.** A value the platform resolves from a secret reference or
   template is redacted from the run's logs. Literal text in Secret is not
   registered for redaction and is stored in the flow as written, so prefer a
