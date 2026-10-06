@@ -468,6 +468,12 @@ def _swap_unknown(
     )
 
 
+def _consume_outcome(task: asyncio.Future[Any]) -> None:
+    """Retrieve a finished task's exception, so one nobody awaits any more is not logged."""
+    if not task.cancelled():
+        task.exception()
+
+
 class _NoWorkspace(Exception):
     """The step cannot read the run's shared workspace; the message says why."""
 
@@ -721,8 +727,18 @@ class WriteSecretHandler(BaseHandler):
             written = await services.write_secret(path, dict(second), merge=False)
             failed = other
             written_other = await services.write_secret(other, dict(first), merge=False)
-        except Exception as exc:  # noqa: BLE001 - settled from what the store holds
-            return await self._settle_swap(ctx, services, swap, failed, exc, written)
+        except (Exception, asyncio.CancelledError) as exc:
+            # Settled from what the store holds, in a task of its own: a step
+            # cancelled half-way (or again while settling) must not leave one
+            # secret's keys at both paths. A cancellation propagates afterwards.
+            settle = asyncio.ensure_future(
+                self._settle_swap(ctx, services, swap, failed, exc, written)
+            )
+            settle.add_done_callback(_consume_outcome)
+            result = await asyncio.shield(settle)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return result
         return _swapped(ctx, swap, written, written_other)
 
     async def _settle_swap(

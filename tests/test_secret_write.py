@@ -11,6 +11,7 @@ checked for the values it must never carry.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import dataclasses
 import errno
@@ -1276,6 +1277,66 @@ async def test_a_first_swap_write_stored_before_it_failed_is_restored(store):
     }
     assert _writes(store) == ["certs/web", "certs/web"]
     _assert_no_values(result)
+
+
+@pytest.mark.parametrize(
+    "outcomes",
+    [
+        # The second write is cancelled before it stores anything.
+        {"certs/web-previous": [asyncio.CancelledError()]},
+        # The first write stores, then the step is cancelled.
+        {"certs/web": [_Stored(asyncio.CancelledError())]},
+    ],
+    ids=["second-write", "first-write-stored"],
+)
+async def test_a_cancelled_swap_is_settled_before_the_cancellation_propagates(store, outcomes):
+    _before_swap(store)
+    store.write_outcomes.update(outcomes)
+    with pytest.raises(asyncio.CancelledError):
+        await _run(SWAP, store)
+    assert store.secrets == {
+        "certs/web": {"cert": CERT_PEM},
+        "certs/web-previous": {"cert": OLD_VALUE},
+    }
+
+
+async def test_a_swap_cancelled_again_while_settling_still_restores(store):
+    _before_swap(store)
+    write = store.write_secret
+    blocked, restoring, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    web_writes = 0
+
+    async def write_secret(path, values, *, merge=False):
+        nonlocal web_writes
+        if path == "certs/web-previous":
+            blocked.set()
+            await asyncio.Event().wait()  # the step is cancelled here; nothing stored
+        if path == "certs/web":
+            web_writes += 1
+            if web_writes == 2:  # the restore
+                restoring.set()
+                await release.wait()
+        return await write(path, values, merge=merge)
+
+    store.write_secret = write_secret
+    task = asyncio.create_task(_run(SWAP, store))
+    await asyncio.wait_for(blocked.wait(), 5)
+    task.cancel()
+    # Without settling on cancellation the restore never starts: fail, do not hang.
+    await asyncio.wait_for(restoring.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The restore runs on in its own task.
+    release.set()
+    for _ in range(50):
+        if store.secrets["certs/web"] == {"cert": CERT_PEM}:
+            break
+        await asyncio.sleep(0)
+    assert store.secrets == {
+        "certs/web": {"cert": CERT_PEM},
+        "certs/web-previous": {"cert": OLD_VALUE},
+    }
 
 
 async def test_a_restore_stored_before_it_failed_counts_as_restored(store):

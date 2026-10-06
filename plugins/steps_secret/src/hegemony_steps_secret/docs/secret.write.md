@@ -187,6 +187,10 @@ back and goes by what they hold:
   which keys, and whose original keys are stored at neither path, to be put
   right by hand.
 
+A step stopped during the swap (cancelled, or past its time limit) settles
+the same way before it stops, and finishes settling even if it is stopped
+again meanwhile.
+
 Something else writing either secret during the swap can be overwritten, as
 it can during Keep other keys, which the platform carries out as a read
 followed by a write.
