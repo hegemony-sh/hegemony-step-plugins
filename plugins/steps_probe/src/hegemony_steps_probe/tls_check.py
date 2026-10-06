@@ -548,22 +548,27 @@ class _TlsRun:
         hostname: str | None,
         issuer_candidates: list[x509.Certificate],
     ) -> None:
-        """Fill the certificate fields and every verdict except the chain's."""
-        record.update(tls_certs.certificate_fields(leaf, now=self.now))
+        """Fill the certificate fields and every verdict except the chain's.
+
+        The record changes only once everything is known, so a certificate
+        the checks cannot read leaves it as it was; the caller records why.
+        """
+        found = tls_certs.certificate_fields(leaf, now=self.now)
         if self.config.include_pem:
-            record["certificate_pem"] = tls_certs.certificate_pem(leaf)
+            found["certificate_pem"] = tls_certs.certificate_pem(leaf)
         if hostname:
             dns_names, ip_addresses = tls_certs.san_names(leaf)
-            record["hostname_ok"] = tls_certs.hostname_matches(
+            found["hostname_ok"] = tls_certs.hostname_matches(
                 hostname, dns_names, ip_addresses, tls_certs.common_name(leaf)
             )
         expected = self.settings.expected_for(record["host"], record["port"], record["sni"])
         if expected is not None:
-            record["matches_expected"] = record["fingerprint_sha256"] == expected
+            found["matches_expected"] = found["fingerprint_sha256"] == expected
         if self.config.check_ocsp:
-            record.update(await self.check_ocsp(leaf, issuer_candidates))
+            found.update(await self.check_ocsp(leaf, issuer_candidates))
         if self.config.check_crl:
-            record.update(await self.check_crl(leaf, issuer_candidates))
+            found.update(await self.check_crl(leaf, issuer_candidates))
+        record.update(found)
 
     # --- live endpoints --------------------------------------------------
 
@@ -633,12 +638,15 @@ class _TlsRun:
         for der in seen.chain_der[1:]:
             with contextlib.suppress(ValueError):
                 served_chain.append(x509.load_der_x509_certificate(der))
-        await self.describe(
-            record,
-            leaf,
-            hostname=server_name,
-            issuer_candidates=served_chain + list(self.bundle_anchors or []),
-        )
+        try:
+            await self.describe(
+                record,
+                leaf,
+                hostname=server_name,
+                issuer_candidates=served_chain + list(self.bundle_anchors or []),
+            )
+        except tls_certs._UNREADABLE as exc:
+            record["error"] = _unreadable_reason(exc)
         return record
 
     # --- pasted certificate ----------------------------------------------
@@ -661,9 +669,12 @@ class _TlsRun:
                 "no trust anchors: the worker's system trust store could not be "
                 "loaded; set a CA bundle"
             )
-        await self.describe(
-            record, leaf, hostname=plan["sni"], issuer_candidates=chain + list(anchors)
-        )
+        try:
+            await self.describe(
+                record, leaf, hostname=plan["sni"], issuer_candidates=chain + list(anchors)
+            )
+        except tls_certs._UNREADABLE as exc:
+            record["error"] = _unreadable_reason(exc)
         return record
 
     # --- revocation: shared HTTP ------------------------------------------
@@ -842,7 +853,10 @@ class _TlsRun:
         config = self.config
         reasons: list[str] = []
         has_certificate = record["fingerprint_sha256"] is not None
-        if record["source"] != "pem":
+        if record["source"] == "pem":
+            if not has_certificate:
+                reasons.append(record["error"] or "no certificate")
+        else:
             if not record["host"]:
                 reasons.append(record["error"] or "no address")
             elif record["reachable"] is False:
@@ -875,6 +889,11 @@ class _TlsRun:
                 reasons.append(f"CRL {record['crl']}: {record['crl_detail']}")
         record["failures"] = reasons
         record["ok"] = not reasons
+
+
+def _unreadable_reason(exc: BaseException) -> str:
+    """The endpoint error for a certificate the checks cannot read."""
+    return f"cannot read the certificate: {exc}"
 
 
 def _http_reason(exc: BaseException) -> str:

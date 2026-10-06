@@ -404,10 +404,19 @@ def _first_attribute(name: x509.Name, oid: x509.ObjectIdentifier) -> str | None:
 def _extension_value(
     cert: x509.Certificate | x509.CertificateRevocationList, ext_type: type[Any]
 ) -> Any:
-    """The value of a certificate's or CRL's ``ext_type`` extension; None when absent or malformed."""
+    """The value of a certificate's or CRL's ``ext_type`` extension; None when absent or malformed.
+
+    An extension holding a name form the X.509 library cannot read (an
+    x400Address or ediPartyName) counts as malformed.
+    """
     try:
         return cert.extensions.get_extension_for_class(ext_type).value
-    except (x509.ExtensionNotFound, x509.DuplicateExtension, ValueError):
+    except (
+        x509.ExtensionNotFound,
+        x509.DuplicateExtension,
+        x509.UnsupportedGeneralNameType,
+        ValueError,
+    ):
         return None
 
 

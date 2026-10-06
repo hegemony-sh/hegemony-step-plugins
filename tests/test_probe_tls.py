@@ -32,7 +32,12 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.hazmat.primitives.serialization import pkcs7
 from cryptography.x509 import ocsp
-from cryptography.x509.oid import AuthorityInformationAccessOID, ExtendedKeyUsageOID, NameOID
+from cryptography.x509.oid import (
+    AuthorityInformationAccessOID,
+    ExtendedKeyUsageOID,
+    ExtensionOID,
+    NameOID,
+)
 
 from hegemony_step_sdk import HandlerContext, HandlerServices
 from hegemony_step_sdk.docs import check_page, load_docs_bundle
@@ -2201,6 +2206,81 @@ def test_an_unreadable_crl_is_a_crl_error(pki):
         bad_date, leaf, url="http://ca.example.test/inter.crl", names=frozenset(), now=NOW
     )
     assert (outcome["crl"], outcome["crl_detail"]) == ("error", "CRL cannot be read: bad date")
+
+
+# --- Certificates the checks cannot read -----------------------------------------
+
+
+#: A subject alternative name holding an x400Address, a name form the X.509
+#: library refuses to read.
+_X400_SAN = (
+    x509.UnrecognizedExtension(ExtensionOID.SUBJECT_ALTERNATIVE_NAME, bytes.fromhex("3002a300")),
+    False,
+)
+
+
+async def test_an_unreadable_alternative_name_does_not_stop_the_other_endpoints(pki, tmp_path):
+    key = ec.generate_private_key(ec.SECP256R1())
+    odd = Leaf(issue("odd.example.test", key, extensions=(_X400_SAN,)), key, ())
+    async with (
+        tls_server(tmp_path, pki.leaves["rsa"]) as good_port,
+        tls_server(tmp_path, odd) as odd_port,
+    ):
+        result = await run_step(
+            {
+                "endpoints": [f"127.0.0.1:{good_port}", f"127.0.0.1:{odd_port}"],
+                "ca_bundle": pki.root_pem,
+            }
+        )
+    good, odd_record = result.output["endpoints"]
+    assert good["ok"] is True and good["subject_cn"] == "rsa.example.test"
+    # The unreadable extension counts as absent; the rest of the certificate is reported.
+    assert odd_record["error"] is None
+    assert odd_record["fingerprint_sha256"] == fingerprint_of(odd.cert)
+    assert (odd_record["subject_cn"], odd_record["sans"]) == ("odd.example.test", [])
+    assert odd_record["hostname_ok"] is False
+
+
+async def test_a_certificate_the_checks_cannot_read_is_its_endpoints_error(
+    pki, tmp_path, monkeypatch
+):
+    unreadable = pki.leaves["ec"].cert
+    real_fields = tls_certs.certificate_fields
+    problem = x509.UnsupportedGeneralNameType("x400Address/EDIPartyName are not supported types")
+
+    def fields(cert: x509.Certificate, *, now: datetime) -> dict[str, Any]:
+        if cert == unreadable:
+            raise problem
+        return real_fields(cert, now=now)
+
+    monkeypatch.setattr(tls_certs, "certificate_fields", fields)
+    async with (
+        tls_server(tmp_path, pki.leaves["rsa"]) as good_port,
+        tls_server(tmp_path, pki.leaves["ec"]) as odd_port,
+    ):
+        result = await run_step(
+            {
+                "endpoints": [f"127.0.0.1:{good_port}", f"127.0.0.1:{odd_port}"],
+                "ca_bundle": pki.root_pem,
+                "check_ocsp": True,
+            }
+        )
+    good, odd_record = result.output["endpoints"]
+    assert good["ok"] is True, good["failures"]
+    assert odd_record["error"] == f"cannot read the certificate: {problem}"
+    assert set(odd_record) == set(good)
+    assert all(odd_record[key] is None for key in tls_certs.CERTIFICATE_FIELDS)
+    assert (odd_record["ocsp"], odd_record["hostname_ok"]) == (None, None)
+    assert odd_record["reachable"] is True and odd_record["chain_ok"] is True
+    assert result.success is False
+    assert f"127.0.0.1:{odd_port} (cannot read the certificate" in (result.error or "")
+
+    pasted = await run_step({"pem": pem_of(unreadable, pki.inter), "ca_bundle": pki.root_pem})
+    [record] = pasted.output["endpoints"]
+    assert record["error"] == f"cannot read the certificate: {problem}"
+    assert record["fingerprint_sha256"] is None
+    assert pasted.success is False
+    assert "pem certificate (cannot read the certificate" in (pasted.error or "")
 
 
 # --- Responses and lists without a next update ---------------------------------

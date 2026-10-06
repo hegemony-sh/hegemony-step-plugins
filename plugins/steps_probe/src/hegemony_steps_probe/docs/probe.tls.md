@@ -85,7 +85,11 @@ server certificate, not the CAs above it; `crl_next_update` says when the
 issuer publishes its next list, which a flow can watch to catch a CA that
 stopped publishing. An OCSP response or CRL the step cannot read, such as one
 signed with an algorithm it does not know, is an `error` for that endpoint
-only; the other endpoints keep their results.
+only; the other endpoints keep their results. The same holds for a
+certificate: an extension holding a name form the step cannot read (such as
+an x400Address) counts as absent, and a certificate it cannot describe at all
+leaves that endpoint's certificate fields empty with the reason in `error`,
+which fails a pasted certificate and, with Require reachable on, the endpoint.
 
 Parallel checks (default 10, up to 50) sets how many endpoints are checked at
 once. When the flow runs under an egress policy, every connection the step
