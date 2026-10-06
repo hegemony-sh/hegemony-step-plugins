@@ -35,14 +35,16 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_shell` | `shell.` | execute (opt-in) |
   | `plugins/steps_ansible` | `ansible.` | playbook (built on `container.run`'s runner) |
   | `plugins/steps_tf` | `tf.` | plan, apply — OpenTofu or Terraform (built on `container.run`'s runner) |
+  | `plugins/steps_http` | `http.` | request |
   | `plugins/steps_secret` | `secret.` | write — store, swap or delete a secret in the organization's secret store |
 
 Wheels are versioned in lockstep with the platform. Most are auto-installed;
 `hegemony-steps-cisco-iosxe` and `hegemony-steps-shell` are opt-in (install the
 released wheels explicitly — the demo pins them via demo-plugin-wheels.txt),
 and hardened deployments may omit `hegemony-steps-container` to disable
-container execution entirely, or `hegemony-steps-secret` to keep flows from
-writing secrets.
+container execution entirely, `hegemony-steps-http` to disable arbitrary
+outbound HTTP requests from workers, or `hegemony-steps-secret` to keep flows
+from writing secrets.
 
 ## Development
 

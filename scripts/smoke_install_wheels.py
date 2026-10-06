@@ -35,6 +35,7 @@ EXPECTED_MODULES = (
     "hegemony_steps_monitor",
     "hegemony_steps_ansible",
     "hegemony_steps_tf",
+    "hegemony_steps_http",
     "hegemony_steps_secret",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
@@ -55,6 +56,7 @@ EXPECTED_ENTRY_POINTS = {
     "monitor",
     "ansible",
     "tf",
+    "http",
     "secret",
 }
 
