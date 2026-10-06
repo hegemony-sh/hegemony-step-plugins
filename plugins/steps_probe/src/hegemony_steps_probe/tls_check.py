@@ -53,6 +53,16 @@ MAX_FETCH_BYTES = 1024 * 1024
 #: Largest CRL the step downloads.
 MAX_CRL_BYTES = 20 * 1024 * 1024
 
+#: Most bytes one run downloads in all (OCSP responses, issuer certificates
+#: and CRLs together); a request past it is an error for its endpoint.
+MAX_RUN_DOWNLOAD_BYTES = 64 * 1024 * 1024
+
+#: Most CRL addresses tried for one certificate.
+MAX_CRL_ADDRESSES = 3
+
+#: Most caIssuers addresses tried for one certificate's issuer.
+MAX_ISSUER_ADDRESSES = 3
+
 #: Request extension that names what an HTTP request is for, in egress checks.
 _EGRESS_KIND = "hegemony.egress_kind"
 
@@ -500,11 +510,13 @@ class _TlsRun:
         self.client: httpx.AsyncClient | None = None
         self._observe: ssl.SSLContext | None = None
         self._verify: ssl.SSLContext | None = None
-        # Endpoints often share an issuer and its CRL: each is downloaded,
-        # parsed and checked against an issuer once per run.
+        # Endpoints often share an issuer and its CRL: each issuer file is
+        # downloaded and parsed once per run, and each CRL once per run and
+        # issuer. A CRL is kept only once its signature verified; for one
+        # that did not, only the reason is.
         self._issuer_files: dict[str, asyncio.Future[list[x509.Certificate]]] = {}
-        self._crls: dict[str, asyncio.Future[x509.CertificateRevocationList]] = {}
-        self._crl_problems: dict[tuple[str, str], str | None] = {}
+        self._crls: dict[tuple[str, str], asyncio.Future[x509.CertificateRevocationList | str]] = {}
+        self.downloaded = 0
 
     # --- records ---------------------------------------------------------
 
@@ -718,6 +730,8 @@ class _TlsRun:
         """
         if self.client is None:
             raise _FetchError("the revocation client is not open")
+        if self.downloaded >= MAX_RUN_DOWNLOAD_BYTES:
+            raise self._download_limit_reached()
         chunks: list[bytes] = []
         try:
             async with (
@@ -733,15 +747,25 @@ class _TlsRun:
                     total += len(chunk)
                     if total > limit:
                         raise _FetchError(f"response from {url} exceeds {limit} bytes")
+                    self.downloaded += len(chunk)
+                    if self.downloaded > MAX_RUN_DOWNLOAD_BYTES:
+                        raise self._download_limit_reached()
                     chunks.append(chunk)
         except TimeoutError:
             raise _FetchError(f"timed out after {self.timeout:g}s") from None
         return b"".join(chunks)
 
+    @staticmethod
+    def _download_limit_reached() -> _FetchError:
+        """The error for a request past the run's download limit."""
+        return _FetchError(
+            f"the step's downloads reached their limit of {MAX_RUN_DOWNLOAD_BYTES} bytes"
+        )
+
     async def _once(
         self,
-        cache: dict[str, asyncio.Future[Any]],
-        key: str,
+        cache: dict[Any, asyncio.Future[Any]],
+        key: Any,
         make: Callable[[], Awaitable[Any]],
     ) -> Any:
         """``await make()`` once per ``key`` and run; later callers share its result or error.
@@ -770,7 +794,7 @@ class _TlsRun:
         if issuer is not None:
             return issuer, ""
         problem = ""
-        for url in tls_certs.ca_issuer_urls(cert):
+        for url in tls_certs.ca_issuer_urls(cert)[:MAX_ISSUER_ADDRESSES]:
             try:
                 downloaded = await self._once(
                     self._issuer_files, url, lambda url=url: self._load_issuer_file(url)
@@ -821,18 +845,24 @@ class _TlsRun:
 
     # --- CRL -------------------------------------------------------------
 
-    async def _load_crl(self, url: str) -> x509.CertificateRevocationList:
-        """Download and parse the CRL at ``url`` (parsed off the event loop: CRLs can be large)."""
+    async def _load_crl(
+        self, url: str, issuer: x509.Certificate
+    ) -> x509.CertificateRevocationList | str:
+        """The CRL at ``url`` if ``issuer`` signed it, else why it cannot be used.
+
+        Parsed and checked off the event loop, since CRLs can be large.
+        """
         data = await self.fetch("GET", url, kind="crl download", limit=MAX_CRL_BYTES)
-        return await asyncio.to_thread(tls_certs.load_crl, data)
+        return await asyncio.to_thread(tls_certs.load_checked_crl, data, issuer)
 
     async def check_crl(
         self, cert: x509.Certificate, candidates: list[x509.Certificate]
     ) -> dict[str, Any]:
         """The CRL status of ``cert``: looked up in the issuer's list from the address it names.
 
-        Each address is tried in turn until one gives an answer (good or
-        revoked); otherwise the first address's problem is reported.
+        Each address, up to ``MAX_CRL_ADDRESSES``, is tried in turn until one
+        gives an answer (good or revoked); otherwise the first address's
+        problem is reported.
         """
         locations, missing = tls_certs.crl_locations(cert)
         if not locations:
@@ -841,7 +871,7 @@ class _TlsRun:
         if issuer is None:
             return tls_certs.crl_outcome("unavailable", problem)
         outcomes: list[dict[str, Any]] = []
-        for location in locations:
+        for location in locations[:MAX_CRL_ADDRESSES]:
             outcome = await self._crl_outcome(location, cert, issuer)
             if outcome["crl"] in ("good", "revoked"):
                 return outcome
@@ -853,20 +883,17 @@ class _TlsRun:
     ) -> dict[str, Any]:
         """``cert`` judged against the CRL at one address."""
         url = location.url
+        key = (url, tls_certs.fingerprint_sha256(issuer))
         try:
-            crl = await self._once(self._crls, url, lambda: self._load_crl(url))
+            crl = await self._once(self._crls, key, lambda: self._load_crl(url, issuer))
         except (httpx.HTTPError, httpx.InvalidURL, _FetchError) as exc:
             return tls_certs.crl_outcome(
                 "error", f"downloading the CRL failed: {_http_reason(exc)}", url=url
             )
         except ValueError as exc:
             return tls_certs.crl_outcome("error", f"the CRL cannot be parsed: {exc}", url=url)
-        key = (url, tls_certs.fingerprint_sha256(issuer))
-        if key not in self._crl_problems:
-            self._crl_problems[key] = tls_certs.crl_signature_problem(crl, issuer)
-        problem = self._crl_problems[key]
-        if problem is not None:
-            return tls_certs.crl_outcome("error", problem, url=url)
+        if isinstance(crl, str):
+            return tls_certs.crl_outcome("error", crl, url=url)
         return tls_certs.crl_status(crl, cert, url=url, names=location.names, now=self.now)
 
     # --- verdicts --------------------------------------------------------

@@ -2363,6 +2363,127 @@ async def test_crl_tries_the_next_address_after_a_failure(pki, responder):
     assert (record["crl"], record["crl_url"]) == ("good", responder.crl_url)
 
 
+async def test_at_most_three_addresses_of_each_kind_are_tried(pki, responder):
+    base = f"http://127.0.0.1:{responder.port}"
+    crl_leaf = _leaf_with(
+        pki, _distribution_points(*(_point(f"{base}/gone-{index}.crl") for index in range(5)))
+    )
+    before = len(responder.requests)
+    result = await run_step(
+        {"pem": pem_of(crl_leaf, pki.inter), "ca_bundle": pki.root_pem, "check_crl": True}
+    )
+    [record] = result.output["endpoints"]
+    assert (record["crl"], record["crl_detail"]) == (
+        "error",
+        f"downloading the CRL failed: HTTP 404 from {base}/gone-0.crl",
+    )
+    assert responder.requests[before:] == [f"GET /gone-{index}.crl" for index in range(3)]
+
+    access = x509.AuthorityInformationAccess(
+        [
+            x509.AccessDescription(
+                AuthorityInformationAccessOID.OCSP, x509.UniformResourceIdentifier(responder.url)
+            ),
+            *(
+                x509.AccessDescription(
+                    AuthorityInformationAccessOID.CA_ISSUERS,
+                    x509.UniformResourceIdentifier(f"{base}/gone-{index}.der"),
+                )
+                for index in range(5)
+            ),
+        ]
+    )
+    issuer_leaf = _leaf_with(pki, (access, False))
+    before = len(responder.requests)
+    result = await run_step(
+        {"pem": pem_of(issuer_leaf), "ca_bundle": pki.root_pem, "check_ocsp": True}
+    )
+    [record] = result.output["endpoints"]
+    assert (record["ocsp"], record["ocsp_detail"]) == (
+        "unavailable",
+        "the issuer certificate is not available; "
+        f"downloading {base}/gone-2.der failed: HTTP 404 from {base}/gone-2.der",
+    )
+    assert responder.requests[before:] == [f"GET /gone-{index}.der" for index in range(3)]
+
+
+async def test_the_step_stops_downloading_at_its_limit(pki, responder, monkeypatch):
+    monkeypatch.setattr(tls_check, "MAX_RUN_DOWNLOAD_BYTES", 100)
+    leaf = issue(
+        "limited.example.test",
+        ec.generate_private_key(ec.SECP256R1()),
+        issuer=pki.inter,
+        issuer_key=pki.inter_key,
+        ocsp_url=responder.url,
+        crl_url=responder.crl_url,
+    )
+    responder.entries[leaf.serial_number] = _OcspEntry(
+        leaf, pki.inter, pki.inter_key, ocsp.OCSPCertStatus.GOOD
+    )
+    before = len(responder.requests)
+    result = await run_step(
+        {
+            "pem": pem_of(leaf, pki.inter),
+            "ca_bundle": pki.root_pem,
+            "check_ocsp": True,
+            "check_crl": True,
+        }
+    )
+    [record] = result.output["endpoints"]
+    limit = "the step's downloads reached their limit of 100 bytes"
+    assert (record["ocsp"], record["ocsp_detail"]) == (
+        "error",
+        f"OCSP request to {responder.url} failed: {limit}",
+    )
+    assert (record["crl"], record["crl_detail"]) == (
+        "error",
+        f"downloading the CRL failed: {limit}",
+    )
+    # The OCSP response used up the limit, so the CRL was never requested.
+    assert responder.requests[before:] == ["POST /ocsp"]
+
+
+async def test_only_a_crl_that_passed_its_check_is_kept(pki, responder, monkeypatch):
+    kept: list[Any] = []
+    real_close = tls_check._TlsRun.close
+
+    def close(run: tls_check._TlsRun) -> None:
+        kept.extend(
+            future.result()
+            for future in run._crls.values()
+            if future.done() and future.exception() is None
+        )
+        real_close(run)
+
+    monkeypatch.setattr(tls_check._TlsRun, "close", close)
+    # The responder publishes the intermediate's CRL; a leaf of the root names it too.
+    stray = issue(
+        "stray.example.test",
+        ec.generate_private_key(ec.SECP256R1()),
+        issuer=pki.root,
+        issuer_key=pki.root_key,
+        crl_url=responder.crl_url,
+    )
+    result = await run_step({"pem": pem_of(stray), "ca_bundle": pki.root_pem, "check_crl": True})
+    [record] = result.output["endpoints"]
+    assert (record["crl"], record["crl_detail"]) == (
+        "error",
+        "CRL is not issued by the certificate's issuer",
+    )
+    assert kept == ["CRL is not issued by the certificate's issuer"]
+
+    kept.clear()
+    result = await run_step(
+        {
+            "pem": pem_of(pki.leaves["crl_good"].cert, pki.inter),
+            "ca_bundle": pki.root_pem,
+            "check_crl": True,
+        }
+    )
+    assert result.output["endpoints"][0]["crl"] == "good"
+    assert [type(item) for item in kept] == [x509.CertificateRevocationList]
+
+
 async def test_a_crl_download_the_egress_policy_denies_is_the_step_error(pki):
     services = FakeServices(deny=("127.0.0.1",))
     leaf = pki.leaves["crl_good"].cert

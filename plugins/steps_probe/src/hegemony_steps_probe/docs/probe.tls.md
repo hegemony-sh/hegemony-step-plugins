@@ -69,7 +69,8 @@ names at all.
 Check OCSP asks the responder named in each certificate whether the
 certificate has been revoked. The issuer certificate the question needs comes
 from the pasted or served chain where available, from CA bundle, or is
-downloaded from the address the certificate names. A response counts only
+downloaded from the addresses the certificate names (its first three
+caIssuers addresses). A response counts only
 when the issuer, or a responder the issuer authorised whose own certificate
 is currently valid, signed it, only when it names this certificate, and only
 while it is current: before its next update, or, when it names none, for 7
@@ -78,8 +79,8 @@ next update.
 
 Check CRL downloads the certificate revocation list (CRL) the certificate
 names in its CRL distribution points and looks the certificate up in it.
-HTTP and HTTPS addresses are tried in order until one gives an answer;
-others, such as `ldap://`, are skipped. A list counts only when it is a
+HTTP and HTTPS addresses are tried in order, at most three of them, until
+one gives an answer; others, such as `ldap://`, are skipped. A list counts only when it is a
 complete CRL (not a delta CRL) from the certificate's own issuer, its
 signature verifies with the issuer's key, the issuer's key usage allows CRL
 signing, its next update has not passed, and its scope covers the
@@ -88,7 +89,11 @@ name the distribution point the list came from and must not leave this kind
 of certificate out. Indirect CRLs and lists that cover only some revocation
 reasons are reported as errors. The issuer certificate comes from the same
 places as for OCSP. Each list is downloaded once per step, up to 20 MiB, and
-shared by every endpoint that names it. Like Check OCSP, it checks the
+shared by every endpoint whose issuer names it; a list that fails these
+checks is not kept, only the reason. All downloads of one step together,
+OCSP responses, issuer certificates and CRLs, stop at 64 MiB: a request past
+that is an `error` (or, for an issuer certificate, `unavailable`) for its
+endpoint, saying the step reached its download limit. Like Check OCSP, it checks the
 server certificate, not the CAs above it; `crl_next_update` says when the
 issuer publishes its next list, which a flow can watch to catch a CA that
 stopped publishing. An OCSP response or CRL the step cannot read, such as one

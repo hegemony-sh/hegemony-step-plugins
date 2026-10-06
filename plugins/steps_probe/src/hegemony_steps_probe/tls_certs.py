@@ -1267,6 +1267,17 @@ def load_crl(data: bytes) -> x509.CertificateRevocationList:
     return x509.load_der_x509_crl(data)
 
 
+def load_checked_crl(data: bytes, issuer: x509.Certificate) -> x509.CertificateRevocationList | str:
+    """A downloaded CRL that passed :func:`crl_signature_problem` for ``issuer``, or that problem.
+
+    Only a list that passed is worth keeping for later lookups. Raises
+    ``ValueError`` when ``data`` is not a CRL.
+    """
+    crl = load_crl(data)
+    problem = crl_signature_problem(crl, issuer)
+    return crl if problem is None else problem
+
+
 def crl_outcome(
     status: str,
     detail: str | None,
