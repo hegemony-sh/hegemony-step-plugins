@@ -26,7 +26,7 @@ entry-point group and the platform discovers them at startup.
   | Wheel | Namespace | Handlers |
   | --- | --- | --- |
   | `plugins/steps_general` | `general.` | noop (hidden), sleep |
-  | `plugins/steps_probe` | `probe.` | connectivity, http, dns, wait_reachable |
+  | `plugins/steps_probe` | `probe.` | connectivity, http, dns, tls, wait_reachable |
   | `plugins/steps_netcli` | `netcli.` | execute, collect_evidence |
   | `plugins/steps_evidence` | `evidence.` | assert, compare |
   | `plugins/steps_container` | `container.` | run |
