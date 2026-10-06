@@ -2194,3 +2194,75 @@ def test_an_unreadable_crl_is_a_crl_error(pki):
         bad_date, leaf, url="http://ca.example.test/inter.crl", names=frozenset(), now=NOW
     )
     assert (outcome["crl"], outcome["crl_detail"]) == ("error", "CRL cannot be read: bad date")
+
+
+# --- Responses and lists without a next update ---------------------------------
+
+
+def _undated_ocsp_response(pki: Pki, cert: x509.Certificate, produced: datetime) -> bytes:
+    return (
+        ocsp.OCSPResponseBuilder()
+        .add_response(
+            cert=cert,
+            issuer=pki.inter,
+            algorithm=hashes.SHA256(),
+            cert_status=ocsp.OCSPCertStatus.GOOD,
+            this_update=produced,
+            next_update=None,
+            revocation_time=None,
+            revocation_reason=None,
+        )
+        .responder_id(ocsp.OCSPResponderEncoding.NAME, pki.inter)
+        .sign(pki.inter_key, hashes.SHA256())
+        .public_bytes(serialization.Encoding.DER)
+    )
+
+
+def test_an_ocsp_response_without_next_update_counts_for_a_limited_time(pki):
+    leaf = pki.leaves["rsa"].cert
+    fresh = _undated_ocsp_response(pki, leaf, NOW - timedelta(days=1))
+    assert evaluate_ocsp_response(fresh, leaf, pki.inter, now=NOW)["ocsp"] == "good"
+    produced = (NOW - tls_certs.MAX_UNDATED_AGE - timedelta(hours=1)).replace(microsecond=0)
+    old = _undated_ocsp_response(pki, leaf, produced)
+    outcome = evaluate_ocsp_response(old, leaf, pki.inter, now=NOW)
+    assert outcome == {
+        "ocsp": "error",
+        "ocsp_detail": (
+            "response names no next update and is older than 7 days "
+            f"(produced {produced.strftime('%Y-%m-%dT%H:%M:%SZ')})"
+        ),
+        "revocation_time": None,
+    }
+
+
+class _Undated:
+    """A real CRL that reads as if it named no next update and was issued at ``issued``."""
+
+    def __init__(self, real: x509.CertificateRevocationList, issued: datetime) -> None:
+        self._real = real
+        self.next_update_utc = None
+        self.last_update_utc = issued
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+def test_a_crl_without_next_update_counts_for_a_limited_time(pki):
+    leaf = pki.leaves["crl_good"].cert
+    crl = make_crl(pki.inter, pki.inter_key)
+
+    def status(issued: datetime) -> dict[str, Any]:
+        undated = cast(x509.CertificateRevocationList, _Undated(crl, issued))
+        return tls_certs.crl_status(
+            undated, leaf, url="http://ca.example.test/inter.crl", names=frozenset(), now=NOW
+        )
+
+    assert status(NOW - timedelta(days=1))["crl"] == "good"
+    issued = (NOW - tls_certs.MAX_UNDATED_AGE - timedelta(hours=1)).replace(microsecond=0)
+    outcome = status(issued)
+    assert outcome["crl"] == "error"
+    assert outcome["crl_detail"] == (
+        "CRL names no next update and is older than 7 days "
+        f"(produced {issued.strftime('%Y-%m-%dT%H:%M:%SZ')})"
+    )
+    assert outcome["crl_next_update"] is None

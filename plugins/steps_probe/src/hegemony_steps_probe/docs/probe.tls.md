@@ -63,7 +63,10 @@ certificate has been revoked. The issuer certificate the question needs comes
 from the pasted or served chain where available, from CA bundle, or is
 downloaded from the address the certificate names. A response counts only
 when the issuer, or a responder the issuer authorised whose own certificate
-is currently valid, signed it, and only when it names this certificate.
+is currently valid, signed it, only when it names this certificate, and only
+while it is current: before its next update, or, when it names none, for 7
+days after it was produced. The same 7-day limit applies to a CRL without a
+next update.
 
 Check CRL downloads the certificate revocation list (CRL) the certificate
 names in its CRL distribution points and looks the certificate up in it.

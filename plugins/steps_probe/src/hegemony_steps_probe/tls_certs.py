@@ -50,6 +50,11 @@ OCSP_CLOCK_SKEW = timedelta(minutes=5)
 #: Clock skew tolerated on CRL ``thisUpdate``/``nextUpdate``.
 CRL_CLOCK_SKEW = OCSP_CLOCK_SKEW
 
+#: How long an OCSP response or CRL that names no ``nextUpdate`` counts after
+#: its ``thisUpdate``. Without a bound, a signed answer could be replayed for
+#: ever; OCSP responses carry no replay protection.
+MAX_UNDATED_AGE = timedelta(days=7)
+
 #: What reading an unusual or malformed certificate, OCSP response or CRL can
 #: raise: an unknown algorithm, key type or name form, or a bad encoding.
 _UNREADABLE = (
@@ -1064,6 +1069,15 @@ def _judge_ocsp_response(
     return ocsp_outcome("error", "response does not cover this certificate")
 
 
+def _undated_too_old(what: str, this_update: datetime) -> str:
+    """Why an OCSP response or CRL without ``nextUpdate`` no longer counts."""
+    days = MAX_UNDATED_AGE.days
+    return (
+        f"{what} names no next update and is older than {days} days "
+        f"(produced {_iso_z(this_update)})"
+    )
+
+
 def _single_outcome(single: Any, now: datetime) -> dict[str, Any]:
     """The OCSP outcome of one single response at ``now``, after its freshness check."""
     this_update: datetime = single.this_update_utc
@@ -1072,6 +1086,8 @@ def _single_outcome(single: Any, now: datetime) -> dict[str, Any]:
         return ocsp_outcome("error", f"response is not valid until {_iso_z(this_update)}")
     if next_update is not None and next_update + OCSP_CLOCK_SKEW < now:
         return ocsp_outcome("error", f"response is stale (next update was {_iso_z(next_update)})")
+    if next_update is None and this_update + MAX_UNDATED_AGE < now:
+        return ocsp_outcome("error", _undated_too_old("response", this_update))
     status = single.certificate_status
     if status == ocsp.OCSPCertStatus.GOOD:
         return ocsp_outcome("good", "responder reports the certificate good")
@@ -1295,6 +1311,8 @@ def _crl_lookup(
         return crl_outcome(
             "error", f"CRL is stale (next update was {_iso_z(next_update)})", **found
         )
+    if next_update is None and this_update + MAX_UNDATED_AGE < now:
+        return crl_outcome("error", _undated_too_old("CRL", this_update), **found)
     problem = _crl_scope_problem(crl, cert, names)
     if problem is not None:
         return crl_outcome("error", problem, **found)
