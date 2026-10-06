@@ -24,7 +24,8 @@ DNS Resolve. URL Path applies only to the HTTP Health check and falls back to
 not follow redirects. DNS Resolve looks up each target's own name with the
 worker's system resolver, so every sample of an IP address target fails.
 Interval (ms) sets the time between samples (default 5000), and Timeout
-(sec) is the per-sample time limit (default 10).
+(sec) is the per-sample time limit (default 10). Steps saved with the old
+names `timeout_sec` (Timeout) and `duration_sec` (Duration) keep working.
 
 Schedule Mode decides when sampling stops: Fixed Count stops after Count
 samples (default 10), Duration stops after Duration (sec) seconds (default

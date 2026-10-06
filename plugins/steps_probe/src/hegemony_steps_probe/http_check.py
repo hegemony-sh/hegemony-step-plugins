@@ -10,16 +10,16 @@ import time
 from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
+    InvalidConfigError,
     StepKind,
     for_each_target_device,
-    max_parallel_from_config,
 )
 
 from .targets import (
@@ -64,7 +64,8 @@ def status_matches(status: int, ranges: list[tuple[int, int]]) -> bool:
 class HttpProbeConfig(BaseModel):
     """Config for ``probe.http``."""
 
-    model_config = ConfigDict(extra="allow")
+    # Expected Status written as a number (200) is its text.
+    model_config = ConfigDict(extra="allow", coerce_numbers_to_str=True)
 
     scheme: Literal["http", "https"] = Field(
         default="http",
@@ -130,14 +131,17 @@ class HttpProbeConfig(BaseModel):
             "and Body Contains see. Enabled by default."
         ),
     )
-    timeout_sec: int = Field(
+    attempt_timeout_seconds: int = Field(
         default=10,
         ge=1,
+        # Steps saved before the rename carry timeout_sec.
+        validation_alias=AliasChoices("attempt_timeout_seconds", "timeout_sec"),
         title="Timeout (sec)",
         description=(
             "Time limit for each request attempt, in seconds, covering "
             "connection setup and the response. Defaults to 10."
         ),
+        json_schema_extra={"x_legacy_keys": ["timeout_sec"]},
     )
     attempts: int = Field(
         default=1, ge=1, le=10, title="Attempts", description="Number of attempts (1-10)"
@@ -171,20 +175,24 @@ class HttpProbeHandler(BaseHandler):
                 summary="Missing targets",
             )
 
-        scheme = ctx.config.get("scheme", "http")
-        port = ctx.config.get("port")
-        path = ctx.config.get("path", "/") or "/"
+        try:
+            config = self.parse_config(ctx.config, HttpProbeConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        scheme = config.scheme
+        port = config.port
+        path = config.path or "/"
         if not path.startswith("/"):
             path = "/" + path
-        method = ctx.config.get("method", "GET")
-        body_contains = ctx.config.get("body_contains", "")
-        verify_tls = bool(ctx.config.get("verify_tls", True))
-        follow_redirects = bool(ctx.config.get("follow_redirects", True))
-        timeout_sec = ctx.config.get("timeout_sec", 10)
-        attempts = min(int(ctx.config.get("attempts", 1)), 10)
+        method = config.method
+        body_contains = config.body_contains
+        verify_tls = config.verify_tls
+        follow_redirects = config.follow_redirects
+        timeout_sec = config.attempt_timeout_seconds
+        attempts = config.attempts
 
         try:
-            status_ranges = parse_status_spec(str(ctx.config.get("expected_status", "200-399")))
+            status_ranges = parse_status_spec(config.expected_status)
         except ValueError as exc:
             return HandlerResult(
                 success=False,
@@ -268,9 +276,7 @@ class HttpProbeHandler(BaseHandler):
             outcomes = await for_each_target_device(
                 target_devices,
                 _check,
-                max_parallel=max_parallel_from_config(
-                    ctx.config, default=DEFAULT_MAX_PARALLEL_TARGETS
-                ),
+                max_parallel=config.max_parallel_devices,
             )
 
         all_evidence, all_metrics, failed_devices = merge_outcomes(outcomes)

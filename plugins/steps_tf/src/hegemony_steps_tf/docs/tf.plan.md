@@ -157,8 +157,9 @@ release the state lock and exit cleanly; it is killed only if it still runs
 after that. The SIGTERM at the timeout comes from inside the container (the
 image's `timeout` command, with SIGKILL once the grace period has passed,
 and not before five minutes), so the tool stops even when the worker that
-should stop the container is gone. Without a Timeout on the
-step, the step's timeout from its policy or the flow applies; managed state
+should stop the container is gone. A Timeout longer than the step's
+timeout raises the step's timeout to fit it plus a minute. Without a
+Timeout on the step, the step's timeout from its policy or the flow applies; managed state
 access lasts as long as that timeout, plus a 10-minute margin. The platform
 grants state access for at most 24 hours, so with managed state the step's
 own Timeout is refused above 85800 seconds; a longer timeout from the policy

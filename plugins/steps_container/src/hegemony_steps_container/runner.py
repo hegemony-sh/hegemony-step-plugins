@@ -30,6 +30,7 @@ included:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -38,6 +39,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     from hegemony_step_sdk import HandlerContext, HandlerResult
+
+logger = logging.getLogger(__name__)
 
 #: Root of the platform's step I/O files inside a container.
 IO_ROOT = "/hegemony"
@@ -184,11 +187,14 @@ class ContainerExecutionConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    timeout_seconds: int = Field(
-        default=600,
+    timeout_seconds: int | None = Field(
+        default=None,
         ge=1,
         title="Timeout (seconds)",
-        description="Maximum run time of the container, including the image pull.",
+        description=(
+            "Maximum run time of the container, including the image pull. Empty: "
+            "the step's timeout. A longer time raises the step's timeout to fit."
+        ),
         json_schema_extra={"x_advanced": True},
     )
     memory: str = Field(
@@ -410,6 +416,58 @@ def secret_map_errors(field_name: str, value: Any) -> list[str]:
     return errors
 
 
+def requested_timeout(value: object) -> int | None:
+    """A step's ``timeout_seconds`` as validated config holds it: an int, or None when unset.
+
+    A rendered template arrives as a string of digits.
+    """
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        return int(str(value))
+    except ValueError:
+        return None
+
+
+def step_container_timeout(ctx: HandlerContext, requested: int | None) -> int:
+    """How long a step's container may run, in seconds.
+
+    The step's own ``timeout_seconds`` (``requested``), else the step's
+    timeout; never longer than the step's timeout. A platform that reads the
+    handler's ``run_timeout_field`` gives the step that long plus a margin, so
+    a set value always fits. An older one gives the step only its policy's
+    timeout, and a container allowed to run past it would be cancelled with
+    the step, its output lost: stopped at the step's timeout, it is kept.
+    """
+    step_timeout = int(ctx.timeout_seconds)
+    if requested is None or requested <= 0:
+        return step_timeout
+    return min(requested, step_timeout)
+
+
+async def report_timeout_cut(ctx: HandlerContext, requested: int | None, timeout: int) -> None:
+    """Warn, in the log and the step's events, when the step's timeout cut ``requested``."""
+    if requested is None or requested <= timeout:
+        return
+    message = (
+        f"timeout_seconds is {requested} s, longer than the step's timeout of {timeout} s: "
+        f"the container stops after {timeout} s. Raise the step's timeout, or upgrade "
+        "Hegemony, which raises it to fit."
+    )
+    logger.warning(message, extra={"run_id": ctx.run_id, "step_run_id": ctx.step_run_id})
+    try:
+        await ctx.emit_progress(
+            message,
+            attrs={
+                "milestone": "timeout_cut",
+                "requested_seconds": requested,
+                "timeout_seconds": timeout,
+            },
+        )
+    except Exception:  # noqa: BLE001 - a progress event never fails the step
+        logger.debug("timeout_cut progress emission failed", exc_info=True)
+
+
 async def run_container_job(
     ctx: HandlerContext, job: ContainerJob
 ) -> HandlerResult | ContainerJobResult:
@@ -533,7 +591,10 @@ __all__ = [
     "container_config_from",
     "deadline_shell_lines",
     "is_bare_secret_ref",
+    "report_timeout_cut",
+    "requested_timeout",
     "resolve_secret_values",
     "run_container_job",
     "secret_map_errors",
+    "step_container_timeout",
 ]

@@ -394,6 +394,7 @@ class TfPlanHandler(BaseHandler):
     default_timeout_seconds = 1800
     config_model = TfPlanConfig
     default_config = {"engine": "opentofu", "state": "managed", "timeout_seconds": 1800}
+    run_timeout_field = "timeout_seconds"
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         errors = super().validate_config(config)
@@ -437,7 +438,7 @@ class TfPlanHandler(BaseHandler):
         shared = shared_workspace_mounted(ctx)
         workdir = workdir_for(ctx.step_id) if shared else LOCAL_WORKDIR
         state_name = config.state_name.strip() if config.state == "managed" else None
-        timeout = container_timeout(ctx, config)
+        timeout = await container_timeout(ctx, config)
 
         try:
             async with managed_state_access(

@@ -64,8 +64,11 @@ from .runner import (
     ContainerJob,
     ContainerJobResult,
     StagedFile,
+    report_timeout_cut,
+    requested_timeout,
     resolve_secret_values,
     secret_map_errors,
+    step_container_timeout,
 )
 from .streams import (
     KILL_WAIT_SECONDS,
@@ -214,11 +217,14 @@ class RunContainerConfig(BaseModel):
         title="Working Directory",
         description="Working directory inside the container (default: /workspace)",
     )
-    timeout_seconds: int = Field(
-        default=300,
+    timeout_seconds: int | None = Field(
+        default=None,
         ge=1,
         title="Timeout (seconds)",
-        description="Max execution time in seconds",
+        description=(
+            "Max execution time in seconds, including the image pull. Empty: the "
+            "step's timeout. A longer time raises the step's timeout to fit."
+        ),
     )
     memory: str = Field(
         default="",
@@ -1160,6 +1166,7 @@ class RunContainerHandler(BaseHandler):
     raw_config_keys = frozenset({"secrets"})
     config_model = RunContainerConfig
     default_config = {"timeout_seconds": 300}
+    run_timeout_field = "timeout_seconds"
 
     _IMAGE_PATTERN = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9._\-/:@]*[a-zA-Z0-9])?$")
     _MAX_OUTPUT_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -1205,6 +1212,12 @@ class RunContainerHandler(BaseHandler):
                     if not isinstance(val, str):
                         errors.append(f"'env' values must be strings (key: {key})")
                         continue
+
+        timeout = config.get("timeout_seconds")
+        if timeout not in (None, ""):
+            seconds = requested_timeout(timeout)
+            if seconds is None or seconds < 1:
+                errors.append("'timeout_seconds' must be a whole number of seconds, at least 1")
 
         # Inline files are intentionally unsupported (flow attachments only).
         if "files" in config:
@@ -1734,7 +1747,9 @@ class RunContainerHandler(BaseHandler):
         # path and every docker call sees the same login for the image's host.
         docker_env = _docker_env(docker_host, getattr(runtime, "docker_config_dir", "") or "")
         image = config.get("image", "")
-        timeout = config.get("timeout_seconds", ctx.timeout_seconds)
+        requested = requested_timeout(config.get("timeout_seconds"))
+        timeout = step_container_timeout(ctx, requested)
+        await report_timeout_cut(ctx, requested, timeout)
         working_dir = config.get("working_dir", "/workspace")
         # Where flow attachments are copied inside the container. Defaults to
         # /attachments; steps may override to any absolute path. Trailing
