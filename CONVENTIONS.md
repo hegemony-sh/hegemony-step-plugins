@@ -172,9 +172,10 @@ Setting names are a persistence contract too: steps store them.
   No `_sec` or `_s`, and no bare `seconds`, `interval` or `timeout`.
 - **A limit on one operation names the operation**
   (`command_timeout_seconds`, `attempt_timeout_seconds`,
-  `connect_timeout_seconds`). `timeout_seconds` and `max_wait_seconds` are
-  limits on the whole step; declare such a field as the handler's
-  `run_timeout_field`, so the host gives the step that long plus a margin.
+  `connect_timeout_seconds`). Declare a limit on the whole step
+  (`timeout_seconds`, probe.wait_reachable's `max_wait_seconds`) as the
+  handler's `run_timeout_field`, so the host gives the step that long plus a
+  margin; a limit that applies to each device in turn is not one.
 - **A tool's own setting keeps the tool's form** when the value is passed to
   the tool as written (tf's `lock_timeout` is a duration string such as `5m`).
 - **Renaming a setting keeps the old name working.** Give the field

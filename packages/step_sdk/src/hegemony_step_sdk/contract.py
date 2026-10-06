@@ -455,19 +455,15 @@ class BaseHandler(ABC):
         try:
             self.config_model.model_validate(config)
         except ValidationError as exc:
-            return [
-                ".".join(str(part) for part in error["loc"]) + f": {error['msg']}"
-                if error["loc"]
-                else error["msg"]
-                for error in exc.errors()
-            ]
+            return _validation_messages(exc)
         return []
 
     def parse_config(self, config: Mapping[str, Any], model: type[_ConfigT]) -> _ConfigT:
         """Validate a step's config and return it parsed as ``model``.
 
-        Runs :meth:`validate_config` (the schema and any semantic checks), then
-        ``model.model_validate``. Read the settings from the result rather than
+        Validates against ``model``, then runs :meth:`validate_config` (the
+        schema and any semantic checks) with each value the step set under its
+        field's current name. Read the settings from the result rather than
         with ``ctx.config.get``: the result carries the model's defaults, its
         type conversion (a rendered template is a string), and the old names a
         field still accepts through ``validation_alias``. ``model`` is normally
@@ -477,10 +473,19 @@ class BaseHandler(ABC):
             InvalidConfigError: the config is invalid; ``exc.result()`` is the
                 failed step result that reports it.
         """
-        errors = self.validate_config(dict(config))
+        from pydantic import ValidationError
+
+        raw = dict(config)
+        try:
+            parsed = model.model_validate(raw)
+        except ValidationError as exc:
+            raise InvalidConfigError(self.handler_id, _validation_messages(exc)) from None
+        # The semantic checks see each value the step set under its field's
+        # current name, so a value given under an old name is checked too.
+        errors = self.validate_config({**raw, **parsed.model_dump(include=parsed.model_fields_set)})
         if errors:
             raise InvalidConfigError(self.handler_id, errors)
-        return model.model_validate(dict(config))
+        return parsed
 
     def template_errors(self, config: dict[str, Any]) -> list[str]:
         """Refuse template uses in ``config`` that would be unsafe once rendered.
@@ -496,6 +501,16 @@ class BaseHandler(ABC):
             List of error messages (empty if the templates are acceptable)
         """
         return []
+
+
+def _validation_messages(exc: Any) -> list[str]:
+    """One ``loc: msg`` line per error of a pydantic ``ValidationError``."""
+    return [
+        ".".join(str(part) for part in error["loc"]) + f": {error['msg']}"
+        if error["loc"]
+        else error["msg"]
+        for error in exc.errors()
+    ]
 
 
 def command_label(command: str, max_len: int = 80) -> str:

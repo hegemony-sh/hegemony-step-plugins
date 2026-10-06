@@ -58,6 +58,5 @@ fails, including `install commit`, also fails that device.
 All devices must verify for the step to succeed; per-device evidence is
 recorded either way. The step's overall default timeout is 7200 seconds, so
 with many devices verified sequentially, keep Max Wait and device count
-within that budget. A step timeout shorter than Max Wait plus 10 minutes
-(for the checks and the commit after the wait) is raised to that. Steps
-saved with Retry Interval's old name, `retry_interval`, keep working.
+within that budget: Max Wait applies to each device in turn. Steps saved
+with Retry Interval's old name, `retry_interval`, keep working.

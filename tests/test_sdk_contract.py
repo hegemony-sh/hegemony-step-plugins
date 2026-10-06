@@ -451,6 +451,9 @@ def test_parse_config_refuses_with_validate_config_errors():
     for config, message in [
         ({"duration_seconds": 0}, "duration_seconds: Input should be greater than or equal to 1"),
         ({"duration_seconds": 13}, "duration_seconds: unlucky"),
+        # The semantic check sees a value given under the old name as well.
+        ({"seconds": 13}, "duration_seconds: unlucky"),
+        ({"seconds": "13"}, "duration_seconds: unlucky"),
     ]:
         with pytest.raises(sdk.InvalidConfigError) as caught:
             handler.parse_config(config, config_model)

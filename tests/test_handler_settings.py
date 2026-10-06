@@ -118,7 +118,6 @@ def test_a_new_step_is_seeded_with_current_names(cls):
 
 EXPECTED_RUN_TIMEOUT_FIELDS = {
     "ansible.playbook": "timeout_seconds",
-    "cisco.iosxe.upgrade.verify": "max_wait_seconds",
     "container.run": "timeout_seconds",
     "general.noop": "delay_seconds",
     "general.sleep": "duration_seconds",
@@ -228,8 +227,7 @@ def _ctx(config: dict[str, Any], **kwargs: Any) -> HandlerContext:
 
 @pytest.fixture
 def slept(monkeypatch) -> list[float]:
-    import hegemony_steps_general.noop as noop_module
-    import hegemony_steps_general.sleep as sleep_module
+    from hegemony_steps_general import noop as noop_module, sleep as sleep_module
 
     calls: list[float] = []
 

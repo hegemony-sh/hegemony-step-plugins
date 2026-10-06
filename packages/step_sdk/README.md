@@ -58,6 +58,9 @@ converted to the field's type (a rendered `{{ }}` template is a string), and a
 renamed field's old name, which the field keeps accepting:
 
 ```python
+from pydantic import AliasChoices, Field
+
+...
     duration_seconds: int = Field(
         default=30,
         validation_alias=AliasChoices("duration_seconds", "seconds"),

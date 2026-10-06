@@ -174,11 +174,6 @@ class DnsProbeHandler(BaseHandler):
                 summary="Missing targets",
             )
 
-        bad_resolver = resolver_error(str(ctx.config.get("resolver", "") or "").strip())
-        if bad_resolver:
-            return HandlerResult(
-                success=False, error=bad_resolver, summary="DNS check configuration error"
-            )
         try:
             config = self.parse_config(ctx.config, DnsProbeConfig)
         except InvalidConfigError as exc:

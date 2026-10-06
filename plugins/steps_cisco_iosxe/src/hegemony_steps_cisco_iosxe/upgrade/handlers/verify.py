@@ -148,10 +148,8 @@ class UpgradeVerifyHandler(BaseHandler):
         "max_wait_seconds": 600,
         "poll_interval_seconds": 30,
     }
-    # The step waits up to max_wait_seconds for the device, then still checks
-    # the version and may run "install commit".
-    run_timeout_field = "max_wait_seconds"
-    run_timeout_margin_seconds = 600
+    # No run_timeout_field: Max Wait applies to each device in turn, and each
+    # then still runs its checks and may commit, so it bounds no whole step.
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Verify upgrade on all target devices."""
