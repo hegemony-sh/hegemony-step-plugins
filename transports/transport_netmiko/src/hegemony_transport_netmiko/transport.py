@@ -1131,12 +1131,16 @@ class SSHTransport:
                 combined_output += str(raw_output)
                 self._stream_from_thread(raw_output)
 
+            # Prompts answered so far, lower-cased. Both phases below share
+            # it: a question already in the first output is answered once,
+            # not again when waiting for patterns starts.
+            answered_prompts: set[str] = set()
+
             # Handle prompts if answers provided (case-insensitive matching)
             # Track which prompts have been answered to avoid repeating
             if answers:
                 max_prompt_iterations = 10
                 iterations = 0
-                answered_prompts: set[str] = set()
 
                 while iterations < max_prompt_iterations:
                     # Check for cancellation
@@ -1152,11 +1156,11 @@ class SSHTransport:
                     output_lower = combined_output.lower()
                     for prompt_pattern, answer in answers.items():
                         # Skip prompts we've already answered
-                        if prompt_pattern in answered_prompts:
+                        if prompt_pattern.lower() in answered_prompts:
                             continue
                         if prompt_pattern.lower() in output_lower:
                             logger.info(f"Matched prompt '{prompt_pattern}', sending answer")
-                            answered_prompts.add(prompt_pattern)
+                            answered_prompts.add(prompt_pattern.lower())
                             raw_answer_output = connection.send_command_timing(
                                 answer,
                                 delay_factor=1,
@@ -1184,25 +1188,24 @@ class SSHTransport:
                 read_interval = 2.0  # Check every 2 seconds
                 last_log_time = time.perf_counter()
                 log_interval = 30.0  # Log progress every 30 seconds
-                # Track prompts we've already answered in THIS wait loop
-                # Track the output length at which we answered each prompt pattern
-                # to avoid re-answering the same prompt appearing in accumulated output
-                answered_prompt_patterns: set[str] = set()
                 # Track position in output up to which we've processed prompts
                 prompt_check_start_pos = 0
 
                 # Check for prompts in initial output BEFORE entering the loop
-                # Prompts may already be present from send_command_timing
+                # Prompts may already be present from send_command_timing;
+                # the ones the answers loop above answered are skipped.
                 if answers:
                     output_lower = combined_output.lower()
                     for prompt_pattern, answer in answers.items():
+                        if prompt_pattern.lower() in answered_prompts:
+                            continue
                         prompt_pos = output_lower.find(prompt_pattern.lower())
                         if prompt_pos >= 0:
                             logger.info(
                                 f"Matched prompt '{prompt_pattern}' in initial output at pos "
                                 f"{prompt_pos}, sending answer"
                             )
-                            answered_prompt_patterns.add(prompt_pattern.lower())
+                            answered_prompts.add(prompt_pattern.lower())
                             connection.write_channel(answer + "\n")
                             time.sleep(0.5)
                     prompt_check_start_pos = len(combined_output)
@@ -1242,14 +1245,14 @@ class SSHTransport:
                                 for prompt_pattern, answer in answers.items():
                                     pattern_lower = prompt_pattern.lower()
                                     # Skip patterns we've already answered
-                                    if pattern_lower in answered_prompt_patterns:
+                                    if pattern_lower in answered_prompts:
                                         continue
                                     if pattern_lower in new_output_lower:
                                         logger.info(
                                             f"Matched prompt '{prompt_pattern}' in new output, "
                                             "sending answer"
                                         )
-                                        answered_prompt_patterns.add(pattern_lower)
+                                        answered_prompts.add(pattern_lower)
                                         connection.write_channel(answer + "\n")
                                         time.sleep(0.5)  # Brief pause after answering
                                         break

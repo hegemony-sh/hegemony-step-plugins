@@ -670,6 +670,32 @@ def test_failed_timing_commands_are_not_logged(caplog):
     assert _SECRET not in caplog.text
 
 
+def test_a_prompt_in_the_first_output_is_answered_once():
+    # The answers loop answered it, then the wait for patterns started with
+    # an empty "answered" set, found the same question in the output it had
+    # already handled and answered it a second time.
+    connection = MagicMock()
+
+    def send_command_timing(command, **kwargs):
+        return "Proceed with install? [confirm]" if command.startswith("install") else ""
+
+    connection.send_command_timing.side_effect = send_command_timing
+    connection.read_channel.return_value = "SUCCESS: install_add_activate_commit"
+
+    result = _run_timing(
+        connection,
+        "install add file flash:new.bin activate commit",
+        read_timeout=60.0,
+        answers={"[confirm]": "y"},
+        wait_for_patterns=["SUCCESS"],
+    )
+
+    assert result.exit_code == 0
+    sent = [c.args[0] for c in connection.send_command_timing.call_args_list[1:]]
+    sent += [c.args[0] for c in connection.write_channel.call_args_list]
+    assert sent == ["y"]
+
+
 def test_http_transfer_url_is_not_logged(caplog):
     caplog.set_level(logging.DEBUG)
     url = f"https://files.example.test/a/{_SECRET}/image.bin"
