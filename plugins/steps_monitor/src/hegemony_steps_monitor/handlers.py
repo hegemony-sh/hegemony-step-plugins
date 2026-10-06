@@ -28,6 +28,10 @@ from .targets import extract_ip_addresses
 
 logger = logging.getLogger(__name__)
 
+#: Ports a check uses when the step sets none, as in probe.connectivity: 80 for
+#: HTTP Health, where SSH's 22, the default of the other checks, would be wrong.
+_CHECK_DEFAULT_PORTS = {"http_health": 80}
+
 
 class ConnectivityMonitorHandler(BaseHandler):
     """Unified connectivity monitoring handler (``monitor.connectivity``)."""
@@ -40,7 +44,6 @@ class ConnectivityMonitorHandler(BaseHandler):
     config_model = ConnectivityMonitorConfig
     default_config = {
         "check_type": "tcp_connect",
-        "port": 22,
         "interval_ms": 5000,
         "schedule_mode": "count",
         "count": 10,
@@ -137,11 +140,11 @@ class ConnectivityMonitorHandler(BaseHandler):
 
         options: dict[str, Any] = {"timeout_ms": config.attempt_timeout_seconds * 1000}
         if check_type in ("tcp_connect", "http_health", "tls_handshake", "ssh_banner"):
-            options["port"] = config.port
+            options["port"] = config.port or _CHECK_DEFAULT_PORTS.get(check_type, 22)
         if check_type == "http_health":
             options["url_path"] = config.url_path or "/health"
         if check_type == "icmp_ping":
-            options["count"] = ctx.config.get("ping_count", 3)
+            options["count"] = config.ping_count
         # Forward the authenticated SOCKS proxy so a monitor can watch targets
         # only reachable through a bastion (e.g. a lab management subnet behind
         # dind:1080). The TCP-based checks tunnel through it; the probe layer

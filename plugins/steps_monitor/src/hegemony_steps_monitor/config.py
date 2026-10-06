@@ -43,19 +43,20 @@ class ConnectivityMonitorConfig(BaseModel):
             },
         },
     )
-    port: int = Field(
-        default=22,
+    port: int | None = Field(
+        default=None,
         ge=1,
         le=65535,
         title="Port",
         description=(
             "TCP port probed on each target by the port-based checks such as "
-            "TCP Connect and HTTP Health. Ignored by checks that do not "
-            "connect to a port, such as ICMP Ping and DNS Resolve. Defaults "
-            "to 22 (SSH); must be between 1 and 65535."
+            "TCP Connect and HTTP Health. When empty, HTTP Health uses 80 and "
+            "the other checks 22 (SSH). Ignored by checks that do not connect "
+            "to a port, such as ICMP Ping and DNS Resolve. Must be between 1 "
+            "and 65535."
         ),
         json_schema_extra={
-            "x_placeholder": "22",
+            "x_placeholder": "22, or 80 for HTTP Health",
             "x_hide_when": {"field": "check_type", "value": "icmp_ping"},
         },
     )
@@ -138,6 +139,18 @@ class ConnectivityMonitorConfig(BaseModel):
             "x_show_when": {"field": "check_type", "value": "http_health"},
             "x_col_span": 2,
         },
+    )
+    ping_count: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        title="Ping Count",
+        description=(
+            "Echo requests sent to each target on every ICMP Ping sample. "
+            "Used only when Check Type is ICMP Ping. Defaults to 3; must be "
+            "between 1 and 10."
+        ),
+        json_schema_extra={"x_show_when": {"field": "check_type", "value": "icmp_ping"}},
     )
     socks_proxy: str = Field(
         default="",
