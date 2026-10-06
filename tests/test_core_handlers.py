@@ -25,6 +25,7 @@ import hegemony_steps_http
 import hegemony_steps_monitor
 import hegemony_steps_netcli
 import hegemony_steps_probe
+import hegemony_steps_secret
 import hegemony_steps_shell
 from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerServices, ProbeResult, StepKind
 
@@ -58,6 +59,7 @@ WHEELS = [
     ),
     (hegemony_steps_monitor, "monitor", {"monitor.connectivity"}),
     (hegemony_steps_http, "http", {"http.request"}),
+    (hegemony_steps_secret, "secret", {"secret.write"}),
 ]
 
 HIDDEN_IDS = {"general.noop"}
@@ -111,7 +113,7 @@ def test_no_duplicate_ids_across_wheels():
     all_ids: list[str] = []
     for module, _ns, _expected in WHEELS:
         all_ids += [cls.handler_id for cls in module.ALL_HANDLERS]
-    assert len(all_ids) == len(set(all_ids)) == 23
+    assert len(all_ids) == len(set(all_ids)) == 24
 
 
 def test_connectivity_check_type_is_registry_driven():

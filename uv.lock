@@ -17,6 +17,7 @@ members = [
     "hegemony-steps-monitor",
     "hegemony-steps-netcli",
     "hegemony-steps-probe",
+    "hegemony-steps-secret",
     "hegemony-steps-shell",
     "hegemony-steps-tf",
     "hegemony-transport-asyncssh",
@@ -582,6 +583,17 @@ requires-dist = [
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
     { name = "httpx", specifier = ">=0.27.0" },
 ]
+
+[[package]]
+name = "hegemony-steps-secret"
+version = "0.21.0"
+source = { editable = "plugins/steps_secret" }
+dependencies = [
+    { name = "hegemony-step-sdk" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
 
 [[package]]
 name = "hegemony-steps-shell"

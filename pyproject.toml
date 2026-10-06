@@ -41,6 +41,7 @@ members = [
     "plugins/steps_ansible",
     "plugins/steps_tf",
     "plugins/steps_http",
+    "plugins/steps_secret",
     "probes/probe_net",
     "transports/transport_netmiko",
     "transports/transport_scrapli",
@@ -61,6 +62,7 @@ hegemony-steps-monitor = { workspace = true }
 hegemony-steps-ansible = { workspace = true }
 hegemony-steps-tf = { workspace = true }
 hegemony-steps-http = { workspace = true }
+hegemony-steps-secret = { workspace = true }
 hegemony-probe-net = { workspace = true }
 hegemony-transport-netmiko = { workspace = true }
 hegemony-transport-scrapli = { workspace = true }
@@ -91,6 +93,7 @@ known-first-party = [
     "hegemony_steps_ansible",
     "hegemony_steps_tf",
     "hegemony_steps_http",
+    "hegemony_steps_secret",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
     "hegemony_transport_scrapli",

@@ -15,7 +15,7 @@ This mirrors ``hegemony_notification_sdk.NotificationServices``.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -265,6 +265,26 @@ class StateBackendAccess:
     extra_hosts: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class SecretWriteResult:
+    """What :meth:`HandlerServices.write_secret` stored, never the values themselves.
+
+    ``path`` is the path the step asked for, relative to the run organization's
+    secret root (``certs/web``). ``reference`` is how a later step reads the
+    secret back, without the key segment: append ``/<key>`` and use it as a
+    bare reference or inside ``{{ secret('...') }}``
+    (``vault://orgs/acme/secrets/certs/web`` + ``/cert``). ``keys`` names every
+    key the secret holds after the write, sorted: the keys written, plus the
+    keys kept when the write merged. ``created`` is True when no secret existed
+    at the path before the write.
+    """
+
+    path: str
+    reference: str
+    keys: tuple[str, ...]
+    created: bool
+
+
 @runtime_checkable
 class HandlerServices(Protocol):
     """Host facilities injected into ``HandlerContext.services``.
@@ -307,6 +327,123 @@ class HandlerServices(Protocol):
         jump-host block).
         """
         ...
+
+    # --- Secret store writes -------------------------------------------------
+    #
+    # Backend-neutral access to the run organization's own secret store, for
+    # handlers declaring ``writes_secrets`` (``secret.write``). The contract
+    # below binds the HOST; it is shared by all three methods:
+    #
+    # - ``path`` is relative to the run organization's own secret root:
+    #   slash-separated segments, no leading slash, no ``..`` segment, no
+    #   ``scheme://``. The host builds the backend path from it (for example
+    #   ``orgs/<org>/secrets/<path>`` on the organization's writable backend);
+    #   a handler never names a backend, a scheme, or another organization.
+    # - The host refuses, with ``PermissionError``: a handler that does not
+    #   declare ``writes_secrets``; an organization whose admins have not
+    #   enabled secret writes by steps; a path outside the prefixes the
+    #   organization allows steps to write (an admin setting); a path that
+    #   would land in another organization's namespace or in the platform's
+    #   shared organization; and, for writes and deletes, a backend marked
+    #   read-only. Reads follow the same path rules, so a step reads back only
+    #   what it may write.
+    # - A malformed path (or, for writes, malformed values) raises
+    #   ``ValueError``; a store that cannot be reached or is not configured
+    #   (no writable backend, backend error) raises ``RuntimeError``. Messages
+    #   name paths and key names, never values.
+    # - Every value read or written is registered for redaction from the
+    #   step's output, events, and artifacts before the call returns, and
+    #   before the host emits anything about it.
+    # - Every call records an audit event naming the run, the step, the
+    #   path and, for writes, the key names (never values).
+    # - A write or delete that raises may still have been applied (the
+    #   backend stored the values and then timed out, or the audit event
+    #   failed afterwards). A caller that needs to know what the store holds
+    #   after an error reads it back with ``read_secret``.
+    # - On a store that keeps versions (a KV v2 engine, say), a replaced or
+    #   deleted secret's old values must not stay readable through the
+    #   store's history: the host destroys the versions it replaces or
+    #   deletes, or keeps at most one version. ``read_secret`` treats a
+    #   secret whose latest version is deleted (soft-deleted) as absent.
+    # - Hosts older than this SDK version lack these methods. A handler checks
+    #   ``getattr(services, "write_secret", None)`` (and the others it uses)
+    #   before calling, and fails with a clear message when they are missing.
+    #   A host that has them but does not support secret writes raises
+    #   ``NotImplementedError`` (the default here), which a handler reports
+    #   the same way.
+
+    async def read_secret(self, path: str) -> dict[str, str] | None:
+        """Read every key of the secret at ``path`` in the run organization's store.
+
+        Returns ``{key: value}``, or None when no secret exists at ``path``.
+        On a store that keeps versions, a secret whose latest version is
+        deleted (soft-deleted) does not exist: None, never an older version.
+        The values are registered for redaction before this returns. Only for
+        handlers declaring ``writes_secrets``; the path rules and errors are
+        those of :meth:`write_secret` (a read-only backend is not refused).
+
+        Raises ``PermissionError`` (refused), ``ValueError`` (malformed path)
+        or ``RuntimeError`` (store unavailable). Hosts without support raise
+        ``NotImplementedError``; a platform older than this method has no
+        such attribute at all, so look it up with ``getattr``.
+        """
+        raise NotImplementedError
+
+    async def write_secret(
+        self, path: str, values: Mapping[str, str], *, merge: bool = False
+    ) -> SecretWriteResult:
+        """Store ``values`` as the keys of the secret at ``path`` in the run organization's store.
+
+        ``path`` is relative to the organization's own secret root
+        (``certs/web``: slash-separated segments, no leading slash, no ``..``,
+        no scheme); the host builds the backend path. ``values`` maps key
+        names to string values and holds at least one key. With ``merge``
+        False the secret holds exactly ``values`` afterwards: keys it had
+        that are not in ``values`` are removed. With ``merge`` True the keys
+        in ``values`` are set and every other key the secret holds is kept
+        (the host reads and writes the secret; that is not atomic against
+        another writer of the same path).
+
+        The host registers every value for redaction before anything is
+        emitted, refuses a handler without ``writes_secrets``, an
+        organization without step secret writes enabled, a path outside the
+        organization's allowed prefixes, another organization's namespace,
+        the platform's shared organization and a read-only backend, and
+        records an audit event naming the run and step, the path and the key
+        names. Returns what was stored as a :class:`SecretWriteResult`,
+        which carries the reference later steps read the keys through and
+        never the values.
+
+        On a store that keeps versions, the values this write replaces must
+        not stay readable through the store's history: the host destroys the
+        version it replaces, or keeps at most one.
+
+        Raises ``PermissionError`` (refused), ``ValueError`` (malformed path,
+        no keys, an invalid key name, a non-string value) or ``RuntimeError``
+        (store unavailable). A call that raised may still have stored the
+        values (the backend committed and then timed out, or the audit event
+        failed afterwards): read the secret back to learn what it holds.
+        Hosts without support raise ``NotImplementedError``; a platform older
+        than this method has no such attribute at all, so look it up with
+        ``getattr`` and fail clearly.
+        """
+        raise NotImplementedError
+
+    async def delete_secret(self, path: str) -> bool:
+        """Delete the secret at ``path`` in the run organization's store, every key of it.
+
+        Returns True when a secret was deleted, False when none existed at
+        ``path``. On a store that keeps versions, every version is destroyed,
+        not only marked deleted, so no old value stays readable through the
+        store's history. Only for handlers declaring ``writes_secrets``; the
+        path rules, refusals (a read-only backend included), audit event and
+        errors are those of :meth:`write_secret`, and like a write, a delete
+        that raised may still have been applied: read the path back to learn
+        whether the secret is gone. Hosts without support raise
+        ``NotImplementedError``; a platform older than this method has no
+        such attribute at all, so look it up with ``getattr``.
+        """
+        raise NotImplementedError
 
     def open_state_backend(
         self, name: str, *, ttl_seconds: int, hold_until_apply: bool = False

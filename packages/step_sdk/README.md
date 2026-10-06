@@ -89,3 +89,17 @@ The step's own `key=value` tags arrive as `ctx.tags` (`env=prod`,
 `risk=high`, `phase=VERIFY` ...), so a handler can vary its behaviour per
 tag. `phase` and `kind` are ordinary keys of that map, nothing more:
 `ctx.tags.get("phase", "")` is `""` when the step carries no such tag.
+
+A handler that stores values in the run organization's secret store
+declares `writes_secrets = True` and calls `services.read_secret`,
+`write_secret` and `delete_secret` with a path relative to the
+organization's own secret root (`certs/web`). The host decides where that
+path lives, refuses what the organization's administrators have not allowed,
+registers the values for redaction and audits each call; `write_secret`
+returns a `SecretWriteResult` naming the stored keys and the reference later
+steps read them through, never the values. A write or delete that raises may
+still have been applied, so read the secret back to learn what it holds. On a
+store that keeps versions, the host leaves no replaced or deleted value
+readable through the store's history, and `read_secret` treats a soft-deleted
+secret as absent. Hosts older than these services lack the methods, so check
+for them with `getattr` and fail clearly.

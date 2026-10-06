@@ -1,0 +1,391 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""Read, and afterwards remove, ``secret.write``'s source files in the run's shared workspace.
+
+The workspace is written by step containers, which the worker does not trust:
+a container can leave a symbolic link where a file is expected, pointing at
+the worker's own files, or swap one in while this step runs. So every
+component below the workspace root is opened relative to its parent directory
+with ``O_NOFOLLOW`` (no symbolic link is followed anywhere on the path), the
+file must be a regular file, and the file opened must be the one inspected. A
+``realpath`` check that the path stays inside the workspace comes first, so a
+link that escapes it is named as such.
+
+Messages name keys and paths inside the workspace, never file contents.
+"""
+
+from __future__ import annotations
+
+import os
+import secrets
+import stat
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+
+from .paths import workspace_relative
+
+#: Largest source file accepted.
+MAX_FILE_BYTES = 64 * 1024
+#: Largest total of all source files of one step.
+MAX_TOTAL_BYTES = 1024 * 1024
+
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_CHUNK = 64 * 1024
+
+
+class WorkspaceError(ValueError):
+    """A source file cannot be used, or the workspace cannot be read. Names no content."""
+
+
+@dataclass(frozen=True, slots=True)
+class SourceFile:
+    """One source file as read: the key it is stored under and its bytes."""
+
+    key: str
+    #: Path inside the run's shared workspace (``out/cert.pem``).
+    path: str
+    data: bytes = field(repr=False)
+    #: Identity of the file read (device, inode, size, modification time), so
+    #: its removal touches that file only, even when its inode number was
+    #: reused for another file meanwhile.
+    identity: tuple[int, int, int, int]
+
+
+def _require_safe_open() -> None:
+    """Refuse to read where files cannot be opened without following symbolic links."""
+    if not (_O_NOFOLLOW and _O_DIRECTORY) or os.open not in os.supports_dir_fd:
+        raise WorkspaceError(
+            "this worker's operating system cannot open files without following symbolic "
+            "links, so the step reads no files from the shared workspace on it"
+        )
+
+
+def _reason(exc: OSError) -> str:
+    return exc.strerror or type(exc).__name__
+
+
+def _open_root(root: str) -> int:
+    try:
+        return os.open(root, os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC)
+    except FileNotFoundError:
+        raise WorkspaceError(
+            "the run's shared workspace does not exist on this worker: no step of this run "
+            "has written files to it here"
+        ) from None
+    except OSError as exc:
+        raise WorkspaceError(
+            f"the run's shared workspace cannot be opened ({_reason(exc)})"
+        ) from None
+
+
+def _check_inside(root: str, rel: str, label: str) -> None:
+    real_root = os.path.realpath(root)
+    real = os.path.realpath(os.path.join(root, rel))
+    if os.path.commonpath([real_root, real]) != real_root:
+        raise WorkspaceError(
+            f"{label} resolves outside the run's shared workspace through a symbolic link; refused"
+        )
+
+
+def _component_error(dir_fd: int, segment: str, where: str, exc: OSError) -> str:
+    """Why a path component could not be opened without following links."""
+    if isinstance(exc, FileNotFoundError):
+        return f"{where!r} does not exist in the run's shared workspace"
+    try:
+        info = os.stat(segment, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return f"{where!r} cannot be opened ({_reason(exc)})"
+    if stat.S_ISLNK(info.st_mode):
+        return f"{where!r} is a symbolic link; refused"
+    if not stat.S_ISDIR(info.st_mode):
+        return f"{where!r} is not a directory"
+    return f"{where!r} cannot be opened ({_reason(exc)})"
+
+
+def _open_parent(root_fd: int, rel: str, label: str) -> tuple[int, str]:
+    """Open the directory holding ``rel``'s last component, following no link on the way.
+
+    Returns ``(dir_fd, name)``; the caller closes ``dir_fd`` unless it is ``root_fd``.
+    """
+    *dirs, name = rel.split("/")
+    current = root_fd
+    try:
+        for index, segment in enumerate(dirs):
+            try:
+                opened = os.open(
+                    segment,
+                    os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC,
+                    dir_fd=current,
+                )
+            except OSError as exc:
+                where = "/".join(dirs[: index + 1])
+                raise WorkspaceError(
+                    f"{label}: {_component_error(current, segment, where, exc)}"
+                ) from None
+            if current != root_fd:
+                os.close(current)
+            current = opened
+    except BaseException:
+        if current != root_fd:
+            os.close(current)
+        raise
+    return current, name
+
+
+def _identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _read_bounded(fd: int, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while total < limit:
+        chunk = os.read(fd, min(_CHUNK, limit - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def _too_large(label: str) -> WorkspaceError:
+    return WorkspaceError(f"{label} is larger than {MAX_FILE_BYTES} bytes; refused")
+
+
+def _read_one(root_fd: int, key: str, rel: str) -> SourceFile:
+    label = f"file {rel!r} (key {key!r})"
+    dir_fd, name = _open_parent(root_fd, rel, label)
+    try:
+        try:
+            before = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise WorkspaceError(f"{label} does not exist in the run's shared workspace") from None
+        except OSError as exc:
+            raise WorkspaceError(f"{label} cannot be read ({_reason(exc)})") from None
+        if stat.S_ISLNK(before.st_mode):
+            raise WorkspaceError(f"{label} is a symbolic link; refused")
+        if not stat.S_ISREG(before.st_mode):
+            raise WorkspaceError(f"{label} is not a regular file; refused")
+        if before.st_size > MAX_FILE_BYTES:
+            raise _too_large(label)
+        try:
+            fd = os.open(name, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC, dir_fd=dir_fd)
+        except OSError as exc:
+            raise WorkspaceError(f"{label} cannot be opened ({_reason(exc)})") from None
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+                before.st_dev,
+                before.st_ino,
+            ):
+                raise WorkspaceError(f"{label} changed while it was being read; refused")
+            data = _read_bounded(fd, MAX_FILE_BYTES + 1)
+        finally:
+            os.close(fd)
+    finally:
+        if dir_fd != root_fd:
+            os.close(dir_fd)
+    if len(data) > MAX_FILE_BYTES:
+        raise _too_large(label)
+    if not data:
+        raise WorkspaceError(f"{label} is empty")
+    return SourceFile(key=key, path=rel, data=data, identity=_identity(opened))
+
+
+def read_source_files(root: str, files: Mapping[str, str]) -> list[SourceFile]:
+    """Read ``{key: file}`` from the workspace at ``root``, in order.
+
+    Each file is written as the step container sees it (``/shared/<rel>``) or
+    relative to the workspace. Refuses a symbolic link anywhere on the path, a
+    path that resolves outside the workspace, anything but a regular file, an
+    empty file, a file over :data:`MAX_FILE_BYTES` and files totalling over
+    :data:`MAX_TOTAL_BYTES`, with :class:`WorkspaceError`.
+    """
+    _require_safe_open()
+    wanted: list[tuple[str, str]] = []
+    for key, written in files.items():
+        try:
+            wanted.append((key, workspace_relative(written)))
+        except ValueError as exc:
+            raise WorkspaceError(f"'files.{key}' {exc}") from None
+    root_fd = _open_root(root)
+    try:
+        sources: list[SourceFile] = []
+        total = 0
+        for key, rel in wanted:
+            _check_inside(root, rel, f"file {rel!r} (key {key!r})")
+            source = _read_one(root_fd, key, rel)
+            total += len(source.data)
+            if total > MAX_TOTAL_BYTES:
+                raise WorkspaceError(
+                    f"the source files together are larger than {MAX_TOTAL_BYTES} bytes; refused"
+                )
+            sources.append(source)
+        return sources
+    finally:
+        os.close(root_fd)
+
+
+def _write_zeros(fd: int, size: int) -> None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    zeros = bytes(_CHUNK)
+    remaining = size
+    while remaining > 0:
+        written = os.write(fd, zeros[: min(_CHUNK, remaining)])
+        if written <= 0:
+            raise OSError("short write")
+        remaining -= written
+    os.fsync(fd)
+
+
+#: Prefix of the private name a source file is moved to before it is removed.
+_QUARANTINE_PREFIX = ".hegemony-scrub-"
+
+
+def _restore(dir_fd: int, quarantine: str, name: str) -> str:
+    """Put a file that turned out not to be the source back under ``name``; why it is left."""
+    try:
+        # A hard link never replaces an existing entry, so a file a container
+        # wrote at ``name`` meanwhile is kept.
+        os.link(quarantine, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+    except FileExistsError:
+        return f"left as {quarantine!r}, since a newer file took its name"
+    except OSError:
+        try:
+            os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            os.rename(quarantine, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            return "left in place"
+        return f"left as {quarantine!r}, since a newer file took its name"
+    os.unlink(quarantine, dir_fd=dir_fd)
+    return "left in place"
+
+
+def _scrub_one(root_fd: int, source: SourceFile) -> str | None:
+    """Overwrite and remove one source file, touching no file but the one read.
+
+    The directory entry is first renamed to a private name in the same
+    directory, atomically: from then on, a file a container writes at the
+    original name is never touched. The renamed file is opened without
+    following links and must be the file read (same device, inode, size and
+    modification time); only then is it overwritten and unlinked. Anything
+    else found under the private name is put back.
+
+    Returns why the file was deleted without being overwritten, or None. A
+    file this worker may not write (one a container's root user wrote, say)
+    is opened for reading to check it is the file read, then deleted; so is
+    one whose overwriting fails.
+    """
+    label = f"file {source.path!r}"
+    dir_fd, name = _open_parent(root_fd, source.path, label)
+    try:
+        quarantine = _QUARANTINE_PREFIX + secrets.token_hex(12)
+        try:
+            os.rename(name, quarantine, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except FileNotFoundError:
+            raise WorkspaceError(f"{label} is already gone") from None
+        flags = _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC
+        not_overwritten: str | None = None
+        try:
+            fd = os.open(quarantine, os.O_WRONLY | flags, dir_fd=dir_fd)
+        except PermissionError as exc:
+            not_overwritten = f"deleted without being overwritten ({_reason(exc)})"
+            try:
+                fd = os.open(quarantine, os.O_RDONLY | flags, dir_fd=dir_fd)
+            except OSError:
+                outcome = _restore(dir_fd, quarantine, name)
+                raise WorkspaceError(
+                    f"{label} cannot be opened ({_reason(exc)}); {outcome}"
+                ) from None
+        except OSError:
+            # Not a regular file any more (a link, a directory, a FIFO).
+            outcome = _restore(dir_fd, quarantine, name)
+            raise WorkspaceError(f"{label} changed since it was read; {outcome}") from None
+        try:
+            info = os.fstat(fd)
+            mismatch = not stat.S_ISREG(info.st_mode) or _identity(info) != source.identity
+            # A file with other names (hard links) keeps its content under
+            # them; overwriting it would change those too, so it is only
+            # unlinked.
+            if not mismatch and not_overwritten is None and info.st_nlink <= 1:
+                try:
+                    _write_zeros(fd, info.st_size)
+                except OSError as exc:
+                    not_overwritten = f"deleted, but overwriting it failed ({_reason(exc)})"
+        finally:
+            os.close(fd)
+        if mismatch:
+            outcome = _restore(dir_fd, quarantine, name)
+            raise WorkspaceError(f"{label} changed since it was read; {outcome}")
+        try:
+            os.unlink(quarantine, dir_fd=dir_fd)
+        except OSError as exc:
+            done = "neither overwritten nor" if not_overwritten else "overwritten but not"
+            raise WorkspaceError(
+                f"{label} was {done} removed ({_reason(exc)}); it is left as {quarantine!r}"
+            ) from None
+        return not_overwritten
+    finally:
+        if dir_fd != root_fd:
+            os.close(dir_fd)
+
+
+@dataclass(frozen=True, slots=True)
+class ScrubReport:
+    """What :func:`scrub_source_files` could not do, by path in the workspace; no content."""
+
+    #: ``{path: reason}`` for every source file left in the workspace.
+    not_removed: dict[str, str] = field(default_factory=dict)
+    #: ``{path: reason}`` for every source file deleted although overwriting
+    #: it first was refused or failed. A file with other names (hard links)
+    #: is never overwritten, and not listed for that.
+    not_overwritten: dict[str, str] = field(default_factory=dict)
+
+
+def scrub_source_files(root: str, sources: Sequence[SourceFile]) -> ScrubReport:
+    """Overwrite each source file with zeros, then unlink it. Best effort.
+
+    Not a secure wipe: a copy-on-write or journaling file system, a snapshot,
+    or a backup may still hold the old bytes. A file that changed since it was
+    read (another inode at the path) is left alone, and so is any file written
+    at the path while the step removes it (see :func:`_scrub_one`). The report
+    names every file not removed, and every file deleted without being
+    overwritten; an empty report means all were overwritten and are gone.
+    """
+    report = ScrubReport()
+    try:
+        _require_safe_open()
+        if os.rename not in os.supports_dir_fd:
+            raise WorkspaceError(
+                "this worker's operating system cannot rename files relative to a directory, "
+                "so the step leaves its source files in place"
+            )
+        root_fd = _open_root(root)
+    except WorkspaceError as exc:
+        report.not_removed.update((source.path, str(exc)) for source in sources)
+        return report
+    try:
+        done: set[str] = set()
+        for source in sources:
+            if source.path in done:
+                continue
+            done.add(source.path)
+            try:
+                not_overwritten = _scrub_one(root_fd, source)
+            except WorkspaceError as exc:
+                report.not_removed[source.path] = str(exc)
+            except OSError as exc:
+                report.not_removed[source.path] = (
+                    f"file {source.path!r} not removed ({_reason(exc)})"
+                )
+            else:
+                if not_overwritten:
+                    report.not_overwritten[source.path] = not_overwritten
+    finally:
+        os.close(root_fd)
+    return report

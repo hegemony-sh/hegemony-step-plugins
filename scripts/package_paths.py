@@ -23,6 +23,7 @@ PACKAGE_DIRS = (
     ROOT / "plugins" / "steps_ansible",
     ROOT / "plugins" / "steps_tf",
     ROOT / "plugins" / "steps_http",
+    ROOT / "plugins" / "steps_secret",
     ROOT / "probes" / "probe_net",
     ROOT / "transports" / "transport_netmiko",
     ROOT / "transports" / "transport_scrapli",
