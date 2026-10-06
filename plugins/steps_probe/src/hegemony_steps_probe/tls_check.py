@@ -501,7 +501,7 @@ class _TlsRun:
         self._verify: ssl.SSLContext | None = None
         # Endpoints often share an issuer and its CRL: each is downloaded,
         # parsed and checked against an issuer once per run.
-        self._downloads: dict[str, asyncio.Future[bytes]] = {}
+        self._issuer_files: dict[str, asyncio.Future[list[x509.Certificate]]] = {}
         self._crls: dict[str, asyncio.Future[x509.CertificateRevocationList]] = {}
         self._crl_problems: dict[tuple[str, str], str | None] = {}
 
@@ -737,7 +737,7 @@ class _TlsRun:
 
     def close(self) -> None:
         """Cancel shared downloads nobody waits for any more."""
-        for cache in (self._downloads, self._crls):
+        for cache in (self._issuer_files, self._crls):
             for future in cache.values():
                 if not future.done():
                     future.cancel()
@@ -752,19 +752,22 @@ class _TlsRun:
         problem = ""
         for url in tls_certs.ca_issuer_urls(cert):
             try:
-                data = await self._once(
-                    self._downloads,
-                    url,
-                    lambda url=url: self.fetch("GET", url, kind="issuer download"),
+                downloaded = await self._once(
+                    self._issuer_files, url, lambda url=url: self._load_issuer_file(url)
                 )
             except (httpx.HTTPError, httpx.InvalidURL, _FetchError) as exc:
                 problem = f"; downloading {url} failed: {_http_reason(exc)}"
                 continue
-            issuer = tls_certs.find_issuer(cert, tls_certs.load_certificates_any(data))
+            issuer = tls_certs.find_issuer(cert, downloaded)
             if issuer is not None:
                 return issuer, ""
             problem = f"; {url} did not hold the issuer"
         return None, "the issuer certificate is not available" + problem
+
+    async def _load_issuer_file(self, url: str) -> list[x509.Certificate]:
+        """Download the certificates at a caIssuers ``url`` and parse them off the event loop."""
+        data = await self.fetch("GET", url, kind="issuer download")
+        return await asyncio.to_thread(tls_certs.load_certificates_any, data)
 
     # --- OCSP ------------------------------------------------------------
 

@@ -67,7 +67,13 @@ _UNREADABLE = (
 
 _ENTRY_SPLIT_RE = re.compile(r"[\r\n,]+")
 _HOST_RE = re.compile(r"^[^\s/@\[\]:]+$")
-_PEM_BLOCK_RE = re.compile(rb"-----BEGIN CERTIFICATE-----\s.*?-----END CERTIFICATE-----", re.DOTALL)
+#: A ``CERTIFICATE`` block. Its body is anything up to the next run of five
+#: dashes (so RFC 1421 headers still pass), which must be the END line: a
+#: match can never run past another BEGIN line, so an unclosed one costs one
+#: scan to the next marker rather than a rescan of everything after it.
+_PEM_BLOCK_RE = re.compile(
+    rb"-----BEGIN CERTIFICATE-----[^-]*(?:-(?!----)[^-]*)*-----END CERTIFICATE-----"
+)
 _FINGERPRINT_PREFIX_RE = re.compile(r"^\s*sha-?256\s*(?:fingerprint)?\s*[=:]\s*", re.IGNORECASE)
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 

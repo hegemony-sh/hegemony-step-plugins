@@ -18,6 +18,7 @@ import ipaddress
 import socket
 import ssl
 import threading
+import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -661,6 +662,35 @@ def test_load_pem_certificates_skips_surrounding_text(pki):
         load_pem_certificates(broken)
 
 
+def test_load_pem_certificates_accepts_every_layout_the_parser_reads(pki):
+    pem = pem_of(pki.inter)
+    begin, _, rest = pem.partition("\n")
+    layouts = {
+        "str": pem,
+        "crlf": pem.replace("\n", "\r\n"),
+        "header": f"{begin}\nProc-Type: 4,CLEAR\n\n{rest}",
+        "one line": "".join(pem.splitlines()),
+        "after an unclosed block": "-----BEGIN CERTIFICATE-----\nAAAA\n" + pem,
+    }
+    for name, text in layouts.items():
+        assert load_pem_certificates(text) == [pki.inter], name
+        assert load_pem_certificates(text.encode()) == [pki.inter], name
+
+
+def test_loading_pem_text_takes_linear_time_on_unclosed_blocks():
+    """An unclosed BEGIN line must not make the parser rescan the rest of the text."""
+    begins = "-----BEGIN CERTIFICATE-----\n" * (1024 * 1024 // 28)
+    unclosed_bodies = ("-----BEGIN CERTIFICATE-----\n" + "QUFB" * 64 + "\n") * 3800
+    for text in (begins, unclosed_bodies):
+        assert len(text) > 1000 * 1024
+        started = time.perf_counter()
+        assert load_pem_certificates(text) == []
+        assert load_pem_certificates(text.encode()) == []
+        assert load_certificates_any(text.encode()) == []
+        assert TlsProbeHandler().validate_config({"pem": text}) == ["pem: no PEM certificate found"]
+        assert time.perf_counter() - started < 1.0
+
+
 def test_load_certificates_any_reads_der_pem_and_pkcs7(pki):
     der = pki.inter.public_bytes(serialization.Encoding.DER)
     assert load_certificates_any(der) == [pki.inter]
@@ -1241,6 +1271,23 @@ async def test_ocsp_good_through_the_issuer_download(pki, tmp_path, responder):
     assert record["revocation_time"] is None
     gated = [entry for entry in services.egress if entry[3] == "ocsp check"]
     assert gated and all(entry[:3] == ("127.0.0.1", responder.port, "tcp") for entry in gated)
+
+
+async def test_a_downloaded_issuer_is_parsed_off_the_event_loop(pki, responder, monkeypatch):
+    real_load = tls_certs.load_certificates_any
+    threads: list[threading.Thread] = []
+
+    def load(data: bytes) -> list[x509.Certificate]:
+        threads.append(threading.current_thread())
+        return real_load(data)
+
+    monkeypatch.setattr(tls_certs, "load_certificates_any", load)
+    result = await run_step(
+        {"pem": pem_of(pki.leaves["rsa"].cert), "ca_bundle": pki.root_pem, "check_ocsp": True}
+    )
+    [record] = result.output["endpoints"]
+    assert record["ocsp"] == "good", record["ocsp_detail"]
+    assert threads and threading.main_thread() not in threads
 
 
 async def test_ocsp_good_with_the_issuer_in_the_ca_bundle(pki, tmp_path, responder):
