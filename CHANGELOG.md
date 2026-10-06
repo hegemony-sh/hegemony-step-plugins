@@ -1,3 +1,17 @@
+## [0.22.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.21.0...v0.22.0) (2026-10-06)
+
+### Features
+
+* **sdk:** add secret store services for steps ([f0ad301](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f0ad301ff3240d29936e388e57b66a71c6b2e3fe))
+* **secret:** add secret.write to store, swap or delete a secret ([08c5337](https://github.com/hegemony-sh/hegemony-step-plugins/commit/08c5337d7119254b3f7af2ee4b94cbf77e13d889))
+
+### Bug Fixes
+
+* **sdk:** default the secret store services to NotImplementedError ([e80f2be](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e80f2be21d57d31950f09391000bc836ed0291ce))
+* **secret:** never remove a file written in a source file's place; full output on failure ([a2c4dc3](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a2c4dc3dc42cf2ed8d7935443954bea0bf8e208a))
+* **secret:** settle a cancelled swap before the cancellation propagates ([42ebb54](https://github.com/hegemony-sh/hegemony-step-plugins/commit/42ebb544f8ee203345e78d3f130475a4cbf5a773))
+* **secret:** settle failed secret writes from what the store holds ([9926c0f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/9926c0f6ddf2a487710195f1fe495f3c3e65e29f))
+
 ## [0.21.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.20.0...v0.21.0) (2026-10-06)
 
 ### Features
