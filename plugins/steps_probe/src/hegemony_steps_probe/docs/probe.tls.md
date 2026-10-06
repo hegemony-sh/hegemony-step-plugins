@@ -55,8 +55,10 @@ the verifier does not handle; every CA is marked as one by basicConstraints,
 may sign certificates (key usage), allows a TLS server in its extended key
 usage (the trust anchor too) and respects its path length, while a trust
 anchor without basicConstraints counts as a CA only as a self-issued version 1
-root or when its key usage allows signing certificates; the server
-certificate's extended key usage and key usage allow a TLS server; and every
+root, when its key usage allows signing certificates, or, without key usage,
+when its Netscape certificate type names a CA, which must then be an SSL CA;
+the server certificate's extended key usage, key usage and Netscape
+certificate type (critical or not) allow a TLS server; and every
 name stays within the name constraints of the CAs above it, with directory
 names compared regardless of letter case and runs of spaces. A path never
 continues from a self-signed certificate to an untrusted one. Certificate PEM

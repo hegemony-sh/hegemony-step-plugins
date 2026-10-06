@@ -552,24 +552,33 @@ def _signed_by(cert: x509.Certificate, issuer: x509.Certificate) -> bool:
     return True
 
 
-def _may_issue(cert: x509.Certificate, *, trusted: bool) -> bool:
-    """CA check as OpenSSL applies it.
+def _ca_error(cert: x509.Certificate, *, trusted: bool) -> str | None:
+    """Why ``cert`` may not act as a CA for TLS servers, as OpenSSL judges it, or None.
 
     Key usage, when present, must allow certificate signing, and
-    basicConstraints must mark a CA. Only a trust anchor may lack
-    basicConstraints: a self-issued version 1 certificate (an old-style
-    root), or one whose key usage allows certificate signing. OpenSSL holds
-    every certificate below the anchor to the strict rule.
+    basicConstraints, when present, decides. Only a trust anchor may lack
+    basicConstraints; OpenSSL holds every certificate below it to the strict
+    rule. Such an anchor is a CA when it is a self-issued version 1
+    certificate (an old-style root), else when it has key usage, else when
+    its Netscape certificate type names any kind of CA; in that last case
+    the type must name an SSL CA, or the anchor does not suit TLS.
     """
     usage = _extension_value(cert, x509.KeyUsage)
     if usage is not None and not usage.key_cert_sign:
-        return False
+        return _INVALID_CA_ERROR
     constraints = _extension_value(cert, x509.BasicConstraints)
     if constraints is not None:
-        return bool(constraints.ca)
+        return None if constraints.ca else _INVALID_CA_ERROR
     if not trusted:
-        return False
-    return usage is not None or (cert.version == x509.Version.v1 and cert.subject == cert.issuer)
+        return _INVALID_CA_ERROR
+    if cert.version == x509.Version.v1 and cert.subject == cert.issuer:
+        return None
+    if usage is not None:
+        return None
+    cert_type = _netscape_cert_type(cert)
+    if cert_type is None or not cert_type & _NS_ANY_CA:
+        return _INVALID_CA_ERROR
+    return None if cert_type & _NS_SSL_CA else _PURPOSE_ERROR
 
 
 def _time_error(cert: x509.Certificate, now: datetime) -> str | None:
@@ -592,11 +601,20 @@ _SERVER_USAGES = frozenset(
     }
 )
 
+#: The Netscape certificate type extension, which the X.509 library leaves unparsed.
+_NETSCAPE_CERT_TYPE = x509.ObjectIdentifier("2.16.840.1.113730.1.1")
+
+#: Bits of a Netscape certificate type's first octet: SSL server, and the
+#: SSL, S/MIME and object-signing CA kinds (bits 1, 5, 6 and 7).
+_NS_SSL_SERVER = 0x40
+_NS_SSL_CA = 0x04
+_NS_ANY_CA = _NS_SSL_CA | 0x02 | 0x01
+
 #: Extensions OpenSSL's verifier understands; any other extension marked
 #: critical makes it reject the certificate ("unhandled critical extension").
 _HANDLED_CRITICAL_EXTENSIONS = frozenset(
     {
-        "2.16.840.1.113730.1.1",  # Netscape certificate type
+        _NETSCAPE_CERT_TYPE.dotted_string,
         ExtensionOID.KEY_USAGE.dotted_string,
         ExtensionOID.SUBJECT_ALTERNATIVE_NAME.dotted_string,
         ExtensionOID.BASIC_CONSTRAINTS.dotted_string,
@@ -617,6 +635,9 @@ _HANDLED_CRITICAL_EXTENSIONS = frozenset(
 #: OpenSSL 3's wording when a certificate's purpose rules out a TLS server.
 _PURPOSE_ERROR = "unsuitable certificate purpose"
 
+#: OpenSSL 3's wording when an issuer may not act as a CA.
+_INVALID_CA_ERROR = "invalid CA certificate"
+
 #: A subject common name OpenSSL treats as a DNS name for name constraints.
 _CN_DNS_RE = re.compile(r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 
@@ -624,6 +645,43 @@ _CN_DNS_RE = re.compile(r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 def _key_usage(cert: x509.Certificate) -> x509.KeyUsage | None:
     """The certificate's key usage extension, or None when it has none."""
     return _extension_value(cert, x509.KeyUsage)
+
+
+def _read_netscape_cert_type(cert: x509.Certificate) -> int | None:
+    """The first octet of the certificate's Netscape certificate type; None when it has none.
+
+    The value is read as OpenSSL reads it: a BIT STRING whose unused bits
+    are cleared, with anything after it ignored. Raises ValueError when the
+    value is no BIT STRING.
+    """
+    try:
+        extension = cert.extensions.get_extension_for_oid(_NETSCAPE_CERT_TYPE)
+    except x509.ExtensionNotFound:
+        return None
+    der = extension.value.public_bytes()
+    if len(der) < 2 or der[0] != 0x03:
+        raise ValueError("the Netscape certificate type is not a BIT STRING")
+    length, start = der[1], 2
+    if length & 0x80:
+        # The long form. An indefinite length (0x80) reads as 0, too short for any BIT STRING.
+        start += length & 0x7F
+        length = int.from_bytes(der[2:start], "big")
+    content = der[start : start + length]
+    if not 1 <= length <= len(content) or content[0] > 7:
+        raise ValueError("the Netscape certificate type is a malformed BIT STRING")
+    if length == 1:
+        return 0
+    # The first octet holds every bit OpenSSL reads; only the last octet has unused bits.
+    mask = (0xFF << content[0]) & 0xFF if length == 2 else 0xFF
+    return content[1] & mask
+
+
+def _netscape_cert_type(cert: x509.Certificate) -> int | None:
+    """:func:`_read_netscape_cert_type`, None when the value is malformed too."""
+    try:
+        return _read_netscape_cert_type(cert)
+    except _UNREADABLE:
+        return None
 
 
 def _eku_error(cert: x509.Certificate) -> str | None:
@@ -638,12 +696,16 @@ def _purpose_error(leaf: x509.Certificate) -> str | None:
     """Why the leaf cannot serve TLS, as OpenSSL's ``ssl_server`` purpose judges it, or None.
 
     Its extended key usage, when present, must allow server authentication,
-    and its key usage, when present, must allow a digital signature, key
-    encipherment or key agreement.
+    its Netscape certificate type, when present (critical or not), must
+    name an SSL server, and its key usage, when present, must allow a
+    digital signature, key encipherment or key agreement.
     """
     error = _eku_error(leaf)
     if error is not None:
         return error
+    cert_type = _netscape_cert_type(leaf)
+    if cert_type is not None and not cert_type & _NS_SSL_SERVER:
+        return _PURPOSE_ERROR
     usage = _key_usage(leaf)
     if usage is not None and not (
         usage.digital_signature or usage.key_encipherment or usage.key_agreement
@@ -653,9 +715,14 @@ def _purpose_error(leaf: x509.Certificate) -> str | None:
 
 
 def _critical_extension_error(cert: x509.Certificate) -> str | None:
-    """Why the certificate carries a critical extension the verifier cannot handle, or None."""
+    """Why the certificate carries a critical extension the verifier cannot handle, or None.
+
+    A certificate with an extension that cannot be read, the Netscape
+    certificate type included, is refused the same way.
+    """
     try:
         extensions = list(cert.extensions)
+        _read_netscape_cert_type(cert)
     except (ValueError, x509.DuplicateExtension, x509.UnsupportedGeneralNameType):
         return "unhandled critical extension"
     for extension in extensions:
@@ -677,9 +744,10 @@ def verify_chain_offline(
     name (checked on its own): every certificate on the path is within its
     validity period, carries no critical extension the verifier does not
     handle, and is signed by the next; every issuer may act as a CA
-    (basicConstraints, key usage, path length) and allows server
-    authentication in its extended key usage, a trust anchor included; the leaf may serve TLS
-    (extended key usage and key usage); every name below a CA with name
+    (basicConstraints, key usage, Netscape certificate type, path length)
+    and allows server authentication in its extended key usage, a trust
+    anchor included; the leaf may serve TLS (extended key usage, Netscape
+    certificate type and key usage); every name below a CA with name
     constraints satisfies them; and the path ends at a trust anchor.
     ``intermediates`` are untrusted candidates, and like OpenSSL the path
     never continues from a self-signed certificate to an untrusted one. A
@@ -833,8 +901,9 @@ def _issuer_problem(
     error = _time_error(issuer, now) or _critical_extension_error(issuer)
     if error is not None:
         return error
-    if not _may_issue(issuer, trusted=trusted):
-        return "invalid CA certificate"
+    error = _ca_error(issuer, trusted=trusted)
+    if error is not None:
+        return error
     if _eku_error(issuer) is not None:
         return _PURPOSE_ERROR
     constraints = _extension_value(issuer, x509.BasicConstraints)

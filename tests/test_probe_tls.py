@@ -1886,10 +1886,23 @@ def _constraints(
     return x509.NameConstraints(permitted_subtrees=permitted, excluded_subtrees=excluded), True
 
 
+def _netscape_cert_type(*bits: int, critical: bool = False) -> tuple[x509.ExtensionType, bool]:
+    """A Netscape certificate type extension with ``bits`` set (bit 0, SSL client, first)."""
+    value = sum(0x80 >> bit for bit in set(bits))
+    unused = (value & -value).bit_length() - 1
+    der = bytes([0x03, 0x02, unused, value])  # BIT STRING
+    return x509.UnrecognizedExtension(_NETSCAPE_CERT_TYPE, der), critical
+
+
+_NETSCAPE_CERT_TYPE = x509.ObjectIdentifier("2.16.840.1.113730.1.1")
+_NS_SSL_CLIENT, _NS_SSL_SERVER, _NS_SSL_CA, _NS_SMIME_CA = 0, 1, 5, 6
+
+
 def _chain_case(
     pki: Pki,
     *,
     inter_extensions: tuple[tuple[x509.ExtensionType, bool], ...] = (_CA_USAGE,),
+    inter_basic_constraints: bool = True,
     leaf_extensions: tuple[tuple[x509.ExtensionType, bool], ...] = (),
     leaf_sans: tuple[str, ...] = ("leaf.example.test",),
     leaf_eku: tuple[x509.ObjectIdentifier, ...] | None = (ExtendedKeyUsageOID.SERVER_AUTH,),
@@ -1903,6 +1916,7 @@ def _chain_case(
         issuer=pki.root,
         issuer_key=pki.root_key,
         ca=True,
+        basic_constraints=inter_basic_constraints,
         extensions=inter_extensions,
     )
     leaf_key = ec.generate_private_key(ec.SECP256R1())
@@ -2012,6 +2026,25 @@ def _version_1_intermediate_case(pki: Pki) -> tuple[Leaf, str]:
         sans=("leaf.example.test",),
     )
     return Leaf(leaf, leaf_key, (inter,)), pki.root_pem
+
+
+def _netscape_ca_case(
+    pki: Pki,
+    *bits: int,
+    usage: bool = False,
+    basic_constraints: bool = False,
+    trusted: bool = False,
+) -> tuple[Leaf, str]:
+    """A chain through an intermediate with Netscape certificate type ``bits``.
+
+    The intermediate has key usage and basicConstraints only when asked,
+    and is the trust anchor itself when ``trusted``.
+    """
+    extensions = ((_CA_USAGE,) if usage else ()) + (_netscape_cert_type(*bits),)
+    leaf, anchors = _chain_case(
+        pki, inter_extensions=extensions, inter_basic_constraints=basic_constraints
+    )
+    return leaf, pem_of(*leaf.chain) if trusted else anchors
 
 
 def _organization(*values: str) -> x509.Name:
@@ -2175,6 +2208,44 @@ _PARITY_CASES: dict[str, tuple[Any, bool | None]] = {
         lambda pki: _anchor_without_basic_constraints_case(),
         True,
     ),
+    "leaf-netscape-ssl-client-critical": (
+        lambda pki: _chain_case(
+            pki, leaf_extensions=(_netscape_cert_type(_NS_SSL_CLIENT, critical=True),)
+        ),
+        False,
+    ),
+    "leaf-netscape-ssl-client": (
+        lambda pki: _chain_case(pki, leaf_extensions=(_netscape_cert_type(_NS_SSL_CLIENT),)),
+        False,
+    ),
+    "leaf-netscape-ssl-server": (
+        lambda pki: _chain_case(
+            pki, leaf_extensions=(_netscape_cert_type(_NS_SSL_CLIENT, _NS_SSL_SERVER),)
+        ),
+        True,
+    ),
+    "intermediate-netscape-ssl-ca": (lambda pki: _netscape_ca_case(pki, _NS_SSL_CA), False),
+    "intermediate-netscape-smime-ca": (lambda pki: _netscape_ca_case(pki, _NS_SMIME_CA), False),
+    "intermediate-basic-constraints-over-netscape": (
+        lambda pki: _netscape_ca_case(pki, _NS_SMIME_CA, usage=True, basic_constraints=True),
+        True,
+    ),
+    "anchor-netscape-ssl-ca": (
+        lambda pki: _netscape_ca_case(pki, _NS_SSL_CA, trusted=True),
+        True,
+    ),
+    "anchor-netscape-smime-ca": (
+        lambda pki: _netscape_ca_case(pki, _NS_SMIME_CA, trusted=True),
+        False,
+    ),
+    "anchor-netscape-without-ca-types": (
+        lambda pki: _netscape_ca_case(pki, _NS_SSL_SERVER, trusted=True),
+        False,
+    ),
+    "anchor-key-usage-over-netscape": (
+        lambda pki: _netscape_ca_case(pki, _NS_SMIME_CA, usage=True, trusted=True),
+        True,
+    ),
     "pinned-client-certificate": (lambda pki: _pinned_case(), False),
     "self-signed-copies-in-chain": (lambda pki: _self_signed_copies_case(), False),
 }
@@ -2194,6 +2265,36 @@ async def test_offline_chain_verdict_matches_the_live_verifier(pki, tmp_path, ca
     assert offline_verdict == live_verdict
     if expected is not None:
         assert live_verdict[0] is expected
+
+
+_PURPOSE = "unsuitable certificate purpose"
+_UNHANDLED = "unhandled critical extension"
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        pytest.param(b"\x03\x02\x06\x40", None, id="ssl-server"),
+        # OpenSSL clears the unused bits, so this names only an SSL client.
+        pytest.param(b"\x03\x02\x07\xc0", _PURPOSE, id="server-bit-unused"),
+        pytest.param(b"\x03\x01\x00", _PURPOSE, id="no-bits"),
+        # Like OpenSSL: bytes after the BIT STRING, a long-form length, later octets.
+        pytest.param(b"\x03\x02\x06\x40\xff", None, id="trailing-bytes"),
+        pytest.param(b"\x03\x81\x02\x06\x40", None, id="long-form-length"),
+        pytest.param(b"\x03\x03\x07\x40\x80", None, id="two-octets"),
+        # A value that is no BIT STRING is unreadable, which OpenSSL refuses too.
+        pytest.param(b"\x05\x00", _UNHANDLED, id="not-a-bit-string"),
+        pytest.param(b"\x03\x02\x08\x40", _UNHANDLED, id="eight-unused-bits"),
+        pytest.param(b"\x03\x05\x06\x40", _UNHANDLED, id="truncated"),
+        pytest.param(b"\x03\x80\x06\x40\x00\x00", _UNHANDLED, id="indefinite-length"),
+        pytest.param(b"", _UNHANDLED, id="empty"),
+    ],
+)
+def test_offline_chain_reads_the_netscape_certificate_type_as_openssl_does(pki, value, error):
+    extension = x509.UnrecognizedExtension(_NETSCAPE_CERT_TYPE, value)
+    leaf, _ = _chain_case(pki, leaf_extensions=((extension, False),))
+    verdict = verify_chain_offline(leaf.cert, leaf.chain, [pki.root], now=NOW)
+    assert verdict == (error is None, error)
 
 
 @pytest.mark.parametrize(
