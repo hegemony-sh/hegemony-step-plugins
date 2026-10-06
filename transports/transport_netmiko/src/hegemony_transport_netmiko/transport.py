@@ -212,6 +212,24 @@ def _is_save_command(command_lower: str) -> bool:
     return command_lower.startswith("write") or command_lower.startswith("copy run")
 
 
+#: What IOS asks before a copy to startup-config, unless 'file prompt quiet'
+#: is set: the destination file name, then on some platforms a confirmation
+#: to overwrite it. Enter takes the answer the device offers.
+_COPY_QUESTION = r"(?:Destination filename \[[^\]\n]*\]\?|\[confirm\])"
+
+#: A copy to startup-config asks at most these two questions.
+_MAX_COPY_ANSWERS = 2
+
+
+def _is_startup_copy(command: str) -> bool:
+    """'copy <source> startup-config', the destination in any abbreviation."""
+    words = command.lower().split()
+    if len(words) != 3 or words[0] != "copy":
+        return False
+    destination = words[2].removeprefix("nvram:")
+    return len(destination) >= 3 and "startup-config".startswith(destination)
+
+
 def _plan_config_set(commands: list[str]) -> list[tuple[bool, list[int]]]:
     """Split a config command set into ordered steps of command indexes.
 
@@ -480,6 +498,8 @@ class SSHTransport:
             if not command.strip():
                 connection.write_channel("\n")
                 raw_output = connection.read_channel()
+            elif _is_startup_copy(command):
+                raw_output = self._send_startup_copy(connection, command)
             else:
                 raw_output = connection.send_command(
                     command,
@@ -520,6 +540,49 @@ class SSHTransport:
             )
         logger.info(f"Command on {self.host} completed in {latency_ms:.0f}ms")
         return SSHResult(command=command, output=output, exit_code=0, latency_ms=latency_ms)
+
+    def _send_startup_copy(self, connection, command: str) -> str:
+        """Run a copy to startup-config, answering its questions with Enter.
+
+        Waiting for the prompt alone, as send_command does, runs into the
+        command timeout while the device asks for the destination file name,
+        so each read also stops at the questions such a copy asks. The output
+        keeps neither the command echo nor the trailing prompt, like
+        send_command's.
+        """
+        prompt = connection.find_prompt()
+        expect = f"{re.escape(prompt)}|{_COPY_QUESTION}"
+        question_at_end = re.compile(rf"{_COPY_QUESTION}\s*\Z")
+        chunk = str(
+            connection.send_command(
+                command,
+                expect_string=expect,
+                read_timeout=self.command_timeout,
+                strip_prompt=False,
+                strip_command=True,
+            )
+        )
+        output = chunk
+        answers = 0
+        while question_at_end.search(chunk):
+            if answers == _MAX_COPY_ANSWERS:
+                raise RuntimeError("The device kept asking questions about the copy")
+            answers += 1
+            chunk = str(
+                connection.send_command(
+                    "",
+                    expect_string=expect,
+                    read_timeout=self.command_timeout,
+                    strip_prompt=False,
+                    strip_command=False,
+                    cmd_verify=False,
+                )
+            )
+            output += chunk
+        lines = output.rstrip().splitlines()
+        if lines and lines[-1].strip() == prompt.strip():
+            lines.pop()
+        return "\n".join(lines)
 
     def _run_config_block(self, connection, block: list[str]) -> list[SSHResult]:
         """Send one config block a line at a time; one result per line.

@@ -34,6 +34,12 @@ When the run is cancelled part way through, the commands that have not run
 are recorded as skipped because the run was cancelled, not because a command
 failed.
 
+With the netmiko and scrapli transports, a copy to `startup-config` (such as
+`copy running-config startup-config` or `copy run start`) answers the
+questions the device asks first with Enter: the destination file name, and
+the `[confirm]` some platforms ask before they overwrite it. It then waits
+for the prompt like any other command.
+
 A configuration session's transcript is saved as a single consolidated
 "Configuration" evidence artifact per device, and the recorded command list
 omits `configure terminal`, `end` and the save commands. Any other first

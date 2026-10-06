@@ -8,8 +8,8 @@ Covers registration under hegemony.device_transports, spec-based construction
 and platform mapping, show/config execution paths (per-response result
 mapping, `exit` kept inside its config block, blocks and exec commands in the
 order written, nothing run after the first failure or a cancellation),
-timing-mode prompt answering, and the explicit NotImplementedError staging
-seam.
+answering the questions of a copy to startup-config, timing-mode prompt
+answering, and the explicit NotImplementedError staging seam.
 """
 
 from __future__ import annotations
@@ -276,6 +276,107 @@ async def test_config_blocks_and_exec_commands_run_in_written_order():
         "write memory",
     ]
     assert all(r.exit_code == 0 for r in results)
+
+
+def _iosxe_connection() -> MagicMock:
+    from scrapli.driver.core.cisco_iosxe.base_driver import PRIVS
+
+    connection = _connection()
+    connection.privilege_levels = PRIVS
+    connection.default_desired_privilege_level = "privilege_exec"
+    connection.send_interactive = AsyncMock()
+    return connection
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "copy running-config startup-config",
+        "copy run start",
+        "copy system:running-config nvram:startup-config",
+    ],
+)
+async def test_a_copy_to_startup_config_answers_the_destination_question(command):
+    # IOS asks for the destination file name before it copies, which the
+    # prompt-only wait of send_command ran into the command timeout.
+    connection = _iosxe_connection()
+    connection.send_interactive.side_effect = [
+        _response(f"{command}\nDestination filename [startup-config]?"),
+        _response("Building configuration...\n[OK]\nr1#"),
+    ]
+
+    results = await _run_on_connection([command], connection)
+
+    calls = connection.send_interactive.await_args_list
+    exec_prompt = r"^[\w.\-@/:]{1,63}#\s*$"
+    assert [c.args[0] for c in calls] == [[(command, exec_prompt)], [("", exec_prompt)]]
+    connection.send_command.assert_not_awaited()
+    assert (results[0].exit_code, results[0].error) == (0, None)
+    assert (
+        results[0].output
+        == "Destination filename [startup-config]?\nBuilding configuration...\n[OK]"
+    )
+
+
+def test_the_copy_questions_are_read_as_patterns_that_match_the_device():
+    # send_interactive escapes a pattern unless it is anchored with ^ and $,
+    # and the exec prompt pattern must not take a question for the prompt.
+    from scrapli.channel.base_channel import BaseChannel
+    from scrapli.driver.core.cisco_iosxe.base_driver import PRIVS
+
+    from hegemony_transport_scrapli.transport import _COPY_QUESTION_PATTERNS
+
+    questions = [
+        b"Destination filename [startup-config]? ",
+        b"Overwrite the previous NVRAM configuration?[confirm]",
+    ]
+    patterns = [BaseChannel._get_prompt_pattern("", pattern) for pattern in _COPY_QUESTION_PATTERNS]
+    for question in questions:
+        assert any(p.search(question) for p in patterns), question
+        assert not BaseChannel._get_prompt_pattern("", PRIVS["privilege_exec"].pattern).search(
+            question
+        )
+
+
+async def test_a_copy_to_startup_config_answers_a_confirmation_too():
+    connection = _iosxe_connection()
+    connection.send_configs.return_value = [_response()]
+    connection.send_interactive.side_effect = [
+        _response("copy run start\nDestination filename [startup-config]?"),
+        _response("Overwrite the previous NVRAM configuration?[confirm]"),
+        _response("Building configuration...\n[OK]\nr1#"),
+    ]
+
+    results = await _run_on_connection(
+        ["configure terminal", "hostname r1", "end", "copy run start"], connection
+    )
+
+    inputs = [c.args[0][0][0] for c in connection.send_interactive.await_args_list]
+    assert inputs == ["copy run start", "", ""]
+    assert [r.exit_code for r in results] == [0, 0]
+    assert results[-1].output.endswith("[OK]")
+
+
+async def test_a_copy_to_startup_config_without_questions_waits_for_the_prompt():
+    connection = _iosxe_connection()
+    connection.send_interactive.return_value = _response(
+        "copy run start\nBuilding configuration...\n[OK]\nr1#"
+    )
+
+    results = await _run_on_connection(["copy run start"], connection)
+
+    assert connection.send_interactive.await_count == 1
+    assert (results[0].exit_code, results[0].output) == (0, "Building configuration...\n[OK]")
+
+
+async def test_a_copy_that_keeps_asking_fails():
+    connection = _iosxe_connection()
+    connection.send_interactive.return_value = _response("Destination filename [startup-config]?")
+
+    results = await _run_on_connection(["copy run start"], connection)
+
+    assert connection.send_interactive.await_count == 3
+    assert results[0].exit_code == -1
 
 
 class _Cancellation(_NullCancellationRegistry):

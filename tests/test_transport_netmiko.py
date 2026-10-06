@@ -10,12 +10,14 @@ output must attach to exactly one result, not every entry equal to the trailing
 command), and how a config command set runs: `exit` stays inside its block,
 blocks and exec commands run in the order written, config lines go out one at
 a time, and nothing runs after the first failure (a rejected config line
-included) or a cancellation.
+included) or a cancellation. A copy to startup-config answers the device's
+questions.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -398,6 +400,88 @@ def test_a_config_line_timeout_does_not_repeat_the_line_in_its_error():
     assert (failed.command, failed.exit_code) == (secret_line, -1)
     assert failed.error == "Timed out after 30 seconds reading the device's answer"
     assert "Secret" not in (failed.error or "")
+
+
+_DESTINATION_QUESTION = "Destination filename [startup-config]? "
+_SAVED = "\nBuilding configuration...\n[OK]\nr1#"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "copy running-config startup-config",
+        "copy run start",
+        "Copy system:running-config nvram:startup-config",
+        "copy flash:golden.cfg startup-config",
+    ],
+)
+def test_a_copy_to_startup_config_answers_the_destination_question(command):
+    # IOS asks for the destination file name before it copies, which the
+    # prompt-only wait of send_command ran into the command timeout.
+    connection = MagicMock()
+    connection.find_prompt.return_value = "r1#"
+    connection.send_command.side_effect = [_DESTINATION_QUESTION, _SAVED]
+
+    results = _run_on_connection([command], connection)
+
+    calls = connection.send_command.call_args_list
+    assert [c.args[0] for c in calls] == [command, ""]  # Enter takes the offered name
+    expect = calls[0].kwargs["expect_string"]
+    for text in (_DESTINATION_QUESTION, "Overwrite the previous NVRAM configuration?[confirm]"):
+        assert re.search(expect, text)
+    assert re.search(expect, "r1#")
+    assert (results[0].exit_code, results[0].error) == (0, None)
+    assert results[0].output == _DESTINATION_QUESTION + "\nBuilding configuration...\n[OK]"
+
+
+def test_a_copy_to_startup_config_answers_a_confirmation_too():
+    connection = MagicMock()
+    connection.find_prompt.return_value = "r1#"
+    connection.send_command.side_effect = [
+        _DESTINATION_QUESTION,
+        "\nOverwrite the previous NVRAM configuration?[confirm]",
+        _SAVED,
+    ]
+
+    results = _run_on_connection(
+        ["configure terminal", "hostname r1", "end", "copy run start"], connection
+    )
+
+    assert [c.args[0] for c in connection.send_command.call_args_list] == ["copy run start", "", ""]
+    assert [r.exit_code for r in results] == [0, 0, 0, 0]
+    assert results[-1].output.endswith("[OK]")
+
+
+def test_a_copy_to_startup_config_without_questions_waits_for_the_prompt():
+    # With 'file prompt quiet' the device copies straight away.
+    connection = MagicMock()
+    connection.find_prompt.return_value = "r1#"
+    connection.send_command.return_value = "Building configuration...\n[OK]\nr1#"
+
+    results = _run_on_connection(["copy run start"], connection)
+
+    assert connection.send_command.call_count == 1
+    assert (results[0].exit_code, results[0].output) == (0, "Building configuration...\n[OK]")
+
+
+def test_a_copy_that_keeps_asking_fails():
+    connection = MagicMock()
+    connection.find_prompt.return_value = "r1#"
+    connection.send_command.return_value = _DESTINATION_QUESTION
+
+    results = _run_on_connection(["copy run start"], connection)
+
+    assert connection.send_command.call_count == 3
+    assert results[0].exit_code == -1
+
+
+def test_other_copy_commands_run_as_before():
+    connection = MagicMock()
+    connection.send_command.return_value = "ok"
+
+    _run_on_connection(["copy running-config flash:backup.cfg"], connection)
+
+    assert "expect_string" not in connection.send_command.call_args.kwargs
 
 
 class _Cancellation(_NullCancellationRegistry):

@@ -23,6 +23,7 @@ netmiko transport for staging steps.
 
 import contextlib
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -183,6 +184,28 @@ def _is_sent(command: str) -> bool:
 def _is_save_command(command_lower: str) -> bool:
     """'write ...' / 'copy run ...': always run at privilege-exec."""
     return command_lower.startswith("write") or command_lower.startswith("copy run")
+
+
+#: What IOS asks before a copy to startup-config, unless 'file prompt quiet'
+#: is set: the destination file name, then on some platforms a confirmation
+#: to overwrite it, as send_interactive patterns (anchored, so read as
+#: regular expressions). Enter takes the answer the device offers.
+_COPY_QUESTION_PATTERNS = [r"^Destination filename \[[^\]\n]*\]\?\s*$", r"^.*\[confirm\]\s*$"]
+
+#: Output that ends with one of those questions.
+_COPY_QUESTION_AT_END = re.compile(r"(?:Destination filename \[[^\]\n]*\]\?|\[confirm\])\s*\Z")
+
+#: A copy to startup-config asks at most these two questions.
+_MAX_COPY_ANSWERS = 2
+
+
+def _is_startup_copy(command: str) -> bool:
+    """'copy <source> startup-config', the destination in any abbreviation."""
+    words = command.lower().split()
+    if len(words) != 3 or words[0] != "copy":
+        return False
+    destination = words[2].removeprefix("nvram:")
+    return len(destination) >= 3 and "startup-config".startswith(destination)
 
 
 def _plan_config_set(commands: list[str]) -> list[tuple[bool, list[str]]]:
@@ -432,10 +455,21 @@ class ScrapliTransport:
     @staticmethod
     def _result_from_response(command: str, response: Any) -> ScrapliResult:
         """Map one scrapli ``Response`` onto the SDK result shape."""
-        output = response.result if response.result is not None else ""
-        latency_ms = float(getattr(response, "elapsed_time", 0.0) or 0.0) * 1000
+        return ScrapliTransport._result_from_responses(command, [response])
+
+    @staticmethod
+    def _result_from_responses(
+        command: str, responses: list[Any], output: str | None = None
+    ) -> ScrapliResult:
+        """Map the scrapli ``Response``s of one command onto the SDK result shape.
+
+        ``output`` replaces the responses' joined text when given.
+        """
+        if output is None:
+            output = "\n".join(r.result for r in responses if r.result)
+        latency_ms = sum(float(getattr(r, "elapsed_time", 0.0) or 0.0) for r in responses) * 1000
         cli_error = _detect_cli_error(output)
-        if response.failed or cli_error:
+        if any(r.failed for r in responses) or cli_error:
             return ScrapliResult(
                 command=command,
                 output=output,
@@ -453,16 +487,48 @@ class ScrapliTransport:
     async def _send_exec_command(self, connection, command: str) -> ScrapliResult:
         """Run one command at privilege-exec; a CLI error pattern gives exit code 1."""
         try:
-            response = await connection.send_command(command)
+            if _is_startup_copy(command):
+                result = await self._send_startup_copy(connection, command)
+            else:
+                result = self._result_from_response(command, await connection.send_command(command))
         except Exception as e:
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             return ScrapliResult(command=command, output="", exit_code=-1, error=str(e))
-        result = self._result_from_response(command, response)
         if result.exit_code == 0:
             logger.info(f"Command on {self.host} completed in {result.latency_ms:.0f}ms")
         else:
             logger.warning(f"Command on {self.host} returned a CLI error")
         return result
+
+    async def _send_startup_copy(self, connection, command: str) -> ScrapliResult:
+        """Run a copy to startup-config, answering its questions with Enter.
+
+        Waiting for the prompt alone, as send_command does, runs into the
+        command timeout while the device asks for the destination file name,
+        so each read also stops at the questions such a copy asks. The output
+        keeps neither the command echo nor the trailing prompt, like
+        send_command's.
+        """
+        exec_prompt = connection.privilege_levels[connection.default_desired_privilege_level]
+        responses = []
+        channel_input = command
+        while True:
+            response = await connection.send_interactive(
+                [(channel_input, exec_prompt.pattern)],
+                interaction_complete_patterns=_COPY_QUESTION_PATTERNS,
+            )
+            responses.append(response)
+            if not _COPY_QUESTION_AT_END.search(response.result or ""):
+                break
+            if len(responses) > _MAX_COPY_ANSWERS:
+                raise RuntimeError("The device kept asking questions about the copy")
+            channel_input = ""
+        lines = "\n".join(r.result for r in responses if r.result).splitlines()
+        if lines and lines[0].strip() == command.strip():
+            lines.pop(0)
+        if lines and re.search(exec_prompt.pattern, lines[-1], flags=re.I):
+            lines.pop()
+        return self._result_from_responses(command, responses, "\n".join(lines).strip())
 
     async def _send_config_block(self, connection, block: list[str]) -> list[ScrapliResult]:
         """Send one config block with send_configs; one result per line."""

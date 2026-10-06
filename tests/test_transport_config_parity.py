@@ -138,6 +138,23 @@ def test_both_transports_share_the_config_rules() -> None:
         assert netmiko._is_save_command(command) == scrapli._is_save_command(command), command
 
 
+def test_both_transports_find_a_copy_to_startup_config_alike() -> None:
+    for command, expected in (
+        ("copy running-config startup-config", True),
+        ("copy run start", True),
+        ("COPY RUN STA", True),
+        ("copy system:running-config nvram:startup-config", True),
+        ("copy flash:golden.cfg startup-config", True),
+        ("copy run st", False),
+        ("copy running-config flash:backup.cfg", False),
+        ("copy startup-config running-config", False),
+        ("copy run start extra", False),
+        ("write memory", False),
+    ):
+        assert netmiko._is_startup_copy(command) is expected, command
+        assert scrapli._is_startup_copy(command) is expected, command
+
+
 def test_both_transports_report_a_command_not_run_alike() -> None:
     assert netmiko._SKIPPED_ERROR == scrapli._SKIPPED_ERROR
     assert netmiko._CANCELLED_ERROR == scrapli._CANCELLED_ERROR
