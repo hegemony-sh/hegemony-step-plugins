@@ -620,6 +620,17 @@ def test_wait_reachable_check_type_is_registry_driven():
     assert props["socks_proxy"]["default"] == ""
 
 
+def test_wait_reachable_offers_the_url_path_of_probe_connectivity():
+    """HTTP Health always requested /health: the path had no setting here."""
+    from hegemony_steps_probe.connectivity import ConnectivityCheckConfig
+    from hegemony_steps_probe.wait_reachable import WaitReachableConfig
+
+    wait = WaitReachableConfig.model_json_schema()["properties"]["url_path"]
+    one_shot = ConnectivityCheckConfig.model_json_schema()["properties"]["url_path"]
+    assert wait == one_shot
+    assert wait["default"] == ""
+
+
 async def test_wait_reachable_defaults_poll_tcp_on_the_management_port():
     """Without the new settings a poll is today's TCP connect: a device on
     its inventory mgmt_port, a direct IP (IPv6 too) on 22."""
@@ -645,8 +656,18 @@ async def test_wait_reachable_defaults_poll_tcp_on_the_management_port():
     ("config", "device_options", "ip_options"),
     [
         ({"port": 443}, {"port": 443}, {"port": 443}),
-        ({"check_type": "http_health"}, {"port": 80}, {"port": 80}),
+        (
+            {"check_type": "http_health"},
+            {"port": 80, "url_path": "/health"},
+            {"port": 80, "url_path": "/health"},
+        ),
+        (
+            {"check_type": "http_health", "url_path": "/api/ready"},
+            {"port": 80, "url_path": "/api/ready"},
+            {"port": 80, "url_path": "/api/ready"},
+        ),
         ({"check_type": "icmp_ping", "port": 443}, {"count": 1}, {"count": 1}),
+        ({"url_path": "/api/ready"}, {"port": 2222}, {"port": 22}),
         (
             {"socks_proxy": " socks5://jump:pw@dind:1080 "},
             {"port": 2222, "socks_proxy": "socks5://jump:pw@dind:1080"},

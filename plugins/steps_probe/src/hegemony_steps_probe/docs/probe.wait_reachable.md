@@ -26,9 +26,10 @@ the same checks as `probe.connectivity`.
 Port applies to the port-based checks and is ignored by ICMP Ping and DNS
 Resolve. Left empty, a device is polled on its management port (22 when the
 inventory sets none) and a direct IP target on port 22, while HTTP Health
-uses port 80. Connect Timeout (sec) bounds each poll of a target (default 5,
-up to 60); a target that does not answer in time counts as unreachable for
-that poll.
+uses port 80. URL Path applies only to HTTP Health, which requests `/health`
+when it is empty. Connect Timeout (sec) bounds each poll of a target
+(default 5, up to 60); a target that does not answer in time counts as
+unreachable for that poll.
 
 The optional SOCKS5 Proxy routes the TCP-based checks through a
 `socks5://user:pass@host:port` proxy (credentials optional; `socks5h://`

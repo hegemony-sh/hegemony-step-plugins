@@ -121,6 +121,19 @@ class WaitReachableConfig(BaseModel):
         ),
         json_schema_extra={"x_legacy_keys": ["connect_timeout"]},
     )
+    url_path: str = Field(
+        default="",
+        title="URL Path",
+        description=(
+            "URL path requested by the HTTP Health check; when omitted the "
+            "check requests /health. Ignored by every other check type."
+        ),
+        json_schema_extra={
+            "x_placeholder": "/health",
+            "x_show_when": {"field": "check_type", "value": "http_health"},
+            "x_col_span": 2,
+        },
+    )
     socks_proxy: str = Field(
         default="",
         title="SOCKS5 Proxy",
@@ -239,7 +252,9 @@ class WaitReachableHandler(BaseHandler):
             port = _port(device)
             if port is not None:
                 options["port"] = port
-            if check_type == "icmp_ping":
+            if check_type == "http_health":
+                options["url_path"] = config.url_path or "/health"
+            elif check_type == "icmp_ping":
                 options["count"] = 1
             if socks_proxy:
                 options["socks_proxy"] = socks_proxy
