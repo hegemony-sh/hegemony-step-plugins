@@ -4,17 +4,17 @@
 
 [project]
 name = "hegemony-steps-tf"
-version = "0.16.0"
+version = "0.17.0"
 description = "OpenTofu/Terraform plan and apply step handlers for Hegemony"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.16.0",
+    "hegemony-step-sdk==0.17.0",
     # Built on container.run's runner: a deployment without container
     # execution cannot install this wheel either.
-    "hegemony-steps-container==0.16.0",
+    "hegemony-steps-container==0.17.0",
 ]
 
 [project.entry-points."hegemony.step_handlers"]

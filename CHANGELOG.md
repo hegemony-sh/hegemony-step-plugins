@@ -1,3 +1,26 @@
+## [0.17.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.16.0...v0.17.0) (2026-10-06)
+
+### ⚠ BREAKING CHANGES
+
+* **iosxe:** the install step no longer sets the boot variable to
+packages.conf by itself. Flows that relied on the automatic boot rewrite
+must enable fix_boot_config.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+
+### Bug Fixes
+
+* **iosxe:** change the boot setting only when asked ([0c35d82](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0c35d82c0366780ed34af0c5e3c48d22cd9dc7dc))
+* **iosxe:** check every command's result ([3b8e1da](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3b8e1da5a5e76986e4b720c712ba33aae1c03e11))
+* **iosxe:** fail the MD5 check unless the device confirms the hash ([93ab133](https://github.com/hegemony-sh/hegemony-step-plugins/commit/93ab1334b573e1db9428ded4ab9116cd60ee9fd0))
+* **iosxe:** let cancelling a run close device sessions ([7a34c4d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7a34c4db81d39a61fab0e5922323cf3319c777c5))
+* **iosxe:** read the whole verify /md5 answer and check its file ([f66ee3e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f66ee3e2f27a17e272aba012063c23fff63ab1b6))
+* **iosxe:** report a failed install as failed ([59c5f3e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/59c5f3e44779d87ce02e8fc00d1e78df51049288))
+* **iosxe:** send bundle-mode boot changes in one session ([55d7978](https://github.com/hegemony-sh/hegemony-step-plugins/commit/55d79781bd4cf58f089350e76ef7a84c7eb45071))
+* **iosxe:** undo a boot change that failed part-way ([f878813](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f878813e5760b9b8958ab9a2397cb2e78adccb30))
+
 ## [0.16.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.15.0...v0.16.0) (2026-10-06)
 
 ### ⚠ BREAKING CHANGES
