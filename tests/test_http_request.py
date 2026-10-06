@@ -40,6 +40,9 @@ from hegemony_steps_http.request import (
 SECRET_REF = "vault://orgs/acme/secrets/api/token"
 SECRET_VALUE = "tok-3f9c1a7e-test-value"
 
+#: The resolver the step uses on a worker, kept before the fake_dns fixture replaces it.
+REAL_RESOLVE_HOST = security.resolve_host
+
 #: Fake DNS for the mock-transport tests (TEST-NET documentation addresses).
 FAKE_DNS = {
     "api.example.test": ["192.0.2.10"],
@@ -60,6 +63,24 @@ def fake_dns(monkeypatch):
         if host in FAKE_DNS:
             return FAKE_DNS[host]
         raise OSError(f"[Errno -2] Name or service not known: {host}")
+
+    monkeypatch.setattr(security, "resolve_host", resolve)
+    return looked_up
+
+
+def resolve_like_getaddrinfo(monkeypatch, names: dict[str, list[str]]) -> list[str]:
+    """Resolve as a worker does: Python's socket encodes a name with its IDNA codec first.
+
+    Returns the names looked up, as encoded.
+    """
+    looked_up: list[str] = []
+
+    async def resolve(host: str, port: int) -> list[str]:
+        name = host.encode("idna").decode("ascii")
+        looked_up.append(name)
+        if name in names:
+            return names[name]
+        raise OSError(f"[Errno -2] Name or service not known: {name}")
 
     monkeypatch.setattr(security, "resolve_host", resolve)
     return looked_up
@@ -231,6 +252,7 @@ async def test_get_returns_json_data_extracted_values_and_filtered_headers():
     assert out["extracted"] == {"first_id": 7, "total": 1, "gone": None}
     assert json.loads(out["body"]) == payload
     assert out["body_truncated"] is False
+    assert out["data_truncated"] is False
     assert out["size_bytes"] == len(out["body"].encode())
     assert out["body_sha256"] == hashlib.sha256(out["body"].encode()).hexdigest()
     assert out["pages"] == 1 and out["more_pages"] is False
@@ -238,8 +260,8 @@ async def test_get_returns_json_data_extracted_values_and_filtered_headers():
     assert out["headers"]["vary"] == "Accept, Origin"
     assert "set-cookie" not in out["headers"]
     assert result.summary.startswith("GET https://api.example.test/v1/items -> 200 (")
-    assert set(result.metrics) == {"elapsed_ms", "size_bytes", "status"}
-    assert result.metrics["status"] == 200
+    assert set(result.metrics) == {"elapsed_ms", "size_bytes", "ok", "status"}
+    assert result.metrics["status"] == 200 and result.metrics["ok"] is True
 
     (evidence,) = result.evidence
     assert evidence["kind"] == "transport_meta"
@@ -530,8 +552,9 @@ async def test_an_unexpected_status_fails_the_step_but_fills_the_output():
     assert result.output["status"] == 404
     assert result.output["ok"] is False
     assert result.output["data"] == {"error": "not found", "code": 44}
+    assert result.output["data_truncated"] is False
     assert result.output["extracted"] == {"code": 44}
-    assert result.summary.endswith(")") and "-> 404" in result.summary
+    assert result.summary.endswith(")") and "-> 404, failed (" in result.summary
     assert result.evidence[0]["content_json"]["error"] == result.error
 
 
@@ -735,6 +758,7 @@ async def test_internal_destinations_are_refused_before_any_connection(url, reas
     assert recorder.requests == []
     assert result.output["status"] is None
     assert result.output["ok"] is False
+    assert result.output["data"] is None and result.output["data_truncated"] is False
     assert "failed" in result.summary
 
 
@@ -769,12 +793,25 @@ async def test_a_name_that_does_not_resolve_fails_cleanly():
 
 
 async def test_a_declared_length_over_the_limit_fails_without_reading():
-    recorder = Recorder(lambda request: httpx.Response(200, content=b"x" * 2048))
+    served: list[int] = []
+
+    async def chunks() -> AsyncIterator[bytes]:
+        served.append(1)
+        yield b"x" * 2048
+
+    recorder = Recorder(
+        lambda request: httpx.Response(200, content=chunks(), headers={"Content-Length": "2048"})
+    )
     result = await _handler(recorder).execute(
         _ctx({"url": "https://api.example.test/", "max_response_bytes": 1024})
     )
     assert result.success is False
-    assert "larger than Max Response Size (1024 bytes)" in (result.error or "")
+    # The declared length is refused: the message names it, and nothing was read.
+    assert result.error == (
+        "the response body (2048 bytes) is larger than Max Response Size (1024 bytes); "
+        "raise Max Response Size or request less"
+    )
+    assert served == []
     assert result.output["status"] == 200
     assert "body" in result.output and result.output["body"] == ""
 
@@ -834,7 +871,7 @@ async def test_sensitive_mode_keeps_the_response_out_of_output_and_evidence():
     assert result.success is True, result.error
     assert "issued-token-value" not in _everything(result)
     out = result.output
-    assert {"body", "body_truncated", "data", "extracted"}.isdisjoint(out)
+    assert {"body", "body_truncated", "data", "data_truncated", "extracted"}.isdisjoint(out)
     assert out["status"] == 200 and out["headers"]["x-kind"] == "token"
     assert out["size_bytes"] == len(raw)
     assert out["body_sha256"] == hashlib.sha256(raw).hexdigest()
@@ -1530,3 +1567,428 @@ def test_a_templated_url_is_checked_for_http_once_rendered():
     assert any("https://" in error for error in handler.validate_config(rendered))
     # Without credentials a plain http:// URL stays fine.
     assert handler.validate_config({"url": "http://api.example.test/v1/me"}) == []
+
+
+# --- Host names, redirects, bodies and output size ----------------------------
+
+
+async def test_an_idna_host_is_checked_under_the_name_the_connection_uses(monkeypatch):
+    """httpx dials the xn-- name; its Unicode form may encode to another name entirely."""
+    looked_up = resolve_like_getaddrinfo(
+        monkeypatch,
+        {
+            # What the Unicode form (straße) becomes under the resolver's older IDNA rules.
+            "strasse.example.test": ["192.0.2.10"],
+            # The name the connection dials.
+            "xn--strae-oqa.example.test": ["169.254.169.254"],
+        },
+    )
+    recorder = Recorder(lambda request: httpx.Response(200, text="ami-id"))
+    services = FakeServices()
+    result = await _handler(recorder).execute(
+        _ctx({"url": "http://xn--strae-oqa.example.test/latest/meta-data/"}, services)
+    )
+    assert result.success is False
+    assert "resolves to 169.254.169.254, a cloud instance metadata address" in (result.error or "")
+    assert recorder.requests == []
+    assert looked_up == ["xn--strae-oqa.example.test"]
+    assert services.gated == [("xn--strae-oqa.example.test", 80, "tcp", "http request")]
+
+
+async def test_a_redirect_to_an_idna_host_is_checked_under_the_name_the_connection_uses(
+    monkeypatch,
+):
+    looked_up = resolve_like_getaddrinfo(
+        monkeypatch,
+        {
+            "api.example.test": ["192.0.2.10"],
+            "strasse.example.test": ["192.0.2.20"],
+            "xn--strae-oqa.example.test": ["127.0.0.1"],
+        },
+    )
+    location = "https://straße.example.test/".encode()
+    recorder = Recorder(lambda request: httpx.Response(302, headers=[(b"Location", location)]))
+    services = FakeServices()
+    result = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/", "follow_redirects": True}, services)
+    )
+    assert result.success is False
+    assert "resolves to 127.0.0.1, a loopback address" in (result.error or "")
+    assert recorder.urls == ["https://api.example.test/"]
+    assert looked_up == ["api.example.test", "xn--strae-oqa.example.test"]
+    assert [host for host, *_ in services.gated] == looked_up
+
+
+@pytest.mark.parametrize(
+    "url", ["https://bücher.example.test/items", "https://xn--bcher-kva.example.test/items"]
+)
+async def test_every_page_from_an_idna_host_checks_the_name_it_connects_to(monkeypatch, url):
+    looked_up = resolve_like_getaddrinfo(
+        monkeypatch, {"xn--bcher-kva.example.test": ["192.0.2.40"]}
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.query:
+            return _json_response({"next": None, "results": [2]})
+        return _json_response({"next": "/items?page=2", "results": [1]})
+
+    recorder = Recorder(respond)
+    services = FakeServices()
+    result = await _handler(recorder).execute(
+        _ctx(
+            {
+                "url": url,
+                "paginate_next": "next",
+                "paginate_items": "results",
+                "max_pages": 5,
+            },
+            services,
+        )
+    )
+    assert result.success is True, result.error
+    connected = [request.url.raw_host.decode("ascii") for request in recorder.requests]
+    assert connected == ["xn--bcher-kva.example.test"] * 2
+    assert looked_up == connected
+    assert [host for host, *_ in services.gated] == connected
+
+
+@pytest.mark.parametrize("host", ["a..example.test", "a" * 64 + ".example.test"])
+async def test_the_resolver_refusing_a_host_name_is_a_refusal(monkeypatch, host):
+    """The worker's resolver raises UnicodeError for an empty or overlong label."""
+    monkeypatch.setattr(security, "resolve_host", REAL_RESOLVE_HOST)
+    with pytest.raises(security.RequestRefused, match="not a valid host name"):
+        await security.check_destination(host, 443)
+
+
+async def test_a_redirect_to_an_invalid_host_name_fails_the_step_with_its_output(monkeypatch):
+    resolve_like_getaddrinfo(monkeypatch, {"api.example.test": ["192.0.2.10"]})
+    recorder = Recorder(
+        lambda request: httpx.Response(302, headers={"Location": "https://a..example.test/"})
+    )
+    result = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/", "follow_redirects": True})
+    )
+    assert result.success is False
+    assert "cannot resolve host a..example.test: not a valid host name" in (result.error or "")
+    assert recorder.urls == ["https://api.example.test/"]
+    # The output and evidence are kept: the refused hop follows the 302.
+    meta = result.evidence[0]["content_json"]
+    assert [request["status"] for request in meta["requests"]] == [302, None]
+    assert result.output["status"] is None and result.output["data_truncated"] is False
+    assert meta["error"] == result.error
+
+
+def test_numbers_written_for_text_settings_are_valid():
+    config = {
+        "url": "https://api.example.test/",
+        "expected_status": 201,
+        "query": {"limit": 100},
+        "headers": {"X-Count": 5},
+    }
+    assert _errors(config) == []
+
+
+async def test_numbers_written_for_text_settings_are_sent_as_their_text():
+    recorder = Recorder(lambda request: httpx.Response(201))
+    result = await _handler(recorder).execute(
+        _ctx(
+            {
+                "url": "https://api.example.test/",
+                "expected_status": 201,
+                "query": {"limit": 100},
+                "headers": {"X-Count": 5},
+            }
+        )
+    )
+    assert result.success is True, result.error
+    (request,) = recorder.requests
+    assert request.url.params["limit"] == "100"
+    assert request.headers["x-count"] == "5"
+
+
+@pytest.mark.parametrize("location", ["http://[::1/x", "https://api.example.test:port/"])
+async def test_without_follow_redirects_a_malformed_location_is_still_the_response(location):
+    recorder = Recorder(
+        lambda request: httpx.Response(302, headers={"Location": location}, text="moved")
+    )
+    result = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/login", "expected_status": "200-399"})
+    )
+    assert result.success is True, result.error
+    assert result.output["status"] == 302 and result.output["ok"] is True
+    assert result.output["headers"]["location"] == location
+    assert result.output["body"] == "moved"
+    assert recorder.urls == ["https://api.example.test/login"]
+
+
+async def test_a_followed_redirect_with_a_malformed_location_fails_with_its_status():
+    recorder = Recorder(
+        lambda request: httpx.Response(302, headers={"Location": "http://[::1/x"}, text="moved")
+    )
+    result = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/login", "follow_redirects": True})
+    )
+    assert result.success is False
+    assert (result.error or "").startswith(
+        "cannot follow the HTTP 302 redirect: its Location header is not a valid URL ("
+    )
+    assert result.output["status"] == 302 and result.output["ok"] is False
+    assert result.output["headers"]["location"] == "http://[::1/x"
+    assert "-> 302, failed (" in result.summary
+    assert recorder.urls == ["https://api.example.test/login"]
+
+
+@pytest.mark.parametrize(
+    ("encoding", "encode"),
+    [
+        ("gzip", _gzip),
+        ("deflate", _deflate),
+        ("deflate", lambda data: _deflate(data, raw=True)),
+    ],
+    ids=["gzip", "deflate", "raw-deflate"],
+)
+@pytest.mark.parametrize("chunk", [7, 4096])
+async def test_a_compressed_body_cut_short_fails_the_step(encoding, encode, chunk):
+    payload = json.dumps({"items": list(range(300))}).encode()
+    cut = encode(payload)[:-30]
+    recorder = Recorder(
+        lambda request: httpx.Response(
+            200, content=_streamed(cut, chunk), headers={"Content-Encoding": encoding}
+        )
+    )
+    result = await _handler(recorder).execute(_ctx({"url": "https://api.example.test/"}))
+    assert result.success is False
+    assert result.error == f"the response body ended before its {encoding} data was complete"
+    assert result.output["status"] == 200 and result.output["ok"] is False
+
+
+@pytest.mark.parametrize("chunk", [5, 4096])
+async def test_a_gzip_body_of_several_members_is_decoded_whole(chunk):
+    payload = json.dumps({"items": list(range(50))}).encode()
+    body = _gzip(payload[:20]) + _gzip(payload[20:60]) + _gzip(payload[60:]) + b"\0" * 4
+    recorder = Recorder(
+        lambda request: httpx.Response(
+            200, content=_streamed(body, chunk), headers={"Content-Encoding": "gzip"}
+        )
+    )
+    result = await _handler(recorder).execute(_ctx({"url": "https://api.example.test/"}))
+    assert result.success is True, result.error
+    assert result.output["data"] == {"items": list(range(50))}
+    assert result.output["size_bytes"] == len(payload)
+
+
+async def test_gzip_members_share_the_size_budget():
+    body = _gzip(b"a" * 3000) + _gzip(b"b" * 3000)
+    recorder = Recorder(
+        lambda request: httpx.Response(
+            200, content=_streamed(body), headers={"Content-Encoding": "gzip"}
+        )
+    )
+    result = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/", "max_response_bytes": 4096})
+    )
+    assert result.success is False
+    assert "larger than Max Response Size (4096 bytes)" in (result.error or "")
+
+
+@pytest.mark.parametrize(
+    "content_type", [None, "application/json", "application/json; charset=UTF-8"]
+)
+async def test_a_json_body_starting_with_a_utf8_byte_order_mark_is_parsed(content_type):
+    raw = b"\xef\xbb\xbf" + json.dumps({"id": 7, "name": "café"}).encode()
+    headers = {"Content-Type": content_type} if content_type else {}
+    recorder = Recorder(lambda request: httpx.Response(200, content=raw, headers=headers))
+    result = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/", "extract": {"id": "id"}})
+    )
+    assert result.success is True, result.error
+    assert result.output["data"] == {"id": 7, "name": "café"}
+    assert result.output["extracted"] == {"id": 7}
+    assert result.output["size_bytes"] == len(raw)
+
+
+async def test_a_body_failure_is_not_ok_even_with_an_expected_status():
+    recorder = Recorder(lambda request: httpx.Response(200, content=_streamed(b"x" * 100)))
+    result = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/", "max_response_bytes": 10})
+    )
+    assert result.success is False
+    assert result.output["status"] == 200
+    assert result.output["ok"] is False
+    assert result.metrics["status"] == 200 and result.metrics["ok"] is False
+    assert result.summary.startswith("GET https://api.example.test/ -> 200, failed (")
+
+
+@pytest.mark.parametrize(("status", "method"), [(307, "POST"), (308, "PUT"), (301, "PATCH")])
+async def test_a_redirect_that_would_send_the_body_to_another_origin_is_refused(status, method):
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.example.test":
+            return httpx.Response(
+                status, headers={"Location": "https://other.example.test/collect"}
+            )
+        return httpx.Response(200)
+
+    recorder = Recorder(respond)
+    result = await _handler(recorder).execute(
+        _ctx(
+            {
+                "url": "https://api.example.test/login",
+                "method": method,
+                "follow_redirects": True,
+                "json_body": {"username": "svc", "password": "hunter2-not-for-elsewhere"},
+            }
+        )
+    )
+    assert result.success is False
+    assert (result.error or "").startswith(
+        f"refused to follow the HTTP {status} redirect to https://other.example.test: it "
+        "would send the request body to another scheme, host or port"
+    )
+    assert recorder.urls == ["https://api.example.test/login"]
+    assert result.output["status"] == status
+    assert "hunter2" not in _everything(result)
+
+
+async def test_a_redirect_repeats_the_body_on_its_origin_and_drops_it_with_a_get():
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            return httpx.Response(307, headers={"Location": "/login/v2"})
+        if request.url.path == "/login/v2":
+            return httpx.Response(303, headers={"Location": "https://other.example.test/done"})
+        return httpx.Response(200)
+
+    recorder = Recorder(respond)
+    result = await _handler(recorder).execute(
+        _ctx(
+            {
+                "url": "https://api.example.test/login",
+                "method": "POST",
+                "follow_redirects": True,
+                "json_body": {"username": "svc"},
+            }
+        )
+    )
+    assert result.success is True, result.error
+    assert [request.method for request in recorder.requests] == ["POST", "POST", "GET"]
+    assert recorder.bodies == [b'{"username":"svc"}', b'{"username":"svc"}', b""]
+
+
+@pytest.mark.parametrize(
+    ("auth", "secret", "echoed"),
+    [
+        ({"auth_type": "bearer"}, "abc/def-ghij-0001", "abc\\/def-ghij-0001"),
+        ({"auth_type": "bearer"}, 'tok"en\\value-01', 'tok\\"en\\\\value-01'),
+        (
+            {"auth_type": "basic", "auth_username": "svc"},
+            "pässwörd-1234",
+            "p\\u00e4ssw\\u00f6rd-1234",
+        ),
+        (
+            {"auth_type": "basic", "auth_username": "svc"},
+            "pass/wörd\tx-1",
+            "pass\\/wörd\\tx-1",
+        ),
+    ],
+    ids=["escaped-slash", "escaped-quote-and-backslash", "unicode-escapes", "mixed"],
+)
+async def test_a_secret_the_response_repeats_json_escaped_is_redacted(auth, secret, echoed):
+    services = FakeServices(secrets={SECRET_REF: secret})
+    raw = ('{"echo":"' + echoed + '"}').encode()
+    assert json.loads(raw)["echo"] == secret
+    recorder = Recorder(
+        lambda request: httpx.Response(
+            200, content=raw, headers={"Content-Type": "application/json"}
+        )
+    )
+    result = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/", "auth_secret": SECRET_REF, **auth}, services)
+    )
+    assert result.success is True, result.error
+    body = result.output["body"]
+    preview = result.evidence[0]["content_json"]["body_preview"]
+    assert echoed not in body and echoed not in preview
+    assert body == preview == '{"echo":"' + security.REDACTED + '"}'
+    assert result.output["data"] == {"echo": security.REDACTED}
+
+
+@pytest.mark.parametrize(
+    ("start", "target"),
+    [
+        ("https://api.example.test/start", "http://api.example.test/next"),
+        ("http://api.example.test/start", "https://api.example.test/next"),
+        ("https://api.example.test:8443/start", "http://api.example.test:8443/next"),
+        ("http://api.example.test:8443/start", "https://api.example.test:8443/next"),
+    ],
+    ids=["https-to-http", "http-to-https", "https-to-http-same-port", "http-to-https-same-port"],
+)
+async def test_a_redirect_that_only_changes_the_scheme_drops_credentials_and_headers(start, target):
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"Location": target})
+        return httpx.Response(200)
+
+    recorder = Recorder(respond)
+    result = await _handler(recorder).execute(
+        _ctx(
+            {
+                "url": start,
+                "follow_redirects": True,
+                "auth_type": "bearer",
+                "auth_secret": SECRET_REF,
+                "allow_insecure_auth": True,
+                "headers": {"Accept": "application/json", "X-Tenant": "t1"},
+            }
+        )
+    )
+    assert result.success is True, result.error
+    assert recorder.urls == [start, target]
+    first, hop = recorder.requests
+    assert first.headers["authorization"] == f"Bearer {SECRET_VALUE}"
+    assert first.headers["x-tenant"] == "t1"
+    assert "authorization" not in hop.headers
+    assert "x-tenant" not in hop.headers
+    assert hop.headers["accept"] == "application/json"
+
+
+def _json_of_size(size: int) -> dict[str, Any]:
+    """A JSON object whose compact UTF-8 form is exactly ``size`` bytes."""
+    overhead = len(json.dumps({"id": 7, "pad": ""}, separators=(",", ":")))
+    value = {"id": 7, "pad": "x" * (size - overhead)}
+    assert len(json.dumps(value, separators=(",", ":")).encode()) == size
+    return value
+
+
+@pytest.mark.parametrize(("extra", "truncated"), [(0, False), (1, True)], ids=["at", "over"])
+async def test_data_over_the_output_limit_is_left_out_but_still_extracted(extra, truncated):
+    payload = _json_of_size(request_module.MAX_DATA_OUTPUT_BYTES + extra)
+    recorder = Recorder(lambda request: _json_response(payload))
+    result = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/", "extract": {"id": "id"}})
+    )
+    assert result.success is True, result.error
+    assert result.output["data_truncated"] is truncated
+    assert result.output["data"] == (None if truncated else payload)
+    assert result.output["extracted"] == {"id": 7}
+
+
+async def test_merged_pages_over_the_output_limit_leave_data_out():
+    def respond(request: httpx.Request) -> httpx.Response:
+        page = 2 if request.url.query else 1
+        items = [{"id": page * 10000 + i, "name": "x" * 20} for i in range(1000)]
+        return _json_response({"next": None if page == 2 else "/items?page=2", "results": items})
+
+    result = await _handler(Recorder(respond)).execute(
+        _ctx(
+            {
+                "url": "https://api.example.test/items",
+                "paginate_next": "next",
+                "paginate_items": "results",
+                "max_pages": 5,
+                "extract": {"last": "results[-1].id", "first": "results[0].id"},
+            }
+        )
+    )
+    assert result.success is True, result.error
+    assert result.output["pages"] == 2
+    assert result.output["data"] is None and result.output["data_truncated"] is True
+    assert result.output["extracted"] == {"last": 20999, "first": 10000}

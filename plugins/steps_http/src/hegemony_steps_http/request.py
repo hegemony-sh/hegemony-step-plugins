@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import codecs
 import hashlib
 import json
 import re
@@ -52,6 +53,7 @@ from .security import (
     is_templated,
     resolve_secret_text,
     same_origin,
+    url_host,
     url_port,
 )
 
@@ -78,6 +80,10 @@ MAX_TIMEOUT_SECONDS = 600
 MAX_REDIRECTS = 10
 #: Characters of the last response body kept in ``output.body``.
 MAX_BODY_OUTPUT_CHARS = 64 * 1024
+#: Largest ``output.data``, in bytes of compact JSON. Step outputs are chained
+#: into later steps' templates and snapshots, so they stay small: larger data
+#: is left out (``data_truncated``), while Extract still reads all of it.
+MAX_DATA_OUTPUT_BYTES = 64 * 1024
 #: Characters of the last response body kept in the evidence record.
 EVIDENCE_PREVIEW_CHARS = MAX_CHAIN_OUTPUT_CHARS
 
@@ -130,7 +136,9 @@ def status_matches(status: int, ranges: list[tuple[int, int]]) -> bool:
 class HttpRequestConfig(BaseModel):
     """Config for ``http.request``."""
 
-    model_config = ConfigDict(extra="allow")
+    # A number written for a text setting (expected_status: 201, a query or
+    # header value) is its text.
+    model_config = ConfigDict(extra="allow", coerce_numbers_to_str=True)
 
     url: str = Field(
         min_length=1,
@@ -310,7 +318,8 @@ class HttpRequestConfig(BaseModel):
             "Follow 3xx redirects, at most 10, and report the final response. Off by "
             "default, when the redirect response itself is the result. Every hop is "
             "checked against the egress policy, and a redirect to a scheme other than "
-            "http or https is refused."
+            "http or https, or one that would send the request body to another origin, "
+            "is refused."
         ),
     )
     verify_tls: bool = Field(
@@ -660,11 +669,17 @@ class _Page:
 
     @cached_property
     def text(self) -> str:
-        """The body decoded by its charset (UTF-8 by default), bad bytes replaced."""
+        """The body decoded by its charset (UTF-8 by default), bad bytes replaced.
+
+        A UTF-8 body drops a leading byte order mark, which JSON parsing refuses.
+        """
+        charset = self.charset or "utf-8"
         try:
-            return self.body.decode(self.charset or "utf-8", errors="replace")
+            if codecs.lookup(charset).name == "utf-8":
+                charset = "utf-8-sig"
+            return self.body.decode(charset, errors="replace")
         except LookupError:
-            return self.body.decode("utf-8", errors="replace")
+            return self.body.decode("utf-8-sig", errors="replace")
 
     @cached_property
     def json(self) -> tuple[bool, Any]:
@@ -702,16 +717,30 @@ class _BoundedDecoder:
         """Start decoding ``encoding``; ``too_large`` is the error once the budget is passed."""
         self._encoding = encoding
         self._too_large = too_large
+        self._gzip = encoding in _GZIP_ENCODINGS
         self._raw_deflate = False
         self._started = False
-        gzip = encoding in _GZIP_ENCODINGS
-        self._decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16 if gzip else zlib.MAX_WBITS)
+        self._decompressor = zlib.decompressobj(
+            zlib.MAX_WBITS | 16 if self._gzip else zlib.MAX_WBITS
+        )
 
     def decode(self, data: bytes, room: int) -> bytes:
-        """The decompressed form of ``data``; raises once more than ``room`` bytes come out."""
+        """The decompressed form of ``data``; raises once more than ``room`` bytes come out.
+
+        A gzip body may hold several members, one after another: each is
+        decoded within the same budget, and zero bytes padding them are skipped.
+        """
         out = bytearray()
         pending = data
-        while pending and not self._decompressor.eof:
+        while pending:
+            if self._decompressor.eof:
+                if not self._gzip:
+                    # Deflate data is a single stream; nothing after its end is read.
+                    break
+                pending = pending.lstrip(b"\0")
+                if not pending:
+                    break
+                self._decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16)
             try:
                 chunk = self._decompressor.decompress(pending, room - len(out) + 1)
             except zlib.error:
@@ -725,11 +754,21 @@ class _BoundedDecoder:
             out.extend(chunk)
             if len(out) > room:
                 raise _ResponseTooLarge(self._too_large)
+            if self._decompressor.eof:
+                pending = self._decompressor.unused_data
+                continue
             tail = self._decompressor.unconsumed_tail
             if not chunk and tail == pending:
                 break
             pending = tail
         return bytes(out)
+
+    def finish(self) -> None:
+        """Refuse a body that ended inside its compressed data, cut short on the way."""
+        if self._started and not self._decompressor.eof:
+            raise _BodyError(
+                f"the response body ended before its {self._encoding} data was complete"
+            )
 
 
 async def _read_body(response: httpx.Response, remaining: int, limit_text: str) -> bytes:
@@ -739,7 +778,8 @@ async def _read_body(response: httpx.Response, remaining: int, limit_text: str) 
     deflate), so neither the raw nor the decoded body can outgrow the budget.
     A declared Content-Length over the budget is refused before reading,
     unless the response has no body by definition (HEAD, 204, 304) or is
-    compressed (the declared length is not the decoded one).
+    compressed (the declared length is not the decoded one). A compressed
+    body that ends before its compressed data does is refused too.
     """
     too_large = (
         f"the response body is larger than {limit_text}; raise Max Response Size or request less"
@@ -783,6 +823,8 @@ async def _read_body(response: httpx.Response, remaining: int, limit_text: str) 
             body.extend(decoder.decode(raw, remaining - len(body)))
         if len(body) > remaining:
             raise _ResponseTooLarge(too_large)
+    if decoder is not None:
+        decoder.finish()
     return bytes(body)
 
 
@@ -955,12 +997,16 @@ class HttpRequestHandler(BaseHandler):
         display_url = str(url.copy_with(query=None, fragment=None))
 
         enforce = getattr(services, "enforce_egress", None)
+        exchanges: list[_Exchange] = []
+        pages: list[_Page] = []
 
         async def gate(request: httpx.Request) -> None:
             """Every outgoing request, redirect hops and pages included, before it dials.
 
-            The egress policy's denial propagates as raised (the step reports
-            the policy's reason); the step's own refusals are RequestRefused.
+            The host is checked in the ASCII form the connection dials (see
+            ``url_host``). The egress policy's denial propagates as raised (the
+            step reports the policy's reason); the step's own refusals are
+            RequestRefused.
             """
             target = request.url
             if target.scheme not in SCHEME_PORTS:
@@ -968,25 +1014,49 @@ class HttpRequestHandler(BaseHandler):
                     f"refused to send a request to a {target.scheme!r} URL: only http and "
                     "https are supported"
                 )
+            host = url_host(target)
             port = url_port(target)
             if enforce is not None:
-                await enforce(target.host, port, proto="tcp", kind="http request")
-            await check_destination(target.host, port)
+                await enforce(host, port, proto="tcp", kind="http request")
+            await check_destination(host, port)
+
+        async def observe(response: httpx.Response) -> None:
+            """Every response, before httpx reads its Location header.
+
+            The status and headers are recorded first, so a redirect that
+            cannot be followed still reports them. Without Follow redirects the
+            response is the result: its Location is kept from httpx, which
+            would otherwise build a next request from it, and fail the step on
+            one that is not a valid URL.
+            """
+            exchange = exchanges[-1]
+            exchange.status = response.status_code
+            exchange.headers = filtered_response_headers(response.headers)
+            if not response.has_redirect_location:
+                return
+            if not config.follow_redirects:
+                del response.headers["location"]
+                return
+            try:
+                httpx.URL(response.headers["location"])
+            except httpx.InvalidURL as exc:
+                raise RequestRefused(
+                    f"cannot follow the HTTP {response.status_code} redirect: its Location "
+                    f"header is not a valid URL ({exc})"
+                ) from None
 
         client_options: dict[str, Any] = {
             "verify": verify,
             "trust_env": False,
             "follow_redirects": False,
             "timeout": httpx.Timeout(config.request_timeout_seconds),
-            "event_hooks": {"request": [gate]},
+            "event_hooks": {"request": [gate], "response": [observe]},
             # Only what _read_body can decode within the size budget.
             "headers": {"Accept-Encoding": ACCEPT_ENCODING},
         }
         if self._transport is not None:
             client_options["transport"] = self._transport
 
-        exchanges: list[_Exchange] = []
-        pages: list[_Page] = []
         sent_header_names: list[str] = []
         combined: Any = None
         items: list[Any] = []
@@ -1010,6 +1080,7 @@ class HttpRequestHandler(BaseHandler):
                         remaining=config.max_response_bytes - used,
                         limit_text=limit_text,
                         credential_header=credentials.header,
+                        has_body=content is not None,
                         stay_at=origin if paginating else None,
                     )
                     pages.append(page)
@@ -1084,7 +1155,9 @@ class HttpRequestHandler(BaseHandler):
         last = exchanges[-1] if exchanges else None
         last_page = pages[-1] if pages and last is not None and pages[-1].exchange is last else None
         status = last.status if last is not None else None
-        ok = status is not None and status_matches(status, ranges)
+        # A response with the expected status is not ok when the step still
+        # failed on it (its body, a redirect, a page).
+        ok = failure is None and status is not None and status_matches(status, ranges)
         size_bytes = sum(len(page.body) for page in pages)
 
         if last_page is not None:
@@ -1123,9 +1196,12 @@ class HttpRequestHandler(BaseHandler):
             "body_sha256": body_sha256,
         }
         if not config.sensitive:
+            data_truncated = data is not None and _json_size(data) > MAX_DATA_OUTPUT_BYTES
             output["body"] = text[:MAX_BODY_OUTPUT_CHARS]
             output["body_truncated"] = len(text) > MAX_BODY_OUTPUT_CHARS
-            output["data"] = data
+            output["data"] = None if data_truncated else data
+            output["data_truncated"] = data_truncated
+            # Extract reads the whole response, however large its data.
             output["extracted"] = {
                 name: get_path(data, parse_path(path)) for name, path in config.extract.items()
             }
@@ -1134,16 +1210,15 @@ class HttpRequestHandler(BaseHandler):
         if failure:
             meta["error"] = failure
 
+        timing = f"{len(pages)} pages, {elapsed_ms} ms" if len(pages) > 1 else f"{elapsed_ms} ms"
         if status is None:
-            summary = f"{config.method} {display_url} failed ({elapsed_ms} ms)"
-        elif len(pages) > 1:
-            summary = (
-                f"{config.method} {display_url} -> {status} ({len(pages)} pages, {elapsed_ms} ms)"
-            )
+            summary = f"{config.method} {display_url} failed ({timing})"
+        elif failure:
+            summary = f"{config.method} {display_url} -> {status}, failed ({timing})"
         else:
-            summary = f"{config.method} {display_url} -> {status} ({elapsed_ms} ms)"
+            summary = f"{config.method} {display_url} -> {status} ({timing})"
 
-        metrics: dict[str, Any] = {"elapsed_ms": elapsed_ms, "size_bytes": size_bytes}
+        metrics: dict[str, Any] = {"elapsed_ms": elapsed_ms, "size_bytes": size_bytes, "ok": ok}
         if status is not None:
             metrics["status"] = status
         evidence = [
@@ -1168,12 +1243,15 @@ class HttpRequestHandler(BaseHandler):
         remaining: int,
         limit_text: str,
         credential_header: str | None,
+        has_body: bool = False,
         stay_at: httpx.URL | None = None,
     ) -> _Page:
         """Send ``request``, following redirects when configured; the final response, read.
 
-        With ``stay_at`` (while paginating), a redirect away from that URL's
-        scheme, host and port is refused, as a next-page link would be.
+        A redirect that would repeat the request body (``has_body``) to another
+        scheme, host or port is refused. With ``stay_at`` (while paginating), a
+        redirect away from that URL's scheme, host and port is refused, as a
+        next-page link would be.
         """
         hops = 0
         while True:
@@ -1183,10 +1261,9 @@ class HttpRequestHandler(BaseHandler):
             next_request: httpx.Request | None = None
             try:
                 async with asyncio.timeout(config.request_timeout_seconds):
+                    # The client's response hook records the status and headers.
                     response = await client.send(request, stream=True)
                     try:
-                        exchange.status = response.status_code
-                        exchange.headers = filtered_response_headers(response.headers)
                         if config.follow_redirects and response.next_request is not None:
                             # The redirect's own body is never read.
                             next_request = response.next_request
@@ -1218,9 +1295,24 @@ class HttpRequestHandler(BaseHandler):
                     f"{next_request.url.netloc.decode('ascii')} while paginating (every page "
                     "must keep the first request's scheme, host and port)"
                 )
+            # httpx keeps the method and body except where the redirect turns it into a GET.
+            has_body = has_body and next_request.method == request.method
             if not same_origin(next_request.url, request.url):
+                if has_body:
+                    raise RequestRefused(
+                        f"refused to follow the HTTP {exchange.status} redirect to "
+                        f"{next_request.url.scheme}://{next_request.url.netloc.decode('ascii')}: "
+                        "it would send the request body to another scheme, host or port; "
+                        "send the request to that URL instead"
+                    )
                 _strip_for_new_origin(next_request.headers, config.headers, credential_header)
             request = next_request
+
+
+def _json_size(value: Any) -> int:
+    """Bytes of ``value`` as compact UTF-8 JSON."""
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return len(text.encode("utf-8", errors="surrogatepass"))
 
 
 def _describe_error(exc: BaseException, timeout_seconds: int) -> str:

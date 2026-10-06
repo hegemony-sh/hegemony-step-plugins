@@ -53,9 +53,13 @@ Expected Status lists the status codes that count as success, as values and
 ranges such as `200-299,304`; the default is `200-299`. Timeout (sec), default
 30, bounds each request: connecting, sending and reading the whole response.
 Follow redirects is off by default, so a 3xx response is the result (add it to
-Expected Status to accept it); switched on, the step follows up to 10
-redirects and reports the final response. A 303 becomes a GET, while 307 and
-308 repeat the method and body.
+Expected Status to accept it), whatever its `Location` header holds; switched
+on, the step follows up to 10 redirects and reports the final response, and a
+`Location` that is not a valid URL fails the step, reporting the redirect's
+status. A 302 or 303 becomes a GET without a body, as does a 301 answering a
+POST; other redirects, 307 and 308 among them, repeat the method and body, but
+only on the same scheme, host and port: one that would send the body anywhere
+else is refused.
 
 Verify TLS certificate is on by default. CA Bundle trusts the PEM
 certificates you give (an internal CA, say) for this request instead of the
@@ -66,8 +70,9 @@ Max Response Size (default 1 MiB, at most 16 MiB) is the largest response
 body the step reads, summed over all pages. A larger body fails the step; it
 is never cut short silently. The step asks for uncompressed, gzip or deflate
 bodies and decompresses them itself, stopping at Max Response Size, so a
-small compressed body cannot expand past it; a body in any other encoding
-fails the step.
+small compressed body cannot expand past it; a gzip body may hold several
+members. A compressed body that ends before its compressed data does, or a
+body in any other encoding, fails the step.
 
 ### Extracting values
 
@@ -94,21 +99,27 @@ with a list at Items Path.
 ## Output
 
 The summary reads like `GET https://api.example.com/v1/items -> 200 (85 ms)`
-(the query string left out), and `(3 pages, 240 ms)` when paginating. Later
-steps read the output as `steps.NODE_ID.output.KEY`:
+(the query string left out), and `(3 pages, 240 ms)` when paginating. A step
+that failed reads `-> 404, failed (85 ms)` when a response arrived, and
+`failed (85 ms)` when none did. Later steps read the output as
+`steps.NODE_ID.output.KEY`:
 
 - `status`: the HTTP status of the last response (`null` if none arrived).
-- `ok`: whether that status is in Expected Status.
+- `ok`: whether the step succeeded: that status is in Expected Status, and
+  nothing else failed (the body, a redirect or a page).
 - `url`: the URL of the last request, after redirects; `method`: the method.
 - `headers`: the last response's headers, names lower-cased; repeated headers
   joined with `, `. `set-cookie`, `set-cookie2`, `authorization`,
   `proxy-authorization` and `cookie` are always left out.
 - `body`: the last response's body as text, at most 64 KiB, with
   `body_truncated` telling whether it was cut.
-- `data`: the body parsed as JSON, or `null` when it is not JSON. With
-  pagination, the first page with the list at Items Path replaced by the
-  items of every page.
-- `extracted`: the Extract values by name.
+- `data`: the body parsed as JSON (a leading UTF-8 byte order mark is
+  ignored), or `null` when it is not JSON. With pagination, the first page
+  with the list at Items Path replaced by the items of every page. Step
+  outputs stay small, so data over 64 KiB as compact JSON is left out:
+  `data` is then `null` and `data_truncated` true (it is false otherwise).
+- `extracted`: the Extract values by name, read from the whole response even
+  when `data` is left out.
 - `elapsed_ms`: the time spent on all requests; `size_bytes`: the body bytes
   read, all pages together; `body_sha256`: the SHA-256 of the last body.
 - `pages`: the number of pages fetched; `more_pages`: whether Max Pages
@@ -116,15 +127,16 @@ steps read the output as `steps.NODE_ID.output.KEY`:
 
 When the status is not expected, the step fails but its output is still
 filled in from that response, so a failure branch can read `status`, `body`
-and `data`. Metrics record `elapsed_ms`, `size_bytes` and `status`. One
+and `data`. Metrics record `elapsed_ms`, `size_bytes`, `ok` and `status`. One
 `transport_meta` evidence record named `http_request` keeps the method, the
 URL as sent, every request made (redirect hops and pages, each with its status
 and time), the names of the request headers sent, the response headers as
 above, the first 4096 characters of the body, its size and SHA-256.
 
-Sensitive response keeps `body`, `body_truncated`, `data` and `extracted`
-out of both output and evidence, for a response that carries a secret; the
-status, headers, size and SHA-256 remain. Extract cannot be combined with it.
+Sensitive response keeps `body`, `body_truncated`, `data`, `data_truncated`
+and `extracted` out of both output and evidence, for a response that carries
+a secret; the status, headers, size and SHA-256 remain. Extract cannot be
+combined with it.
 
 ## Security
 
@@ -133,20 +145,24 @@ status, headers, size and SHA-256 remain. Extract cannot be combined with it.
   next pages included, passes the flow's egress policy, and a request to a
   loopback, link-local, unspecified or multicast address is refused: a literal
   IP is judged as written, a host name by every address it resolves to (it is
-  refused if any of them is such an address). The cloud instance metadata
-  services at `169.254.169.254`, `fd00:ec2::254` and `100.100.100.200` are
-  refused too. Private network addresses are left to the egress policy.
+  refused if any of them is such an address). An internationalized name is
+  checked, and passed to the egress policy, in the ASCII (`xn--`) form the
+  connection uses. The cloud instance metadata services at `169.254.169.254`,
+  `fd00:ec2::254` and `100.100.100.200` are refused too. Private network
+  addresses are left to the egress policy.
 - **Worker settings.** The step ignores the worker's proxy variables, `.netrc`
   and certificate-file variables: the request goes directly to the URL, and
   trusts the public authorities or CA Bundle only.
 - **Credentials.** Credentials are sent only to the URL's own scheme, host and
-  port: a redirect to anywhere else drops them, and drops every header set in
-  Headers except Accept, Accept-Language, Content-Type and User-Agent. So put
-  tokens in Authentication, not in Headers.
+  port: a redirect to anywhere else, even to the same host over the other
+  scheme, drops them, and drops every header set in Headers except Accept,
+  Accept-Language, Content-Type and User-Agent. So put tokens in
+  Authentication, not in Headers. A redirect that would repeat the request
+  body elsewhere is refused.
 - **What is recorded.** The secret, request header values and the request body
   never appear in the output, evidence, summary or error; request headers are
-  recorded by name only. A secret the response repeats is replaced with
-  `[redacted]` in the output and evidence.
+  recorded by name only. A secret the response repeats, as is or escaped in
+  a JSON string, is replaced with `[redacted]` in the output and evidence.
 - **Redaction.** A value the platform resolves from a secret reference or
   template is redacted from the run's logs. Literal text in Secret is not
   registered for redaction and is stored in the flow as written, so prefer a
@@ -164,10 +180,12 @@ resolves to nothing, the secret is shorter than 4 characters (too short to
 keep reliably out of the output), CA Bundle holds no certificate, or the
 platform cannot apply the flow's network policy to the request.
 
-During the request it fails on a refused destination, a DNS failure, a
-connection or TLS error, a timeout, more than 10 redirects, a response over
-Max Response Size or in an encoding the step does not decode, a status
-outside Expected Status (output still filled in), or a page that is not JSON,
-has no list at Items Path, links to another origin or back to an earlier
-page, or redirects to another origin. A denial by the flow's egress policy fails the step with the policy's
-own reason.
+During the request it fails on a refused destination, a DNS failure or a
+host name that is not valid, a connection or TLS error, a timeout, more than
+10 redirects, a redirect whose `Location` is not a valid URL or that would
+send the request body to another origin, a response over Max Response Size,
+in an encoding the step does not decode or cut short inside its compressed
+data, a status outside Expected Status (output still filled in), or a page
+that is not JSON, has no list at Items Path, links to another origin or back
+to an earlier page, or redirects to another origin. A denial by the flow's
+egress policy fails the step with the policy's own reason.

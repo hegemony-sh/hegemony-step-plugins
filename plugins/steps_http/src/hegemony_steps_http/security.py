@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import re
 import socket
 from collections.abc import Iterable
@@ -189,6 +190,9 @@ async def check_destination(host: str, port: int) -> None:
         addresses = await resolve_host(host, port)
     except OSError as exc:
         raise RequestRefused(f"cannot resolve host {host}: {exc}") from None
+    except ValueError as exc:
+        # UnicodeError included: the resolver refuses an empty or overlong label.
+        raise RequestRefused(f"cannot resolve host {host}: not a valid host name ({exc})") from None
     if not addresses:
         raise RequestRefused(f"cannot resolve host {host}: no addresses")
     for address in addresses:
@@ -205,9 +209,19 @@ def url_port(url: httpx.URL) -> int:
     return url.port or SCHEME_PORTS.get(url.scheme, 80)
 
 
+def url_host(url: httpx.URL) -> str:
+    """The host a request to ``url`` connects to, in ASCII (``xn--`` labels kept).
+
+    ``url.host`` decodes ``xn--`` labels to Unicode, and the resolver would
+    encode that text again by older IDNA rules, possibly into another name,
+    so the step checks and compares the name the connection uses.
+    """
+    return url.raw_host.decode("ascii")
+
+
 def same_origin(a: httpx.URL, b: httpx.URL) -> bool:
     """Whether two URLs share scheme, host and port."""
-    return a.scheme == b.scheme and a.host == b.host and url_port(a) == url_port(b)
+    return a.scheme == b.scheme and url_host(a) == url_host(b) and url_port(a) == url_port(b)
 
 
 def filtered_response_headers(headers: httpx.Headers) -> dict[str, str]:
@@ -224,12 +238,31 @@ def filtered_response_headers(headers: httpx.Headers) -> dict[str, str]:
     return result
 
 
+def _escaped_forms(secret: str) -> set[str]:
+    """``secret`` as it appears in text: as is, and escaped inside a JSON string.
+
+    A response that repeats the secret in JSON text may escape its quotes,
+    backslashes, control and non-ASCII characters, and slashes, so each of
+    those forms is searched for too.
+    """
+    forms = {secret}
+    for ensure_ascii in (True, False):
+        forms.add(json.dumps(secret, ensure_ascii=ensure_ascii)[1:-1])
+    forms.update([form.replace("/", "\\/") for form in forms])
+    return forms
+
+
 class Scrubber:
     """Replaces known credential values in text and nested JSON-shaped data."""
 
     def __init__(self, secrets: Iterable[str] = ()) -> None:
-        """Keep the credentials worth searching for, longest first."""
-        unique = {s for s in secrets if isinstance(s, str) and len(s) >= MIN_SCRUB_LENGTH}
+        """Keep the credentials worth searching for, raw and JSON-escaped, longest first."""
+        unique = {
+            form
+            for s in secrets
+            if isinstance(s, str) and len(s) >= MIN_SCRUB_LENGTH
+            for form in _escaped_forms(s)
+        }
         # Longest first, so a value containing another is replaced whole.
         self._secrets = sorted(unique, key=len, reverse=True)
 
@@ -268,5 +301,6 @@ __all__ = [
     "resolve_host",
     "resolve_secret_text",
     "same_origin",
+    "url_host",
     "url_port",
 ]
