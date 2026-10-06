@@ -31,6 +31,7 @@ from cryptography import x509
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from hegemony_step_sdk import (
+    MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
     HandlerContext,
     HandlerResult,
@@ -40,12 +41,9 @@ from hegemony_step_sdk import (
 from hegemony_step_sdk.concurrency import for_each_target_device
 
 from . import tls_certs
-from .targets import all_probe_targets
+from .targets import DEFAULT_MAX_PARALLEL_TARGETS, all_probe_targets
 
 logger = logging.getLogger(__name__)
-
-#: Upper bound for ``max_parallel``.
-MAX_PARALLEL_LIMIT = 50
 
 #: Largest OCSP response or issuer certificate download the step reads.
 MAX_FETCH_BYTES = 1024 * 1024
@@ -278,13 +276,12 @@ class TlsProbeConfig(BaseModel):
         ),
         json_schema_extra={"x_advanced": True},
     )
-    max_parallel: int = Field(
-        default=10,
+    max_parallel_devices: int = Field(
+        default=DEFAULT_MAX_PARALLEL_TARGETS,
         ge=1,
-        le=MAX_PARALLEL_LIMIT,
-        title="Parallel checks",
-        description="How many endpoints are checked at the same time (1-50). Defaults to 10.",
-        json_schema_extra={"x_advanced": True},
+        le=MAX_PARALLEL_DEVICES_LIMIT,
+        title="Max Parallel Devices",
+        description="Endpoints checked at the same time (1 = one after another). Defaults to 10.",
     )
 
     @field_validator("warn_days")
@@ -1207,7 +1204,7 @@ class TlsProbeHandler(BaseHandler):
                 records = await for_each_target_device(
                     plans,
                     run.probe_endpoint,
-                    max_parallel=min(config.max_parallel, len(plans)),
+                    max_parallel=min(config.max_parallel_devices, len(plans)),
                 )
 
         for record in records:

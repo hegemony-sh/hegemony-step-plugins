@@ -40,7 +40,7 @@ from cryptography.x509.oid import (
     NameOID,
 )
 
-from hegemony_step_sdk import HandlerContext, HandlerServices
+from hegemony_step_sdk import MAX_PARALLEL_DEVICES_LIMIT, HandlerContext, HandlerServices
 from hegemony_step_sdk.docs import check_page, load_docs_bundle
 from hegemony_steps_probe import tls_certs, tls_check
 from hegemony_steps_probe.tls_certs import (
@@ -1446,7 +1446,9 @@ async def test_parallelism_is_bounded_and_results_keep_their_order(monkeypatch):
 
     monkeypatch.setattr(tls_check, "tls_handshake", fake_handshake)
     endpoints = [f"192.0.2.{index}:443" for index in range(1, 13)]
-    result = await run_step({"endpoints": endpoints, "max_parallel": 3, "require_reachable": False})
+    result = await run_step(
+        {"endpoints": endpoints, "max_parallel_devices": 3, "require_reachable": False}
+    )
     assert peak == 3
     assert [r["host"] for r in result.output["endpoints"]] == [
         f"192.0.2.{index}" for index in range(1, 13)
@@ -1614,7 +1616,12 @@ async def test_configuration_errors_stop_before_any_connection(pki):
         "ca_bundle: no PEM certificate found"
     ]
     assert handler.validate_config({"expected_fingerprints": {"a.example:443": "zz"}})
-    assert handler.validate_config({"max_parallel": 51})
+    # The same parallelism setting and bounds as every other handler that runs per target.
+    assert "max_parallel" not in TlsProbeConfig.model_fields
+    limit = MAX_PARALLEL_DEVICES_LIMIT
+    assert handler.validate_config({"max_parallel_devices": limit}) == []
+    assert handler.validate_config({"max_parallel_devices": limit + 1})
+    assert handler.validate_config({"max_parallel_devices": 0})
     assert handler.validate_config({"warn_days": [30, -1]})
 
 

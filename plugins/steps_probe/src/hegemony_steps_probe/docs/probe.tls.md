@@ -111,10 +111,10 @@ leaves that endpoint's certificate fields empty with the reason in `error`,
 which fails a pasted certificate and, with Require reachable on, the
 endpoint.
 
-Parallel checks (default 10, up to 50) sets how many endpoints are checked at
-once. When the flow runs under an egress policy, every connection the step
-makes, OCSP requests, CRL downloads and issuer downloads included, is checked
-against it.
+Max Parallel Devices sets how many endpoints are checked at the same time
+(default 10, up to 32); 1 checks them one after another. When the flow runs
+under an egress policy, every connection the step makes, OCSP requests, CRL
+downloads and issuer downloads included, is checked against it.
 
 ### Assertions
 
