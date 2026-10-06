@@ -13,8 +13,8 @@ import pytest
 
 from hegemony_steps_probe.dns_check import normalize_answer
 from hegemony_steps_probe.http_check import parse_status_spec, status_matches
-from hegemony_steps_shell.execute import ShellExecuteHandler, build_command
-from hegemony_steps_shell.templates import WHITESPACE_CONTROL
+from hegemony_steps_shell.execute import ShellExecuteHandler, build_command, pwsh_literal
+from hegemony_steps_shell.templates import PWSH_VALUES, WHITESPACE_CONTROL
 
 
 def test_build_command_default_passthrough():
@@ -236,32 +236,70 @@ def test_build_command_pwsh_wraps():
     assert composed == "pwsh -NoProfile -Command 'Get-Service nginx'"
 
 
-def test_build_command_pwsh_rejects_env():
-    with pytest.raises(ValueError, match="pwsh"):
-        build_command("Get-Date", shell="pwsh", env={"A": "1"})
+def test_build_command_pwsh_sets_env_as_powershell_literals():
+    composed = build_command("Write-Output $env:A", shell="pwsh", env={"A": "x’; y", "B": "1"})
+    assert composed == (
+        "pwsh -NoProfile -Command "
+        + shlex.quote("$env:A = 'x’’; y'; $env:B = '1'; Write-Output $env:A")
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "literal"),
+    [
+        ("plain", "'plain'"),
+        ("it's", "'it''s'"),
+        ("‘smart’ ‚low‛", "'‘‘smart’’ ‚‚low‛‛'"),
+        ('$(Get-Date) `n "x"', "'$(Get-Date) `n \"x\"'"),
+    ],
+)
+def test_pwsh_literal_doubles_every_single_quote_powershell_reads(value, literal):
+    assert pwsh_literal(value) == literal
+
+
+PWSH_HOSTILE = [
+    "x’; Write-Output PWNED; ’",
+    "x‘; Write-Output PWNED; ‘",
+    "x'; Write-Output PWNED; '",
+    "$(Write-Output PWNED)",
+    'a"b`n@HOME, c',
+    "line1\nline2",
+]
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None or shutil.which("sh") is None, reason="needs pwsh")
+@pytest.mark.parametrize("value", PWSH_HOSTILE)
+def test_pwsh_env_values_stay_data_in_real_powershell(value):
+    """Run the composed line as a POSIX login shell would: the value comes back exactly."""
+    composed = build_command("[Console]::Out.Write($env:V)", shell="pwsh", env={"V": value})
+    done = subprocess.run(["sh", "-c", composed], capture_output=True, text=True, check=True)
+    assert done.stdout == value
+    assert "PWNED" not in done.stdout.replace(value, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Write-Output {{ inputs.v | quote }}",
+        "Restart-Service {{ inputs.name }}",
+        "{% for h in inputs.hosts %}Test-Connection {{ h | quote }}; {% endfor %}",
+        "Write-Output {{ inputs.v",
+    ],
+)
+def test_pwsh_lines_take_no_template_values(command):
+    errors = ShellExecuteHandler().template_errors({"commands": [command], "shell": "pwsh"})
+    assert errors == [f"commands line 1: {PWSH_VALUES}"]
+
+
+def test_pwsh_lines_without_values_pass():
+    handler = ShellExecuteHandler()
+    for command in ["Get-Service nginx", "{% if inputs.force %}Stop-Service x{% endif %}"]:
+        assert handler.template_errors({"commands": [command], "shell": "pwsh"}) == []
 
 
 def test_build_command_rejects_unknown_shell():
     with pytest.raises(ValueError, match="unsupported"):
         build_command("ls", shell="zsh")
-
-
-async def test_shell_execute_rejects_pwsh_env_combo():
-    from hegemony_step_sdk import HandlerContext
-
-    ctx = HandlerContext(
-        run_id="r",
-        flow_id="f",
-        step_run_id="sr",
-        step_id="s",
-        config={"commands": ["Get-Date"], "shell": "pwsh", "env": {"A": "1"}},
-        target_roles=["primary"],
-        target_devices_by_role={"primary": [{"id": "d1", "name": "h1", "mgmt_host": "192.0.2.1"}]},
-        # services intentionally unbound: the config error returns first
-    )
-    result = await ShellExecuteHandler().execute(ctx)
-    assert result.success is False
-    assert "pwsh" in (result.error or "")
 
 
 def test_parse_status_spec_ranges_and_codes():

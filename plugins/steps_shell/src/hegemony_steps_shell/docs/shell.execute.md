@@ -52,12 +52,16 @@ in `pwsh -NoProfile -Command '...'` for PowerShell hosts. Environment
 variables are quoted and set for every command: with the default interpreter
 they are exported in the login shell first (`export KEY=VALUE; ...`, so a
 POSIX login shell is needed), with `sh` and `bash` they are prefixed as
-`env KEY=VALUE`. Either way `"$KEY"` works anywhere in the line. Names are
+`env KEY=VALUE`. Either way `"$KEY"` works anywhere in the line. With `pwsh`
+they are set at the start of the PowerShell command
+(`$env:KEY = '...'; ...`, the value as a PowerShell single-quoted string) and
+read as `$env:KEY`. A `pwsh` line takes no `{{ }}` values: `| quote` is POSIX
+quoting, and PowerShell also reads typographic quotes (‘ ’) as quotes, so a
+value could end the string. Pass values to `pwsh` in Environment Variables. Names are
 written into the command line as they are, so they must be letters, digits
 and `_`, not starting with a digit; the values are the quoted part. Their values
 appear on the remote command line (for example in the host's process list),
-so they are not a place for secrets. They cannot be combined with the `pwsh`
-interpreter — that combination is rejected before anything runs.
+so they are not a place for secrets.
 
 "Stop on first failure" (on by default) skips a device's remaining commands
 after the first non-zero exit code; turn it off to run every command and
@@ -90,10 +94,9 @@ Metrics record `command_count` (configured commands), `device_count`, and
 
 The step fails immediately — before contacting any host — when a command
 line inserts a `{{ }}` value without `| quote` or inside quotes, a comment,
-backticks or a here-document, or uses whitespace control, when no target
-devices or no
-commands are configured, or when environment variables are combined with the
-`pwsh` interpreter. Per host, it fails when the device has
+backticks or a here-document, or uses whitespace control, when a `pwsh` line
+inserts a `{{ }}` value, or when no target devices or no commands are
+configured. Per host, it fails when the device has
 no management host, when the shell connection cannot be opened, when a command
 exits non-zero, or when a command times out or the transport raises an error
 (which also skips that host's remaining commands). One failing host does not

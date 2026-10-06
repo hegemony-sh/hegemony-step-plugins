@@ -127,6 +127,28 @@ def command_template_problem(command: str) -> str | None:
     return None
 
 
+PWSH_VALUES = (
+    "pwsh command lines cannot take {{ }} values: | quote only keeps a value one "
+    "word for POSIX shells, and PowerShell reads quotes differently. Pass the value "
+    "in Environment Variables and read it as $env:NAME"
+)
+
+
+def inserts_values(command: str) -> bool:
+    """Whether ``command`` renders any ``{{ }}`` value into its text (invalid counts)."""
+    if "{" not in command:
+        return False
+    try:
+        tree = _ENV.parse(command)
+    except TemplateSyntaxError:
+        return True
+    return any(
+        not isinstance(child, nodes.TemplateData)
+        for output in tree.find_all(nodes.Output)
+        for child in output.nodes
+    )
+
+
 def _is_quoted(expression: nodes.Node) -> bool:
     """Whether the whole expression is ``<value> | quote`` with no arguments."""
     return (

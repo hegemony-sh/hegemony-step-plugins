@@ -33,7 +33,7 @@ from hegemony_step_sdk import (
     for_each_target_device,
 )
 
-from .templates import command_template_problem
+from .templates import PWSH_VALUES, command_template_problem, inserts_values
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,17 @@ _SH_FAMILY = frozenset({"sh", "bash"})
 #: An environment variable name: it is written into the command line as is
 #: (``export NAME=...``, ``env NAME=...``), so anything else could be syntax.
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+#: The characters PowerShell reads as a single quote: the ASCII one and the
+#: typographic ones (U+2018 to U+201B). Inside a single-quoted string each is
+#: written twice to stand for itself.
+_PWSH_SINGLE_QUOTES = frozenset("'\u2018\u2019\u201a\u201b")
+
+
+def pwsh_literal(value: str) -> str:
+    """``value`` as a PowerShell single-quoted string: nothing in it is expanded or run."""
+    return "'" + "".join(char * 2 if char in _PWSH_SINGLE_QUOTES else char for char in value) + "'"
+
 
 #: Time the step keeps, before its timeout, to close its sessions and report.
 #: A command never runs past it, whatever its own limit, so the step returns
@@ -62,18 +73,23 @@ def command_timeout(deadline: float, limit: float) -> float | None:
     return min(limit, left)
 
 
-def command_template_errors(commands: Any) -> list[str]:
+def command_template_errors(commands: Any, shell: Any = "default") -> list[str]:
     """One error per command line that could let a rendered value become shell syntax.
 
     A rendered value lands in the remote shell's command line, so an input of
     ``x; rm -rf ~`` would run a second command. See :mod:`.templates` for what
     a line must look like: every value ``| quote``-d and standing unquoted.
+    ``| quote`` is POSIX quoting, so a ``pwsh`` line takes no values at all:
+    PowerShell reads typographic quotes as quotes, and they pass through it.
     """
     if not isinstance(commands, list):
         return []
     errors: list[str] = []
     for number, command in enumerate(commands, start=1):
         if not isinstance(command, str):
+            continue
+        if shell == "pwsh" and inserts_values(command):
+            errors.append(f"commands line {number}: {PWSH_VALUES}")
             continue
         problem = command_template_problem(command)
         if problem:
@@ -94,15 +110,17 @@ def build_command(
       works anywhere in the line (POSIX login shells).
     - ``sh``/``bash``: the command is quoted into ``<shell> -c '...'``.
     - ``pwsh``: the command is quoted into ``pwsh -NoProfile -Command '...'``;
-      env vars are not supported (no portable prefix syntax).
+      env vars are set inside that command (``$env:KEY = '...'; command``),
+      quoted as PowerShell literals, so ``$env:KEY`` works anywhere in it.
 
     Raises ``ValueError`` for unsupported combinations.
     """
     env = env or {}
     if shell == "pwsh":
-        if env:
-            raise ValueError("env variables are not supported with the pwsh interpreter")
-        return f"pwsh -NoProfile -Command {shlex.quote(command)}"
+        assignments = "".join(
+            f"$env:{key} = {pwsh_literal(value)}; " for key, value in sorted(env.items())
+        )
+        return f"pwsh -NoProfile -Command {shlex.quote(assignments + command)}"
 
     pairs = " ".join(f"{key}={shlex.quote(value)}" for key, value in sorted(env.items()))
 
@@ -131,6 +149,7 @@ class ShellExecuteConfig(BaseModel):
             "Each line runs as its own exec-channel command with its own exit code. "
             "A {{ }} value must end with | quote and stand outside quotes, e.g. "
             "systemctl restart {{ inputs.service | quote }}, or come in through "
+            "Environment Variables. With pwsh, values only come in through "
             "Environment Variables."
         ),
         json_schema_extra={
@@ -158,9 +177,9 @@ class ShellExecuteConfig(BaseModel):
         title="Environment Variables",
         description=(
             "KEY=VALUE per line, quoted and set for every command, which reads them "
-            'as "$KEY". The safe way to pass run inputs or step results. Names are '
-            "letters, digits and _ (not starting with a digit). Values appear on the "
-            "remote command line, so use secrets elsewhere. Not supported with pwsh."
+            'as "$KEY" ($env:KEY with pwsh). The safe way to pass run inputs or step '
+            "results. Names are letters, digits and _ (not starting with a digit). "
+            "Values appear on the remote command line, so use secrets elsewhere."
         ),
         json_schema_extra={
             "x_widget": "env-vars",
@@ -239,7 +258,7 @@ class ShellExecuteHandler(BaseHandler):
 
     def template_errors(self, config: dict[str, Any]) -> list[str]:
         """Refuse command lines whose ``{{ }}`` values would not be single literal words."""
-        return command_template_errors(config.get("commands"))
+        return command_template_errors(config.get("commands"), config.get("shell", "default"))
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         # Commands stop in time for the step to report before its timeout.
