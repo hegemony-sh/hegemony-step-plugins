@@ -37,8 +37,10 @@ from hegemony_steps_container.runner import (
     StagedFile,
     container_config_from,
     deadline_shell_lines,
+    report_timeout_cut,
     resolve_secret_values,
     secret_map_errors,
+    step_container_timeout,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,7 +78,7 @@ LockTimeout = Annotated[
 #: write the run's shared workspace, and have a POSIX sh with ``timeout``.
 #: tf.plan records the image's digest and tf.apply runs that.
 DEFAULT_IMAGES: dict[str, str] = {
-    "opentofu": "ghcr.io/hegemony-sh/opentofu-runner:0.18",
+    "opentofu": "ghcr.io/hegemony-sh/opentofu-runner:0.19",
     "terraform": "hashicorp/terraform:1.16.4",
 }
 BINARIES: dict[str, str] = {"opentofu": "tofu", "terraform": "terraform"}
@@ -270,18 +272,18 @@ def state_backend_env(access: StateBackendAccess) -> dict[str, str]:
     }
 
 
-def container_timeout(ctx: HandlerContext, config: ContainerExecutionConfig) -> int:
+async def container_timeout(ctx: HandlerContext, config: ContainerExecutionConfig) -> int:
     """How long the step's container may run, resolved once for the container and its state access.
 
     The step's own ``timeout_seconds`` when it sets one, else the step timeout the
     host resolved (the step's policy, the flow's default, the handler's default),
-    which is what the runner falls back to. The config model's own default must
-    not stand in for an absent value: state access granted for that would end
-    while the container still runs.
+    which is what the runner falls back to; never longer than the step timeout
+    (see :func:`step_container_timeout`), and a cut is reported in the step's
+    events.
     """
-    if "timeout_seconds" in config.model_fields_set:
-        return config.timeout_seconds
-    return ctx.timeout_seconds
+    timeout = step_container_timeout(ctx, config.timeout_seconds)
+    await report_timeout_cut(ctx, config.timeout_seconds, timeout)
+    return timeout
 
 
 @asynccontextmanager

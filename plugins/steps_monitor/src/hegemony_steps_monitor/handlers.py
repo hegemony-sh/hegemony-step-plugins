@@ -15,7 +15,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, StepKind
+from hegemony_step_sdk import (
+    BaseHandler,
+    HandlerContext,
+    HandlerResult,
+    InvalidConfigError,
+    StepKind,
+)
 
 from .config import ConnectivityMonitorConfig
 from .targets import extract_ip_addresses
@@ -41,11 +47,13 @@ class ConnectivityMonitorHandler(BaseHandler):
     }
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
-        check_type = ctx.config.get("check_type", "tcp_connect")
-        port = ctx.config.get("port", 22)
-        interval_ms = ctx.config.get("interval_ms", 5000)
-        timeout_sec = ctx.config.get("timeout_sec", 10)
-        schedule_mode = ctx.config.get("schedule_mode", "count")
+        try:
+            config = self.parse_config(ctx.config, ConnectivityMonitorConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        check_type = config.check_type
+        interval_ms = config.interval_ms
+        schedule_mode = config.schedule_mode
 
         services = ctx.require_services()
         if not services.is_check_registered(check_type):
@@ -127,26 +135,25 @@ class ConnectivityMonitorHandler(BaseHandler):
                 success=False, error="No valid targets with addresses", summary="No targets found"
             )
 
-        options: dict[str, Any] = {"timeout_ms": timeout_sec * 1000}
+        options: dict[str, Any] = {"timeout_ms": config.attempt_timeout_seconds * 1000}
         if check_type in ("tcp_connect", "http_health", "tls_handshake", "ssh_banner"):
-            options["port"] = port
+            options["port"] = config.port
         if check_type == "http_health":
-            options["url_path"] = ctx.config.get("url_path", "/health")
+            options["url_path"] = config.url_path or "/health"
         if check_type == "icmp_ping":
             options["count"] = ctx.config.get("ping_count", 3)
         # Forward the authenticated SOCKS proxy so a monitor can watch targets
         # only reachable through a bastion (e.g. a lab management subnet behind
         # dind:1080). The TCP-based checks tunnel through it; the probe layer
         # rejects it for icmp_ping. Form: socks5[h]://[user:pass@]host:port
-        socks_proxy = ctx.config.get("socks_proxy")
-        if isinstance(socks_proxy, str) and socks_proxy.strip():
-            options["socks_proxy"] = socks_proxy.strip()
+        if config.socks_proxy.strip():
+            options["socks_proxy"] = config.socks_proxy.strip()
 
         schedule: dict[str, Any] = {"schedule_mode": schedule_mode, "interval_ms": interval_ms}
         if schedule_mode == "count":
-            schedule["count"] = ctx.config.get("count", 10)
+            schedule["count"] = config.count
         elif schedule_mode == "duration":
-            schedule["duration_s"] = ctx.config.get("duration_sec", 60)
+            schedule["duration_s"] = config.duration_seconds
 
         monitor_config = {
             "monitor_id": monitor_id,

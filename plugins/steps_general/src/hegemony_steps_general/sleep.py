@@ -7,13 +7,14 @@
 import asyncio
 import logging
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import (
     BaseHandler,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
 )
 
@@ -25,17 +26,20 @@ class SleepConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    seconds: int = Field(
+    duration_seconds: int = Field(
         default=30,
         ge=1,
+        # Steps saved before the rename carry seconds.
+        validation_alias=AliasChoices("duration_seconds", "seconds"),
         title="Duration (seconds)",
         description=(
             "How many seconds the flow pauses at this step before moving on. "
             "Must be at least 1; defaults to 30."
         ),
+        json_schema_extra={"x_legacy_keys": ["seconds"]},
     )
-    message: str = Field(
-        default="",
+    message: str | None = Field(
+        default=None,
         title="Message (optional)",
         description=(
             "Note recorded as the step summary and in the sleep evidence, "
@@ -47,12 +51,7 @@ class SleepConfig(BaseModel):
 
 
 class SleepHandler(BaseHandler):
-    """Handler for simple delays/sleep.
-
-    Config:
-        seconds: int - Number of seconds to sleep (required)
-        message: str - Optional message to log
-    """
+    """Handler for simple delays/sleep (settings: :class:`SleepConfig`)."""
 
     handler_id = "general.sleep"
     supported_kinds = [StepKind.WAIT, StepKind.ACTION]
@@ -61,20 +60,17 @@ class SleepHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = SleepConfig
-    default_config = {"seconds": 30}
+    default_config = {"duration_seconds": 30}
+    run_timeout_field = "duration_seconds"
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Sleep for configured duration."""
-        seconds = ctx.config.get("seconds", 0)
-        default_message = f"Sleeping for {seconds} seconds"
-        message = ctx.config.get("message", default_message)
-
-        if seconds <= 0:
-            return HandlerResult(
-                success=False,
-                error="Invalid sleep duration: must be > 0",
-                summary="Sleep configuration error",
-            )
+        try:
+            config = self.parse_config(ctx.config, SleepConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        seconds = config.duration_seconds
+        message = config.message or f"Sleeping for {seconds} seconds"
 
         logger.info(f"Sleep starting: {seconds}s - {message}")
         await asyncio.sleep(seconds)

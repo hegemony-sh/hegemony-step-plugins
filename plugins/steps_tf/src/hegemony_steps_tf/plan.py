@@ -258,11 +258,11 @@ class TfPlanConfig(TfContainerConfig):
         title="Image",
         description=(
             "Container image with the tool, run as root with a POSIX sh. Leave empty for "
-            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.18 for OpenTofu, "
+            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.19 for OpenTofu, "
             "hashicorp/terraform at a pinned version for Terraform."
         ),
         json_schema_extra={
-            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.18",
+            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.19",
             "x_advanced": True,
         },
     )
@@ -394,6 +394,7 @@ class TfPlanHandler(BaseHandler):
     default_timeout_seconds = 1800
     config_model = TfPlanConfig
     default_config = {"engine": "opentofu", "state": "managed", "timeout_seconds": 1800}
+    run_timeout_field = "timeout_seconds"
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         errors = super().validate_config(config)
@@ -437,7 +438,7 @@ class TfPlanHandler(BaseHandler):
         shared = shared_workspace_mounted(ctx)
         workdir = workdir_for(ctx.step_id) if shared else LOCAL_WORKDIR
         state_name = config.state_name.strip() if config.state == "managed" else None
-        timeout = container_timeout(ctx, config)
+        timeout = await container_timeout(ctx, config)
 
         try:
             async with managed_state_access(

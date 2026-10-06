@@ -21,6 +21,7 @@ from .concurrency import (
 )
 from .contract import (
     DEFAULT_DEVICE_PLATFORM,
+    DEFAULT_RUN_TIMEOUT_MARGIN_SECONDS,
     MAX_CHAIN_OUTPUT_CHARS,
     OUTPUT_EVENT_CHUNK_CHARS,
     OUTPUT_EVENT_MAX_CHARS,
@@ -30,6 +31,7 @@ from .contract import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    InvalidConfigError,
     command_label,
     resolve_target_devices_for_roles,
 )
@@ -73,6 +75,7 @@ __all__ = [
     "BUILD_NETWORK_NONE",
     "DEFAULT_DEVICE_MGMT_PORT",
     "DEFAULT_DEVICE_PLATFORM",
+    "DEFAULT_RUN_TIMEOUT_MARGIN_SECONDS",
     "MAX_CHAIN_OUTPUT_CHARS",
     "MAX_PARALLEL_DEVICES_LIMIT",
     "OUTPUT_EVENT_CHUNK_CHARS",
@@ -97,6 +100,7 @@ __all__ = [
     "HandlerResult",
     "HandlerServices",
     "HandlerTargeting",
+    "InvalidConfigError",
     "JumpHostSpec",
     "ProbeRegistry",
     "ProbeResult",
