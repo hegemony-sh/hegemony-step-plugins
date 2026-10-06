@@ -16,7 +16,7 @@
 # release tag vX.Y.Z as ghcr.io/hegemony-sh/ansible-runner:X.Y.Z and :X.Y. The
 # step's default names X.Y (DEFAULT_IMAGE in
 # plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py), currently
-# ghcr.io/hegemony-sh/ansible-runner:0.16. To customise it, build and push it
+# ghcr.io/hegemony-sh/ansible-runner:0.18. To customise it, build and push it
 # under your own tag and set the step's Execution image:
 #
 #   docker build -t registry.example.com/ansible-runner:custom images/ansible-runner

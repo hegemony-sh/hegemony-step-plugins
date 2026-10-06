@@ -116,7 +116,8 @@ BuildKit itself.
 
 ## Output
 
-While the build runs, its log streams into the step's live log. Later steps
+While the build runs, its log streams into the step's live log, up to 5 MB.
+Past that the live log says so and shows no more; the build goes on. Later steps
 can read `steps.NODE_ID.output.reference`: for a pushed image, the image by
 digest (`registry.hegemony.internal/orgs/ORG/NAME@sha256:…`, or
 `ghcr.io/acme/NAME@sha256:…`), which a `container.run` step can run exactly.

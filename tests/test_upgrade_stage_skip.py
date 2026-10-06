@@ -25,10 +25,14 @@ from hegemony_steps_cisco_iosxe.upgrade.cisco.iosxe_common import stage_image
 class _Result:
     output: str
     exit_code: int = 0
+    error: str | None = None
 
 
 class _FakeTransport:
-    """Scripted SSH transport: dir listing, verify /md5 (in order), HTTP transfer."""
+    """Scripted SSH transport: dir listing, verify /md5 (in order), HTTP transfer.
+
+    After a transfer, a dir that answered "No such file" lists the file.
+    """
 
     def __init__(self, *, dir_output: str, md5_outputs: list[str] | None = None) -> None:
         self._dir_output = dir_output
@@ -38,6 +42,8 @@ class _FakeTransport:
 
     async def execute_commands(self, commands):
         self.commands.extend(commands)
+        if self.transfers and "No such file" in self._dir_output:
+            return [_Result(_EXISTS)]
         return [_Result(self._dir_output)]
 
     async def execute_command_timing(self, command, **kwargs):
@@ -49,6 +55,15 @@ class _FakeTransport:
         return {"transferred": True, "output": "Copied file"}
 
 
+_MD5 = "0123456789abcdef0123456789abcdef"
+# What IOS-XE prints for "verify /md5 <file> <hash>": a match, and a mismatch.
+_VERIFIED = f"..........Done!\nVerified (flash:img.bin) = {_MD5}\n"
+_MISMATCH = (
+    "..........Done!\n"
+    "%Error verifying flash:img.bin\n"
+    "Computed signature d41d8cd98f00b204e9800998ecf8427e\n"
+    f"Submitted signature {_MD5}\n"
+)
 _EXISTS = "-rw-  987654321  Jan 1 2026  img.bin"
 _MISSING = "%Error opening flash:img.bin (No such file or directory)"
 # The IOS-XE dir format the size parser understands: index, size, date, name.
@@ -76,8 +91,8 @@ async def _stage(ssh, **overrides: Any):
 
 @pytest.mark.asyncio
 async def test_existing_file_with_verified_md5_is_skipped():
-    ssh = _FakeTransport(dir_output=_EXISTS, md5_outputs=["Verified (flash:img.bin)"])
-    result = await _stage(ssh, expected_md5="abc123")
+    ssh = _FakeTransport(dir_output=_EXISTS, md5_outputs=[_VERIFIED])
+    result = await _stage(ssh, expected_md5=_MD5)
     assert result.success and result.skipped and result.hash_verified
     assert ssh.transfers == []
 
@@ -86,9 +101,9 @@ async def test_existing_file_with_verified_md5_is_skipped():
 async def test_existing_file_failing_md5_is_retransferred():
     ssh = _FakeTransport(
         dir_output=_EXISTS,
-        md5_outputs=["%Error: hash does not match", "Verified (flash:img.bin)"],
+        md5_outputs=[_MISMATCH, _VERIFIED],
     )
-    result = await _stage(ssh, expected_md5="abc123")
+    result = await _stage(ssh, expected_md5=_MD5)
     assert result.success and not result.skipped
     assert ssh.transfers == ["flash:img.bin"]
 
@@ -104,8 +119,8 @@ async def test_existing_file_without_checksum_is_retransferred():
 
 @pytest.mark.asyncio
 async def test_overwrite_forces_transfer_despite_verified_md5():
-    ssh = _FakeTransport(dir_output=_EXISTS, md5_outputs=["Verified (flash:img.bin)"])
-    result = await _stage(ssh, expected_md5="abc123", overwrite=True)
+    ssh = _FakeTransport(dir_output=_EXISTS, md5_outputs=[_VERIFIED])
+    result = await _stage(ssh, expected_md5=_MD5, overwrite=True)
     assert result.success and not result.skipped
     assert ssh.transfers == ["flash:img.bin"]
     # Overwrite skips the pre-check entirely; verification still runs after.
@@ -114,8 +129,8 @@ async def test_overwrite_forces_transfer_despite_verified_md5():
 
 @pytest.mark.asyncio
 async def test_missing_file_is_transferred():
-    ssh = _FakeTransport(dir_output=_MISSING, md5_outputs=["Verified (flash:img.bin)"])
-    result = await _stage(ssh, expected_md5="abc123")
+    ssh = _FakeTransport(dir_output=_MISSING, md5_outputs=[_VERIFIED])
+    result = await _stage(ssh, expected_md5=_MD5)
     assert result.success and not result.skipped
     assert ssh.transfers == ["flash:img.bin"]
 

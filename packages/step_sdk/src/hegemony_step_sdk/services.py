@@ -434,6 +434,19 @@ class HandlerServices(Protocol):
         """
         ...
 
+    async def release_state_hold(self, name: str) -> bool:
+        """End this run's hold on the managed state ``name`` early.
+
+        For a hold taken with ``open_state_backend(..., hold_until_apply=True)``
+        that no apply will end, e.g. when there is nothing to apply. ``name``
+        is the state name given to ``open_state_backend``. Returns True if a
+        hold was released, False otherwise (the run held none, or the host
+        could not end it, which it logs). Hosts without support raise
+        ``NotImplementedError``; a platform older than this method has no such
+        attribute at all, so look it up with ``getattr``.
+        """
+        raise NotImplementedError
+
     def validate_secret_ref(
         self, ref: Any, *, field_name: str, required: bool = False
     ) -> str | None:

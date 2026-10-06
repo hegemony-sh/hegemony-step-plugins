@@ -16,9 +16,12 @@ What gets removed depends on Upgrade Mode. In install mode the step runs
 `install remove inactive`, letting the device delete packages that are not
 part of the running software; confirmation prompts are answered
 automatically. In bundle mode the step lists the `.bin` images on flash,
-keeps every image referenced by the boot configuration, keeps the newest
+keeps every image the boot variables name (for the current boot and the
+next reload), keeps the newest
 old images up to Versions to Keep (default 1, sorted by filename), and
-deletes the rest with `delete /force`.
+deletes the rest with `delete /force`. When the boot variable names no
+image, the device boots the first image it finds, so the step deletes
+nothing and fails that device.
 
 The "Remove inactive packages/old images" toggle is the master switch: when
 it is off, the step does nothing and succeeds immediately with a "skipped"
@@ -43,11 +46,14 @@ reports how many devices were cleaned and how many items were removed.
 ## When It Fails
 
 The step fails when no target devices are configured, when no upgrade driver
-exists for the configured platform and mode, or when any device fails:
-a missing management host, an SSH or command error, or — in install mode —
-`install remove inactive` output containing an error or failure marker. In
-bundle mode a single image that cannot be deleted is logged and skipped
-without failing the device, so the step reports the files it did remove.
+exists for the configured platform and mode, or when any device fails: a
+missing management host, a device that cannot be reached, or a command that
+fails. In install mode `install remove inactive` must end with
+`SUCCESS: install_remove` or say there is nothing to remove; an error, a
+`FAILED` line or no answer fails the device. In bundle mode `show boot` and
+the `.bin` listing must succeed and the boot variable must name an image.
+An image that cannot be deleted fails the device, but the step goes on with
+the other images and reports the files it did remove.
 
 All devices must succeed for the step to succeed. The step's default timeout
 is 7200 seconds; the `install remove inactive` command itself is given up to

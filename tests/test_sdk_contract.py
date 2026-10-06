@@ -8,6 +8,7 @@ Pins the public API plugin authors rely on; the host keeps a mirror parity
 test so the duck-typed platform registry and this SDK stay in lock-step.
 """
 
+import asyncio
 import dataclasses
 import inspect
 from typing import Any
@@ -159,6 +160,23 @@ def test_secret_write_result_carries_names_and_the_reference_only():
 def test_the_abi_version_stays_for_optional_services():
     """New optional services and handler flags are not an incompatible change."""
     assert sdk.SDK_ABI_VERSION == 1
+
+
+def test_handler_services_declares_release_state_hold():
+    """Added later: optional, and the default says a host does not support it."""
+    method = sdk.HandlerServices.release_state_hold
+    assert inspect.iscoroutinefunction(method)
+    assert list(inspect.signature(method).parameters) == ["self", "name"]
+
+    class Host(sdk.HandlerServices):
+        pass
+
+    try:
+        asyncio.run(Host().release_state_hold("network-core"))
+    except NotImplementedError:
+        pass
+    else:
+        raise AssertionError("a host without support must raise NotImplementedError")
 
 
 def test_state_backend_access_keeps_the_token_out_of_repr():

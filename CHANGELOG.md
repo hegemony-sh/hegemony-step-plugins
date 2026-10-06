@@ -1,3 +1,50 @@
+## [0.18.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.17.0...v0.18.0) (2026-10-06)
+
+### ⚠ BREAKING CHANGES
+
+* **tf:** tf.apply refuses a plan made by the previous version of
+tf.plan, which recorded no digest. Plan again after upgrading.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+
+### Features
+
+* **sdk:** let a step end its run's hold on a managed state ([91c4f3a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/91c4f3ab8aaa0849b50abaf5287ced3d20bf75ad))
+
+### Bug Fixes
+
+* **container:** cap live output ([fe2be08](https://github.com/hegemony-sh/hegemony-step-plugins/commit/fe2be0862eaec29af740a7b7d5d9f1fb31d83129))
+* **container:** count the live log as emitted, and mark output dropped at the budget ([7bbce80](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7bbce8061a32afeac0959127f254b0b4daae7146))
+* **container:** stop long output lines from hanging container.run ([a059c6b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a059c6be49e59cdd10f8ffe284b0c9fa137d77bf))
+* **tf:** end the state hold when there is nothing to apply ([a0a025e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a0a025eb3da287d343283c52639a484f9c8174f3))
+* **tf:** refuse to apply a plan file that changed after planning ([7eeaac7](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7eeaac738e32e102d1fdb82585c23fed247bb215))
+* **tf:** take the plan's digest and readable forms from one private file ([6adbd29](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6adbd295075c1eb1c5ef5c6ecdd8a42a8fcf6db5))
+
+## [0.17.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.16.0...v0.17.0) (2026-10-06)
+
+### ⚠ BREAKING CHANGES
+
+* **iosxe:** the install step no longer sets the boot variable to
+packages.conf by itself. Flows that relied on the automatic boot rewrite
+must enable fix_boot_config.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+
+### Bug Fixes
+
+* **iosxe:** change the boot setting only when asked ([0c35d82](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0c35d82c0366780ed34af0c5e3c48d22cd9dc7dc))
+* **iosxe:** check every command's result ([3b8e1da](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3b8e1da5a5e76986e4b720c712ba33aae1c03e11))
+* **iosxe:** fail the MD5 check unless the device confirms the hash ([93ab133](https://github.com/hegemony-sh/hegemony-step-plugins/commit/93ab1334b573e1db9428ded4ab9116cd60ee9fd0))
+* **iosxe:** let cancelling a run close device sessions ([7a34c4d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7a34c4db81d39a61fab0e5922323cf3319c777c5))
+* **iosxe:** read the whole verify /md5 answer and check its file ([f66ee3e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f66ee3e2f27a17e272aba012063c23fff63ab1b6))
+* **iosxe:** report a failed install as failed ([59c5f3e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/59c5f3e44779d87ce02e8fc00d1e78df51049288))
+* **iosxe:** send bundle-mode boot changes in one session ([55d7978](https://github.com/hegemony-sh/hegemony-step-plugins/commit/55d79781bd4cf58f089350e76ef7a84c7eb45071))
+* **iosxe:** undo a boot change that failed part-way ([f878813](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f878813e5760b9b8958ab9a2397cb2e78adccb30))
+
 ## [0.16.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.15.0...v0.16.0) (2026-10-06)
 
 ### ⚠ BREAKING CHANGES

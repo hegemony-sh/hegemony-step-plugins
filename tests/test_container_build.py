@@ -35,6 +35,7 @@ from hegemony_steps_container.build import (
     DESTINATION_LOCAL,
     DESTINATION_PLATFORM,
     DESTINATION_REMOTE,
+    MAX_LOG_BYTES,
     RUN_LABEL,
     STEP_LABEL,
     BuildImageHandler,
@@ -51,6 +52,7 @@ from hegemony_steps_container.build import (
     same_registry_host,
     tag_error,
 )
+from hegemony_steps_container.streams import MAX_LIVE_OUTPUT_BYTES
 
 RUN_ID = "1a2b3c4d-0000-4000-8000-000000000001"
 DIGEST = "sha256:" + "ab" * 32
@@ -1052,6 +1054,28 @@ async def test_a_very_long_output_line_is_logged_whole(fake_docker, monkeypatch)
     assert "#5 0.200 " + "x" * 200_000 + "\n#12 pushing layers done" in log
     streamed = "".join(message for message, attrs in events if attrs.get("milestone") == "output")
     assert "x" * 200_000 in streamed
+
+
+@pytest.mark.asyncio
+async def test_the_live_log_stops_at_its_limit_and_the_log_is_still_kept() -> None:
+    events: list[str] = []
+
+    async def emit(message: str, attrs: dict | None = None) -> None:
+        events.append(message)
+
+    log = _BuildLog(emit)
+    line = b"#7 " + b"z" * 96 + b"\n"
+    for _ in range((MAX_LIVE_OUTPUT_BYTES + 1024 * 1024) // len(line)):
+        await log.add(line)
+    await log.add(b"ERROR: failed to build\n")
+    await log.flush()
+    live = "".join(events)
+    assert live.count("[Live output stops here, at its 5 MB limit; the build goes on.") == 1
+    assert len(live.encode()) <= MAX_LIVE_OUTPUT_BYTES + 300
+    # The evidence and the error line still see the whole output.
+    assert len(log.captured) == MAX_LOG_BYTES
+    assert log.truncated
+    assert list(log.tail)[-1] == "ERROR: failed to build"
 
 
 @pytest.mark.asyncio

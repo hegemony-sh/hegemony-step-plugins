@@ -7,9 +7,11 @@
 Nothing about the configuration is repeated: the apply runs in the plan step's
 working directory with the same image (by digest), so the lock file, providers, backend
 settings, and variables are the ones that were planned (and, typically,
-approved). The tool itself refuses the saved plan if the state changed since it
-was made. Only provider credentials, which are never stored in a plan, are
-given again.
+approved). The saved plan lies in the run's shared workspace, which every
+container step of the run can write, so the apply takes a private copy and
+refuses it unless it has the digest tf.plan recorded. The tool itself refuses
+the saved plan if the state changed since it was made. Only provider
+credentials, which are never stored in a plan, are given again.
 """
 
 from __future__ import annotations
@@ -36,6 +38,8 @@ from .common import (
     PLAN_FILE,
     PLAN_TEXT_MISSING_NOTE,
     RUN_SCRIPT,
+    SHA256_RE,
+    TF_ROOT,
     Engine,
     LockTimeout,
     StateMode,
@@ -47,6 +51,7 @@ from .common import (
     managed_state_access,
     managed_timeout_errors,
     public_outputs,
+    release_state_hold,
     script_header,
     secret_environment,
     shared_workspace_mounted,
@@ -65,6 +70,11 @@ ERRORED_STATE_FILE = f"{OUTPUT_DIR}/errored-state"
 ERRORED_STATE_ARTIFACT = "errored.tfstate.gz"
 #: Exit code the run script uses when the saved plan is gone.
 EXIT_NO_PLAN = 4
+#: Exit code the run script uses when the saved plan is not the one tf.plan made.
+EXIT_PLAN_CHANGED = 5
+#: The private copy of the saved plan that is checked and applied, and its check file.
+APPLIED_PLAN_FILE = f"{TF_ROOT}/plan.tfplan"
+APPLIED_PLAN_SUM_FILE = f"{TF_ROOT}/plan.sha256"
 #: Waits before each further attempt to save errored.tfstate (the first is immediate).
 SAVE_RETRY_WAITS = (10, 30)
 STALE_PLAN_MARKER = "Saved plan is stale"
@@ -95,11 +105,16 @@ def build_apply_script(
     engine: str,
     workdir: str,
     lock_timeout: str,
+    plan_sha256: str,
     *,
     deadline: int | None = None,
     kill_after: int = KILL_AFTER_SECONDS,
 ) -> str:
     """Apply the saved plan in the plan step's working directory.
+
+    The plan is copied out of the shared workspace first, and only that copy
+    is applied, once ``sha256sum -c`` finds it has ``plan_sha256`` (exit
+    :data:`EXIT_PLAN_CHANGED` otherwise).
 
     When the tool changed resources but could not save the resulting state
     (the backend was unreachable, refused the write, or the token ended), it
@@ -115,7 +130,16 @@ def build_apply_script(
     """
     tf = BINARIES[engine]
     run = "" if deadline is None else "bounded "
-    apply = [tf, "apply", "-input=false", "-no-color", f"-lock-timeout={lock_timeout}", PLAN_FILE]
+    if not SHA256_RE.fullmatch(plan_sha256):
+        raise ValueError("plan_sha256 must be 64 hex digits")
+    apply = [
+        tf,
+        "apply",
+        "-input=false",
+        "-no-color",
+        f"-lock-timeout={lock_timeout}",
+        APPLIED_PLAN_FILE,
+    ]
     # Without the lock: when the apply's own unlock failed too, this step still
     # holds the lock, and the platform lets the holder write without its ID.
     push = f"{tf} state push -lock=false errored.tfstate"
@@ -135,6 +159,12 @@ def build_apply_script(
                 f"  exit {EXIT_NO_PLAN}",
                 "fi",
                 f"cd {quoted_workdir}",
+                f"cp {PLAN_FILE} {APPLIED_PLAN_FILE}",
+                f"printf '%s  %s\\n' {plan_sha256} {APPLIED_PLAN_FILE} > {APPLIED_PLAN_SUM_FILE}",
+                f"if ! sha256sum -c {APPLIED_PLAN_SUM_FILE} > /dev/null 2>&1; then",
+                f"  echo {shlex.quote(PLAN_CHANGED_MESSAGE)} >&2",
+                f"  exit {EXIT_PLAN_CHANGED}",
+                "fi",
                 "set +e",
                 run + " ".join(shlex.quote(part) for part in apply),
                 "code=$?",
@@ -166,6 +196,10 @@ NO_PLAN_MESSAGE = (
     "The saved plan is gone: the run's shared workspace was removed (for example "
     "cleaned up after a worker restart while the run waited). Plan again."
 )
+PLAN_CHANGED_MESSAGE = (
+    "The saved plan changed since tf.plan made it, so it is not the plan that was "
+    "reviewed or approved; something else in the run wrote it. Plan again."
+)
 
 
 class PlanHandoff(BaseModel):
@@ -181,6 +215,10 @@ class PlanHandoff(BaseModel):
     cache_image: bool = True
     state: StateMode
     state_name: str = ""
+    # Whether the run still holds the managed state for this plan's apply.
+    state_held: bool = False
+    # The saved plan's digest when tf.plan made it (see read_plan_handoff).
+    plan_sha256: str = Field(pattern=SHA256_RE.pattern)
     working_dir: str
     apply_ready: bool
     has_changes: bool
@@ -199,6 +237,11 @@ def read_plan_handoff(plan_step: str, output: dict[str, Any]) -> PlanHandoff | s
         return (
             f"step {plan_step!r} is not a tf.plan step, or its plan was made by an "
             "older version of tf.plan: point Plan step at a tf.plan step and plan again"
+        )
+    if "plan_sha256" not in output:
+        return (
+            f"the plan of step {plan_step!r} was made by an older version of tf.plan, "
+            "which did not record the saved plan's digest: plan again"
         )
     try:
         handoff = PlanHandoff.model_validate(output)
@@ -278,9 +321,13 @@ class TfApplyHandler(BaseHandler):
                 "in the plan's working directory on the same worker"
             )
         if not handoff.has_changes:
+            summary = "Nothing to apply: the plan has no changes"
+            if handoff.state_held and handoff.state == "managed" and handoff.state_name.strip():
+                # No apply will end the plan's hold on the state: end it here.
+                summary += await release_state_hold(ctx, handoff.state_name.strip())
             return HandlerResult(
                 success=True,
-                summary="Nothing to apply: the plan has no changes",
+                summary=summary,
                 # The state is as the plan found it, and so are its outputs.
                 output={
                     "applied": False,
@@ -327,6 +374,7 @@ class TfApplyHandler(BaseHandler):
                             engine,
                             workdir,
                             config.lock_timeout.strip(),
+                            handoff.plan_sha256,
                             tool_deadline(timeout, config.stop_grace_seconds),
                             tool_kill_after(timeout, config.stop_grace_seconds),
                         ),
@@ -403,6 +451,8 @@ def apply_failure(
     errored = (outcome.collected.get(ERRORED_STATE_FILE) or b"").decode("utf-8", "replace")
     if outcome.exit_code == EXIT_NO_PLAN:
         return NO_PLAN_MESSAGE
+    if outcome.exit_code == EXIT_PLAN_CHANGED:
+        return PLAN_CHANGED_MESSAGE
     if errored.strip() == "kept":
         return (
             f"{tool} apply changed resources but could not save the resulting state to "
@@ -427,9 +477,9 @@ def apply_failure(
 
 
 def _script_file(
-    engine: str, workdir: str, lock_timeout: str, deadline: int, kill_after: int
+    engine: str, workdir: str, lock_timeout: str, plan_sha256: str, deadline: int, kill_after: int
 ) -> StagedFile:
     script = build_apply_script(
-        engine, workdir, lock_timeout, deadline=deadline, kill_after=kill_after
+        engine, workdir, lock_timeout, plan_sha256, deadline=deadline, kill_after=kill_after
     )
     return StagedFile(RUN_SCRIPT, script, mode=0o755)
