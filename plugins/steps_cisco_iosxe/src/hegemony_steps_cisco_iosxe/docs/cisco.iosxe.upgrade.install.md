@@ -17,9 +17,10 @@ Image Filename names the staged image on the destination filesystem; the two
 are combined into the full path used by the install commands. Upgrade Mode
 must match how the device boots. In install mode the step runs
 `install add file` with the activate and commit keywords according to the
-Activate and Commit options, answering the confirmation prompts
-automatically. A switch set by a `{{ }}` template takes the rendered text
-`true` or `false` as its value.
+Activate and Commit options and answers its confirmation question: `y` to
+the first question that ends in `[y/n]`, `yes` to the first that ends in
+`[yes/no]`, once each. A switch set by a `{{ }}` template takes the rendered
+text `true` or `false` as its value.
 
 In bundle mode the step sends `no boot system`, `boot system` with the new
 image, and `boot system` with the first previously configured image as a

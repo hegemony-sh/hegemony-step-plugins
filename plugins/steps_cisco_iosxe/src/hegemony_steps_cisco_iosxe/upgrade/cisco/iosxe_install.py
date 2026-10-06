@@ -92,6 +92,16 @@ _NO_CHANGE_RE = re.compile(
     r"Same Image File-No Change|Nothing to activate|No package is added or removed",
     re.IGNORECASE,
 )
+# Answers to the install's questions, keyed by the choices each question ends
+# with. The transports answer a key when it shows up in new output, each key
+# once, so no question may contain two keys. The phrase keys used before
+# overlapped: 16.x asks "This operation requires a reload of the system. Do
+# you want to proceed? Please confirm you have changed boot config to
+# flash:packages.conf [y/n]", which holds four of them, and got a "y" for each
+# one that arrived in a separate piece of output, the extra ones going to
+# whatever the device asked next. A second question with the same choices goes
+# unanswered and the install times out, which fails safe.
+_INSTALL_ANSWERS = {"[y/n]": "y", "[yes/no]": "yes"}
 
 
 # "install remove inactive": success, nothing to do, and each deleted file.
@@ -463,16 +473,6 @@ class IOSXEInstallDriver(UpgradeDriver):
             if commit:
                 install_cmd += " commit"
 
-        prompts = {
-            "Please confirm you have changed boot config to flash:packages.conf": "y",
-            "This operation requires a reload": "y",
-            "This operation may require a reload": "y",
-            "Do you want to proceed": "y",
-            "Proceed with install": "y",
-            "[y/n]": "y",
-            "[yes/no]": "yes",
-        }
-
         # Stop waiting at the first sign that the install finished or failed.
         completion_patterns = [
             "SUCCESS: install_",
@@ -495,7 +495,7 @@ class IOSXEInstallDriver(UpgradeDriver):
                 install_cmd,
                 read_timeout=1800,  # 30 minutes
                 delay_factor=2,
-                answers=prompts,
+                answers=_INSTALL_ANSWERS,
                 wait_for_patterns=completion_patterns,
             )
             outcome = _classify_install(
