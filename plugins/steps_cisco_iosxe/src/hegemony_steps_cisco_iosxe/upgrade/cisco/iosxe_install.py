@@ -447,18 +447,25 @@ class IOSXEInstallDriver(UpgradeDriver):
                         return _failed(boot_change_failure(e, restored=restored))
                     boot_config_changed = True
                     cli_outputs.append(f"=== boot configuration ===\n{transcript}")
-                    saved = await save_config(ssh)
-                    cli_outputs.append(f"=== write memory ===\n{saved}")
-                    # The boot variable follows the saved configuration, so
-                    # it is read back after the save.
-                    after = await run_checked(ssh, "show boot")
-                    cli_outputs.append(f"=== show boot (after) ===\n{after}")
-                    new_boot = parse_boot_statements(after)
-                    if not (new_boot and same_file_path(new_boot[0], expected_boot)):
-                        return _failed(
-                            f"Boot variable is {';'.join(new_boot) or 'not set'} after the "
-                            f"change, expected {expected_boot}"
-                        )
+                    # A failed save or read-back leaves the change in the
+                    # running configuration, so it is undone there as well.
+                    try:
+                        saved = await save_config(ssh)
+                        cli_outputs.append(f"=== write memory ===\n{saved}")
+                        # The boot variable follows the saved configuration, so
+                        # it is read back after the save.
+                        after = await run_checked(ssh, "show boot")
+                        cli_outputs.append(f"=== show boot (after) ===\n{after}")
+                        new_boot = parse_boot_statements(after)
+                        if not (new_boot and same_file_path(new_boot[0], expected_boot)):
+                            raise CommandError(
+                                f"Boot variable is {';'.join(new_boot) or 'not set'} after "
+                                f"the change, expected {expected_boot}"
+                            )
+                    except CommandError as e:
+                        restored = await undo_boot_change(ssh, previous_boot, cli_outputs)
+                        boot_config_changed = not restored
+                        return _failed(boot_change_failure(e, restored=restored, after_save=True))
             except CommandError as e:
                 return _failed(str(e))
             except Exception as e:

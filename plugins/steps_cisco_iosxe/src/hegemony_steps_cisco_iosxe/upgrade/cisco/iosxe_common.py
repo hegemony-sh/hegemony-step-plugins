@@ -301,14 +301,23 @@ async def undo_boot_change(ssh: "Transport", previous: list[str], cli_outputs: l
     return True
 
 
-def boot_change_failure(error: CommandError, *, restored: bool) -> str:
-    """The error for a boot change session that failed, after the undo."""
-    if restored:
-        return f"{error}; the previous boot entries were restored"
-    return (
-        f"{error}; restoring the previous boot entries failed too, so check the "
-        "device's boot setting"
-    )
+def boot_change_failure(error: CommandError, *, restored: bool, after_save: bool = False) -> str:
+    """The error for a boot change that failed, after the undo.
+
+    ``after_save``: the change failed at or after "write memory", which may
+    have stored it; the undo changes only the running configuration.
+    """
+    if not restored:
+        return (
+            f"{error}; restoring the previous boot entries failed too, so check the "
+            "device's boot setting"
+        )
+    if after_save:
+        return (
+            f"{error}; the previous boot entries were restored in the running "
+            "configuration, but the saved configuration may still hold the change"
+        )
+    return f"{error}; the previous boot entries were restored"
 
 
 async def save_config(ssh: "Transport") -> str:

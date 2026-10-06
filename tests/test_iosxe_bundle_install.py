@@ -339,10 +339,45 @@ async def test_partly_applied_bundle_boot_change_that_cannot_be_undone_is_report
     assert "check the device's boot setting" in (result.error or "")
 
 
+RESTORE = ["configure terminal", "no boot system", f"boot system {OLD}", "end"]
+
+
 async def test_boot_config_changed_does_not_mean_saved():
-    """The running boot setting changed, the save failed: the flag says changed."""
-    ssh = _device(**{"write memory": Result("Building configuration...\n")})
+    """The save failed and so did the undo: the flag says changed."""
+    ssh = _device(
+        **{
+            "write memory": Result("Building configuration...\n"),
+            # The fallback line of the change works; the undo's does not.
+            f"boot system {OLD}": [Result(), UNREACHABLE],
+        }
+    )
     result = await _install(ssh)
     assert result.success is False
+    assert ssh.calls[-1] == RESTORE
     assert result.boot_config_changed is True
     assert "did not confirm the save" in (result.error or "")
+    assert "check the device's boot setting" in (result.error or "")
+
+
+@pytest.mark.parametrize(
+    ("replies", "error"),
+    [
+        ({"write memory": Result("Building configuration...\n")}, "did not confirm the save"),
+        ({"write memory": UNREACHABLE}, "write memory failed: Connection timeout"),
+        ({"show boot": [_boot(OLD), _boot(OLD, NEW)]}, f"expected {NEW} first"),
+        ({"show boot": [_boot(OLD), UNREACHABLE]}, "show boot failed: Connection timeout"),
+    ],
+    ids=["save-unconfirmed", "save-failed", "wrong-first-entry", "read-back-failed"],
+)
+async def test_a_failed_save_or_read_back_is_undone(replies, error):
+    ssh = _device(**replies)
+    result = await _install(ssh)
+    assert result.success is False
+    assert error in (result.error or "")
+    assert (result.error or "").endswith(
+        "the previous boot entries were restored in the running configuration, "
+        "but the saved configuration may still hold the change"
+    )
+    assert ssh.calls[-1] == RESTORE
+    assert result.boot_config_changed is False
+    assert "reload" not in ssh.commands

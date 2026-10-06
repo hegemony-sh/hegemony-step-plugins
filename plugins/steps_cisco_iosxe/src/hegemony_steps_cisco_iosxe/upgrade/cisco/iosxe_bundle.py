@@ -314,19 +314,26 @@ class IOSXEBundleDriver(UpgradeDriver):
             boot_config_changed = True
             cli_outputs.append(f"=== boot configuration ===\n{transcript}")
 
-            saved = await save_config(ssh)
-            cli_outputs.append(f"=== write memory ===\n{saved}")
+            # A failed save or read-back leaves the change in the running
+            # configuration, so it is undone there as well.
+            try:
+                saved = await save_config(ssh)
+                cli_outputs.append(f"=== write memory ===\n{saved}")
 
-            # The boot variable follows the saved configuration, so it is
-            # read back after the save. The new image must come first.
-            verify_output = await run_checked(ssh, "show boot")
-            cli_outputs.append(f"=== show boot (after) ===\n{verify_output}")
-            new_boot = parse_boot_statements(verify_output)
-            if not (new_boot and same_file_path(new_boot[0], full_image_path)):
-                return _failed(
-                    f"Boot variable is {';'.join(new_boot) or 'not set'} after the change, "
-                    f"expected {full_image_path} first"
-                )
+                # The boot variable follows the saved configuration, so it is
+                # read back after the save. The new image must come first.
+                verify_output = await run_checked(ssh, "show boot")
+                cli_outputs.append(f"=== show boot (after) ===\n{verify_output}")
+                new_boot = parse_boot_statements(verify_output)
+                if not (new_boot and same_file_path(new_boot[0], full_image_path)):
+                    raise CommandError(
+                        f"Boot variable is {';'.join(new_boot) or 'not set'} after the change, "
+                        f"expected {full_image_path} first"
+                    )
+            except CommandError as e:
+                restored = await undo_boot_change(ssh, previous_boot, cli_outputs)
+                boot_config_changed = not restored
+                return _failed(boot_change_failure(e, restored=restored, after_save=True))
 
             if not activate:
                 # Just configure, don't reload yet

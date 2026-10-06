@@ -28,7 +28,10 @@ fallback, all in one configuration session; if a line fails, the step
 writes the previous boot entries back and does not reload. It saves with
 `write memory`, which must answer `[OK]`, checks that `show boot` now lists
 the new image first, and issues `reload`, answering `no` to saving the
-configuration again and confirming the reload.
+configuration again and confirming the reload. If the save or that check
+fails, the step writes the previous boot entries back as well and does not
+reload; this undo changes the running configuration only, so the saved
+configuration may still hold the change, and the device's error says so.
 
 An install-mode activation boots packages.conf, so with Activate on the step
 first reads `show boot`. The first boot entry must be packages.conf on the
@@ -40,8 +43,12 @@ configuration session, saves with `write memory`, and reads `show boot`
 again before installing. Saving also stores any other unsaved change in the
 running configuration. If a line of the session fails, its first lines may
 already be applied, so the step writes the previous boot entries back in a
-new session, and the device fails. When `show boot` fails or shows no boot variable, the
-device fails; the step never changes the boot setting on a guess.
+new session, and the device fails. The step does the same when the save or
+the `show boot` check after it fails; that undo changes the running
+configuration only, so the saved configuration may still hold the change,
+and the device's error says so. When `show boot` fails or shows no boot
+variable, the device fails; the step never changes the boot setting on a
+guess.
 
 Uncheck Activate to prepare the upgrade without reloading: install mode runs
 `install add file` only, without activate or commit, and bundle mode stops
@@ -63,8 +70,9 @@ device id whose entries hold `reboot_triggered`, `activated`, `committed`,
 `boot_config_changed` and `previous_boot` (the boot entries it found) for
 each device. `boot_config_changed` is true when the step changed the boot
 setting in the running configuration, or could not undo a failed change.
-It does not mean the change was saved: the save comes after it and can
-still fail, and the device's error then says so.
+It does not mean the change was saved: when the save or the check after it
+fails, the step undoes the change in the running configuration, and the
+device's error says whether that worked.
 
 One evidence artifact is saved per device, named `Install: <device>` -
 success or failure; a device that could not be attempted at all (no
