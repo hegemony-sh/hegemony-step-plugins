@@ -1137,6 +1137,24 @@ async def test_endpoints_string_and_list_forms(pki, tmp_path, form):
     assert [e["device_id"] for e in result.evidence] == [None, None]
 
 
+async def test_evidence_names_tell_server_names_apart(pki, tmp_path):
+    async with tls_server(tmp_path, pki.leaves["wildcard"]) as port:
+        result = await run_step(
+            {
+                "endpoints": [
+                    f"127.0.0.1:{port}:a.example.test",
+                    f"127.0.0.1:{port}:b.example.test",
+                    f"127.0.0.1:{port}",
+                ]
+            }
+        )
+    assert [evidence["name"] for evidence in result.evidence] == [
+        f"tls_127.0.0.1_{port}_a.example.test",
+        f"tls_127.0.0.1_{port}_b.example.test",
+        f"tls_127.0.0.1_{port}",
+    ]
+
+
 async def test_targets_and_endpoints_combine_without_duplicates(pki, tmp_path):
     async with tls_server(tmp_path, pki.leaves["rsa"]) as port:
         result = await run_step(

@@ -183,8 +183,10 @@ The summary reads `tls: N endpoints, R reachable, min D days left` (or
 `tls: pem certificate, min D days left`), with `, F failing` appended when
 endpoints fail. Metrics record `endpoints`, `unreachable`, and
 `min_days_left`. Each endpoint adds one `transport_meta` evidence record named
-`tls_HOST_PORT` (`tls_pem` for a pasted certificate) holding its full record,
-tied to the device when the endpoint came from a device target.
+`tls_HOST_PORT`, or `tls_HOST_PORT_SNI` when a server name was sent, so
+endpoints that share an address and port stay apart when evidence is compared
+(`tls_pem` for a pasted certificate). It holds the endpoint's full record and
+is tied to the device when the endpoint came from a device target.
 
 ## When It Fails
 

@@ -1216,10 +1216,18 @@ class TlsProbeHandler(BaseHandler):
 
 
 def _evidence_name(record: dict[str, Any]) -> str:
-    """Name of the evidence record for one endpoint record."""
+    """Name of the evidence record for one endpoint record.
+
+    The server name sent ends it, so endpoints that share an address and
+    port but not a server name keep apart wherever evidence is paired by
+    name (evidence.compare).
+    """
     if record["source"] == "pem":
         return "tls_pem"
-    return f"tls_{record['host'] or record['device_name'] or 'unknown'}_{record['port']}"
+    name = f"tls_{record['host'] or record['device_name'] or 'unknown'}_{record['port']}"
+    if record["sni"]:
+        name += f"_{record['sni']}"
+    return name
 
 
 def _result(
