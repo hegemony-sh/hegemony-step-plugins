@@ -570,6 +570,7 @@ name = "hegemony-steps-probe"
 version = "0.20.0"
 source = { editable = "plugins/steps_probe" }
 dependencies = [
+    { name = "cryptography" },
     { name = "dnspython" },
     { name = "hegemony-step-sdk" },
     { name = "httpx" },
@@ -577,6 +578,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=43" },
     { name = "dnspython", specifier = ">=2.6.0" },
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
     { name = "httpx", specifier = ">=0.27.0" },
