@@ -14,6 +14,7 @@ import pytest
 from hegemony_steps_probe.dns_check import normalize_answer
 from hegemony_steps_probe.http_check import parse_status_spec, status_matches
 from hegemony_steps_shell.execute import ShellExecuteHandler, build_command
+from hegemony_steps_shell.templates import WHITESPACE_CONTROL
 
 
 def test_build_command_default_passthrough():
@@ -33,7 +34,6 @@ def test_build_command_sh_family_keeps_env_prefix():
 ACCEPTED = [
     "uname -a",
     "systemctl restart {{ inputs.service | quote }}",
-    "echo {{- inputs.msg|quote -}} done",
     "{% if inputs.force %}rm -f /tmp/x{% endif %}",
     "cp {{ inputs.src | quote }} {{ inputs.dst | quote }}",
     "X={{ inputs.v | quote }} env",
@@ -170,6 +170,43 @@ def test_accepted_templates_render_values_as_data_in_a_real_shell(tmp_path, shel
     assert not sentinel.exists()
     if "$(" not in command:
         assert done.stdout == value
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo {{- inputs.msg | quote }}",
+        "echo {{ inputs.msg | quote -}}",
+        "echo {{- inputs.msg|quote -}} done",
+        "{%- if inputs.force %}rm -f /tmp/x{% endif %}",
+        "{% if inputs.force -%}rm -f /tmp/x{% endif %}",
+        "{#- note #}uname -a",
+        "uname -a{# note -#}",
+        "{%- raw %}x{% endraw %}",
+    ],
+)
+def test_template_errors_refuses_whitespace_control(command):
+    errors = ShellExecuteHandler().template_errors({"commands": [command]})
+    assert errors == [f"commands line 1: {WHITESPACE_CONTROL}"]
+
+
+def test_whitespace_control_cannot_join_two_checked_lines(tmp_path):
+    """The host renders all lines as one template: '{{-' would remove the line break,
+    so a value would land inside the quotes the line before opened."""
+    commands = ['echo "hello', '{{- inputs.v | quote }}"']
+    assert ShellExecuteHandler().template_errors({"commands": commands}) == [
+        f"commands line 2: {WHITESPACE_CONTROL}"
+    ]
+    # What the check now refuses: rendered as the host does, the two lines join.
+    env = jinja2.Environment()
+    env.filters["quote"] = lambda item: shlex.quote(str(item))
+    rendered = env.from_string("\n".join(commands)).render(inputs={"v": "$(touch x)"})
+    assert "\n" not in rendered
+
+
+def test_whitespace_control_markers_in_plain_text_are_not_tags():
+    for command in ["awk '{print $1-}}'", "echo a-}} b", "{% raw %}{{- x -}}{% endraw %}"]:
+        assert ShellExecuteHandler().template_errors({"commands": [command]}) == []
 
 
 def test_template_errors_ignores_non_list_commands():

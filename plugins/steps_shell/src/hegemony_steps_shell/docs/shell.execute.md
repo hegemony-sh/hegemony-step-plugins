@@ -30,8 +30,11 @@ comment, backticks or a here-document: there the quoting does not hold, and
 `echo "{{ inputs.msg | quote }}"` would let a value containing `"` end the
 string. `{% if %}` and `{% for %}` statements are fine where a value would
 be (`{% if inputs.force %}--force{% endif %}`); `{% filter %}`,
-`{% include %}`, imports and macros are not supported. The step refuses to
-run a line that breaks these rules, before anything is rendered. Quoting
+`{% include %}`, imports and macros are not supported. Neither is Jinja's
+whitespace control (`{{-`, `-}}`, `{%-`, `-%}`, `{#-`, `-#}`): it can remove
+the line break between two lines, which would join them into one command. The
+step refuses to run a line that breaks these rules, before anything is
+rendered. Quoting
 keeps a value one word; a command that runs its argument as code (`eval`,
 `sh -c`, `ssh host`) still runs it.
 
@@ -85,7 +88,8 @@ Metrics record `command_count` (configured commands), `device_count`, and
 
 The step fails immediately — before contacting any host — when a command
 line inserts a `{{ }}` value without `| quote` or inside quotes, a comment,
-backticks or a here-document, when no target devices or no
+backticks or a here-document, or uses whitespace control, when no target
+devices or no
 commands are configured, or when environment variables are combined with the
 `pwsh` interpreter. Per host, it fails when the device has
 no management host, when the shell connection cannot be opened, when a command

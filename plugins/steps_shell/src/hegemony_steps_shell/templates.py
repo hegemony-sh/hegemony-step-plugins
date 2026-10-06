@@ -22,10 +22,19 @@ accepted only when
   branches of ``{% if %}``/``{% for %}`` from changing the quoting state, so
   scanning the text in document order covers every way the template renders.
 
+Each line is checked on its own, so a line must also stay its own command when
+the host renders the step: the host renders all lines as one template, and
+Jinja's whitespace control (``{{-``, ``-}}``, ``{%-``, ``-%}``, ``{#-``,
+``-#}``) would remove the line break between two lines, joining them into one
+command whose quoting the per-line check never saw. Whitespace control is
+refused for that reason.
+
 Anything the scanner cannot follow is refused rather than guessed at.
 """
 
 from __future__ import annotations
+
+import re
 
 from jinja2 import Environment, nodes
 from jinja2.exceptions import TemplateSyntaxError
@@ -51,6 +60,23 @@ _OPAQUE_STATEMENTS: tuple[type[nodes.Node], ...] = (
 #: from an unquoted position (comments render nothing and are skipped).
 _TAG_STARTS = frozenset({"variable_begin", "block_begin", "raw_begin"})
 
+#: Tags that can carry Jinja whitespace control: a ``-`` right after the opening
+#: delimiter or right before the closing one removes the whitespace, line breaks
+#: included, on that side of the tag.
+_WHITESPACE_CONTROL_RE = re.compile(r"\A\{[{%#]-|-[}%#]\}\s*\Z|\{%-|-%\}")
+_TAG_TOKENS = frozenset(
+    {
+        "variable_begin",
+        "variable_end",
+        "block_begin",
+        "block_end",
+        "comment_begin",
+        "comment_end",
+        "raw_begin",
+        "raw_end",
+    }
+)
+
 #: Characters after which a ``#`` starts a comment.
 _WORD_BREAKS = frozenset(" \t\n;&|()<>")
 
@@ -64,6 +90,11 @@ NOT_A_WORD = (
     "it unquoted, as in echo {{ inputs.name | quote }}"
 )
 OPAQUE = "{% filter %}, {% include %}, {% import %}, {% extends %} and macros are not supported"
+WHITESPACE_CONTROL = (
+    "whitespace control ({{- -}}, {%- -%}, {#- -#}) is not supported: it can join "
+    "this line with the one before or after it, so it would no longer run as its "
+    "own command"
+)
 INVALID = "is not a valid template"
 
 
@@ -78,6 +109,11 @@ def command_template_problem(command: str) -> str | None:
         return INVALID
     if any(True for _ in tree.find_all(_OPAQUE_STATEMENTS)):
         return OPAQUE
+    if any(
+        token in _TAG_TOKENS and _WHITESPACE_CONTROL_RE.search(value)
+        for _lineno, token, value in tokens
+    ):
+        return WHITESPACE_CONTROL
     for output in tree.find_all(nodes.Output):
         for child in output.nodes:
             if not isinstance(child, nodes.TemplateData) and not _is_quoted(child):
