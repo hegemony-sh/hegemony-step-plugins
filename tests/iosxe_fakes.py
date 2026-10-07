@@ -150,3 +150,12 @@ class InstantClock:
 
     async def sleep(self, seconds: float) -> None:
         self.now += seconds
+
+    async def wait_for(self, awaitable: Any, timeout: float | None) -> Any:
+        """``asyncio.wait_for`` on this clock: work that took longer is cut off at ``timeout``."""
+        start = self.now
+        result = await awaitable
+        if timeout is not None and self.now - start > timeout:
+            self.now = start + timeout
+            raise TimeoutError
+        return result

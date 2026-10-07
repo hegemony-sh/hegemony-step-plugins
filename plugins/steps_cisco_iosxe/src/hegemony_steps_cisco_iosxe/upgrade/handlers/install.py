@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 # How often the step checks whether a device that started its reload is down.
 _DOWN_POLL_SECONDS = 5
+# How long one check waits for a session and an answer; a device that gives
+# none in that time counts as down.
+_DOWN_PROBE_SECONDS = 30
 
 
 class UpgradeInstallConfig(BaseModel):
@@ -104,9 +107,10 @@ class UpgradeInstallConfig(BaseModel):
         title="Reload Wait (sec)",
         description=(
             "Once a device starts its reload, how long to wait for it to stop "
-            "answering, checked every 5 seconds with a new session. A device "
-            "that still answers then fails: it has not reloaded, and a verify "
-            "step would read its old image. 0 skips the check."
+            "answering, checked every 5 seconds with a new session (no answer "
+            "within 30 seconds counts as down). A device not seen to go down "
+            "by then fails: a verify step could read its old image. 0 skips "
+            "the check."
         ),
     )
     max_parallel_devices: int = Field(
@@ -226,10 +230,16 @@ class UpgradeInstallHandler(BaseHandler):
 
         services = ctx.require_services()
 
-        async def _answers(device: dict[str, Any]) -> bool:
-            """Whether the device answers a command in a new session."""
+        async def _answers(device: dict[str, Any], timeout: float) -> bool:
+            """Whether the device answers a command in a new session within ``timeout``."""
             try:
-                probe = services.connect(device, platform=platform, step_run_id=ctx.step_run_id)
+                probe = services.connect(
+                    device,
+                    platform=platform,
+                    connect_timeout=timeout,
+                    command_timeout=timeout,
+                    step_run_id=ctx.step_run_id,
+                )
                 answer = await probe.execute_command("show clock")
             except Exception as e:
                 logger.debug(f"Down check for {device.get('name')}: {e}")
@@ -237,17 +247,30 @@ class UpgradeInstallHandler(BaseHandler):
             # A session that failed is exit code -1; a CLI error is still an answer.
             return answer.exit_code >= 0
 
-        async def _wait_until_down(device: dict[str, Any]) -> tuple[bool, float]:
+        async def _wait_until_down(device: dict[str, Any]) -> tuple[bool | None, float]:
             """Wait up to Reload Wait for the device to stop answering.
 
             A device that has not gone down yet still answers from its old
             image, so a verify step started now could read the old version.
-            Returns whether it went down and the seconds waited.
+            Each check ends by the end of Reload Wait, so an answer or a
+            failure seen after it never counts. Returns whether the device
+            went down (None when a check was still waiting for it as Reload
+            Wait ran out) and the seconds waited.
             """
             loop = asyncio.get_event_loop()
             start = loop.time()
             while True:
-                answered = await _answers(device)
+                left = reload_wait_seconds - (loop.time() - start)
+                if left <= 0:
+                    return False, loop.time() - start
+                budget = min(left, _DOWN_PROBE_SECONDS)
+                try:
+                    answered = await asyncio.wait_for(_answers(device, budget), timeout=budget)
+                except TimeoutError:
+                    # No answer in the whole check time: down. A check cut
+                    # short by the end of Reload Wait has seen neither.
+                    elapsed = loop.time() - start
+                    return (True if budget == _DOWN_PROBE_SECONDS else None), elapsed
                 elapsed = loop.time() - start
                 if not answered:
                     return True, elapsed
@@ -320,8 +343,16 @@ class UpgradeInstallHandler(BaseHandler):
                         device_id,
                         {"phase": "install", "status": "waiting_down"},
                     )
-                    went_down, down_elapsed = await _wait_until_down(device)
-                    if not went_down:
+                    seen_down, down_elapsed = await _wait_until_down(device)
+                    went_down = bool(seen_down)
+                    if seen_down is None:
+                        success = False
+                        error = (
+                            f"The device reported its reload, but a check for it was "
+                            f"still waiting for an answer when Reload Wait "
+                            f"({reload_wait_seconds}s) ran out: it was not seen to go down"
+                        )
+                    elif not seen_down:
                         success = False
                         error = (
                             f"The device reported its reload but still answered "

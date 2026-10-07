@@ -108,8 +108,11 @@ A device can keep answering from its old image for a while after it reports
 its reload. So once a device has started its reload, in either mode, the
 step waits for it to go down: every 5 seconds it opens a new session and
 runs `show clock`, until that fails, for up to Reload Wait seconds (default
-300). A device that still answers then fails, since it has not reloaded and
-a verify step would read its old image. A Reload Wait of 0 skips this check.
+300). A check that gets no session and answer within 30 seconds also counts
+as down. No check runs past Reload Wait: a device that still answers then,
+or whose check is still waiting for an answer when it runs out, fails, since
+it was not seen to reload and a verify step could read its old image. A
+Reload Wait of 0 skips this check.
 The step does not wait for devices to come back; use
 `cisco.iosxe.upgrade.verify` for that. The step's default timeout is 7200
 seconds; with devices installed one at a time, each device's install and

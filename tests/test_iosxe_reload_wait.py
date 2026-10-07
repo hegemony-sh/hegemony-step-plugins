@@ -97,9 +97,60 @@ async def test_a_device_that_never_goes_down_fails(clock):
         "The device reported its reload but still answered 60s later: "
         "it did not go down within Reload Wait (60s)"
     )
-    # One check at once, then one every 5 seconds up to the limit.
-    assert _probes(ssh) == 13
+    # One check at once, then one every 5 seconds until the limit.
+    assert _probes(ssh) == 12
     assert clock.now == 60
+
+
+class _SlowCheckTransport(ScriptedTransport):
+    """Its ``show clock`` takes ``seconds`` on the clock, then answers ``reply``."""
+
+    def __init__(self, clock: InstantClock, seconds: float, reply: Result) -> None:
+        super().__init__({"show boot": BOOT_OK, "install add": RELOADING, "show clock": reply})
+        self.clock = clock
+        self.seconds = seconds
+
+    async def execute_commands(self, commands: list[str]) -> list[Result]:
+        if commands == ["show clock"]:
+            self.clock.now += self.seconds
+        return await super().execute_commands(commands)
+
+
+async def test_a_check_still_waiting_when_reload_wait_runs_out_fails(clock):
+    """A failure seen after Reload Wait does not count as the device going down."""
+    ssh = _SlowCheckTransport(clock, 90, UNREACHABLE)
+    result = await _run(ssh, reload_wait_seconds=1)
+    assert result.success is False
+    evidence = result.evidence[0]["content_json"]
+    assert evidence["went_down"] is False
+    assert evidence["down_elapsed_sec"] == 1
+    assert evidence["error"] == (
+        "The device reported its reload, but a check for it was still waiting for an "
+        "answer when Reload Wait (1s) ran out: it was not seen to go down"
+    )
+    assert clock.now == 1
+
+
+async def test_a_check_without_an_answer_in_its_time_counts_as_down(clock):
+    ssh = _SlowCheckTransport(clock, 40, UP)
+    result = await _run(ssh)
+    assert result.success is True, result.error
+    evidence = result.evidence[0]["content_json"]
+    assert evidence["went_down"] is True
+    assert evidence["down_elapsed_sec"] == 30
+
+
+@pytest.mark.parametrize(("reload_wait", "timeout"), [(300, 30), (10, 10)])
+async def test_each_check_session_ends_by_the_end_of_reload_wait(clock, reload_wait, timeout):
+    ssh = ScriptedTransport(
+        {"show boot": BOOT_OK, "install add": RELOADING, "show clock": UNREACHABLE}
+    )
+    services = FakeServices(lambda: ssh)
+    config = {"image_name": "img.bin", "reload_wait_seconds": reload_wait}
+    result = await UpgradeInstallHandler().execute(make_ctx(config, services))
+    assert result.success is True, result.error
+    check = services.connect_calls[-1]
+    assert (check["connect_timeout"], check["command_timeout"]) == (timeout, timeout)
 
 
 async def test_a_cli_error_is_still_an_answer(clock):
