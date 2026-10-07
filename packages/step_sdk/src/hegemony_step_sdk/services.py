@@ -462,16 +462,21 @@ class HandlerServices(Protocol):
         """
         ...
 
-    async def release_state_hold(self, name: str) -> bool:
+    async def release_state_hold(self, name: str, *, taken_by: str | None = None) -> bool:
         """End this run's hold on the managed state ``name`` early.
 
         For a hold taken with ``open_state_backend(..., hold_until_apply=True)``
         that no apply will end, e.g. when there is nothing to apply. ``name``
-        is the state name given to ``open_state_backend``. Returns True if a
-        hold was released, False otherwise (the run held none, or the host
-        could not end it, which it logs). Hosts without support raise
-        ``NotImplementedError``; a platform older than this method has no such
-        attribute at all, so look it up with ``getattr``.
+        is the state name given to ``open_state_backend``. A hold records the
+        step whose lock took it: with ``taken_by`` (a step id of this run),
+        the host ends the hold only when that step took it, and leaves alone
+        a hold another step took, which another plan may still need. Returns
+        True if a hold was released, False otherwise (the run held none,
+        another step took it, or the host could not end it, which it logs).
+        Hosts without support raise ``NotImplementedError``; a platform older
+        than this method has no such attribute at all, so look it up with
+        ``getattr``. A platform older than ``taken_by`` raises ``TypeError``
+        when it is passed.
         """
         raise NotImplementedError
 
