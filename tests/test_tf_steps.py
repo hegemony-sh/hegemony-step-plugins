@@ -555,13 +555,18 @@ def _install_docker(
 
 
 def _ctx(
-    config: dict[str, Any], services: _Services, *, shared: bool = True, timeout: int = 300
+    config: dict[str, Any],
+    services: _Services,
+    *,
+    shared: bool = True,
+    timeout: int = 300,
+    step_id: str = "plan",
 ) -> HandlerContext:
     return HandlerContext(
         run_id="run-12345678",
         flow_id="flow-1",
         step_run_id="step-12345678",
-        step_id="plan",
+        step_id=step_id,
         config=config,
         shared_workspace=shared,
         timeout_seconds=timeout,
@@ -1036,16 +1041,37 @@ async def test_a_hold_on_a_platform_that_predates_it_fails_with_the_reason(monke
 
 
 class _ReleasingServices(_Services):
-    """A platform that can end a run's hold on a state early."""
+    """A platform that can end a run's hold on a state early.
 
-    def __init__(self, *args: Any, released: bool = True, **kwargs: Any) -> None:
+    ``holder`` is the step whose lock took the run's hold: as on the platform,
+    a release naming another step ends nothing.
+    """
+
+    def __init__(
+        self, *args: Any, released: bool = True, holder: str = "plan", **kwargs: Any
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.released = released
+        self.holder = holder
+        self.releases: list[str] = []
+        self.taken_by: list[str | None] = []
+
+    async def release_state_hold(self, name: str, *, taken_by: str | None = None) -> bool:
+        self.releases.append(name)
+        self.taken_by.append(taken_by)
+        return self.released and taken_by in (None, self.holder)
+
+
+class _UntargetedReleaseServices(_Services):
+    """A platform older than ``taken_by``: it would end the run's hold, whoever took it."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
         self.releases: list[str] = []
 
     async def release_state_hold(self, name: str) -> bool:
         self.releases.append(name)
-        return self.released
+        return True
 
 
 _HOLD = {"state_name": "core", "hold_until_apply": True}
@@ -1068,6 +1094,8 @@ async def test_a_plan_without_changes_ends_its_hold(monkeypatch):
     assert result.success is True, result.error
     assert services.held == ["core"]
     assert services.releases == ["core"]
+    # Only the hold this plan's own lock took.
+    assert services.taken_by == ["plan"]
     assert result.output["state_held"] is False
     assert result.summary == "No changes: infrastructure matches the configuration"
     assert "Ended the run's hold on managed state 'core': there is nothing to apply" in progress
@@ -1094,14 +1122,14 @@ async def test_a_plan_ends_only_a_hold_no_apply_will_end(monkeypatch, config, co
 
 
 class _NoReleaseServices(_ReleasingServices):
-    async def release_state_hold(self, name: str) -> bool:
-        await super().release_state_hold(name)
+    async def release_state_hold(self, name: str, *, taken_by: str | None = None) -> bool:
+        await super().release_state_hold(name, taken_by=taken_by)
         raise NotImplementedError
 
 
 class _BrokenReleaseServices(_ReleasingServices):
-    async def release_state_hold(self, name: str) -> bool:
-        await super().release_state_hold(name)
+    async def release_state_hold(self, name: str, *, taken_by: str | None = None) -> bool:
+        await super().release_state_hold(name, taken_by=taken_by)
         raise RuntimeError("platform API unreachable")
 
 
@@ -1156,6 +1184,7 @@ async def test_a_failed_plan_ends_its_hold(monkeypatch, exit_code, out):
     assert result.success is False
     assert services.held == ["core"]
     assert services.releases == ["core"]
+    assert services.taken_by == ["plan"]
     assert "Ended the run's hold on managed state 'core': the plan failed" in progress
 
 
@@ -1186,6 +1215,45 @@ async def test_a_failed_plan_adds_no_note_about_a_hold(monkeypatch, services):
     result = await TfPlanHandler().execute(_ctx(_HOLD, services))
     assert result.success is False
     assert result.summary == "tofu plan failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("exit_code", "code"), [(1, b""), (0, b"0")])
+async def test_a_plan_leaves_a_hold_another_plan_took(monkeypatch, exit_code, code):
+    """Another plan of the run took the hold: its apply still needs it."""
+    out = {"plan-exitcode": code, "plan.txt": b"No changes.\n"} if code else {}
+    _install_docker(monkeypatch, out=out, exit_code=exit_code)
+    services = _ReleasingServices(holder="first-plan")
+    progress: list[str] = []
+
+    async def emit(message, device_id=None, attrs=None):
+        progress.append(message)
+        return True
+
+    ctx = _ctx(_HOLD, services, step_id="second-plan")
+    ctx._emit_progress = emit
+    result = await TfPlanHandler().execute(ctx)
+
+    assert result.success is (exit_code == 0)
+    assert services.taken_by == ["second-plan"]
+    assert not any(message.startswith("Ended the run's hold") for message in progress)
+    if result.success:
+        assert result.summary.endswith(HOLD_NOT_ENDED_NOTE)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("exit_code", "code"), [(1, b""), (0, b"0")])
+async def test_a_plan_keeps_a_hold_a_platform_cannot_end_by_step(monkeypatch, exit_code, code):
+    """A platform older than taken_by would end any hold of the run: keep it instead."""
+    out = {"plan-exitcode": code, "plan.txt": b"No changes.\n"} if code else {}
+    _install_docker(monkeypatch, out=out, exit_code=exit_code)
+    services = _UntargetedReleaseServices()
+    result = await TfPlanHandler().execute(_ctx(_HOLD, services))
+    assert result.success is (exit_code == 0)
+    assert services.releases == []
+    if result.success:
+        assert result.summary.endswith(HOLD_KEPT_NOTE)
+        assert result.output["state_held"] is True
 
 
 @pytest.mark.asyncio
@@ -1490,10 +1558,12 @@ async def test_apply_step_skips_a_plan_without_changes(monkeypatch):
 async def test_apply_without_changes_ends_a_hold_the_plan_kept(monkeypatch, plan, releases):
     state = _install_docker(monkeypatch, out={})
     services = _ReleasingServices(plan)
-    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services, step_id="apply"))
     assert result.success is True, result.error
     assert result.summary == "Nothing to apply: the plan has no changes"
     assert services.releases == releases
+    # Only a hold its plan step's lock took, not one another plan took.
+    assert services.taken_by == ["plan"] * len(releases)
     assert services.opened == []
     assert state["calls"] == []
 
@@ -1539,6 +1609,28 @@ async def test_apply_without_changes_succeeds_when_the_hold_cannot_be_ended(monk
     plan = _plan_output(has_changes=False, state="managed", state_name="core", state_held=True)
     result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _NoReleaseServices(plan)))
     assert result.success is True, result.error
+    assert result.summary == "Nothing to apply: the plan has no changes" + HOLD_KEPT_NOTE
+
+
+@pytest.mark.asyncio
+async def test_apply_without_changes_leaves_a_hold_another_plan_took(monkeypatch):
+    _install_docker(monkeypatch, out={})
+    plan = _plan_output(has_changes=False, state="managed", state_name="core", state_held=True)
+    services = _ReleasingServices(plan, holder="other-plan")
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services, step_id="apply"))
+    assert result.success is True, result.error
+    assert services.taken_by == ["plan"]
+    assert result.summary == "Nothing to apply: the plan has no changes" + HOLD_NOT_ENDED_NOTE
+
+
+@pytest.mark.asyncio
+async def test_apply_without_changes_keeps_a_hold_a_platform_cannot_end_by_step(monkeypatch):
+    _install_docker(monkeypatch, out={})
+    plan = _plan_output(has_changes=False, state="managed", state_name="core", state_held=True)
+    services = _UntargetedReleaseServices(plan)
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.success is True, result.error
+    assert services.releases == []
     assert result.summary == "Nothing to apply: the plan has no changes" + HOLD_KEPT_NOTE
 
 

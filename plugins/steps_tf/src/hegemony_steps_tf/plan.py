@@ -492,13 +492,16 @@ class TfPlanHandler(BaseHandler):
             if state_name and config.hold_until_apply and ran_tool:
                 # No apply follows a failed plan, so none will end a hold its
                 # lock may have taken: end it now. The run holds none when the
-                # tool failed before locking, so the failure gets no note.
-                await release_state_hold(ctx, state_name, reason="the plan failed")
+                # tool failed before locking, or one another plan took, so the
+                # failure gets no note.
+                await release_state_hold(
+                    ctx, state_name, taken_by=ctx.step_id, reason="the plan failed"
+                )
             return result
         output = result.output
         if state_name and output["state_held"] and not output["has_changes"]:
             # Nothing to apply, so no apply will end the hold: end it now.
-            note = await release_state_hold(ctx, state_name)
+            note = await release_state_hold(ctx, state_name, taken_by=ctx.step_id)
             output["state_held"] = bool(note)
             result.summary += note
             output["summary"] = result.summary

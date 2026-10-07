@@ -32,8 +32,10 @@ When the plan has no changes, the step succeeds without starting a
 container, whether or not either step has a shared workspace, and its
 outputs are the ones the plan step read from the state, which nothing
 changed since. If the run still holds the managed state for that plan, the
-step ends the hold; when the platform cannot end it, the hold may last
-until the run ends, and the summary says so.
+step ends the hold, but only one the plan step's lock took: a hold another
+plan of the run took stays for that plan's apply. When the platform cannot
+end the hold, or cannot tell which step took it, the hold may last until
+the run ends, and the summary says so.
 
 ## Output
 
