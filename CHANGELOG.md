@@ -1,3 +1,61 @@
+## [0.23.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.22.0...v0.23.0) (2026-10-07)
+
+### ⚠ BREAKING CHANGES
+
+* **shell:** refuse values in lines whose interpreter is a template
+* **transports:** stop a config block at the first line the device rejects
+* **iosxe:** compare IOS-XE versions as releases, not substrings
+* **iosxe:** wait in the install step until a reloading device goes down
+* **iosxe:** read upgrade step settings through their config models
+* **flow:** read flow.run's settings through its model, so a rendered "false" stops waiting
+* **container:** read a rendered cache_image as a boolean and a blank working_dir as /workspace
+* **evidence:** fail evidence.compare when the precheck capture failed
+* **evidence:** fail evidence.assert on a capture that failed
+* **evidence:** fail evidence.assert ordering checks on values that are not numbers
+* **container:** refuse templates in the command of a host-access step
+* **shell:** keep template values out of PowerShell commands
+* **shell:** refuse environment variable names that are not identifiers
+* **shell:** refuse whitespace control in command templates
+
+### Bug Fixes
+
+* **ansible:** escape a leading [#jinja2](https://github.com/hegemony-sh/hegemony-step-plugins/issues/jinja2): header in values Ansible reads ([927ee41](https://github.com/hegemony-sh/hegemony-step-plugins/commit/927ee41b93d1bfbb416f84109f2b279a6dae138c))
+* **ansible:** say when the target roles match no device ([e2243e1](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e2243e12b62c3fa63b78ce0dd924fd05d075b4c6))
+* **container:** keep the output of a container stopped at its timeout ([bbe231a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bbe231abc82a412cbaf36e87972136bf56002ff6))
+* **container:** read a rendered cache_image as a boolean and a blank working_dir as /workspace ([14ed35f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/14ed35fb5d0c16cd894f19ec04016fa2712a26b9))
+* **container:** refuse templates in the command of a host-access step ([1c5ad9a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/1c5ad9a105ac8f7818b3098f367c42ebb3736032))
+* **evidence:** fail evidence.assert on a capture that failed ([eb81b53](https://github.com/hegemony-sh/hegemony-step-plugins/commit/eb81b5344ecc170e27c95e0b9dd30ae638d5c9f7))
+* **evidence:** fail evidence.assert ordering checks on values that are not numbers ([e949b8c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e949b8c5b5e7e72c1a56e04cd09ff1f1568edd4d))
+* **evidence:** fail evidence.compare when the precheck capture failed ([b30408c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b30408cac1447b3d108efe4103b8b838545909fc))
+* **flow:** read flow.run's settings through its model, so a rendered "false" stops waiting ([856acea](https://github.com/hegemony-sh/hegemony-step-plugins/commit/856acea7b81fee583842b9567ae83128649021c5))
+* **iosxe:** answer each install-mode question exactly once ([1b5af88](https://github.com/hegemony-sh/hegemony-step-plugins/commit/1b5af88c9c08e3e02c7d0d2865e0aabc6bf20afd))
+* **iosxe:** compare IOS-XE versions as releases, not substrings ([d52d52e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/d52d52ec8a7714e0463b403ff8fcabda2f379202))
+* **iosxe:** end each reload check by the end of Reload Wait ([1e69c47](https://github.com/hegemony-sh/hegemony-step-plugins/commit/1e69c47cfcee43231dfdd23dafebf168ca7b0fb4))
+* **iosxe:** fetch a fresh repository download URL for each staged device ([059b51f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/059b51f5030e484abc02893aa0c908396d93c272))
+* **iosxe:** read upgrade step settings through their config models ([74c0520](https://github.com/hegemony-sh/hegemony-step-plugins/commit/74c0520f34219bbd5dcaadf510472bcaefca66b6))
+* **iosxe:** title verify's poll interval setting Poll Interval ([caf9433](https://github.com/hegemony-sh/hegemony-step-plugins/commit/caf9433e217a533f3b2fe2dad73d973a54819275))
+* **iosxe:** undo the boot change when its save or read-back fails ([dcbdfbc](https://github.com/hegemony-sh/hegemony-step-plugins/commit/dcbdfbc511aba4af2d4b2bba61474a8f5f7facd8))
+* **iosxe:** wait in the install step until a reloading device goes down ([32ad428](https://github.com/hegemony-sh/hegemony-step-plugins/commit/32ad4289f9147d14e56fe6f92bf1665d79a15cb7))
+* **monitor:** default the HTTP Health port to 80 and declare ping_count ([e924313](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e924313906c4a10217d31be09bf4886e39149601))
+* **netcli:** find a configuration session after leading blank lines ([cb65762](https://github.com/hegemony-sh/hegemony-step-plugins/commit/cb657623a8f48dbaa56d581668d511f1c14b1fa0))
+* **netmiko:** answer a timing command's prompt only once ([3a82490](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3a82490de75cf61282f1a96325b0e12da3b48c2f))
+* **probe:** await the host's egress check on the step's own event loop ([2c57f9f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/2c57f9f215551c6e2318419b999b9c88e883e240))
+* **probe:** fail only the probe.http target whose request cannot be made ([7c8f2d9](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7c8f2d9d6c3c10d978c928d4e420d3396f445de1))
+* **probe:** let probe.wait_reachable's HTTP Health check request any path ([42af963](https://github.com/hegemony-sh/hegemony-step-plugins/commit/42af963803879bbb094ac2ff2d83adfcd92bb1ca))
+* **probe:** refuse a probe.wait_reachable window as long as the wait ([7a36299](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7a36299ddee414069d670998b136ed52ccbbb684))
+* **probe:** run the probe.http and probe.dns egress checks off the event loop ([a99e238](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a99e2386714db477d115ea5880f02e664b5eb301))
+* **shell:** keep template values out of PowerShell commands ([38bc245](https://github.com/hegemony-sh/hegemony-step-plugins/commit/38bc2459d197c569ad61e5821c2adccc0ceab49d))
+* **shell:** refuse environment variable names that are not identifiers ([197f30c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/197f30c88ff7250dbf9b29d8ededa91a56fc22ef))
+* **shell:** refuse values in lines whose interpreter is a template ([51f4c65](https://github.com/hegemony-sh/hegemony-step-plugins/commit/51f4c6537e3f3e4d290b65650b1e6b061eed0d9a))
+* **shell:** refuse whitespace control in command templates ([e01d3ea](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e01d3ea14719014aa0957c0863e457678e7add7d)), closes [#-](https://github.com/hegemony-sh/hegemony-step-plugins/issues/-)
+* **tf:** end the run's hold on managed state when tf.plan fails ([f406789](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f406789669bdb59a0c0c1b647f2605afb64b1973))
+* **tf:** let tf.apply succeed on a plan with no changes without a shared workspace ([dd74dc7](https://github.com/hegemony-sh/hegemony-step-plugins/commit/dd74dc79db70a45609cf15f702b570b1254203b6))
+* **tf:** read tf.plan's plan modes as the plan does, and refuse refresh_only with replace ([71e37a4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/71e37a4c87e8cb15fdc04e95fe8d94f8956e4dbf))
+* **transports:** answer a prompt that a channel read cut in two ([416492c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/416492c4e3832785a8efcc449305903934de54c5))
+* **transports:** answer the questions of a copy to startup-config ([dbce1da](https://github.com/hegemony-sh/hegemony-step-plugins/commit/dbce1dae935b8934c5e6e3e7969dffb1aaee992c))
+* **transports:** keep command and configuration text out of the logs ([8090c5e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8090c5e4cf67c0667572814b865661e9b791f477))
+* **transports:** stop a config block at the first line the device rejects ([9de4ea7](https://github.com/hegemony-sh/hegemony-step-plugins/commit/9de4ea71f0981e2dca921d8fec49ab80bc969fa3))
+
 ## [0.22.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.21.0...v0.22.0) (2026-10-06)
 
 ### Features

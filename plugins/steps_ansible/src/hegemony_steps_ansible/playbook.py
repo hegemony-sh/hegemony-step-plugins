@@ -75,7 +75,7 @@ from .results import (
 #: network collections. Built from images/ansible-runner in this repository; the
 #: Images workflow publishes it for every release as X.Y.Z and X.Y, and the tag
 #: here names this release's minor version (scripts/set_version.py moves it).
-DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.22"
+DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.23"
 
 ATTACHMENTS_ROOT = "/attachments"
 ANSIBLE_ROOT = "/hegemony/ansible"
