@@ -1,3 +1,13 @@
+## [0.24.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.23.0...v0.24.0) (2026-10-07)
+
+### Features
+
+* **sdk:** let a step end only a state hold a given step took ([84f7a35](https://github.com/hegemony-sh/hegemony-step-plugins/commit/84f7a350bfdc94afa199511e12d4716bca1e6001))
+
+### Bug Fixes
+
+* **tf:** end only the state hold the plan step's own lock took ([7e073a5](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7e073a5ed7222f47eb8dee912167913185b242db))
+
 ## [0.23.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.22.0...v0.23.0) (2026-10-07)
 
 ### ⚠ BREAKING CHANGES
