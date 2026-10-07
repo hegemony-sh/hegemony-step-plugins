@@ -15,7 +15,8 @@ body containing expected text — without any device credentials.
 
 Targets come from the step's target picker: each selected role resolves to
 its devices' management addresses, and explicit IP selectors add literal
-addresses (IPv6 literals are handled). The request URL is built from Scheme
+addresses (an IPv6 address is put in brackets in the URL; one already in
+brackets is used as is). The request URL is built from Scheme
 (HTTP by default), Port (defaulting to 80 or 443 by scheme), and Path
 (default `/`; a missing leading slash is added). Method is GET, HEAD, or
 POST — keep in mind a HEAD response has no body for Body Contains to match.
@@ -51,11 +52,12 @@ failed.
 ## When It Fails
 
 The step fails before any request when Expected Status cannot be parsed, or
-when no target devices or IPs are configured. A target fails when the
-connection errors (refused, TLS failure, or timeout — the timeout applies
-per attempt, not to the step as a whole), when the response status is
-outside the expected set, or when the body does not contain the Body
-Contains text. One failing target fails the whole step, with per-target
-reasons listed in the step error. Evidence is kept for every target that
-was actually requested; a device without a management address fails the
-step but leaves no evidence record.
+when no target devices or IPs are configured. A target fails when its
+address does not make a valid URL, when the request errors (refused, TLS
+failure, or timeout — the timeout applies per attempt, not to the step as a
+whole), when the response status is outside the expected set, or when the
+body does not contain the Body Contains text; the other targets are still
+requested. One failing target fails the whole step, with per-target reasons
+listed in the step error. Evidence is kept for every target that was
+actually requested; a device without a management address fails the step
+but leaves no evidence record.

@@ -8,12 +8,13 @@ Covers registration under hegemony.device_transports, spec-based construction
 and platform mapping, show/config execution paths (per-response result
 mapping, `exit` kept inside its config block, blocks and exec commands in the
 order written, nothing run after the first failure or a cancellation),
-timing-mode prompt answering, and the explicit NotImplementedError staging
-seam.
+answering the questions of a copy to startup-config, timing-mode prompt
+answering, and the explicit NotImplementedError staging seam.
 """
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -197,6 +198,24 @@ async def test_exit_inside_a_config_block_is_sent_as_a_config_line():
     assert all(r.exit_code == 0 for r in results)
 
 
+async def test_a_leading_blank_line_keeps_the_configuration_session():
+    # A blank first line used to make the list a show/exec list, so the save
+    # ran even when a config line failed.
+    connection = _connection()
+    connection.send_configs.return_value = [
+        _response("% Invalid input detected at '^' marker.", failed=True)
+    ]
+
+    results = await _run_on_connection(
+        ["", "  ", "conf t", "hostname r1", "end", "write memory"], connection
+    )
+
+    connection.send_configs.assert_awaited_once_with(["hostname r1"], stop_on_failed=True)
+    assert connection.send_command.await_count == 0
+    assert [(r.command, r.exit_code) for r in results] == [("hostname r1", 1), ("write memory", -1)]
+    assert results[-1].error == _SKIPPED_ERROR
+
+
 async def test_failed_post_command_fails_and_skips_the_rest():
     connection = _connection()
     connection.send_configs.return_value = [_response()]
@@ -257,6 +276,107 @@ async def test_config_blocks_and_exec_commands_run_in_written_order():
         "write memory",
     ]
     assert all(r.exit_code == 0 for r in results)
+
+
+def _iosxe_connection() -> MagicMock:
+    from scrapli.driver.core.cisco_iosxe.base_driver import PRIVS
+
+    connection = _connection()
+    connection.privilege_levels = PRIVS
+    connection.default_desired_privilege_level = "privilege_exec"
+    connection.send_interactive = AsyncMock()
+    return connection
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "copy running-config startup-config",
+        "copy run start",
+        "copy system:running-config nvram:startup-config",
+    ],
+)
+async def test_a_copy_to_startup_config_answers_the_destination_question(command):
+    # IOS asks for the destination file name before it copies, which the
+    # prompt-only wait of send_command ran into the command timeout.
+    connection = _iosxe_connection()
+    connection.send_interactive.side_effect = [
+        _response(f"{command}\nDestination filename [startup-config]?"),
+        _response("Building configuration...\n[OK]\nr1#"),
+    ]
+
+    results = await _run_on_connection([command], connection)
+
+    calls = connection.send_interactive.await_args_list
+    exec_prompt = r"^[\w.\-@/:]{1,63}#\s*$"
+    assert [c.args[0] for c in calls] == [[(command, exec_prompt)], [("", exec_prompt)]]
+    connection.send_command.assert_not_awaited()
+    assert (results[0].exit_code, results[0].error) == (0, None)
+    assert (
+        results[0].output
+        == "Destination filename [startup-config]?\nBuilding configuration...\n[OK]"
+    )
+
+
+def test_the_copy_questions_are_read_as_patterns_that_match_the_device():
+    # send_interactive escapes a pattern unless it is anchored with ^ and $,
+    # and the exec prompt pattern must not take a question for the prompt.
+    from scrapli.channel.base_channel import BaseChannel
+    from scrapli.driver.core.cisco_iosxe.base_driver import PRIVS
+
+    from hegemony_transport_scrapli.transport import _COPY_QUESTION_PATTERNS
+
+    questions = [
+        b"Destination filename [startup-config]? ",
+        b"Overwrite the previous NVRAM configuration?[confirm]",
+    ]
+    patterns = [BaseChannel._get_prompt_pattern("", pattern) for pattern in _COPY_QUESTION_PATTERNS]
+    for question in questions:
+        assert any(p.search(question) for p in patterns), question
+        assert not BaseChannel._get_prompt_pattern("", PRIVS["privilege_exec"].pattern).search(
+            question
+        )
+
+
+async def test_a_copy_to_startup_config_answers_a_confirmation_too():
+    connection = _iosxe_connection()
+    connection.send_configs.return_value = [_response()]
+    connection.send_interactive.side_effect = [
+        _response("copy run start\nDestination filename [startup-config]?"),
+        _response("Overwrite the previous NVRAM configuration?[confirm]"),
+        _response("Building configuration...\n[OK]\nr1#"),
+    ]
+
+    results = await _run_on_connection(
+        ["configure terminal", "hostname r1", "end", "copy run start"], connection
+    )
+
+    inputs = [c.args[0][0][0] for c in connection.send_interactive.await_args_list]
+    assert inputs == ["copy run start", "", ""]
+    assert [r.exit_code for r in results] == [0, 0]
+    assert results[-1].output.endswith("[OK]")
+
+
+async def test_a_copy_to_startup_config_without_questions_waits_for_the_prompt():
+    connection = _iosxe_connection()
+    connection.send_interactive.return_value = _response(
+        "copy run start\nBuilding configuration...\n[OK]\nr1#"
+    )
+
+    results = await _run_on_connection(["copy run start"], connection)
+
+    assert connection.send_interactive.await_count == 1
+    assert (results[0].exit_code, results[0].output) == (0, "Building configuration...\n[OK]")
+
+
+async def test_a_copy_that_keeps_asking_fails():
+    connection = _iosxe_connection()
+    connection.send_interactive.return_value = _response("Destination filename [startup-config]?")
+
+    results = await _run_on_connection(["copy run start"], connection)
+
+    assert connection.send_interactive.await_count == 3
+    assert results[0].exit_code == -1
 
 
 class _Cancellation(_NullCancellationRegistry):
@@ -389,6 +509,28 @@ async def test_timing_mode_answers_prompts_and_finds_pattern():
     assert "\n" in written[1:]  # the [confirm] answer
 
 
+async def test_timing_mode_answers_a_prompt_split_across_reads():
+    transport = _make_transport()
+    connection = _connection()
+    connection.channel.read = AsyncMock(
+        side_effect=[b"Proceed with reload? [y/", b"n]", ScrapliTimeout("no data"), b"SUCCESS"]
+    )
+
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        result = await transport.execute_command_timing(
+            "install activate",
+            read_timeout=30.0,
+            answers={"[y/n]": "y"},
+            wait_for_patterns=["SUCCESS"],
+        )
+
+    assert result.exit_code == 0
+    written = [call.args[0] for call in connection.channel.write.call_args_list]
+    assert written == ["install activate\n", "y\n"]
+
+
 async def test_timing_mode_settles_when_channel_goes_quiet():
     transport = _make_transport()
     connection = _connection()
@@ -430,6 +572,95 @@ async def test_timing_mode_stops_on_hard_read_error():
     assert connection.channel.read.await_count == 2
     assert result.exit_code == 0
     assert "System going down" in result.output
+
+
+# ── Command text stays out of the logs ──────────────────────────────────────
+
+#: Stands for a value a step rendered from {{ secret(...) }}: the platform has
+#: no log redaction, so command text must never reach a log message.
+_SECRET = "Sw0rdfish-42.x"
+
+
+def _respond(outcome: object):
+    async def respond(*args, **kwargs):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    return respond
+
+
+_OUTCOMES = [
+    _response(f"{_SECRET} ok"),
+    _response(f"{_SECRET}\n% Invalid input detected at '^' marker.", failed=True),
+    ScrapliTimeout(f"timed out sending {_SECRET}"),
+]
+_OUTCOME_IDS = ["success", "cli-error", "exception"]
+
+
+@pytest.mark.parametrize("outcome", _OUTCOMES, ids=_OUTCOME_IDS)
+async def test_exec_commands_are_not_logged(caplog, outcome):
+    caplog.set_level(logging.DEBUG)
+    connection = _connection()
+    connection.send_command.side_effect = _respond(outcome)
+
+    await _run_on_connection([f"show running-config | include {_SECRET}"], connection)
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+@pytest.mark.parametrize("outcome", _OUTCOMES, ids=_OUTCOME_IDS)
+async def test_config_lines_are_not_logged(caplog, outcome):
+    caplog.set_level(logging.DEBUG)
+    connection = _connection()
+    configs = outcome if isinstance(outcome, Exception) else [outcome]
+    connection.send_configs.side_effect = _respond(configs)
+    connection.send_command.return_value = _response("[OK]")
+
+    await _run_on_connection(
+        ["configure terminal", f"username admin secret {_SECRET}", "end", "write memory"],
+        connection,
+    )
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+async def test_timing_commands_and_output_are_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    transport = _make_transport()
+    connection = _connection()
+    # The device echoes the command; the awaited pattern never comes.
+    connection.channel.read = AsyncMock(side_effect=[f"{_SECRET}\n".encode(), OSError("gone")])
+
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        await transport.execute_command_timing(
+            f"install add file flash:{_SECRET}.bin",
+            read_timeout=30.0,
+            wait_for_patterns=["Install done"],
+        )
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+async def test_failed_timing_commands_are_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    transport = _make_transport()
+    connection = _connection()
+    connection.channel.write.side_effect = OSError(f"write of {_SECRET} failed")
+
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        result = await transport.execute_command_timing(f"install add file flash:{_SECRET}.bin")
+
+    assert result.exit_code == -1
+    assert caplog.records
+    assert _SECRET not in caplog.text
 
 
 async def test_staging_methods_are_an_explicit_seam():

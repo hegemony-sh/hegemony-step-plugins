@@ -142,7 +142,7 @@ class VerifyResult:
 
     success: bool
     current_version: str = ""
-    version_match: bool = False  # Running version contains target_version
+    version_match: bool = False  # Running version is target_version (same release)
     version_changed: bool = False  # Version different from preflight
     committed: bool = False  # Install-mode: software committed
     boot_config_correct: bool = True  # Boot system points to new image
@@ -345,7 +345,8 @@ class UpgradeDriver(ABC):
 
         Args:
             ssh: Connected SSH transport
-            target_version: Expected version substring to match
+            target_version: Expected version, compared as a release (17.9.4a
+                is 17.09.04a; 17.09.04 is not)
             preflight_version: Version before upgrade (to detect unchanged)
             auto_commit: Automatically commit if not committed
 

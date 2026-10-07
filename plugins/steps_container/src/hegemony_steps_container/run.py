@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
@@ -641,6 +641,25 @@ def _optional_str(value: Any, default: str = "") -> str:
     return value.strip() if isinstance(value, str) and value.strip() else default
 
 
+_BOOL_SETTING: TypeAdapter[bool] = TypeAdapter(bool)
+
+
+def _bool_setting(value: Any, default: bool) -> bool | None:
+    """A boolean field read the way its config model reads it.
+
+    A rendered template arrives as text, so ``"false"`` (or ``"False"``,
+    ``"0"``, ``"off"``) is False rather than a non-empty string that
+    ``bool()`` would call true. Absent is ``default``; None means the value
+    is not a boolean at all, which validation refuses.
+    """
+    if value is None:
+        return default
+    try:
+        return _BOOL_SETTING.validate_python(value)
+    except ValidationError:
+        return None
+
+
 _HOST_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 
 
@@ -1148,6 +1167,29 @@ def _container_run_result(ctx: HandlerContext, outcome: ContainerJobResult) -> H
     )
 
 
+#: The admin-only options that give the step's container rights on the sandbox
+#: host (its network, process namespace, Docker daemon, files, or all of it).
+#: Read from the fields' ``x_admin_only`` flag so the list cannot drift.
+_HOST_ACCESS_FIELDS: tuple[str, ...] = tuple(
+    name
+    for name, field in RunContainerConfig.model_fields.items()
+    if isinstance(field.json_schema_extra, dict) and field.json_schema_extra.get("x_admin_only")
+)
+
+#: Where Jinja template syntax starts: a value, a statement or a comment.
+_TEMPLATE_SYNTAX_RE = re.compile(r"\{[{%#]")
+
+
+def _host_access_enabled(config: dict[str, Any]) -> list[str]:
+    """The host-access options a step's config turns on (a template counts as on)."""
+    return [
+        name
+        for name in _HOST_ACCESS_FIELDS
+        if config.get(name) not in (None, False, "", [], {})
+        and not (isinstance(config.get(name), str) and not config[name].strip())
+    ]
+
+
 class RunContainerHandler(BaseHandler):
     """Handler for running commands inside Docker containers.
 
@@ -1183,6 +1225,30 @@ class RunContainerHandler(BaseHandler):
     # paths are absolute and opts are a comma list of alnum tokens (e.g.
     # `ro,shared`). No spaces, no `..` traversal, no leading dashes.
     _EXTRA_MOUNT_PATTERN = re.compile(r"^(/[^:\s]+):(/[^:\s]+)(?::([a-zA-Z][a-zA-Z0-9,]*))?$")
+
+    def template_errors(self, config: dict[str, Any]) -> list[str]:
+        """Refuse templates in the command of a step that has host-access options.
+
+        The host renders a step's ``{{ }}`` templates before the step runs, so a
+        value in the command or entrypoint becomes part of the script the
+        container runs. With admin-only host-access options on, that script runs
+        with rights on the sandbox host, so a run input there could take them
+        over. Such a step must take its values from Environment Variables.
+        """
+        enabled = _host_access_enabled(config)
+        if not enabled:
+            return []
+        errors: list[str] = []
+        for field_name in ("command", "entrypoint"):
+            value = config.get(field_name)
+            texts = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+            if any(isinstance(text, str) and _TEMPLATE_SYNTAX_RE.search(text) for text in texts):
+                errors.append(
+                    f"{field_name} cannot hold {{{{ }}}} or {{% %}} templates when "
+                    f"{', '.join(enabled)} is set: a value rendered into it would run with "
+                    'those rights. Pass values in Environment Variables and read them as "$NAME".'
+                )
+        return errors
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         """Validate container handler configuration."""
@@ -1224,6 +1290,9 @@ class RunContainerHandler(BaseHandler):
             errors.append("'files' is no longer supported; use flow attachments + mounted_files")
 
         errors.extend(secret_map_errors("secrets", config.get("secrets")))
+
+        if _bool_setting(config.get("cache_image"), True) is None:
+            errors.append("'cache_image' must be true or false")
 
         entrypoint = config.get("entrypoint")
         if entrypoint is not None:
@@ -1750,7 +1819,8 @@ class RunContainerHandler(BaseHandler):
         requested = requested_timeout(config.get("timeout_seconds"))
         timeout = step_container_timeout(ctx, requested)
         await report_timeout_cut(ctx, requested, timeout)
-        working_dir = config.get("working_dir", "/workspace")
+        # As build_docker_args reads it: blank is the default, not a path.
+        working_dir = _optional_str(config.get("working_dir"), "/workspace")
         # Where flow attachments are copied inside the container. Defaults to
         # /attachments; steps may override to any absolute path. Trailing
         # slashes are normalized off so the docker cp target is well-formed.
@@ -2321,6 +2391,11 @@ class RunContainerHandler(BaseHandler):
 
             max_bytes = self._MAX_OUTPUT_BYTES
             stream_budget = max_bytes // 2
+            # What the evidence keeps of each stream (up to stream_budget), held
+            # here so that a container stopped at the timeout keeps what it wrote.
+            stdout_bytes = bytearray()
+            stderr_bytes = bytearray()
+            truncated_streams: set[str] = set()
             live = LiveOutput(
                 f"[Live output stops here, at its {size_text(MAX_LIVE_OUTPUT_BYTES)} limit; "
                 f"the container goes on. Its container_output evidence keeps the first "
@@ -2340,11 +2415,6 @@ class RunContainerHandler(BaseHandler):
                 """
 
                 lock = asyncio.Lock()
-
-                stdout_bytes = bytearray()
-                stderr_bytes = bytearray()
-                stdout_trunc = False
-                stderr_trunc = False
 
                 # Event buffers store decoded text fragments to emit via ctx.emit_progress
                 stdout_event_buf: list[str] = []
@@ -2367,7 +2437,18 @@ class RunContainerHandler(BaseHandler):
                         logger.debug("emit_progress failed for %s: %s", stream_label, e)
 
                 async def _take(line: bytes, artifact_bytes: bytearray, event_buf_label: str):
-                    nonlocal stdout_trunc, stderr_trunc, stdout_event_size, stderr_event_size
+                    nonlocal stdout_event_size, stderr_event_size
+                    # Capture artifact bytes up to budget, before anything this
+                    # task can be cancelled at. Output that arrives once the
+                    # budget is full, also when a line filled it exactly, is
+                    # dropped and marks the stream truncated.
+                    remaining = stream_budget - len(artifact_bytes)
+                    if len(line) > remaining:
+                        artifact_bytes.extend(line[: max(remaining, 0)])
+                        truncated_streams.add(event_buf_label)
+                    else:
+                        artifact_bytes.extend(line)
+
                     # Decode using replace to avoid errors; past its limit the
                     # live log gets one notice, then nothing.
                     text = live.admit(line.decode("utf-8", errors="replace"))
@@ -2395,19 +2476,6 @@ class RunContainerHandler(BaseHandler):
                     if to_flush is not None:
                         # Flush outside the lock
                         await _flush_event_buffer(event_buf_label, [to_flush])
-
-                    # Capture artifact bytes up to budget. Output that arrives
-                    # once the budget is full, also when a line filled it
-                    # exactly, is dropped and marks the stream truncated.
-                    remaining = stream_budget - len(artifact_bytes)
-                    if len(line) > remaining:
-                        artifact_bytes.extend(line[: max(remaining, 0)])
-                        if event_buf_label == "stdout":
-                            stdout_trunc = True
-                        else:
-                            stderr_trunc = True
-                    else:
-                        artifact_bytes.extend(line)
 
                 async def _reader(
                     stream: asyncio.StreamReader,
@@ -2510,9 +2578,9 @@ class RunContainerHandler(BaseHandler):
                 # Return decoded artifacts and truncation flags
                 return (
                     stdout_bytes.decode("utf-8", errors="replace"),
-                    stdout_trunc,
+                    "stdout" in truncated_streams,
                     stderr_bytes.decode("utf-8", errors="replace"),
-                    stderr_trunc,
+                    "stderr" in truncated_streams,
                 )
 
             try:
@@ -2531,10 +2599,48 @@ class RunContainerHandler(BaseHandler):
                 # full never closes, which asyncio's wait() also waits for.
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(proc.wait(), timeout=KILL_WAIT_SECONDS)
+                # The step fails as timed out, with what the container wrote
+                # until then, kept as a finished run's output is.
+                error = f"Container execution timed out after {timeout}s"
+                stdout_out = stdout_bytes.decode("utf-8", errors="replace")
+                stderr_out = stderr_bytes.decode("utf-8", errors="replace")
+                truncated = bool(truncated_streams)
+                output = stdout_out + stderr_out
+                if truncated:
+                    output += f"\n[TRUNCATED after {max_bytes} bytes]"
+                duration = round(time.monotonic() - start_time, 2)
                 return HandlerResult(
                     success=False,
-                    error=f"Container execution timed out after {timeout}s",
+                    error=error,
                     summary="Container timed out",
+                    # As for a timeout before the container ran: no harvest.
+                    metrics={"duration_seconds": duration, "image": image, "skipped_artifacts": 0},
+                    evidence=[
+                        {
+                            "kind": "container_output",
+                            "name": f"container_output_{ctx.step_id}",
+                            "content_text": output,
+                            "content_json": {
+                                "exit_code": None,
+                                "timed_out": True,
+                                "error": error,
+                                "image": image,
+                                "image_digest": image_digest,
+                                "image_served": served,
+                                "image_source": acquired.source,
+                                "image_cached": acquired.cached,
+                                "duration_seconds": duration,
+                                "truncated": truncated,
+                                "container_name": container_name,
+                                "stdout": stdout_out,
+                                "stderr": stderr_out,
+                            },
+                        }
+                    ],
+                    output={
+                        "stdout": stdout_out[:MAX_CHAIN_OUTPUT_CHARS],
+                        "stderr": stderr_out[:MAX_CHAIN_OUTPUT_CHARS],
+                    },
                 )
             except asyncio.CancelledError:
                 # Cancellation (workflow cancelled, heartbeat timeout) is a
@@ -3057,7 +3163,8 @@ class RunContainerHandler(BaseHandler):
         is left of the step's deadline. Nothing here fails the step except the
         pull itself, or running out of time.
         """
-        wants_cache = bool(job.config.get("cache_image", True))
+        # Validated: a rendered "false" turns the cache off like a stored false.
+        wants_cache = bool(_bool_setting(job.config.get("cache_image"), True))
         plan = plan_cache(image, cache) if (wants_cache and cache is not None) else None
         if plan is None:
             failure = await self._pull_image(

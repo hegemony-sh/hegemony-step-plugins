@@ -82,6 +82,27 @@ _QUIET_READS_DONE = 3
 #: so every existing close path tears the tunnel down with the session.
 _JUMP_TUNNEL_ATTR = "_hegemony_jump_tunnel"
 
+#: First lines that make a command list a configuration session (same as the
+#: CLI transports).
+_CONFIG_ENTER_COMMANDS = ("configure terminal", "conf t", "config t")
+
+#: Error of a result for a command not run because an earlier one failed.
+_SKIPPED_ERROR = "Skipped: earlier command failed"
+
+#: Error of a result for a command not run because the run was cancelled.
+_CANCELLED_ERROR = "Skipped: the run was cancelled"
+
+
+def _is_config_session(commands: list[str]) -> bool:
+    """True when the first non-blank command enters configuration mode."""
+    first = next((cmd.strip().lower() for cmd in commands if cmd.strip()), "")
+    return first in _CONFIG_ENTER_COMMANDS
+
+
+def _skipped(command: str, reason: str) -> ExecResult:
+    """Result for a command not run, with ``reason`` as its error."""
+    return ExecResult(command=command, output="", exit_code=-1, error=reason)
+
 
 async def _close_connection(connection) -> None:
     """Close an asyncssh connection (and its jump tunnel), suppressing errors.
@@ -101,6 +122,35 @@ async def _close_connection(connection) -> None:
             tunnel.close()
         with contextlib.suppress(Exception):
             await tunnel.wait_closed()
+
+
+def _next_prompt(
+    output: str, start: int, answers: dict[str, str], answered: set[str]
+) -> tuple[str | None, str, int]:
+    """The first prompt in ``output`` from ``start`` that is not answered yet.
+
+    Matches ignore case. Returns ``(prompt, answer, resume)``: the prompt and
+    its answer, or None and "" when none is there, and where the next scan
+    starts. That is just past the prompt found, so a second question in the
+    same output is found next; or, when none was found, the last characters
+    of ``output`` that could begin a prompt, so a prompt that one read cut in
+    two is found once the rest arrives. The prompt found joins ``answered``.
+    """
+    output_lower = output.lower()
+    found: tuple[int, str, str] | None = None
+    for prompt, answer in answers.items():
+        key = prompt.lower()
+        if not key or key in answered:
+            continue
+        index = output_lower.find(key, start)
+        if index >= 0 and (found is None or index < found[0]):
+            found = (index, prompt, answer)
+    if found is None:
+        longest = max((len(prompt) for prompt in answers), default=1)
+        return None, "", max(start, len(output_lower) - longest + 1)
+    index, prompt, answer = found
+    answered.add(prompt.lower())
+    return prompt, answer, index + len(prompt)
 
 
 class AsyncSSHTransport:
@@ -257,6 +307,17 @@ class AsyncSSHTransport:
         logger.info(f"Connected to {self.host} in {connect_time:.0f}ms")
         return connection
 
+    def _skip_reason(self) -> str:
+        """Why the commands after a failure are not run.
+
+        Cancelling the run closes the connection, so the command running then
+        fails; the rest are skipped because of the cancellation, not that
+        failure.
+        """
+        if self._cancellation_registry.is_cancelled(self.step_run_id):
+            return _CANCELLED_ERROR
+        return _SKIPPED_ERROR
+
     @staticmethod
     def _result_from_completed(command: str, completed: Any, latency_ms: float) -> ExecResult:
         """Map one asyncssh completed process onto the SDK result shape."""
@@ -281,6 +342,12 @@ class AsyncSSHTransport:
         """
         Execute multiple commands over one SSH connection, one exec channel each.
 
+        In a configuration session (the first non-blank command is
+        'configure terminal' or an abbreviation) nothing runs after the first
+        failure or a cancellation, as on the CLI transports: the commands left
+        are recorded as skipped, so a later save never stores a change that
+        failed part way. Otherwise every command runs.
+
         Args:
             commands: List of commands to execute
 
@@ -299,14 +366,22 @@ class AsyncSSHTransport:
             if self.step_run_id:
                 self._cancellation_registry.register(self.step_run_id, connection)
 
+            config_session = _is_config_session(commands)
+            skip_reason: str | None = None
             for command in commands:
                 if not command.strip():
+                    continue
+                if skip_reason is not None:
+                    results.append(_skipped(command, skip_reason))
                     continue
                 if self._cancellation_registry.is_cancelled(self.step_run_id):
                     results.append(
                         ExecResult(command=command, output="", exit_code=-1, error="Cancelled")
                     )
-                    break
+                    if not config_session:
+                        break
+                    skip_reason = _CANCELLED_ERROR
+                    continue
                 start = time.perf_counter()
                 try:
                     completed = await asyncio.wait_for(
@@ -315,37 +390,33 @@ class AsyncSSHTransport:
                     )
                     latency_ms = (time.perf_counter() - start) * 1000
                     result = self._result_from_completed(command, completed, latency_ms)
-                    results.append(result)
                     if result.exit_code == 0:
-                        logger.info(f"Command '{command}' completed in {latency_ms:.0f}ms")
+                        logger.info(f"Command on {self.host} completed in {latency_ms:.0f}ms")
                     else:
-                        logger.warning(
-                            f"Command '{command}' exited {result.exit_code}: {result.error}"
-                        )
+                        logger.warning(f"Command on {self.host} exited {result.exit_code}")
                 except TimeoutError:
                     latency_ms = (time.perf_counter() - start) * 1000
-                    results.append(
-                        ExecResult(
-                            command=command,
-                            output="",
-                            exit_code=-1,
-                            error=f"Command timeout after {self.command_timeout}s",
-                            latency_ms=latency_ms,
-                        )
+                    result = ExecResult(
+                        command=command,
+                        output="",
+                        exit_code=-1,
+                        error=f"Command timeout after {self.command_timeout}s",
+                        latency_ms=latency_ms,
                     )
-                    logger.error(f"Command '{command}' timed out")
+                    logger.error(f"Command on {self.host} timed out")
                 except Exception as e:
                     latency_ms = (time.perf_counter() - start) * 1000
-                    results.append(
-                        ExecResult(
-                            command=command,
-                            output="",
-                            exit_code=-1,
-                            error=str(e),
-                            latency_ms=latency_ms,
-                        )
+                    result = ExecResult(
+                        command=command,
+                        output="",
+                        exit_code=-1,
+                        error=str(e),
+                        latency_ms=latency_ms,
                     )
-                    logger.error(f"Command '{command}' failed: {e}")
+                    logger.error(f"Command on {self.host} failed: {type(e).__name__}")
+                results.append(result)
+                if config_session and result.exit_code != 0:
+                    skip_reason = self._skip_reason()
 
         except asyncssh.PermissionDenied as e:
             logger.error(f"Authentication failed to {self.host}: {e}")
@@ -465,7 +536,7 @@ class AsyncSSHTransport:
         combined_output = ""
 
         try:
-            logger.info(f"Executing timing command on {self.host}: {command[:50]}...")
+            logger.info(f"Executing timing command on {self.host}")
             connection = await self._connect()
 
             if self.step_run_id:
@@ -499,19 +570,16 @@ class AsyncSSHTransport:
                 else:
                     quiet_reads += 1
 
-                # Answer known prompts, each at most once, scanning only new output.
-                if answers:
-                    new_output_lower = combined_output[prompt_check_start_pos:].lower()
-                    for prompt_pattern, answer in answers.items():
-                        pattern_lower = prompt_pattern.lower()
-                        if pattern_lower in answered_prompts:
-                            continue
-                        if pattern_lower in new_output_lower:
-                            logger.info(f"Matched prompt '{prompt_pattern}', sending answer")
-                            answered_prompts.add(pattern_lower)
-                            process.stdin.write(answer + "\n")
-                            break
-                    prompt_check_start_pos = len(combined_output)
+                # Answer known prompts, each at most once, scanning only output
+                # not scanned yet (see _next_prompt).
+                while answers:
+                    prompt, answer, prompt_check_start_pos = _next_prompt(
+                        combined_output, prompt_check_start_pos, answers, answered_prompts
+                    )
+                    if prompt is None:
+                        break
+                    logger.info(f"Matched prompt '{prompt}', sending answer")
+                    process.stdin.write(answer + "\n")
 
                 if wait_for_patterns:
                     for pattern in wait_for_patterns:
@@ -532,7 +600,7 @@ class AsyncSSHTransport:
             if wait_for_patterns and not pattern_found:
                 logger.warning(
                     f"Timeout waiting for patterns after {read_timeout}s. "
-                    f"Output so far: {combined_output[-500:] if combined_output else '(empty)'}"
+                    f"Output length: {len(combined_output)}"
                 )
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -556,7 +624,7 @@ class AsyncSSHTransport:
 
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            logger.error(f"Timing command failed on {self.host}: {e}")
+            logger.error(f"Timing command failed on {self.host}: {type(e).__name__}")
             return ExecResult(
                 command=command,
                 output=combined_output,
@@ -686,7 +754,9 @@ class AsyncSSHTransport:
             output = f"{stdout}\n{stderr}".strip()
             transferred = completed.exit_status == 0
             if not transferred:
-                logger.error(f"HTTP transfer failed: {output}")
+                logger.error(
+                    f"HTTP transfer on {self.host} failed: curl exited {completed.exit_status}"
+                )
 
             return {
                 "transferred": transferred,
@@ -694,7 +764,7 @@ class AsyncSSHTransport:
                 "elapsed_ms": elapsed_ms,
             }
         except Exception as e:
-            logger.error(f"HTTP transfer on {self.host} failed: {e}")
+            logger.error(f"HTTP transfer on {self.host} failed: {type(e).__name__}")
             raise
         finally:
             if self.step_run_id and connection:

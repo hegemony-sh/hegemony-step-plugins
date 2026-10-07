@@ -27,9 +27,9 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
     for_each_target_device,
-    max_parallel_from_config,
 )
 
 from ..driver import UpgradeMode, get_driver
@@ -68,7 +68,10 @@ class UpgradePreflightConfig(BaseModel):
     target_version: str = Field(
         default="",
         title="Target Version (optional)",
-        description="Expected version after upgrade",
+        description=(
+            "Expected version after upgrade, compared as a release: 17.9.4a "
+            "matches 17.09.04a, but 17.09.04 does not"
+        ),
         json_schema_extra={"x_placeholder": "17.09.04a"},
     )
     dest_fs: str = Field(
@@ -153,15 +156,19 @@ class UpgradePreflightHandler(BaseHandler):
                 summary="Missing target device",
             )
 
-        # Get parameters
+        try:
+            config = self.parse_config(ctx.config, UpgradePreflightConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        # Not a setting: only the IOS-XE drivers exist. Kept for steps that name it.
         platform = ctx.config.get("platform", DEFAULT_DEVICE_PLATFORM)
-        mode_str = ctx.config.get("upgrade_mode", "install")
-        upgrade_mode = UpgradeMode.BUNDLE if mode_str.lower() == "bundle" else UpgradeMode.INSTALL
+        mode_str = config.upgrade_mode
+        upgrade_mode = UpgradeMode.BUNDLE if mode_str == "bundle" else UpgradeMode.INSTALL
 
-        image_name = ctx.config.get("image_name")
-        target_version = ctx.config.get("target_version")
-        dest_fs = ctx.config.get("dest_fs", "flash:")
-        min_free_bytes = ctx.config.get("min_free_bytes")
+        image_name = config.image_name or None
+        target_version = config.target_version or None
+        dest_fs = config.dest_fs
+        min_free_bytes = config.min_free_bytes
 
         # Get driver for platform
         try:
@@ -320,7 +327,7 @@ class UpgradePreflightHandler(BaseHandler):
         outcomes = await for_each_target_device(
             target_devices,
             _process_device,
-            max_parallel=max_parallel_from_config(ctx.config),
+            max_parallel=config.max_parallel_devices,
         )
 
         # Merge per-device results in device order — deterministic regardless

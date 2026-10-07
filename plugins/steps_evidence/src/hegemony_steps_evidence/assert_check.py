@@ -20,7 +20,7 @@ from hegemony_step_sdk import (
     command_label,
 )
 
-from .artifacts import find_command_artifact, latest_artifact
+from .artifacts import capture_error, find_command_artifact, latest_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,17 @@ logger = logging.getLogger(__name__)
 # (line_filter, matches/not_matches patterns) never run against more than
 # this much text, so a catastrophic pattern cannot stall the worker.
 _MAX_REGEX_INPUT_CHARS = 1_000_000
+
+#: The ordering operators and the symbols their messages show.
+_ORDERING_SYMBOLS = {"gt": ">", "lt": "<", "ge": ">=", "le": "<="}
+
+
+def _number(value: Any) -> float | None:
+    """``value`` read as a number; None when it is not one."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class AssertConfig(BaseModel):
@@ -56,8 +67,8 @@ class AssertConfig(BaseModel):
         description=(
             "How the artifact content is compared with the expected value. "
             "Regex operators treat the expected value as a regular expression; "
-            "ordering operators compare numerically when both sides parse as "
-            "numbers, and as text otherwise. Defaults to Contains."
+            "ordering operators compare numbers and fail when either side is "
+            "not a number. Defaults to Contains."
         ),
         json_schema_extra={
             "x_option_labels": {
@@ -278,12 +289,13 @@ class AssertHandler(BaseHandler):
 
         for name, device, device_command in lookups:
             if device is None:
-                artifact_content = self._get_artifact_data(artifacts, artifact_step_id, name)
+                artifact = self._get_artifact(artifacts, artifact_step_id, name)
             else:
-                artifact_content = self._get_command_output(
+                artifact = self._get_command_artifact(
                     artifacts, artifact_step_id, device, device_command
                 )
-            if artifact_content is None:
+            artifact_content = None if artifact is None else self._artifact_content(artifact)
+            if artifact is None or artifact_content is None:
                 logger.warning(
                     "assert_artifact_fetch_failed",
                     extra={
@@ -297,9 +309,16 @@ class AssertHandler(BaseHandler):
 
             # The actual value is the artifact text content
             actual = artifact_content
-            passed, comparison_msg, scope_detail = self._assert_content(
-                actual, expected, operator, match_scope, line_filter, min_lines
-            )
+            error = capture_error(artifact)
+            if error is None:
+                passed, comparison_msg, scope_detail = self._assert_content(
+                    actual, expected, operator, match_scope, line_filter, min_lines
+                )
+            else:
+                # A failed capture holds an error, not the device's output:
+                # its empty output would pass not_contains, not_matches and ne.
+                passed, comparison_msg = False, f"capture failed: {error}"
+                scope_detail = {"capture_error": error}
             if not passed:
                 failed_messages.append(f"{name}: {comparison_msg}")
 
@@ -333,13 +352,13 @@ class AssertHandler(BaseHandler):
             evidence=assertion_evidence,
         )
 
-    def _get_artifact_data(
+    def _get_artifact(
         self,
         artifacts: list[dict] | None,
         artifact_step_id: str | None = None,
         artifact_name: str | None = None,
-    ) -> str | None:
-        """Get the content of a previous step's artifact by its name.
+    ) -> dict | None:
+        """Get a previous step's artifact by its name.
 
         ``artifacts`` is the run's artifact list, None when the fetch failed.
         """
@@ -355,17 +374,16 @@ class AssertHandler(BaseHandler):
         artifact = latest_artifact(artifacts, step_id=artifact_step_id, name=artifact_name)
         if artifact is None:
             logger.error(f"Artifact '{artifact_name}' not found in step '{artifact_step_id}'")
-            return None
-        return self._artifact_content(artifact)
+        return artifact
 
-    def _get_command_output(
+    def _get_command_artifact(
         self,
         artifacts: list[dict] | None,
         artifact_step_id: str | None,
         device: dict,
         command: str,
-    ) -> str | None:
-        """Get the output a previous step collected for ``device`` and ``command``.
+    ) -> dict | None:
+        """Get the artifact a previous step stored for ``device`` and ``command``.
 
         ``artifacts`` is the run's artifact list, None when the fetch failed.
         """
@@ -374,7 +392,7 @@ class AssertHandler(BaseHandler):
             return None
         if artifacts is None:
             return None
-        # Newest match: see _get_artifact_data.
+        # Newest match: see _get_artifact.
         artifact = find_command_artifact(
             artifacts, step_id=artifact_step_id, device=device, command=command
         )
@@ -383,8 +401,7 @@ class AssertHandler(BaseHandler):
                 f"No output of '{command_label(command)}' for device "
                 f"'{device.get('name')}' in step '{artifact_step_id}'"
             )
-            return None
-        return self._artifact_content(artifact)
+        return artifact
 
     async def _fetch_run_artifacts(self, ctx: HandlerContext) -> list[dict] | None:
         """Fetch the run's artifacts from the API; None when the fetch fails."""
@@ -484,10 +501,17 @@ class AssertHandler(BaseHandler):
 
         if first_failed is not None:
             detail["first_failed_line"] = first_failed
+            # Ordering operators compare numbers only; say when that is why.
+            not_a_number = ""
+            if operator in _ORDERING_SYMBOLS:
+                if _number(expected) is None:
+                    not_a_number = f"; the expected value '{expected}' is not a number"
+                elif _number(first_failed) is None:
+                    not_a_number = ", which is not a number"
             return (
                 False,
                 f"{len(selected) - lines_passed}/{len(selected)} selected line(s) "
-                f"failed {operator} '{expected}'; first: '{first_failed}'",
+                f"failed {operator} '{expected}'; first: '{first_failed}'{not_a_number}",
                 detail,
             )
         return True, "", detail
@@ -501,17 +525,23 @@ class AssertHandler(BaseHandler):
             elif operator == "ne":
                 passed = actual != expected
                 msg = f"Expected not {expected}, got {actual}"
-            elif operator in ("gt", "lt", "ge", "le"):
-                # Attempt numeric coercion for ordering comparisons;
-                # only use floats if *both* values convert successfully.
-                try:
-                    num_actual: Any = float(actual)
-                    num_expected: Any = float(expected)
-                except (TypeError, ValueError):
-                    # Fall back to original values (string comparison)
-                    num_actual = actual
-                    num_expected = expected
-                if operator == "gt":
+            elif operator in _ORDERING_SYMBOLS:
+                # Ordering compares numbers only: as text, output that starts
+                # with a letter ('Cisco IOS XE Software, Version 17.09.04a')
+                # sorts after '17.9', whatever the version.
+                num_actual = _number(actual)
+                num_expected = _number(expected)
+                if num_actual is None or num_expected is None:
+                    passed = False
+                    msg = f"Expected {_ORDERING_SYMBOLS[operator]} {expected}, but " + " and ".join(
+                        f"the {side} value '{value}' is not a number"
+                        for side, value, number in (
+                            ("expected", expected, num_expected),
+                            ("collected", actual, num_actual),
+                        )
+                        if number is None
+                    )
+                elif operator == "gt":
                     passed = num_actual > num_expected
                     msg = f"Expected > {expected}, got {actual}"
                 elif operator == "lt":

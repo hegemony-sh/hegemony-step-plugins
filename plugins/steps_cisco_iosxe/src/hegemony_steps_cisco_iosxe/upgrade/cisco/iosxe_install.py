@@ -50,6 +50,7 @@ from .iosxe_common import (
     run_checked,
     run_config,
     same_file_path,
+    same_version,
     save_config,
     stage_image,
     undo_boot_change,
@@ -91,6 +92,16 @@ _NO_CHANGE_RE = re.compile(
     r"Same Image File-No Change|Nothing to activate|No package is added or removed",
     re.IGNORECASE,
 )
+# Answers to the install's questions, keyed by the choices each question ends
+# with. The transports answer a key when it shows up in new output, each key
+# once, so no question may contain two keys. The phrase keys used before
+# overlapped: 16.x asks "This operation requires a reload of the system. Do
+# you want to proceed? Please confirm you have changed boot config to
+# flash:packages.conf [y/n]", which holds four of them, and got a "y" for each
+# one that arrived in a separate piece of output, the extra ones going to
+# whatever the device asked next. A second question with the same choices goes
+# unanswered and the install times out, which fails safe.
+_INSTALL_ANSWERS = {"[y/n]": "y", "[yes/no]": "yes"}
 
 
 # "install remove inactive": success, nothing to do, and each deleted file.
@@ -295,10 +306,10 @@ class IOSXEInstallDriver(UpgradeDriver):
             else:
                 install_mode_supported = True
 
-                # Check if target version is already committed
+                # Check if target version is already committed ("IMG  C  17.09.04a.0.6")
                 if target_version:
-                    committed_pattern = rf"\bC\s+{re.escape(target_version)}"
-                    if re.search(committed_pattern, summary_output):
+                    committed = re.findall(r"\bC\s+(\d\S*)", summary_output)
+                    if any(same_version(version, target_version) for version in committed):
                         target_version_installed = True
                         logger.info("Target version %s already committed", target_version)
 
@@ -436,18 +447,25 @@ class IOSXEInstallDriver(UpgradeDriver):
                         return _failed(boot_change_failure(e, restored=restored))
                     boot_config_changed = True
                     cli_outputs.append(f"=== boot configuration ===\n{transcript}")
-                    saved = await save_config(ssh)
-                    cli_outputs.append(f"=== write memory ===\n{saved}")
-                    # The boot variable follows the saved configuration, so
-                    # it is read back after the save.
-                    after = await run_checked(ssh, "show boot")
-                    cli_outputs.append(f"=== show boot (after) ===\n{after}")
-                    new_boot = parse_boot_statements(after)
-                    if not (new_boot and same_file_path(new_boot[0], expected_boot)):
-                        return _failed(
-                            f"Boot variable is {';'.join(new_boot) or 'not set'} after the "
-                            f"change, expected {expected_boot}"
-                        )
+                    # A failed save or read-back leaves the change in the
+                    # running configuration, so it is undone there as well.
+                    try:
+                        saved = await save_config(ssh)
+                        cli_outputs.append(f"=== write memory ===\n{saved}")
+                        # The boot variable follows the saved configuration, so
+                        # it is read back after the save.
+                        after = await run_checked(ssh, "show boot")
+                        cli_outputs.append(f"=== show boot (after) ===\n{after}")
+                        new_boot = parse_boot_statements(after)
+                        if not (new_boot and same_file_path(new_boot[0], expected_boot)):
+                            raise CommandError(
+                                f"Boot variable is {';'.join(new_boot) or 'not set'} after "
+                                f"the change, expected {expected_boot}"
+                            )
+                    except CommandError as e:
+                        restored = await undo_boot_change(ssh, previous_boot, cli_outputs)
+                        boot_config_changed = not restored
+                        return _failed(boot_change_failure(e, restored=restored, after_save=True))
             except CommandError as e:
                 return _failed(str(e))
             except Exception as e:
@@ -461,16 +479,6 @@ class IOSXEInstallDriver(UpgradeDriver):
             install_cmd += " activate"
             if commit:
                 install_cmd += " commit"
-
-        prompts = {
-            "Please confirm you have changed boot config to flash:packages.conf": "y",
-            "This operation requires a reload": "y",
-            "This operation may require a reload": "y",
-            "Do you want to proceed": "y",
-            "Proceed with install": "y",
-            "[y/n]": "y",
-            "[yes/no]": "yes",
-        }
 
         # Stop waiting at the first sign that the install finished or failed.
         completion_patterns = [
@@ -494,7 +502,7 @@ class IOSXEInstallDriver(UpgradeDriver):
                 install_cmd,
                 read_timeout=1800,  # 30 minutes
                 delay_factor=2,
-                answers=prompts,
+                answers=_INSTALL_ANSWERS,
                 wait_for_patterns=completion_patterns,
             )
             outcome = _classify_install(
@@ -544,11 +552,11 @@ class IOSXEInstallDriver(UpgradeDriver):
             # Check version match
             version_match = False
             if target_version:
-                version_match = target_version.lower() in current_version.lower()
+                version_match = same_version(current_version, target_version)
 
             # Check version changed
             version_changed = True
-            if preflight_version and preflight_version.lower() in current_version.lower():
+            if preflight_version and same_version(current_version, preflight_version):
                 logger.error(
                     "Upgrade FAILED: version unchanged (before: '%s', after: '%s')",
                     preflight_version,

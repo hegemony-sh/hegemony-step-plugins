@@ -53,6 +53,7 @@ from .iosxe_common import (
     run_checked,
     run_config,
     same_file_path,
+    same_version,
     save_config,
     stage_image,
     undo_boot_change,
@@ -177,7 +178,7 @@ class IOSXEBundleDriver(UpgradeDriver):
 
             # Check if target version already running
             target_version_installed = False
-            if target_version and target_version.lower() in current_version.lower():
+            if target_version and same_version(current_version, target_version):
                 target_version_installed = True
                 logger.info("Target version %s already running", target_version)
 
@@ -313,19 +314,26 @@ class IOSXEBundleDriver(UpgradeDriver):
             boot_config_changed = True
             cli_outputs.append(f"=== boot configuration ===\n{transcript}")
 
-            saved = await save_config(ssh)
-            cli_outputs.append(f"=== write memory ===\n{saved}")
+            # A failed save or read-back leaves the change in the running
+            # configuration, so it is undone there as well.
+            try:
+                saved = await save_config(ssh)
+                cli_outputs.append(f"=== write memory ===\n{saved}")
 
-            # The boot variable follows the saved configuration, so it is
-            # read back after the save. The new image must come first.
-            verify_output = await run_checked(ssh, "show boot")
-            cli_outputs.append(f"=== show boot (after) ===\n{verify_output}")
-            new_boot = parse_boot_statements(verify_output)
-            if not (new_boot and same_file_path(new_boot[0], full_image_path)):
-                return _failed(
-                    f"Boot variable is {';'.join(new_boot) or 'not set'} after the change, "
-                    f"expected {full_image_path} first"
-                )
+                # The boot variable follows the saved configuration, so it is
+                # read back after the save. The new image must come first.
+                verify_output = await run_checked(ssh, "show boot")
+                cli_outputs.append(f"=== show boot (after) ===\n{verify_output}")
+                new_boot = parse_boot_statements(verify_output)
+                if not (new_boot and same_file_path(new_boot[0], full_image_path)):
+                    raise CommandError(
+                        f"Boot variable is {';'.join(new_boot) or 'not set'} after the change, "
+                        f"expected {full_image_path} first"
+                    )
+            except CommandError as e:
+                restored = await undo_boot_change(ssh, previous_boot, cli_outputs)
+                boot_config_changed = not restored
+                return _failed(boot_change_failure(e, restored=restored, after_save=True))
 
             if not activate:
                 # Just configure, don't reload yet
@@ -408,11 +416,11 @@ class IOSXEBundleDriver(UpgradeDriver):
             # Check version match
             version_match = False
             if target_version:
-                version_match = target_version.lower() in current_version.lower()
+                version_match = same_version(current_version, target_version)
 
             # Check version changed
             version_changed = True
-            if preflight_version and preflight_version.lower() in current_version.lower():
+            if preflight_version and same_version(current_version, preflight_version):
                 logger.error(
                     "Upgrade FAILED: version unchanged (before: '%s', after: '%s')",
                     preflight_version,

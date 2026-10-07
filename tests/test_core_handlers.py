@@ -536,6 +536,79 @@ async def test_wait_reachable_refuses_an_invalid_config():
     assert "Invalid probe.wait_reachable config" in (result.error or "")
 
 
+@pytest.mark.parametrize(
+    ("config", "valid"),
+    [
+        ({"max_wait_seconds": 30, "stable_seconds": 30}, False),
+        ({"max_wait_seconds": 20}, False),  # the default 30 s window
+        ({"max_wait": 10, "stable_seconds": 12}, False),
+        ({"max_wait_seconds": 31}, True),
+        ({"max_wait_seconds": 2, "stable_seconds": 1}, True),
+    ],
+)
+def test_wait_reachable_refuses_a_window_as_long_as_the_wait(config, valid):
+    """No target can complete a window that does not end before the deadline."""
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    errors = WaitReachableHandler().validate_config(config)
+    if valid:
+        assert errors == []
+    else:
+        assert len(errors) == 1
+        assert "must be shorter than max_wait_seconds" in errors[0]
+
+
+async def test_wait_reachable_does_not_poll_with_a_window_as_long_as_the_wait():
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    probes = _FakeProbes()
+    config = {"max_wait_seconds": 30, "stable_seconds": 30}
+    result = await WaitReachableHandler().execute(_ip_target_ctx(config, ["192.0.2.7"], probes))
+    assert result.success is False
+    assert (result.error or "").startswith("Invalid probe.wait_reachable config: ")
+    assert "stable_seconds (30) must be shorter than max_wait_seconds (30)" in (result.error or "")
+    assert probes.calls == []
+
+
+@pytest.mark.parametrize(
+    ("ips", "error", "summary"),
+    [
+        (
+            ["192.0.2.1", "192.0.2.2", "192.0.2.3"],
+            "Timeout waiting for targets - not reachable: 192.0.2.2; "
+            "reachable but not yet stable for 1s: 192.0.2.3",
+            "Targets not reachable after 2s",
+        ),
+        (
+            ["192.0.2.3"],
+            "Timeout waiting for targets - reachable but not yet stable for 1s: 192.0.2.3",
+            "Targets not stable after 2s",
+        ),
+    ],
+    ids=["some_unreachable", "all_reachable"],
+)
+async def test_wait_reachable_names_unreachable_and_unsettled_targets_apart(ips, error, summary):
+    """At the deadline the error names the targets that were not reachable and,
+    apart from them, those still partway through their window. A wait where
+    every target answered used to fail naming none of them."""
+    from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+
+    class _Probes(_FakeProbes):
+        """192.0.2.1 always answers, 192.0.2.2 never, 192.0.2.3 from its second poll."""
+
+        async def run_probe(self, check_type, address, options):
+            polls = sum(1 for call in self.calls if call[1] == address)
+            self.calls.append((check_type, address, dict(options)))
+            ok = address == "192.0.2.1" or (address == "192.0.2.3" and polls >= 1)
+            return ProbeResult(ok=ok)
+
+    config = {"max_wait_seconds": 2, "stable_seconds": 1, "poll_interval": 1}
+    result = await WaitReachableHandler().execute(_ip_target_ctx(config, ips, _Probes()))
+    assert result.success is False
+    assert result.error == error
+    assert result.summary == summary
+
+
 def test_wait_reachable_check_type_is_registry_driven():
     from hegemony_steps_probe.wait_reachable import WaitReachableConfig
 
@@ -545,6 +618,17 @@ def test_wait_reachable_check_type_is_registry_driven():
     assert props["check_type"]["x_options_source"] == "probes"
     assert props["port"]["x_hide_when"] == {"field": "check_type", "value": "icmp_ping"}
     assert props["socks_proxy"]["default"] == ""
+
+
+def test_wait_reachable_offers_the_url_path_of_probe_connectivity():
+    """HTTP Health always requested /health: the path had no setting here."""
+    from hegemony_steps_probe.connectivity import ConnectivityCheckConfig
+    from hegemony_steps_probe.wait_reachable import WaitReachableConfig
+
+    wait = WaitReachableConfig.model_json_schema()["properties"]["url_path"]
+    one_shot = ConnectivityCheckConfig.model_json_schema()["properties"]["url_path"]
+    assert wait == one_shot
+    assert wait["default"] == ""
 
 
 async def test_wait_reachable_defaults_poll_tcp_on_the_management_port():
@@ -572,8 +656,18 @@ async def test_wait_reachable_defaults_poll_tcp_on_the_management_port():
     ("config", "device_options", "ip_options"),
     [
         ({"port": 443}, {"port": 443}, {"port": 443}),
-        ({"check_type": "http_health"}, {"port": 80}, {"port": 80}),
+        (
+            {"check_type": "http_health"},
+            {"port": 80, "url_path": "/health"},
+            {"port": 80, "url_path": "/health"},
+        ),
+        (
+            {"check_type": "http_health", "url_path": "/api/ready"},
+            {"port": 80, "url_path": "/api/ready"},
+            {"port": 80, "url_path": "/api/ready"},
+        ),
         ({"check_type": "icmp_ping", "port": 443}, {"count": 1}, {"count": 1}),
+        ({"url_path": "/api/ready"}, {"port": 2222}, {"port": 22}),
         (
             {"socks_proxy": " socks5://jump:pw@dind:1080 "},
             {"port": 2222, "socks_proxy": "socks5://jump:pw@dind:1080"},
@@ -741,6 +835,76 @@ async def test_http_probe_brackets_ipv6_literals_and_gates_every_hop(monkeypatch
     assert gated == [("2001:db8::7", 8080)]
 
 
+async def test_http_probe_fails_only_the_target_whose_request_cannot_be_made(monkeypatch):
+    """Only an IPv6 address is bracketed, and a URL that does not parse, or a
+    request that raises something other than an httpx.HTTPError, fails that
+    target alone: the others are still requested and keep their evidence."""
+    import httpx
+
+    from hegemony_steps_probe import http_check
+    from hegemony_steps_probe.http_check import HttpProbeHandler
+
+    sent: list[str] = []
+
+    def transport_handler(request: httpx.Request) -> httpx.Response:
+        """Answer 200, except for the host whose transport breaks."""
+        if request.url.host == "192.0.2.66":
+            raise ValueError("transport broke")
+        sent.append(str(request.url))
+        return httpx.Response(200, text="ok")
+
+    transport = httpx.MockTransport(transport_handler)
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        """The handler's own client, rerouted through the mock transport."""
+        kwargs["transport"] = transport
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(http_check.httpx, "AsyncClient", client_with_mock_transport)
+
+    hosts = {
+        "v4": "192.0.2.1",
+        "v6": "2001:db8::7",
+        "bracketed": "[2001:db8::8]",
+        "host_port": "192.0.2.5:8443",
+        "broken": "192.0.2.66",
+    }
+    ctx = HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        config={"path": "/health", "port": 8080, "max_parallel_devices": 5},
+        target_roles=["primary"],
+        target_devices_by_role={
+            "primary": [{"name": name, "mgmt_host": host} for name, host in hosts.items()]
+        },
+        services=cast(HandlerServices, type("_Services", (), {})()),
+    )
+    result = await HttpProbeHandler().execute(ctx)
+
+    assert result.success is False
+    assert sorted(sent) == [
+        "http://192.0.2.1:8080/health",
+        "http://[2001:db8::7]:8080/health",
+        "http://[2001:db8::8]:8080/health",
+    ]
+    assert result.error == (
+        "Failed: host_port (invalid URL http://192.0.2.5:8443:8080/health: "
+        "Invalid port: '8443:8080'), broken (ValueError: transport broke)"
+    )
+    assert result.summary == "http GET /health: 3/5 targets OK"
+    assert [e["name"] for e in result.evidence] == [f"http_{name}" for name in hosts]
+    assert [e["content_json"]["success"] for e in result.evidence] == [
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
+
+
 async def test_http_probe_refuses_a_redirect_to_a_denied_destination(monkeypatch):
     """A redirect must not launder a denied destination through an allowed
     first hop: the request hook walks every hop past the gate, and the denial
@@ -830,6 +994,38 @@ async def test_execute_cli_connects_with_the_device_platform():
     result = await handler.execute(ctx)
     assert result.success is True
     assert connects == ["eos"]
+
+
+async def test_execute_cli_leading_blank_line_is_still_a_configuration_session():
+    """A blank first line, which a template easily leaves, used to turn the
+    configuration session into show/exec mode: one artifact per command and
+    no consolidated configuration transcript."""
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    class _Result:
+        def __init__(self, command: str) -> None:
+            self.command = command
+            self.output = f"echo of {command}" if command.strip() else ""
+            self.exit_code = 0
+            self.error = None
+            self.latency_ms = 1.0
+
+    class _Transport:
+        async def execute_commands(self, commands):
+            return [_Result(c) for c in commands]
+
+    class _Services:
+        def connect(self, device, **kwargs):
+            return _Transport()
+
+    commands = ["", "configure terminal", "hostname r1", "end", "write memory"]
+    result = await ExecuteCLIActionHandler().execute(_netcli_ctx(_Services(), commands=commands))
+
+    assert result.success is True, result.error
+    assert [e["name"] for e in result.evidence] == ["Configuration"]
+    assert "echo of hostname r1" in result.evidence[0]["content_text"]
+    assert "hostname r1" in result.evidence[0]["content_json"]["commands"]
+    assert "write memory" not in result.evidence[0]["content_json"]["commands"]
 
 
 def _netcli_ctx(services: Any, **config: Any) -> HandlerContext:

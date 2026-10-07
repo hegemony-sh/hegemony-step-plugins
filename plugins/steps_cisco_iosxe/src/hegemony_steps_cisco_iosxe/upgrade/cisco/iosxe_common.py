@@ -28,6 +28,9 @@ _BOOT_LINE_RE = re.compile(r"BOOT\s+(?:variable|path-list)\s*[=:]", re.IGNORECAS
 # The value stays on its line: an empty BOOT variable must not take the next
 # line ("CONFIG_FILE variable = ...") as its value.
 _BOOT_VALUE_RE = re.compile(r"BOOT\s+(?:variable|path-list)[ \t]*[=:][ \t]*(.*)", re.IGNORECASE)
+# An IOS-XE release at the start of a version string: major.minor.rebuild, the
+# rebuild with an optional letter suffix ("17.09.04a").
+_RELEASE_RE = re.compile(r"\s*(\d+)\.(\d+)\.(\d+)([a-z]*)(?![a-z0-9])", re.IGNORECASE)
 
 
 # ==============================================================================
@@ -72,6 +75,36 @@ def parse_version_from_show_version(output: str) -> str:
         return match.group(1)
 
     return ""
+
+
+def parse_iosxe_version(text: str) -> tuple[int, int, int, str] | None:
+    """The IOS-XE release ``text`` starts with: three numbers and a letter suffix.
+
+    "17.9.4a" and "17.09.04a" are the same release, (17, 9, 4, "a"), and
+    "17.09.04" is another one. What follows the third part, such as the build
+    numbers "show install summary" adds ("17.09.04a.0.6") or an old train
+    suffix (".S"), is not part of the release. None when ``text`` does not
+    start with major.minor.rebuild.
+    """
+    match = _RELEASE_RE.match(text)
+    if not match:
+        return None
+    major, minor, rebuild, suffix = match.groups()
+    return int(major), int(minor), int(rebuild), suffix.lower()
+
+
+def same_version(first: str, second: str) -> bool:
+    """Whether two IOS-XE version strings name the same release.
+
+    Versions are compared as parsed releases (see :func:`parse_iosxe_version`),
+    never as substrings: "17.09.04" is not "17.09.04a". Text that is not such a
+    version is compared as written, ignoring case and surrounding space.
+    """
+    first_release = parse_iosxe_version(first)
+    second_release = parse_iosxe_version(second)
+    if first_release is None or second_release is None:
+        return first.strip().lower() == second.strip().lower()
+    return first_release == second_release
 
 
 def normalize_filesystem(fs: str) -> str:
@@ -268,14 +301,23 @@ async def undo_boot_change(ssh: "Transport", previous: list[str], cli_outputs: l
     return True
 
 
-def boot_change_failure(error: CommandError, *, restored: bool) -> str:
-    """The error for a boot change session that failed, after the undo."""
-    if restored:
-        return f"{error}; the previous boot entries were restored"
-    return (
-        f"{error}; restoring the previous boot entries failed too, so check the "
-        "device's boot setting"
-    )
+def boot_change_failure(error: CommandError, *, restored: bool, after_save: bool = False) -> str:
+    """The error for a boot change that failed, after the undo.
+
+    ``after_save``: the change failed at or after "write memory", which may
+    have stored it; the undo changes only the running configuration.
+    """
+    if not restored:
+        return (
+            f"{error}; restoring the previous boot entries failed too, so check the "
+            "device's boot setting"
+        )
+    if after_save:
+        return (
+            f"{error}; the previous boot entries were restored in the running "
+            "configuration, but the saved configuration may still hold the change"
+        )
+    return f"{error}; the previous boot entries were restored"
 
 
 async def save_config(ssh: "Transport") -> str:

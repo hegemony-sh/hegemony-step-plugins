@@ -508,6 +508,13 @@ def test_verify_reads_its_old_retry_interval_name():
     assert UpgradeVerifyConfig.model_validate({"retry_interval": 45}).poll_interval_seconds == 45
 
 
+def test_verify_titles_its_poll_interval_by_the_current_name():
+    from hegemony_steps_cisco_iosxe.upgrade.handlers.verify import UpgradeVerifyConfig
+
+    field = UpgradeVerifyConfig.model_fields["poll_interval_seconds"]
+    assert field.title == "Poll Interval (sec)"
+
+
 # --- container-backed steps ---------------------------------------------------
 
 

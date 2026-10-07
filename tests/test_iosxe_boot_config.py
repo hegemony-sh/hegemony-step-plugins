@@ -121,21 +121,58 @@ async def test_rejected_config_line_stops_before_saving():
     assert not any(c.startswith("install") for c in ssh.commands)
 
 
-async def test_unconfirmed_save_stops_before_installing():
+RESTORED_RUNNING = (
+    "the previous boot entries were restored in the running configuration, "
+    "but the saved configuration may still hold the change"
+)
+
+
+async def test_unconfirmed_save_is_undone_and_stops_before_installing():
     ssh = _fixing_device(**{"write memory": Result("Building configuration...\n")})
     result = await _install(ssh, fix_boot_config=True)
     assert result.success is False
-    assert "write memory did not confirm the save" in (result.error or "")
-    assert result.boot_config_changed is True
+    assert result.error == (
+        f"write memory did not confirm the save: Building configuration...; {RESTORED_RUNNING}"
+    )
+    # The running configuration held the change: it is written back.
+    assert ssh.calls[-1] == RESTORE_LINES
+    assert result.boot_config_changed is False
     assert not any(c.startswith("install") for c in ssh.commands)
 
 
-async def test_boot_variable_not_changed_after_save_stops_before_installing():
+async def test_boot_variable_not_changed_after_save_is_undone_and_stops_before_installing():
     ssh = _fixing_device(**{"show boot": BOOT_OLD})
     result = await _install(ssh, fix_boot_config=True)
     assert result.success is False
     assert "after the change, expected bootflash:packages.conf" in (result.error or "")
+    assert RESTORED_RUNNING in (result.error or "")
+    assert ssh.calls[-1] == RESTORE_LINES
+    assert result.boot_config_changed is False
     assert not any(c.startswith("install") for c in ssh.commands)
+
+
+async def test_failed_read_back_after_save_is_undone():
+    ssh = _fixing_device(**{"show boot": [BOOT_OLD, UNREACHABLE]})
+    result = await _install(ssh, fix_boot_config=True)
+    assert result.success is False
+    assert "show boot failed: Connection timeout" in (result.error or "")
+    assert ssh.calls[-1] == RESTORE_LINES
+    assert result.boot_config_changed is False
+    assert "restore previous boot entries" in result.cli_output
+
+
+async def test_failed_save_that_cannot_be_undone_is_reported():
+    ssh = _fixing_device(
+        **{
+            "write memory": Result("Building configuration...\n"),
+            f"boot system {OLD_IMAGE}": UNREACHABLE,
+        }
+    )
+    result = await _install(ssh, fix_boot_config=True)
+    assert result.success is False
+    assert ssh.calls[-1] == RESTORE_LINES
+    assert result.boot_config_changed is True
+    assert "check the device's boot setting" in (result.error or "")
 
 
 async def test_without_activate_the_boot_variable_is_not_read():
@@ -151,7 +188,8 @@ def test_fix_boot_config_is_off_by_default():
 
 
 async def test_handler_passes_the_option_and_reports_the_change():
-    ssh = _fixing_device()
+    # The device goes down for its reload at once, so the step does not wait.
+    ssh = _fixing_device(**{"show clock": UNREACHABLE})
     result = await UpgradeInstallHandler().execute(
         make_ctx(
             {"image_name": "img.bin", "dest_fs": "bootflash:", "fix_boot_config": True},

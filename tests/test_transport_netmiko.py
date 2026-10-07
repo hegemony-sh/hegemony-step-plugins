@@ -8,13 +8,20 @@ Covers registration under hegemony.device_transports, spec-based construction,
 and config-set result building (regression: the full send_config_set session
 output must attach to exactly one result, not every entry equal to the trailing
 command), and how a config command set runs: `exit` stays inside its block,
-blocks and exec commands run in the order written, and nothing runs after the
-first failure or a cancellation.
+blocks and exec commands run in the order written, config lines go out one at
+a time, and nothing runs after the first failure (a rejected config line
+included) or a cancellation. A copy to startup-config answers the device's
+questions.
 """
 
 from __future__ import annotations
 
+import logging
+import re
 from unittest.mock import MagicMock, patch
+
+import pytest
+from netmiko.exceptions import ReadTimeout
 
 import hegemony_transport_netmiko
 from hegemony_step_sdk import DeviceConnectionSpec
@@ -82,7 +89,14 @@ def _make_transport() -> SSHTransport:
     t.step_run_id = None
     t.jump_host = None
     t._cancellation_registry = _NullCancellationRegistry()
+    t._output_sink = None
+    t.streams_timing_output = False
     return t
+
+
+def _echo_config_lines(lines, **kwargs):
+    """send_config_set stand-in: echo each line after a config prompt."""
+    return "".join(f"sw(config)#{line}\n" for line in lines)
 
 
 def test_config_set_output_not_duplicated_with_blank_lines():
@@ -99,16 +113,10 @@ def test_config_set_output_not_duplicated_with_blank_lines():
         "end",
         "write memory",
     ]
-    session_output = (
-        "configure terminal\n"
-        "cml-switch02(config)#vlan 75\n"
-        "cml-switch02(config-vlan)#name vlan_75\n"
-        "cml-switch02(config-if)#no shutdown\n"
-        "cml-switch02(config-if)#end\ncml-switch02#"
-    )
+    session_output = "".join(_echo_config_lines([line]) for line in commands[1:7])
 
     connection = MagicMock()
-    connection.send_config_set.return_value = session_output
+    connection.send_config_set.side_effect = _echo_config_lines
     connection.find_prompt.return_value = "cml-switch02#"
     connection.send_command.return_value = "Building configuration...\n[OK]"
 
@@ -120,9 +128,12 @@ def test_config_set_output_not_duplicated_with_blank_lines():
     ):
         results = transport._execute_commands_sync(commands)
 
-    assert connection.send_config_set.call_count == 1
+    # One call per line, blank lines included, and the block's transcript
+    # lands on exactly one result.
+    assert connection.send_config_set.call_count == 6
     outputs_with_session = [r for r in results if session_output in (r.output or "")]
     assert len(outputs_with_session) == 1
+    assert sum((r.output or "").count("vlan 75\n") for r in results) == 1
     assert connection.send_command.call_count == 1
     write_results = [r for r in results if r.command == "write memory"]
     assert len(write_results) == 1
@@ -204,13 +215,13 @@ def test_exit_inside_a_config_block_is_sent_as_a_config_line():
         "write memory",
     ]
     connection = MagicMock()
-    connection.send_config_set.return_value = "r1(config)#end\nr1#"
+    connection.send_config_set.return_value = "r1(config)#"
     connection.send_command.return_value = "Building configuration...\n[OK]"
 
     results = _run_on_connection(commands, connection)
 
-    connection.send_config_set.assert_called_once()
-    assert connection.send_config_set.call_args.args[0] == commands[1:6]
+    sent = [c.args[0] for c in connection.send_config_set.call_args_list]
+    assert sent == [[line] for line in commands[1:6]]
     assert [c.args[0] for c in connection.send_command.call_args_list] == ["write memory"]
     assert [r.command for r in results] == commands
     assert all(r.exit_code == 0 for r in results)
@@ -275,6 +286,204 @@ def test_config_blocks_and_exec_commands_run_in_written_order():
     assert all(r.exit_code == 0 for r in results)
 
 
+def test_a_leading_blank_line_keeps_the_configuration_session():
+    # A blank first line, which a template easily leaves, used to make the
+    # list a show/exec list: the config lines ran one by one at the exec
+    # prompt, and the save after them ran even when one of them failed.
+    commands = ["", "  ", "configure terminal", "hostname r1", "end", "write memory"]
+    connection = MagicMock()
+    connection.read_channel.return_value = ""
+    connection.send_config_set.return_value = "% Invalid input detected at '^' marker."
+
+    results = _run_on_connection(commands, connection)
+
+    assert [c.args[0] for c in connection.send_config_set.call_args_list] == [["hostname r1"]]
+    assert connection.send_command.call_count == 0
+    assert [r.command for r in results] == commands
+    assert (results[3].exit_code, results[-1].error) == (1, _SKIPPED_ERROR)
+
+
+def test_a_rejected_config_line_stops_its_block():
+    # A config set used to be written to the device in one go, so the lines
+    # after a rejected one were applied all the same.
+    commands = [
+        "configure terminal",
+        "interface GigabitEthernet1",
+        " ip address 10.0.0.1",
+        " no shutdown",
+        "end",
+        "write memory",
+    ]
+
+    def send_config_set(lines, **kwargs):
+        if lines == [" ip address 10.0.0.1"]:
+            return " ip address 10.0.0.1\n% Incomplete command.\n\nr1(config-if)#"
+        return f"{lines[0]}\nr1(config-if)#"
+
+    connection = MagicMock()
+    connection.send_config_set.side_effect = send_config_set
+
+    results = _run_on_connection(commands, connection)
+
+    sent = [c.args[0] for c in connection.send_config_set.call_args_list]
+    assert sent == [["interface GigabitEthernet1"], [" ip address 10.0.0.1"]]
+    assert connection.send_command.call_count == 0
+    assert [(r.command, r.exit_code, r.error) for r in results] == [
+        ("configure terminal", 0, None),
+        ("interface GigabitEthernet1", 0, None),
+        (" ip address 10.0.0.1", 1, "% Incomplete command."),
+        (" no shutdown", -1, _SKIPPED_ERROR),
+        ("end", -1, _SKIPPED_ERROR),
+        ("write memory", -1, _SKIPPED_ERROR),
+    ]
+    # The transcript of what ran goes on the line that failed.
+    assert "% Incomplete command." in results[2].output
+    assert "interface GigabitEthernet1" in results[2].output
+
+
+def test_config_mode_is_entered_before_the_first_line_and_left_after_the_last():
+    commands = ["configure terminal", "hostname r1", "ip domain-name lab", "ntp server 192.0.2.5"]
+    connection = MagicMock()
+    connection.send_config_set.return_value = "r1(config)#"
+
+    _run_on_connection(commands, connection)
+
+    calls = connection.send_config_set.call_args_list
+    assert [c.args[0] for c in calls] == [[line] for line in commands[1:]]
+    # Like one config set: enter before the first line, leave after the last.
+    assert [
+        (c.kwargs.get("enter_config_mode", True), c.kwargs.get("exit_config_mode", True))
+        for c in calls
+    ] == [(True, False), (False, False), (False, True)]
+    # Each line's echo and prompt are checked, within the command timeout.
+    assert all(c.kwargs["cmd_verify"] is True for c in calls)
+    assert all(c.kwargs["read_timeout"] == 30.0 for c in calls)
+
+
+def test_a_block_with_banner_text_is_sent_without_echo_checks():
+    # Banner text lines get no prompt back, so waiting for one after each
+    # line would time out: like netmiko's own bypass for a banner, the whole
+    # block is sent without echo checks.
+    commands = [
+        "configure terminal",
+        "hostname r1",
+        "banner motd ^",
+        "Authorised access only",
+        "^",
+        "end",
+    ]
+    connection = MagicMock()
+    connection.send_config_set.return_value = "r1(config)#"
+
+    results = _run_on_connection(commands, connection)
+
+    calls = connection.send_config_set.call_args_list
+    assert len(calls) == 4
+    assert all(c.kwargs["cmd_verify"] is False for c in calls)
+    assert all(r.exit_code == 0 for r in results)
+
+
+def test_a_config_line_timeout_does_not_repeat_the_line_in_its_error():
+    # netmiko's ReadTimeout names the pattern it waited for, the escaped
+    # line itself; escaped, a secret would slip past the host's redaction.
+    from netmiko.exceptions import ReadTimeout
+
+    secret_line = "username admin secret Very.Secret-Value"
+    connection = MagicMock()
+    connection.send_config_set.side_effect = ReadTimeout(
+        "Pattern not detected: 'username\\ admin\\ secret\\ Very\\.Secret\\-Value'"
+    )
+
+    results = _run_on_connection(["configure terminal", secret_line, "end"], connection)
+
+    failed = results[1]
+    assert (failed.command, failed.exit_code) == (secret_line, -1)
+    assert failed.error == "Timed out after 30 seconds reading the device's answer"
+    assert "Secret" not in (failed.error or "")
+
+
+_DESTINATION_QUESTION = "Destination filename [startup-config]? "
+_SAVED = "\nBuilding configuration...\n[OK]\nr1#"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "copy running-config startup-config",
+        "copy run start",
+        "Copy system:running-config nvram:startup-config",
+        "copy flash:golden.cfg startup-config",
+    ],
+)
+def test_a_copy_to_startup_config_answers_the_destination_question(command):
+    # IOS asks for the destination file name before it copies, which the
+    # prompt-only wait of send_command ran into the command timeout.
+    connection = MagicMock()
+    connection.find_prompt.return_value = "r1#"
+    connection.send_command.side_effect = [_DESTINATION_QUESTION, _SAVED]
+
+    results = _run_on_connection([command], connection)
+
+    calls = connection.send_command.call_args_list
+    assert [c.args[0] for c in calls] == [command, ""]  # Enter takes the offered name
+    expect = calls[0].kwargs["expect_string"]
+    for text in (_DESTINATION_QUESTION, "Overwrite the previous NVRAM configuration?[confirm]"):
+        assert re.search(expect, text)
+    assert re.search(expect, "r1#")
+    assert (results[0].exit_code, results[0].error) == (0, None)
+    assert results[0].output == _DESTINATION_QUESTION + "\nBuilding configuration...\n[OK]"
+
+
+def test_a_copy_to_startup_config_answers_a_confirmation_too():
+    connection = MagicMock()
+    connection.find_prompt.return_value = "r1#"
+    connection.send_command.side_effect = [
+        _DESTINATION_QUESTION,
+        "\nOverwrite the previous NVRAM configuration?[confirm]",
+        _SAVED,
+    ]
+
+    results = _run_on_connection(
+        ["configure terminal", "hostname r1", "end", "copy run start"], connection
+    )
+
+    assert [c.args[0] for c in connection.send_command.call_args_list] == ["copy run start", "", ""]
+    assert [r.exit_code for r in results] == [0, 0, 0, 0]
+    assert results[-1].output.endswith("[OK]")
+
+
+def test_a_copy_to_startup_config_without_questions_waits_for_the_prompt():
+    # With 'file prompt quiet' the device copies straight away.
+    connection = MagicMock()
+    connection.find_prompt.return_value = "r1#"
+    connection.send_command.return_value = "Building configuration...\n[OK]\nr1#"
+
+    results = _run_on_connection(["copy run start"], connection)
+
+    assert connection.send_command.call_count == 1
+    assert (results[0].exit_code, results[0].output) == (0, "Building configuration...\n[OK]")
+
+
+def test_a_copy_that_keeps_asking_fails():
+    connection = MagicMock()
+    connection.find_prompt.return_value = "r1#"
+    connection.send_command.return_value = _DESTINATION_QUESTION
+
+    results = _run_on_connection(["copy run start"], connection)
+
+    assert connection.send_command.call_count == 3
+    assert results[0].exit_code == -1
+
+
+def test_other_copy_commands_run_as_before():
+    connection = MagicMock()
+    connection.send_command.return_value = "ok"
+
+    _run_on_connection(["copy running-config flash:backup.cfg"], connection)
+
+    assert "expect_string" not in connection.send_command.call_args.kwargs
+
+
 class _Cancellation(_NullCancellationRegistry):
     """Cancellation registry whose run is cancelled once ``cancelled`` is set."""
 
@@ -309,9 +518,13 @@ def test_commands_after_a_cancellation_say_the_run_was_cancelled():
         results = transport._execute_commands_sync(commands)
 
     assert connection.send_command.call_count == 0
-    assert [r.command for r in results] == commands
-    assert [r.error for r in results[:3]] == ["Socket is closed"] * 3
-    assert [(r.exit_code, r.error) for r in results[3:]] == [(-1, _CANCELLED_ERROR)] * 2
+    assert [(r.command, r.exit_code, r.error) for r in results] == [
+        ("configure terminal", 0, None),
+        ("hostname r1", -1, "Socket is closed"),
+        ("end", -1, _CANCELLED_ERROR),
+        ("show clock", -1, _CANCELLED_ERROR),
+        ("write memory", -1, _CANCELLED_ERROR),
+    ]
 
 
 async def test_execute_step_fails_when_a_post_command_fails():
@@ -351,6 +564,178 @@ async def test_execute_step_fails_when_a_post_command_fails():
     assert result.success is False
     assert "% Invalid input detected" in (result.error or "")
     assert result.evidence[0]["content_json"]["success"] is False
+
+
+# ── Command text stays out of the logs ──────────────────────────────────────
+
+#: Stands for a value a step rendered from {{ secret(...) }}: the platform has
+#: no log redaction, so command text must never reach a log message.
+_SECRET = "Sw0rdfish-42.x"
+
+
+def _send_command(output: str | Exception):
+    def send_command(command, **kwargs):
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+    return send_command
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        f"{_SECRET} ok",
+        f"show {_SECRET}\n% Invalid input detected at '^' marker.",
+        ReadTimeout(f"Pattern not detected: 'show\\ {_SECRET}'"),
+    ],
+    ids=["success", "cli-error", "exception"],
+)
+def test_exec_commands_are_not_logged(caplog, outcome):
+    caplog.set_level(logging.DEBUG)
+    connection = MagicMock()
+    connection.send_command.side_effect = _send_command(outcome)
+
+    _run_on_connection([f"show running-config | include {_SECRET}"], connection)
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        f"r1(config)#username admin secret {_SECRET}\nr1(config)#",
+        f"username admin secret {_SECRET}\n% Invalid input detected at '^' marker.",
+        ReadTimeout(f"Pattern not detected: 'username\\ admin\\ secret\\ {_SECRET}'"),
+    ],
+    ids=["success", "cli-error", "exception"],
+)
+def test_config_lines_are_not_logged(caplog, outcome):
+    caplog.set_level(logging.DEBUG)
+    connection = MagicMock()
+    connection.send_config_set.side_effect = _send_command(outcome)
+    connection.send_command.return_value = "[OK]"
+
+    _run_on_connection(
+        ["configure terminal", f"username admin secret {_SECRET}", "end", "write memory"],
+        connection,
+    )
+
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+def _run_timing(connection: MagicMock, command: str, **kwargs):
+    transport = _make_transport()
+    with (
+        patch.object(
+            hegemony_transport_netmiko.transport, "ConnectHandler", return_value=connection
+        ),
+        patch.object(hegemony_transport_netmiko.transport, "_safe_disconnect"),
+        patch.object(hegemony_transport_netmiko.transport.time, "sleep"),
+    ):
+        return transport._execute_command_timing_sync(command, **kwargs)
+
+
+def test_timing_commands_and_answers_are_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    connection = MagicMock()
+    connection.send_command_timing.return_value = f"{_SECRET}\nPassword:"
+    # The device echoes the answer back before the awaited pattern.
+    connection.read_channel.side_effect = [f"{_SECRET}\n", "Install done"]
+
+    result = _run_timing(
+        connection,
+        f"install add file flash:{_SECRET}.bin",
+        read_timeout=60.0,
+        answers={"Password:": _SECRET},
+        wait_for_patterns=["Install done"],
+    )
+
+    assert result.exit_code == 0
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+def test_failed_timing_commands_are_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    connection = MagicMock()
+    connection.send_command_timing.side_effect = ReadTimeout(f"no prompt after {_SECRET}")
+
+    result = _run_timing(connection, f"install add file flash:{_SECRET}.bin")
+
+    assert result.exit_code == -1
+    assert caplog.records
+    assert _SECRET not in caplog.text
+
+
+def test_a_prompt_in_the_first_output_is_answered_once():
+    # The answers loop answered it, then the wait for patterns started with
+    # an empty "answered" set, found the same question in the output it had
+    # already handled and answered it a second time.
+    connection = MagicMock()
+
+    def send_command_timing(command, **kwargs):
+        return "Proceed with install? [confirm]" if command.startswith("install") else ""
+
+    connection.send_command_timing.side_effect = send_command_timing
+    connection.read_channel.return_value = "SUCCESS: install_add_activate_commit"
+
+    result = _run_timing(
+        connection,
+        "install add file flash:new.bin activate commit",
+        read_timeout=60.0,
+        answers={"[confirm]": "y"},
+        wait_for_patterns=["SUCCESS"],
+    )
+
+    assert result.exit_code == 0
+    sent = [c.args[0] for c in connection.send_command_timing.call_args_list[1:]]
+    sent += [c.args[0] for c in connection.write_channel.call_args_list]
+    assert sent == ["y"]
+
+
+def test_a_prompt_split_across_reads_is_answered():
+    connection = MagicMock()
+    connection.send_command_timing.return_value = "Proceed with reload? [y/"
+    connection.read_channel.side_effect = ["n]", "", "SUCCESS"]
+
+    result = _run_timing(
+        connection,
+        "install activate",
+        read_timeout=60.0,
+        answers={"[y/n]": "y"},
+        wait_for_patterns=["SUCCESS"],
+    )
+
+    assert result.exit_code == 0
+    sent = [c.args[0] for c in connection.send_command_timing.call_args_list[1:]]
+    sent += [c.args[0] for c in connection.write_channel.call_args_list]
+    assert sent == ["y\n"]
+
+
+def test_http_transfer_url_is_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    url = f"https://files.example.test/a/{_SECRET}/image.bin"
+    connection = MagicMock()
+    connection.read_channel.return_value = f"copy {url} flash:image.bin\n%Error opening {url}"
+    transport = _make_transport()
+
+    with (
+        patch.object(
+            hegemony_transport_netmiko.transport, "ConnectHandler", return_value=connection
+        ),
+        patch.object(hegemony_transport_netmiko.transport, "_safe_disconnect"),
+        patch.object(hegemony_transport_netmiko.transport.time, "sleep"),
+    ):
+        result = transport._http_transfer_sync(
+            url=url, dest_fs="flash:", dest_filename="image.bin", timeout_seconds=10
+        )
+
+    assert result["transferred"] is False
+    assert caplog.records
+    assert _SECRET not in caplog.text
 
 
 # ── Jump host (bastion) hop ──────────────────────────────────────────────────

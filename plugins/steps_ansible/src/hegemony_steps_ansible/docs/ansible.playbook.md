@@ -73,7 +73,10 @@ device that is there only through `run` scope (none of its roles is a target
 of this step) and has no usable credentials, or a management address that is
 not a host name or IP address, is left out of the inventory instead of
 failing the step, and named with the reason in an
-`ansible_hosts_left_out_<step id>` artifact.
+`ansible_hosts_left_out_<step id>` artifact. When the target roles match no
+device at all, the inventory has no hosts: the step still runs (a play for
+`localhost` alone is fine), but says so in its progress and summary, and its
+`target_devices` metric is 0.
 
 ## Ansible Configuration
 

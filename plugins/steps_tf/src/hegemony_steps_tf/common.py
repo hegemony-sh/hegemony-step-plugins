@@ -339,12 +339,15 @@ HOLD_NOT_ENDED_NOTE = (
 )
 
 
-async def release_state_hold(ctx: HandlerContext, name: str) -> str:
+async def release_state_hold(
+    ctx: HandlerContext, name: str, *, reason: str = "there is nothing to apply"
+) -> str:
     """End the run's hold on managed state ``name``, which no apply will end.
 
-    For a plan with nothing to apply. Returns "" when the hold was ended,
-    else a note for the step's summary: the hold may then last until the run
-    ends, which never fails the step.
+    For a plan with nothing to apply, or one that failed (``reason`` says
+    which in the step's events). Returns "" when the hold was ended, else a
+    note for the step's summary: the hold may then last until the run ends,
+    which never fails the step.
     """
     release = getattr(ctx.require_services(), "release_state_hold", None)
     if release is None:
@@ -363,9 +366,7 @@ async def release_state_hold(ctx: HandlerContext, name: str) -> str:
         released = False
     if not released:
         return HOLD_NOT_ENDED_NOTE
-    await ctx.emit_progress(
-        f"Ended the run's hold on managed state {name!r}: there is nothing to apply"
-    )
+    await ctx.emit_progress(f"Ended the run's hold on managed state {name!r}: {reason}")
     return ""
 
 

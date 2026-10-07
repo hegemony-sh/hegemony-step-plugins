@@ -18,10 +18,12 @@ test, a config push — happening in parallel branches of the flow.
 Check Type picks the probe sent on every sample — a TCP connection attempt
 (the default), an ICMP echo, an HTTP health request, or a DNS lookup; the
 list is registry-driven, and the value is validated when the step runs. Port
-(default 22) applies to the port-based checks and is ignored by ICMP Ping and
-DNS Resolve. URL Path applies only to the HTTP Health check and falls back to
-`/health` when omitted; HTTP Health passes on any status below 400 and does
-not follow redirects. DNS Resolve looks up each target's own name with the
+applies to the port-based checks and is ignored by ICMP Ping and DNS
+Resolve; left empty, HTTP Health uses 80 and the other checks 22. URL Path
+applies only to the HTTP Health check and falls back to `/health` when
+omitted; HTTP Health passes on any status below 400 and does not follow
+redirects. Ping Count (default 3, up to 10) sets how many echo requests each
+ICMP Ping sample sends. DNS Resolve looks up each target's own name with the
 worker's system resolver, so every sample of an IP address target fails.
 Interval (ms) sets the time between samples (default 5000), and Timeout
 (sec) is the per-sample time limit (default 10). Steps saved with the old

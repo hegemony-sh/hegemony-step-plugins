@@ -47,7 +47,9 @@ State decides where the state lives:
   Every other flow using the state waits that long. A plan with no changes
   ends the hold at once, since there is nothing to apply; when the platform
   cannot end it, the hold may last until the run ends, and the summary says
-  so. An admin can end the hold with Force unlock on the state's page.
+  so. A plan that fails after its tool started ends the hold as well, if
+  its lock took one. An admin can end the hold with Force unlock on the
+  state's page.
 - `backend`: the configuration's own backend block, such as S3, Azure
   Storage, GCS, Consul, or PostgreSQL. Backend settings fill a partial block
   (bucket, key, and so on) from a file. A configuration without a backend
@@ -94,8 +96,9 @@ affinity on a worker with shared workspaces enabled: the plan's working
 directory, with its providers and lock file, lives in the run's shared
 workspace under `/shared/tf/<step id>`, and the apply runs there on the same
 worker. Otherwise the plan reports `apply_ready: false` and keeps a
-`plan_only_<step id>` note saying why a `tf.apply` would refuse it. A
-plan-only flow needs no shared affinity. The saved plan contains every variable value, secret ones
+`plan_only_<step id>` note saying why a `tf.apply` would refuse it (a
+plan with no changes is the exception: the apply has nothing to apply and
+succeeds). A plan-only flow needs no shared affinity. The saved plan contains every variable value, secret ones
 included; it stays inside the run's workspace, which is deleted when the run
 ends.
 
@@ -147,7 +150,8 @@ plan's digest cannot be read back (so `tf.apply` could not check the plan), when
 plan or apply holds the state lock for longer than Lock timeout (the error
 names the holder from the lock's Who and Info lines), or before running
 anything when the config is
-invalid, a secret resolves to nothing, or the platform cannot serve managed
+invalid (Plan a destroy, Refresh only and Replace each exclude the other
+two), a secret resolves to nothing, or the platform cannot serve managed
 state (for example, no state encryption key is configured). Provider downloads and remote state
 need network access to those endpoints under the flow's egress policy. The
 timeout covers the whole run, image pull included. The tool receives

@@ -17,8 +17,10 @@ Image Filename names the staged image on the destination filesystem; the two
 are combined into the full path used by the install commands. Upgrade Mode
 must match how the device boots. In install mode the step runs
 `install add file` with the activate and commit keywords according to the
-Activate and Commit options, answering the confirmation prompts
-automatically.
+Activate and Commit options and answers its confirmation question: `y` to
+the first question that ends in `[y/n]`, `yes` to the first that ends in
+`[yes/no]`, once each. A switch set by a `{{ }}` template takes the rendered
+text `true` or `false` as its value.
 
 In bundle mode the step sends `no boot system`, `boot system` with the new
 image, and `boot system` with the first previously configured image as a
@@ -26,7 +28,10 @@ fallback, all in one configuration session; if a line fails, the step
 writes the previous boot entries back and does not reload. It saves with
 `write memory`, which must answer `[OK]`, checks that `show boot` now lists
 the new image first, and issues `reload`, answering `no` to saving the
-configuration again and confirming the reload.
+configuration again and confirming the reload. If the save or that check
+fails, the step writes the previous boot entries back as well and does not
+reload; this undo changes the running configuration only, so the saved
+configuration may still hold the change, and the device's error says so.
 
 An install-mode activation boots packages.conf, so with Activate on the step
 first reads `show boot`. The first boot entry must be packages.conf on the
@@ -38,8 +43,12 @@ configuration session, saves with `write memory`, and reads `show boot`
 again before installing. Saving also stores any other unsaved change in the
 running configuration. If a line of the session fails, its first lines may
 already be applied, so the step writes the previous boot entries back in a
-new session, and the device fails. When `show boot` fails or shows no boot variable, the
-device fails; the step never changes the boot setting on a guess.
+new session, and the device fails. The step does the same when the save or
+the `show boot` check after it fails; that undo changes the running
+configuration only, so the saved configuration may still hold the change,
+and the device's error says so. When `show boot` fails or shows no boot
+variable, the device fails; the step never changes the boot setting on a
+guess.
 
 Uncheck Activate to prepare the upgrade without reloading: install mode runs
 `install add file` only, without activate or commit, and bundle mode stops
@@ -61,13 +70,15 @@ device id whose entries hold `reboot_triggered`, `activated`, `committed`,
 `boot_config_changed` and `previous_boot` (the boot entries it found) for
 each device. `boot_config_changed` is true when the step changed the boot
 setting in the running configuration, or could not undo a failed change.
-It does not mean the change was saved: the save comes after it and can
-still fail, and the device's error then says so.
+It does not mean the change was saved: when the save or the check after it
+fails, the step undoes the change in the running configuration, and the
+device's error says whether that worked.
 
 One evidence artifact is saved per device, named `Install: <device>` -
 success or failure; a device that could not be attempted at all (no
 management host, an unexpected error) gets `Install Error: <device>`
-instead - with the full install-session transcript and status flags. The
+instead - with the full install-session transcript and status flags,
+including whether a reloading device went down and after how long. The
 transcript includes `show boot` before and after, and the configuration
 session when the step changed the boot setting. The summary line reports
 how many devices started installing and how many are rebooting.
@@ -91,7 +102,18 @@ reload.
 
 The SSH session ends when the device reloads. A session that closes counts
 as the reload only when the output already shows that activation finished or
-the reload was confirmed; a session that closes earlier fails the device. This
-step does not wait for devices to come back; use
+the reload was confirmed; a session that closes earlier fails the device.
+
+A device can keep answering from its old image for a while after it reports
+its reload. So once a device has started its reload, in either mode, the
+step waits for it to go down: every 5 seconds it opens a new session and
+runs `show clock`, until that fails, for up to Reload Wait seconds (default
+300). A check that gets no session and answer within 30 seconds also counts
+as down. No check runs past Reload Wait: a device that still answers then,
+or whose check is still waiting for an answer when it runs out, fails, since
+it was not seen to reload and a verify step could read its old image. A
+Reload Wait of 0 skips this check.
+The step does not wait for devices to come back; use
 `cisco.iosxe.upgrade.verify` for that. The step's default timeout is 7200
-seconds.
+seconds; with devices installed one at a time, each device's install and
+Reload Wait count against it.

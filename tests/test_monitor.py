@@ -111,3 +111,60 @@ async def test_connectivity_rejects_unregistered_check():
     assert result.success is False
     assert "Unknown check type" in result.summary
     assert not services.start_calls
+
+
+async def test_connectivity_port_defaults_by_check_type():
+    """An empty Port is 80 for HTTP Health and 22 for the other port checks,
+    as in probe.connectivity; a port the step sets is kept."""
+    from hegemony_steps_monitor.config import ConnectivityMonitorConfig
+
+    # A new step starts without a port, so the check's own default applies.
+    assert "port" not in ConnectivityMonitorHandler().default_config
+    assert ConnectivityMonitorConfig().port is None
+    configs: list[dict[str, Any]] = [
+        {},
+        {"check_type": "http_health"},
+        {"check_type": "http_health", "port": None},
+        {"check_type": "http_health", "port": 22},
+        {"check_type": "http_health", "port": 8080},
+        {"check_type": "tcp_connect", "port": 443},
+    ]
+    services = _FakeServices()
+    for config in configs:
+        result = await ConnectivityMonitorHandler().execute(_ctx(config, services))
+        assert result.success is True, (config, result.error)
+    assert [(c["check_id"], c["options"]["port"]) for c, _ in services.start_calls] == [
+        ("tcp_connect", 22),
+        ("http_health", 80),
+        ("http_health", 80),
+        ("http_health", 22),
+        ("http_health", 8080),
+        ("tcp_connect", 443),
+    ]
+
+
+async def test_connectivity_declares_its_ping_count():
+    """ping_count was read from the raw config but never declared or checked."""
+    from hegemony_steps_monitor.config import ConnectivityMonitorConfig
+
+    prop = ConnectivityMonitorConfig.model_json_schema()["properties"]["ping_count"]
+    assert (prop["default"], prop["minimum"], prop["maximum"]) == (3, 1, 10)
+    assert prop["x_show_when"] == {"field": "check_type", "value": "icmp_ping"}
+
+    services = _FakeServices()
+    for config in ({"check_type": "icmp_ping"}, {"check_type": "icmp_ping", "ping_count": "5"}):
+        result = await ConnectivityMonitorHandler().execute(_ctx(config, services))
+        assert result.success is True, result.error
+    assert [c["options"] for c, _ in services.start_calls] == [
+        {"timeout_ms": 10_000, "count": 3},
+        {"timeout_ms": 10_000, "count": 5},
+    ]
+
+    for bad in (0, 11, "many"):
+        result = await ConnectivityMonitorHandler().execute(
+            _ctx({"check_type": "icmp_ping", "ping_count": bad}, services)
+        )
+        assert result.success is False
+        error = result.error or ""
+        assert error.startswith("Invalid monitor.connectivity config: ping_count"), bad
+    assert len(services.start_calls) == 2

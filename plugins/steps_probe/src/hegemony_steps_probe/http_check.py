@@ -5,6 +5,7 @@
 """HttpProbeHandler: HTTP(S) endpoint checks against target devices."""
 
 import asyncio
+import ipaddress
 import logging
 import time
 from typing import Any, Literal
@@ -59,6 +60,32 @@ def parse_status_spec(spec: str) -> list[tuple[int, int]]:
 
 def status_matches(status: int, ranges: list[tuple[int, int]]) -> bool:
     return any(low <= status <= high for low, high in ranges)
+
+
+def _url_authority(host: str) -> str:
+    """``host`` as the host part of a URL: an IPv6 address bracketed, anything else as is.
+
+    Only a real IPv6 address gets brackets. A value that merely holds a colon
+    (an IPv6 address already in brackets, a ``host:port``) is left alone; a
+    URL that does not parse then fails that target's request, not the step.
+    """
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    return f"[{host}]" if address.version == 6 else host
+
+
+class _EgressRefused(Exception):
+    """The egress gate refused a request; ``error`` is what the gate raised.
+
+    Kept apart from the request errors that fail a single target, so a
+    refusal still fails the step with the policy's own error.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(str(error))
+        self.error = error
 
 
 class HttpProbeConfig(BaseModel):
@@ -218,7 +245,10 @@ class HttpProbeHandler(BaseHandler):
             if enforce is None:
                 return
             port = request.url.port or _SCHEME_DEFAULT_PORTS.get(request.url.scheme, 80)
-            await enforce(request.url.host, port, proto="tcp", kind="http check")
+            try:
+                await enforce(request.url.host, port, proto="tcp", kind="http check")
+            except Exception as exc:
+                raise _EgressRefused(exc) from exc
 
         async with httpx.AsyncClient(
             verify=verify_tls,
@@ -237,9 +267,7 @@ class HttpProbeHandler(BaseHandler):
                 if not host:
                     return TargetOutcome(device_name, ok=False, error="no host")
 
-                # A colon marks an IPv6 literal (hostnames and IPv4 cannot
-                # carry one), and a URL authority requires it bracketed.
-                authority = f"[{host}]" if ":" in host else host
+                authority = _url_authority(host)
                 netloc = authority if default_port else f"{authority}:{effective_port}"
                 url = f"{scheme}://{netloc}{path}"
 
@@ -273,11 +301,14 @@ class HttpProbeHandler(BaseHandler):
 
             # An egress denial raised by the request hook propagates and
             # cancels the requests still running.
-            outcomes = await for_each_target_device(
-                target_devices,
-                _check,
-                max_parallel=config.max_parallel_devices,
-            )
+            try:
+                outcomes = await for_each_target_device(
+                    target_devices,
+                    _check,
+                    max_parallel=config.max_parallel_devices,
+                )
+            except _EgressRefused as exc:
+                raise exc.error from None
 
         all_evidence, all_metrics, failed_devices = merge_outcomes(outcomes)
         success_count = sum(outcome.ok for outcome in outcomes)
@@ -308,7 +339,15 @@ class HttpProbeHandler(BaseHandler):
         start = time.perf_counter()
         try:
             response = await client.request(method, url)
-        except httpx.HTTPError as exc:
+        except _EgressRefused:
+            raise
+        except httpx.InvalidURL as exc:
+            # The target's address does not make a URL (a host:port, say).
+            return {"success": False, "error": f"invalid URL {url}: {exc}"}
+        except Exception as exc:  # noqa: BLE001 - fails this target, never the step
+            # Not only httpx.HTTPError: an exception escaping here would fail
+            # the step, cancel the other targets' requests and lose their
+            # evidence.
             return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
         latency_ms = round((time.perf_counter() - start) * 1000, 3)
 

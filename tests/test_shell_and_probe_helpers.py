@@ -13,7 +13,8 @@ import pytest
 
 from hegemony_steps_probe.dns_check import normalize_answer
 from hegemony_steps_probe.http_check import parse_status_spec, status_matches
-from hegemony_steps_shell.execute import ShellExecuteHandler, build_command
+from hegemony_steps_shell.execute import ShellExecuteHandler, build_command, pwsh_literal
+from hegemony_steps_shell.templates import DYNAMIC_SHELL, PWSH_VALUES, WHITESPACE_CONTROL
 
 
 def test_build_command_default_passthrough():
@@ -33,7 +34,6 @@ def test_build_command_sh_family_keeps_env_prefix():
 ACCEPTED = [
     "uname -a",
     "systemctl restart {{ inputs.service | quote }}",
-    "echo {{- inputs.msg|quote -}} done",
     "{% if inputs.force %}rm -f /tmp/x{% endif %}",
     "cp {{ inputs.src | quote }} {{ inputs.dst | quote }}",
     "X={{ inputs.v | quote }} env",
@@ -172,9 +172,58 @@ def test_accepted_templates_render_values_as_data_in_a_real_shell(tmp_path, shel
         assert done.stdout == value
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo {{- inputs.msg | quote }}",
+        "echo {{ inputs.msg | quote -}}",
+        "echo {{- inputs.msg|quote -}} done",
+        "{%- if inputs.force %}rm -f /tmp/x{% endif %}",
+        "{% if inputs.force -%}rm -f /tmp/x{% endif %}",
+        "{#- note #}uname -a",
+        "uname -a{# note -#}",
+        "{%- raw %}x{% endraw %}",
+    ],
+)
+def test_template_errors_refuses_whitespace_control(command):
+    errors = ShellExecuteHandler().template_errors({"commands": [command]})
+    assert errors == [f"commands line 1: {WHITESPACE_CONTROL}"]
+
+
+def test_whitespace_control_cannot_join_two_checked_lines(tmp_path):
+    """The host renders all lines as one template: '{{-' would remove the line break,
+    so a value would land inside the quotes the line before opened."""
+    commands = ['echo "hello', '{{- inputs.v | quote }}"']
+    assert ShellExecuteHandler().template_errors({"commands": commands}) == [
+        f"commands line 2: {WHITESPACE_CONTROL}"
+    ]
+    # What the check now refuses: rendered as the host does, the two lines join.
+    env = jinja2.Environment()
+    env.filters["quote"] = lambda item: shlex.quote(str(item))
+    rendered = env.from_string("\n".join(commands)).render(inputs={"v": "$(touch x)"})
+    assert "\n" not in rendered
+
+
+def test_whitespace_control_markers_in_plain_text_are_not_tags():
+    for command in ["awk '{print $1-}}'", "echo a-}} b", "{% raw %}{{- x -}}{% endraw %}"]:
+        assert ShellExecuteHandler().template_errors({"commands": [command]}) == []
+
+
 def test_template_errors_ignores_non_list_commands():
     assert ShellExecuteHandler().template_errors({"commands": "echo {{ x }}"}) == []
     assert ShellExecuteHandler().template_errors({}) == []
+
+
+def test_env_names_must_be_identifiers():
+    """A name is written into the command line as is (export NAME=...), so it must
+    be a plain identifier; the value is the quoted part."""
+    errors = ShellExecuteHandler().validate_config(
+        {"commands": ["true"], "env": {"OK_1": "a", "A;touch x": "b", "1X": "c", "": "d"}}
+    )
+    assert len(errors) == 1
+    assert "'A;touch x'" in errors[0] and "'1X'" in errors[0] and "''" in errors[0]
+    assert "OK_1" not in errors[0]
+    assert ShellExecuteHandler().validate_config({"commands": ["true"], "env": {"_A": "x"}}) == []
 
 
 def test_build_command_bash_wraps_and_quotes():
@@ -187,32 +236,92 @@ def test_build_command_pwsh_wraps():
     assert composed == "pwsh -NoProfile -Command 'Get-Service nginx'"
 
 
-def test_build_command_pwsh_rejects_env():
-    with pytest.raises(ValueError, match="pwsh"):
-        build_command("Get-Date", shell="pwsh", env={"A": "1"})
+def test_build_command_pwsh_sets_env_as_powershell_literals():
+    composed = build_command("Write-Output $env:A", shell="pwsh", env={"A": "x’; y", "B": "1"})
+    assert composed == (
+        "pwsh -NoProfile -Command "
+        + shlex.quote("$env:A = 'x’’; y'; $env:B = '1'; Write-Output $env:A")
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "literal"),
+    [
+        ("plain", "'plain'"),
+        ("it's", "'it''s'"),
+        ("‘smart’ ‚low‛", "'‘‘smart’’ ‚‚low‛‛'"),
+        ('$(Get-Date) `n "x"', "'$(Get-Date) `n \"x\"'"),
+    ],
+)
+def test_pwsh_literal_doubles_every_single_quote_powershell_reads(value, literal):
+    assert pwsh_literal(value) == literal
+
+
+PWSH_HOSTILE = [
+    "x’; Write-Output PWNED; ’",
+    "x‘; Write-Output PWNED; ‘",
+    "x'; Write-Output PWNED; '",
+    "$(Write-Output PWNED)",
+    'a"b`n@HOME, c',
+    "line1\nline2",
+]
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None or shutil.which("sh") is None, reason="needs pwsh")
+@pytest.mark.parametrize("value", PWSH_HOSTILE)
+def test_pwsh_env_values_stay_data_in_real_powershell(value):
+    """Run the composed line as a POSIX login shell would: the value comes back exactly."""
+    composed = build_command("[Console]::Out.Write($env:V)", shell="pwsh", env={"V": value})
+    done = subprocess.run(["sh", "-c", composed], capture_output=True, text=True, check=True)
+    assert done.stdout == value
+    assert "PWNED" not in done.stdout.replace(value, "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Write-Output {{ inputs.v | quote }}",
+        "Restart-Service {{ inputs.name }}",
+        "{% for h in inputs.hosts %}Test-Connection {{ h | quote }}; {% endfor %}",
+        "Write-Output {{ inputs.v",
+    ],
+)
+def test_pwsh_lines_take_no_template_values(command):
+    errors = ShellExecuteHandler().template_errors({"commands": [command], "shell": "pwsh"})
+    assert errors == [f"commands line 1: {PWSH_VALUES}"]
+
+
+def test_pwsh_lines_without_values_pass():
+    handler = ShellExecuteHandler()
+    for command in ["Get-Service nginx", "{% if inputs.force %}Stop-Service x{% endif %}"]:
+        assert handler.template_errors({"commands": [command], "shell": "pwsh"}) == []
+
+
+@pytest.mark.parametrize("shell", ["{{ inputs.interpreter }}", "{% if x %}pwsh{% endif %}", 7])
+def test_a_line_with_values_needs_an_interpreter_written_out(shell):
+    """The check sees the setting before it renders: a template could pick pwsh."""
+    handler = ShellExecuteHandler()
+    config = {"commands": ["Write-Output {{ inputs.value | quote }}"], "shell": shell}
+
+    assert handler.template_errors(config) == [f"commands line 1: {DYNAMIC_SHELL}"]
+
+
+@pytest.mark.parametrize("shell", ["default", "sh", "bash", None])
+def test_a_posix_interpreter_written_out_takes_quoted_values(shell):
+    config = {"commands": ["echo {{ inputs.value | quote }}"], "shell": shell}
+
+    assert ShellExecuteHandler().template_errors(config) == []
+
+
+def test_a_templated_interpreter_is_fine_for_lines_without_values():
+    config = {"commands": ["Get-Service nginx"], "shell": "{{ inputs.interpreter }}"}
+
+    assert ShellExecuteHandler().template_errors(config) == []
 
 
 def test_build_command_rejects_unknown_shell():
     with pytest.raises(ValueError, match="unsupported"):
         build_command("ls", shell="zsh")
-
-
-async def test_shell_execute_rejects_pwsh_env_combo():
-    from hegemony_step_sdk import HandlerContext
-
-    ctx = HandlerContext(
-        run_id="r",
-        flow_id="f",
-        step_run_id="sr",
-        step_id="s",
-        config={"commands": ["Get-Date"], "shell": "pwsh", "env": {"A": "1"}},
-        target_roles=["primary"],
-        target_devices_by_role={"primary": [{"id": "d1", "name": "h1", "mgmt_host": "192.0.2.1"}]},
-        # services intentionally unbound: the config error returns first
-    )
-    result = await ShellExecuteHandler().execute(ctx)
-    assert result.success is False
-    assert "pwsh" in (result.error or "")
 
 
 def test_parse_status_spec_ranges_and_codes():

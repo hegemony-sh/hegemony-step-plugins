@@ -353,6 +353,10 @@ def test_scripts_stop_the_tool_at_the_step_deadline():
         ({"targets": ["a\nb"]}, "one resource address"),
         ({"replace": ["aws_instance.web\tx"]}, "one resource address"),
         ({"destroy": True, "refresh_only": True}, "cannot be combined"),
+        ({"destroy": True, "replace": ["aws_instance.web"]}, "combined with 'destroy'"),
+        ({"refresh_only": True, "replace": ["aws_instance.web"]}, "combined with 'refresh_only'"),
+        # Rendered templates arrive as text.
+        ({"destroy": "true", "refresh_only": "True"}, "cannot be combined"),
         ({"engine": "terraform", "state_encryption_key": "vault://k/x"}, "opentofu engine"),
         ({"lock_timeout": "soon"}, "lock_timeout"),
         ({"image": "/tmp/x"}, "Invalid image reference"),
@@ -395,6 +399,19 @@ def test_keyed_resource_instances_can_be_targeted_and_replaced():
     assert """'-target=module.site["prod east"].aws_vpc.main'""" in script
     assert """'-replace=aws_instance.web["blue"]'""" in script
     _assert_parses(script)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"destroy": "false", "refresh_only": "true"},
+        {"destroy": "False", "replace": ["aws_instance.web"]},
+        {"refresh_only": "false", "replace": ["aws_instance.web"]},
+    ],
+)
+def test_plan_validation_reads_rendered_plan_modes(config):
+    """A templated switch rendered as "false" is off, as the plan runs with it."""
+    assert TfPlanHandler().validate_config({"state_name": "core", **config}) == []
 
 
 def test_plan_validation_accepts_defaults():
@@ -1114,6 +1131,89 @@ async def test_a_hold_that_cannot_be_ended_lasts_until_the_run_ends(monkeypatch,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exit_code", "out"),
+    [
+        # The tool failed; a lock it took holds the state for the run.
+        (1, {}),
+        # The plan ran, but whether it has changes could not be read back.
+        (0, {"plan.txt": b"plan\n"}),
+    ],
+)
+async def test_a_failed_plan_ends_its_hold(monkeypatch, exit_code, out):
+    _install_docker(monkeypatch, out=out, exit_code=exit_code)
+    services = _ReleasingServices()
+    progress: list[str] = []
+
+    async def emit(message, device_id=None, attrs=None):
+        progress.append(message)
+        return True
+
+    ctx = _ctx(_HOLD, services)
+    ctx._emit_progress = emit
+    result = await TfPlanHandler().execute(ctx)
+
+    assert result.success is False
+    assert services.held == ["core"]
+    assert services.releases == ["core"]
+    assert "Ended the run's hold on managed state 'core': the plan failed" in progress
+
+
+@pytest.mark.asyncio
+async def test_a_plan_whose_container_fails_ends_its_hold(monkeypatch):
+    async def timed_out(ctx, job):
+        return HandlerResult(
+            success=False,
+            error="Container execution timed out after 300s",
+            summary="Container timed out",
+        )
+
+    monkeypatch.setattr("hegemony_steps_tf.plan.run_container_job", timed_out)
+    services = _ReleasingServices()
+    result = await TfPlanHandler().execute(_ctx(_HOLD, services))
+    assert result.summary == "Container timed out"
+    assert services.releases == ["core"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "services",
+    [_ReleasingServices(released=False), _NoReleaseServices(), _Services()],
+)
+async def test_a_failed_plan_adds_no_note_about_a_hold(monkeypatch, services):
+    """The run may hold nothing: the tool can fail before it locks the state."""
+    _install_docker(monkeypatch, out={}, exit_code=1)
+    result = await TfPlanHandler().execute(_ctx(_HOLD, services))
+    assert result.success is False
+    assert result.summary == "tofu plan failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "config",
+    [
+        # No hold asked for.
+        {"state_name": "core"},
+        # Refused before the tool ran: no lock, no hold.
+        {**_HOLD, "state_encryption_key": "vault://orgs/acme/secrets/enc"},
+    ],
+)
+async def test_a_failed_plan_ends_no_hold_it_cannot_have(monkeypatch, config):
+    state = _install_docker(monkeypatch, out={}, exit_code=1)
+
+    class ShortKey(_ReleasingServices):
+        async def resolve_secret_ref(self, ref, *, source):
+            return "short"
+
+    services = ShortKey()
+    result = await TfPlanHandler().execute(_ctx(config, services))
+    assert result.success is False
+    assert services.releases == []
+    if "state_encryption_key" in config:
+        assert state["calls"] == []
+
+
+@pytest.mark.asyncio
 async def test_plan_step_reports_unavailable_managed_state(monkeypatch):
     state = _install_docker(monkeypatch, out={})
     services = _Services()
@@ -1395,6 +1495,41 @@ async def test_apply_without_changes_ends_a_hold_the_plan_kept(monkeypatch, plan
     assert result.summary == "Nothing to apply: the plan has no changes"
     assert services.releases == releases
     assert services.opened == []
+    assert state["calls"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("plan", "shared", "releases"),
+    [
+        # The plan step ran without a shared workspace (plan only).
+        (_plan_output(has_changes=False, apply_ready=False, working_dir=LOCAL_WORKDIR), True, []),
+        # This step has none.
+        (_plan_output(has_changes=False), False, []),
+        # Neither has one, and the run still holds the state for the apply.
+        (
+            _plan_output(
+                has_changes=False,
+                apply_ready=False,
+                working_dir=LOCAL_WORKDIR,
+                state="managed",
+                state_name="core",
+                state_held=True,
+            ),
+            False,
+            ["core"],
+        ),
+    ],
+)
+async def test_apply_without_changes_needs_no_shared_workspace(monkeypatch, plan, shared, releases):
+    """Nothing to apply needs no saved plan, so the workspaces do not matter."""
+    state = _install_docker(monkeypatch, out={})
+    services = _ReleasingServices(plan)
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services, shared=shared))
+    assert result.success is True, result.error
+    assert result.summary == "Nothing to apply: the plan has no changes"
+    assert result.output["applied"] is False
+    assert services.releases == releases
     assert state["calls"] == []
 
 

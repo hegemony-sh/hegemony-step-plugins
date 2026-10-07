@@ -21,6 +21,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
 )
 
@@ -222,8 +223,8 @@ class RunFlowConfig(BaseModel):
         title="Poll interval (sec)",
         description=(
             "Seconds between status checks of the child run while waiting "
-            "for completion; values are clamped to 1-60 and default to 5. "
-            "Ignored when the step does not wait."
+            "for completion, from 1 to 60 (default 5). Ignored when the step "
+            "does not wait."
         ),
     )
 
@@ -260,45 +261,42 @@ class RunFlowHandler(BaseHandler):
             except ValueError:
                 errors.append("flow_id must be a UUID")
 
-        version = config.get("version")
-        if version is not None and (
-            isinstance(version, bool) or not isinstance(version, int) or version < 1
-        ):
-            errors.append("version must be a positive integer")
-
         if "input_mappings" in config:
             errors.append("input_mappings is no longer supported; configure field_mappings")
 
         errors.extend(_validate_field_mappings(config.get("field_mappings")))
         errors.extend(_validate_target_mappings(config.get("target_mappings")))
-        return errors
+        if errors:
+            return errors
+        # The other settings as the model reads them (types and bounds), so a
+        # rendered "false" or "3" is checked as the step will run with it.
+        return super().validate_config(config)
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Start a child flow run and optionally wait for its terminal result."""
-        validation_errors = self.validate_config(ctx.config)
-        if validation_errors:
+        # The settings as the model reads them: the platform renders templates
+        # as text, and a rendered "false" must not read as true.
+        try:
+            config = self.parse_config(ctx.config, RunFlowConfig)
+        except InvalidConfigError as exc:
             return HandlerResult(
                 success=False,
                 summary="Nested flow configuration error",
-                error="; ".join(validation_errors),
+                error="; ".join(exc.errors),
             )
 
         services = ctx.require_services()
 
-        raw_flow_id = ctx.config.get("flow_id")
-        raw_flow_name = ctx.config.get("flow_name")
-        flow_id = raw_flow_id.strip() if isinstance(raw_flow_id, str) else ""
-        flow_name = raw_flow_name.strip() if isinstance(raw_flow_name, str) else ""
-        raw_version = ctx.config.get("version")
-        version = int(raw_version) if raw_version is not None else None
-        wait_for_completion = bool(ctx.config.get("wait_for_completion", True))
-        run_name = ctx.config.get("run_name")
-        if run_name is not None:
-            run_name = str(run_name).strip() or None
+        flow_id = config.flow_id.strip()
+        flow_name = config.flow_name.strip()
+        version = config.version
+        wait_for_completion = config.wait_for_completion
+        run_name = (config.run_name or "").strip() or None
         if run_name is None:
             parent_run_name = ctx.run_name.strip() if ctx.run_name else ctx.run_id[:8]
             run_name = f"{parent_run_name}_{secrets.token_hex(_DEFAULT_RUN_NAME_HASH_BYTES)}"
 
+        # The platform renders the mappings keeping each value's own type: used as they arrive.
         field_mappings = ctx.config.get("field_mappings")
         target_mappings = ctx.config.get("target_mappings")
         assert isinstance(field_mappings, dict)
@@ -371,10 +369,7 @@ class RunFlowHandler(BaseHandler):
                 },
             )
 
-        poll_interval = ctx.config.get("poll_interval_seconds", 5)
-        if isinstance(poll_interval, bool) or not isinstance(poll_interval, (int, float)):
-            poll_interval = 5
-        poll_interval = max(1.0, min(float(poll_interval), 60.0))
+        poll_interval = config.poll_interval_seconds
         started = time.monotonic()
 
         try:

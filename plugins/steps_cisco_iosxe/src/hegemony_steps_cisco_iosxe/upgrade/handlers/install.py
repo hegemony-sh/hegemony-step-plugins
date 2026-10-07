@@ -10,6 +10,7 @@ This handler should run in IMPLEMENTATION phase during the
 maintenance window. It will cause device reboot.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -23,14 +24,20 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
     for_each_target_device,
-    max_parallel_from_config,
 )
 
 from ..driver import UpgradeMode, get_driver
 
 logger = logging.getLogger(__name__)
+
+# How often the step checks whether a device that started its reload is down.
+_DOWN_POLL_SECONDS = 5
+# How long one check waits for a session and an answer; a device that gives
+# none in that time counts as down.
+_DOWN_PROBE_SECONDS = 30
 
 
 class UpgradeInstallConfig(BaseModel):
@@ -94,6 +101,18 @@ class UpgradeInstallConfig(BaseModel):
         ),
         json_schema_extra={"x_show_when": {"field": "upgrade_mode", "value": "install"}},
     )
+    reload_wait_seconds: int = Field(
+        default=300,
+        ge=0,
+        title="Reload Wait (sec)",
+        description=(
+            "Once a device starts its reload, how long to wait for it to stop "
+            "answering, checked every 5 seconds with a new session (no answer "
+            "within 30 seconds counts as down). A device not seen to go down "
+            "by then fails: a verify step could read its old image. 0 skips "
+            "the check."
+        ),
+    )
     max_parallel_devices: int = Field(
         default=1,
         ge=1,
@@ -140,6 +159,8 @@ class UpgradeInstallHandler(BaseHandler):
         commit: Commit change to prevent rollback (default: true)
         fix_boot_config: Install mode: set the boot variable to packages.conf
             and save it instead of failing (default: false)
+        reload_wait_seconds: How long to wait for a reloading device to go
+            down (default: 300; 0 skips the check)
 
     Output context:
         install.reboot_triggered: Whether device is rebooting
@@ -149,8 +170,9 @@ class UpgradeInstallHandler(BaseHandler):
             setting (not whether it was saved)
         install.previous_boot: Boot entries before the step
 
-    Note: After this handler completes, the device will be rebooting.
-    Use cisco.iosxe.upgrade.verify in a subsequent step after device comes back up.
+    Note: After this handler completes, a device that started its reload has
+    gone down (unless reload_wait_seconds is 0). Use cisco.iosxe.upgrade.verify
+    in a subsequent step to wait for it to come back up.
     """
 
     handler_id = "cisco.iosxe.upgrade.install"
@@ -179,23 +201,22 @@ class UpgradeInstallHandler(BaseHandler):
                 summary="Missing target device",
             )
 
-        # Get parameters
+        # The model requires a non-empty Image Filename.
+        try:
+            config = self.parse_config(ctx.config, UpgradeInstallConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        # Not a setting: only the IOS-XE drivers exist. Kept for steps that name it.
         platform = ctx.config.get("platform", DEFAULT_DEVICE_PLATFORM)
-        mode_str = ctx.config.get("upgrade_mode", "install")
-        upgrade_mode = UpgradeMode.BUNDLE if mode_str.lower() == "bundle" else UpgradeMode.INSTALL
+        mode_str = config.upgrade_mode
+        upgrade_mode = UpgradeMode.BUNDLE if mode_str == "bundle" else UpgradeMode.INSTALL
 
-        image_name = ctx.config.get("image_name")
-        if not image_name:
-            return HandlerResult(
-                success=False,
-                error="image_name is required",
-                summary="Missing required parameter",
-            )
-
-        dest_fs = ctx.config.get("dest_fs", "flash:")
-        activate = ctx.config.get("activate", True)
-        commit = ctx.config.get("commit", True)
-        fix_boot_config = bool(ctx.config.get("fix_boot_config", False))
+        image_name = config.image_name
+        dest_fs = config.dest_fs
+        activate = config.activate
+        commit = config.commit
+        fix_boot_config = config.fix_boot_config
+        reload_wait_seconds = config.reload_wait_seconds
 
         # Get driver for platform
         try:
@@ -208,6 +229,54 @@ class UpgradeInstallHandler(BaseHandler):
             )
 
         services = ctx.require_services()
+
+        async def _answers(device: dict[str, Any], timeout: float) -> bool:
+            """Whether the device answers a command in a new session within ``timeout``."""
+            try:
+                probe = services.connect(
+                    device,
+                    platform=platform,
+                    connect_timeout=timeout,
+                    command_timeout=timeout,
+                    step_run_id=ctx.step_run_id,
+                )
+                answer = await probe.execute_command("show clock")
+            except Exception as e:
+                logger.debug(f"Down check for {device.get('name')}: {e}")
+                return False
+            # A session that failed is exit code -1; a CLI error is still an answer.
+            return answer.exit_code >= 0
+
+        async def _wait_until_down(device: dict[str, Any]) -> tuple[bool | None, float]:
+            """Wait up to Reload Wait for the device to stop answering.
+
+            A device that has not gone down yet still answers from its old
+            image, so a verify step started now could read the old version.
+            Each check ends by the end of Reload Wait, so an answer or a
+            failure seen after it never counts. Returns whether the device
+            went down (None when a check was still waiting for it as Reload
+            Wait ran out) and the seconds waited.
+            """
+            loop = asyncio.get_event_loop()
+            start = loop.time()
+            while True:
+                left = reload_wait_seconds - (loop.time() - start)
+                if left <= 0:
+                    return False, loop.time() - start
+                budget = min(left, _DOWN_PROBE_SECONDS)
+                try:
+                    answered = await asyncio.wait_for(_answers(device, budget), timeout=budget)
+                except TimeoutError:
+                    # No answer in the whole check time: down. A check cut
+                    # short by the end of Reload Wait has seen neither.
+                    elapsed = loop.time() - start
+                    return (True if budget == _DOWN_PROBE_SECONDS else None), elapsed
+                elapsed = loop.time() - start
+                if not answered:
+                    return True, elapsed
+                if elapsed >= reload_wait_seconds:
+                    return False, elapsed
+                await asyncio.sleep(min(_DOWN_POLL_SECONDS, reload_wait_seconds - elapsed))
 
         async def _process_device(device: dict[str, Any]) -> _DeviceOutcome:
             outcome = _DeviceOutcome()
@@ -264,7 +333,34 @@ class UpgradeInstallHandler(BaseHandler):
                     # duplicate the whole transcript).
                     await ctx.emit_output(result.cli_output, device=device, command="install")
 
-                if result.success:
+                success = result.success
+                error = result.error
+                went_down: bool | None = None
+                down_elapsed = 0.0
+                if result.success and result.reboot_triggered and reload_wait_seconds:
+                    await ctx.emit_progress(
+                        f"Waiting for {device_name} to go down for its reload",
+                        device_id,
+                        {"phase": "install", "status": "waiting_down"},
+                    )
+                    seen_down, down_elapsed = await _wait_until_down(device)
+                    went_down = bool(seen_down)
+                    if seen_down is None:
+                        success = False
+                        error = (
+                            f"The device reported its reload, but a check for it was "
+                            f"still waiting for an answer when Reload Wait "
+                            f"({reload_wait_seconds}s) ran out: it was not seen to go down"
+                        )
+                    elif not seen_down:
+                        success = False
+                        error = (
+                            f"The device reported its reload but still answered "
+                            f"{down_elapsed:.0f}s later: it did not go down within "
+                            f"Reload Wait ({reload_wait_seconds}s)"
+                        )
+
+                if success:
                     outcome.ok = True
 
                     if result.reboot_triggered:
@@ -284,7 +380,7 @@ class UpgradeInstallHandler(BaseHandler):
                 else:
                     outcome.failed_device = device_name
                     await ctx.emit_progress(
-                        f"Install failed: {result.error}",
+                        f"Install failed: {error}",
                         device_id,
                         {"phase": "install", "status": "failed"},
                     )
@@ -302,17 +398,19 @@ class UpgradeInstallHandler(BaseHandler):
                 content_lines = [
                     f"Device: {device_name}",
                     f"Platform: {platform} ({mode_str} mode)",
-                    f"Success: {result.success}",
+                    f"Success: {success}",
                     f"Reboot Triggered: {result.reboot_triggered}",
                     f"Activated: {result.activated}",
                     f"Committed: {result.committed}",
                     f"Boot Config Changed: {result.boot_config_changed}",
                     f"Previous Boot: {';'.join(result.previous_boot) or 'unknown'}",
                 ]
+                if went_down is not None:
+                    content_lines.append(f"Went Down: {went_down} (after {down_elapsed:.1f}s)")
                 if result.note:
                     content_lines.append(f"Note: {result.note}")
-                if result.error:
-                    content_lines.append(f"Error: {result.error}")
+                if error:
+                    content_lines.append(f"Error: {error}")
                 if result.cli_output:
                     content_lines.append(f"\n--- CLI Output ---\n{result.cli_output}")
 
@@ -326,14 +424,16 @@ class UpgradeInstallHandler(BaseHandler):
                         "device_name": device_name,
                         "platform": platform,
                         "upgrade_mode": mode_str,
-                        "success": result.success,
+                        "success": success,
                         "reboot_triggered": result.reboot_triggered,
                         "activated": result.activated,
                         "committed": result.committed,
                         "boot_config_changed": result.boot_config_changed,
                         "previous_boot": result.previous_boot,
+                        "went_down": went_down,
+                        "down_elapsed_sec": down_elapsed,
                         "note": result.note,
-                        "error": result.error,
+                        "error": error,
                     },
                 }
                 outcome.evidence.append(evidence_item)
@@ -366,7 +466,7 @@ class UpgradeInstallHandler(BaseHandler):
         outcomes = await for_each_target_device(
             target_devices,
             _process_device,
-            max_parallel=max_parallel_from_config(ctx.config),
+            max_parallel=config.max_parallel_devices,
         )
 
         # Merge per-device results in device order — deterministic regardless

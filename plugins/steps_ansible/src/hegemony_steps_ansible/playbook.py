@@ -433,6 +433,18 @@ def credential_host_vars(
     return variables, files
 
 
+def _roles_without_devices(devices_by_role: dict[str, list[dict[str, Any]]]) -> list[str]:
+    """The step's target roles when none of them matched a device, else ``[]``.
+
+    Such roles leave an inventory with no hosts: a play for them runs nowhere and
+    reports nothing changed, which reads like a clean run on the devices. A play
+    for localhost alone is fine, so the step reports this rather than failing.
+    """
+    if any(devices_by_role.values()):
+        return []
+    return sorted(devices_by_role)
+
+
 def _ansible_env(config: AnsiblePlaybookConfig, user_env: dict[str, str]) -> dict[str, str]:
     """The ANSIBLE_* variables the step needs, and nothing more.
 
@@ -699,10 +711,15 @@ class AnsiblePlaybookHandler(BaseHandler):
         config = AnsiblePlaybookConfig.model_validate(ctx.config)
         services = ctx.require_services()
 
-        try:
-            inventory = build_inventory(
-                self._devices_by_role(ctx, config.inventory_scope), group_by=config.group_by
+        devices_by_role = self._devices_by_role(ctx, config.inventory_scope)
+        unmatched_roles = _roles_without_devices(devices_by_role)
+        if unmatched_roles:
+            await ctx.emit_progress(
+                "No device matched the target roles "
+                f"({', '.join(unmatched_roles)}); the inventory has no hosts"
             )
+        try:
+            inventory = build_inventory(devices_by_role, group_by=config.group_by)
             files, inventory, left_out = await self._staged_files(ctx, config, inventory, services)
         except ValueError as exc:
             return HandlerResult(
@@ -966,12 +983,16 @@ class AnsiblePlaybookHandler(BaseHandler):
             )
         else:
             summary = f"{config.playbook}{mode}: ansible-playbook exited with code {exit_code}"
+        devices_by_role = self._devices_by_role(ctx, config.inventory_scope)
+        if unmatched_roles := _roles_without_devices(devices_by_role):
+            summary += f" (no device matched the target roles: {', '.join(unmatched_roles)})"
         return HandlerResult(
             success=success,
             summary=summary,
             error=error,
             metrics={
                 "exit_code": exit_code,
+                "target_devices": sum(len(devices) for devices in devices_by_role.values()),
                 "duration_seconds": outcome.duration_seconds,
                 "image": outcome.image,
                 "image_served": outcome.image_served,

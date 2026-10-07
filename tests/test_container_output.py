@@ -168,6 +168,59 @@ async def test_a_pipe_that_never_closes_ends_in_the_timeout_result(attached_clie
     assert result.error == "Container execution timed out after 2s"
 
 
+async def test_a_timed_out_container_keeps_the_output_it_wrote(attached_client, monkeypatch):
+    monkeypatch.setattr("hegemony_steps_container.run.KILL_WAIT_SECONDS", 1.0)
+    attached_client["script"] = (
+        "import sys, time\n"
+        "sys.stdout.write('step one\\n'); sys.stdout.flush()\n"
+        "sys.stderr.write('warning: slow\\n'); sys.stderr.flush()\n"
+        "time.sleep(60)\n"
+    )
+    events: list[tuple[str, dict]] = []
+
+    result = await _run(_ctx(events, timeout=2))
+
+    assert isinstance(result, HandlerResult)
+    assert result.success is False
+    assert result.summary == "Container timed out"
+    assert result.error == "Container execution timed out after 2s"
+    assert result.output == {"stdout": "step one\n", "stderr": "warning: slow\n"}
+    assert result.metrics["skipped_artifacts"] == 0
+    (evidence,) = result.evidence
+    assert evidence["kind"] == "container_output"
+    assert evidence["name"] == "container_output_step-1"
+    assert evidence["content_text"] == "step one\nwarning: slow\n"
+    details = evidence["content_json"]
+    assert (details["stdout"], details["stderr"]) == ("step one\n", "warning: slow\n")
+    assert details["exit_code"] is None
+    assert details["timed_out"] is True
+    assert details["truncated"] is False
+    assert details["image"] == "alpine:3.20"
+
+
+async def test_a_timed_out_container_keeps_its_output_within_the_budget(
+    attached_client, monkeypatch
+):
+    monkeypatch.setattr("hegemony_steps_container.run.KILL_WAIT_SECONDS", 1.0)
+    # 20 bytes for the evidence: 10 per stream, which the first line fills.
+    monkeypatch.setattr(RunContainerHandler, "_MAX_OUTPUT_BYTES", 20)
+    attached_client["script"] = (
+        "import sys, time\n"
+        "sys.stdout.write('abcdefghi\\nmore\\n'); sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    events: list[tuple[str, dict]] = []
+
+    result = await _run(_ctx(events, timeout=2))
+
+    assert isinstance(result, HandlerResult)
+    assert result.summary == "Container timed out"
+    assert result.output["stdout"] == "abcdefghi\n"
+    (evidence,) = result.evidence
+    assert evidence["content_text"] == "abcdefghi\n\n[TRUNCATED after 20 bytes]"
+    assert evidence["content_json"]["truncated"] is True
+
+
 async def test_the_live_log_stops_at_its_limit_and_the_output_is_still_read(attached_client):
     total = MAX_LIVE_OUTPUT_BYTES + 3 * 1024 * 1024
     attached_client["script"] = (

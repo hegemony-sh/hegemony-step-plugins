@@ -30,8 +30,11 @@ comment, backticks or a here-document: there the quoting does not hold, and
 `echo "{{ inputs.msg | quote }}"` would let a value containing `"` end the
 string. `{% if %}` and `{% for %}` statements are fine where a value would
 be (`{% if inputs.force %}--force{% endif %}`); `{% filter %}`,
-`{% include %}`, imports and macros are not supported. The step refuses to
-run a line that breaks these rules, before anything is rendered. Quoting
+`{% include %}`, imports and macros are not supported. Neither is Jinja's
+whitespace control (`{{-`, `-}}`, `{%-`, `-%}`, `{#-`, `-#}`): it can remove
+the line break between two lines, which would join them into one command. The
+step refuses to run a line that breaks these rules, before anything is
+rendered. Quoting
 keeps a value one word; a command that runs its argument as code (`eval`,
 `sh -c`, `ssh host`) still runs it.
 
@@ -49,10 +52,19 @@ in `pwsh -NoProfile -Command '...'` for PowerShell hosts. Environment
 variables are quoted and set for every command: with the default interpreter
 they are exported in the login shell first (`export KEY=VALUE; ...`, so a
 POSIX login shell is needed), with `sh` and `bash` they are prefixed as
-`env KEY=VALUE`. Either way `"$KEY"` works anywhere in the line. Their values
+`env KEY=VALUE`. Either way `"$KEY"` works anywhere in the line. With `pwsh`
+they are set at the start of the PowerShell command
+(`$env:KEY = '...'; ...`, the value as a PowerShell single-quoted string) and
+read as `$env:KEY`. A `pwsh` line takes no `{{ }}` values: `| quote` is POSIX
+quoting, and PowerShell also reads typographic quotes (‘ ’) as quotes, so a
+value could end the string. Pass values to `pwsh` in Environment Variables. For
+the same reason a line that takes `{{ }}` values needs the Interpreter written
+out as the login shell, `sh` or `bash`, not as a template, which could render
+to `pwsh`. Names are
+written into the command line as they are, so they must be letters, digits
+and `_`, not starting with a digit; the values are the quoted part. Their values
 appear on the remote command line (for example in the host's process list),
-so they are not a place for secrets. They cannot be combined with the `pwsh`
-interpreter — that combination is rejected before anything runs.
+so they are not a place for secrets.
 
 "Stop on first failure" (on by default) skips a device's remaining commands
 after the first non-zero exit code; turn it off to run every command and
@@ -85,9 +97,10 @@ Metrics record `command_count` (configured commands), `device_count`, and
 
 The step fails immediately — before contacting any host — when a command
 line inserts a `{{ }}` value without `| quote` or inside quotes, a comment,
-backticks or a here-document, when no target devices or no
-commands are configured, or when environment variables are combined with the
-`pwsh` interpreter. Per host, it fails when the device has
+backticks or a here-document, or uses whitespace control, when a `pwsh` line
+inserts a `{{ }}` value, or a line does under an Interpreter written as a
+template, or when no target devices or no commands are
+configured. Per host, it fails when the device has
 no management host, when the shell connection cannot be opened, when a command
 exits non-zero, or when a command times out or the transport raises an error
 (which also skips that host's remaining commands). One failing host does not

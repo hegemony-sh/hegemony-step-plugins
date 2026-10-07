@@ -309,18 +309,7 @@ class TfApplyHandler(BaseHandler):
         handoff = read_plan_handoff(plan_step, plan_output)
         if isinstance(handoff, str):
             return self._refuse(handoff)
-        if not handoff.apply_ready:
-            return self._refuse(
-                f"plan step {plan_step!r} ran without a shared workspace, so its saved plan "
-                "is gone: give it shared (or explicit) execution affinity on a worker with "
-                "shared workspaces enabled"
-            )
-        if not shared_workspace_mounted(ctx):
-            return self._refuse(
-                "this apply step has no shared workspace: give it shared (or explicit) "
-                "execution affinity on a worker with shared workspaces enabled, so it runs "
-                "in the plan's working directory on the same worker"
-            )
+        # Nothing to apply needs no saved plan, so no shared workspace either.
         if not handoff.has_changes:
             summary = "Nothing to apply: the plan has no changes"
             if handoff.state_held and handoff.state == "managed" and handoff.state_name.strip():
@@ -335,6 +324,18 @@ class TfApplyHandler(BaseHandler):
                     "outputs": handoff.outputs,
                     "sensitive_outputs": handoff.sensitive_outputs,
                 },
+            )
+        if not handoff.apply_ready:
+            return self._refuse(
+                f"plan step {plan_step!r} ran without a shared workspace, so its saved plan "
+                "is gone: give it shared (or explicit) execution affinity on a worker with "
+                "shared workspaces enabled"
+            )
+        if not shared_workspace_mounted(ctx):
+            return self._refuse(
+                "this apply step has no shared workspace: give it shared (or explicit) "
+                "execution affinity on a worker with shared workspaces enabled, so it runs "
+                "in the plan's working directory on the same worker"
             )
 
         state_name: str | None = None

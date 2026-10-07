@@ -56,10 +56,9 @@ class ExecuteCliConfig(BaseModel):
         le=3600,
         title="Command timeout (seconds)",
         description=(
-            "How long one command may run on a device before it fails. With the "
-            "netmiko transport a configuration block is sent as one command, so "
-            "the limit covers the whole block. The step timeout must still cover "
-            "every command on every device. Defaults to 30 seconds."
+            "How long one command, or one configuration line, may run on a "
+            "device before it fails. The step timeout must still cover every "
+            "command on every device. Defaults to 30 seconds."
         ),
     )
 
@@ -310,8 +309,10 @@ class ExecuteCLIActionHandler(BaseHandler):
         )
 
     def _is_config_command_set(self, commands: list[str]) -> bool:
-        """Check if commands are a configuration command set."""
-        if not commands:
-            return False
-        first_cmd = commands[0].strip().lower()
+        """Check if commands are a configuration command set.
+
+        The first non-blank command decides, as in the transports: a leading
+        blank line must not turn configuration mode off.
+        """
+        first_cmd = next((cmd.strip().lower() for cmd in commands if cmd.strip()), "")
         return first_cmd in ("configure terminal", "conf t", "config t")

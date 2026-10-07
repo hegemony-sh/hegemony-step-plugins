@@ -22,9 +22,9 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    InvalidConfigError,
     StepKind,
     for_each_target_device,
-    max_parallel_from_config,
 )
 
 from ..driver import UpgradeMode, get_driver
@@ -132,13 +132,17 @@ class UpgradeCleanupHandler(BaseHandler):
                 summary="Missing target device",
             )
 
-        # Get parameters
+        try:
+            config = self.parse_config(ctx.config, UpgradeCleanupConfig)
+        except InvalidConfigError as exc:
+            return exc.result()
+        # Not a setting: only the IOS-XE drivers exist. Kept for steps that name it.
         platform = ctx.config.get("platform", DEFAULT_DEVICE_PLATFORM)
-        mode_str = ctx.config.get("upgrade_mode", "install")
-        upgrade_mode = UpgradeMode.BUNDLE if mode_str.lower() == "bundle" else UpgradeMode.INSTALL
+        mode_str = config.upgrade_mode
+        upgrade_mode = UpgradeMode.BUNDLE if mode_str == "bundle" else UpgradeMode.INSTALL
 
-        remove_inactive = ctx.config.get("remove_inactive", True)
-        keep_versions = ctx.config.get("keep_versions", 1)
+        remove_inactive = config.remove_inactive
+        keep_versions = config.keep_versions
 
         if not remove_inactive:
             return HandlerResult(
@@ -292,7 +296,7 @@ class UpgradeCleanupHandler(BaseHandler):
         outcomes = await for_each_target_device(
             target_devices,
             _process_device,
-            max_parallel=max_parallel_from_config(ctx.config),
+            max_parallel=config.max_parallel_devices,
         )
 
         # Merge per-device results in device order — deterministic regardless

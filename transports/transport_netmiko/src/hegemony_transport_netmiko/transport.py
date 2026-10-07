@@ -14,6 +14,7 @@ settings.
 import asyncio
 import contextlib
 import logging
+import re
 import socket
 import time
 from dataclasses import dataclass
@@ -31,12 +32,14 @@ try:
     from netmiko.exceptions import (
         NetmikoAuthenticationException,
         NetmikoTimeoutException,
+        ReadTimeout,
     )
 except ImportError:
     # Netmiko unavailable - provide stubs for type checking
     ConnectHandler: Any = None
     NetmikoAuthenticationException: type[Exception] = Exception
     NetmikoTimeoutException: type[Exception] = Exception
+    ReadTimeout: type[Exception] = TimeoutError
 
 try:
     # Netmiko's own SSH library; used only for the optional jump-host hop.
@@ -186,6 +189,17 @@ _SKIPPED_ERROR = "Skipped: earlier command failed"
 #: Error of a result for a command not run because the run was cancelled.
 _CANCELLED_ERROR = "Skipped: the run was cancelled"
 
+#: Config lines that start free text (a banner, a macro body, a certificate's
+#: hex), which the device takes without a prompt after each line. netmiko
+#: waits for the echo and the prompt after every line it checks, so, like
+#: netmiko's own ``bypass_commands`` for a banner, a block holding one is
+#: sent without those checks: each line then waits for the channel to go
+#: quiet instead.
+_FREE_TEXT_ENTRY = re.compile(
+    r"^\s*(?:banner|macro\s+name|crypto\s+(?:pki|ca)\s+certificate\s+chain)\s",
+    re.IGNORECASE,
+)
+
 
 def _is_mode_wrapper(command: str) -> bool:
     """'configure terminal' / 'end': the transport switches modes itself."""
@@ -198,15 +212,33 @@ def _is_save_command(command_lower: str) -> bool:
     return command_lower.startswith("write") or command_lower.startswith("copy run")
 
 
+#: What IOS asks before a copy to startup-config, unless 'file prompt quiet'
+#: is set: the destination file name, then on some platforms a confirmation
+#: to overwrite it. Enter takes the answer the device offers.
+_COPY_QUESTION = r"(?:Destination filename \[[^\]\n]*\]\?|\[confirm\])"
+
+#: A copy to startup-config asks at most these two questions.
+_MAX_COPY_ANSWERS = 2
+
+
+def _is_startup_copy(command: str) -> bool:
+    """'copy <source> startup-config', the destination in any abbreviation."""
+    words = command.lower().split()
+    if len(words) != 3 or words[0] != "copy":
+        return False
+    destination = words[2].removeprefix("nvram:")
+    return len(destination) >= 3 and "startup-config".startswith(destination)
+
+
 def _plan_config_set(commands: list[str]) -> list[tuple[bool, list[int]]]:
     """Split a config command set into ordered steps of command indexes.
 
-    A step is ``(True, indexes)`` for a config block, sent as one config set,
-    or ``(False, [index])`` for one command run at privilege-exec. A block
-    opens at 'configure terminal' and closes only at 'end'; both wrappers
-    belong to their block. A save command inside a block splits it and runs
-    between the two halves. Running the steps in turn keeps the order the
-    commands were written in.
+    A step is ``(True, indexes)`` for a config block, sent in one stay in
+    config mode, or ``(False, [index])`` for one command run at
+    privilege-exec. A block opens at 'configure terminal' and closes only at
+    'end'; both wrappers belong to their block. A save command inside a block
+    splits it and runs between the two halves. Running the steps in turn
+    keeps the order the commands were written in.
     """
     steps: list[tuple[bool, list[int]]] = []
     block: list[int] | None = None
@@ -235,6 +267,35 @@ def _plan_config_set(commands: list[str]) -> list[tuple[bool, list[int]]]:
 def _skipped(command: str, reason: str) -> SSHResult:
     """Result for a command not run, with ``reason`` as its error."""
     return SSHResult(command=command, output="", exit_code=-1, error=reason)
+
+
+def _next_prompt(
+    output: str, start: int, answers: dict[str, str], answered: set[str]
+) -> tuple[str | None, str, int]:
+    """The first prompt in ``output`` from ``start`` that is not answered yet.
+
+    Matches ignore case. Returns ``(prompt, answer, resume)``: the prompt and
+    its answer, or None and "" when none is there, and where the next scan
+    starts. That is just past the prompt found, so a second question in the
+    same output is found next; or, when none was found, the last characters
+    of ``output`` that could begin a prompt, so a prompt that one read cut in
+    two is found once the rest arrives. The prompt found joins ``answered``.
+    """
+    output_lower = output.lower()
+    found: tuple[int, str, str] | None = None
+    for prompt, answer in answers.items():
+        key = prompt.lower()
+        if not key or key in answered:
+            continue
+        index = output_lower.find(key, start)
+        if index >= 0 and (found is None or index < found[0]):
+            found = (index, prompt, answer)
+    if found is None:
+        longest = max((len(prompt) for prompt in answers), default=1)
+        return None, "", max(start, len(output_lower) - longest + 1)
+    index, prompt, answer = found
+    answered.add(prompt.lower())
+    return prompt, answer, index + len(prompt)
 
 
 class SSHTransport:
@@ -441,11 +502,11 @@ class SSHTransport:
         Check if commands are a configuration command set.
 
         A config command set starts with 'configure terminal' (or 'conf t' /
-        'config t'); see ``_plan_config_set`` for how it is run.
+        'config t'); see ``_plan_config_set`` for how it is run. The first
+        non-blank command decides, so a leading blank line does not turn
+        configuration mode off.
         """
-        if not commands:
-            return False
-        first_cmd = commands[0].strip().lower()
+        first_cmd = next((cmd.strip().lower() for cmd in commands if cmd.strip()), "")
         return first_cmd in _CONFIG_ENTER_COMMANDS
 
     def _skip_reason(self) -> str:
@@ -466,6 +527,8 @@ class SSHTransport:
             if not command.strip():
                 connection.write_channel("\n")
                 raw_output = connection.read_channel()
+            elif _is_startup_copy(command):
+                raw_output = self._send_startup_copy(connection, command)
             else:
                 raw_output = connection.send_command(
                     command,
@@ -475,7 +538,7 @@ class SSHTransport:
                 )
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
-            logger.error(f"Command '{command}' failed: {e}")
+            logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             return SSHResult(
                 command=command,
                 output="",
@@ -489,14 +552,14 @@ class SSHTransport:
         output: str
         if raw_output is None:
             output = ""
-            logger.warning(f"Command '{command}' returned None output (connection issue?)")
+            logger.warning(f"Command on {self.host} returned no output (connection issue?)")
         else:
             output = str(raw_output)
 
         # Check for CLI error patterns in output
         cli_error = None if not command.strip() else _detect_cli_error(output)
         if cli_error:
-            logger.warning(f"Command '{command}' returned CLI error: {cli_error}")
+            logger.warning(f"Command on {self.host} returned a CLI error")
             return SSHResult(
                 command=command,
                 output=output,
@@ -504,73 +567,148 @@ class SSHTransport:
                 error=cli_error,
                 latency_ms=latency_ms,
             )
-        logger.info(f"Command '{command}' completed in {latency_ms:.0f}ms")
+        logger.info(f"Command on {self.host} completed in {latency_ms:.0f}ms")
         return SSHResult(command=command, output=output, exit_code=0, latency_ms=latency_ms)
 
-    def _run_config_block(self, connection, block: list[str]) -> list[SSHResult]:
-        """Send one config block as a single config set; one result per line.
+    def _send_startup_copy(self, connection, command: str) -> str:
+        """Run a copy to startup-config, answering its questions with Enter.
 
-        The mode wrappers are not sent (send_config_set enters and leaves
-        config mode itself) and get an empty result.
+        Waiting for the prompt alone, as send_command does, runs into the
+        command timeout while the device asks for the destination file name,
+        so each read also stops at the questions such a copy asks. The output
+        keeps neither the command echo nor the trailing prompt, like
+        send_command's.
         """
-        sent = [cmd for cmd in block if not _is_mode_wrapper(cmd)]
+        prompt = connection.find_prompt()
+        expect = f"{re.escape(prompt)}|{_COPY_QUESTION}"
+        question_at_end = re.compile(rf"{_COPY_QUESTION}\s*\Z")
+        chunk = str(
+            connection.send_command(
+                command,
+                expect_string=expect,
+                read_timeout=self.command_timeout,
+                strip_prompt=False,
+                strip_command=True,
+            )
+        )
+        output = chunk
+        answers = 0
+        while question_at_end.search(chunk):
+            if answers == _MAX_COPY_ANSWERS:
+                raise RuntimeError("The device kept asking questions about the copy")
+            answers += 1
+            chunk = str(
+                connection.send_command(
+                    "",
+                    expect_string=expect,
+                    read_timeout=self.command_timeout,
+                    strip_prompt=False,
+                    strip_command=False,
+                    cmd_verify=False,
+                )
+            )
+            output += chunk
+        lines = output.rstrip().splitlines()
+        if lines and lines[-1].strip() == prompt.strip():
+            lines.pop()
+        return "\n".join(lines)
+
+    def _run_config_block(self, connection, block: list[str]) -> list[SSHResult]:
+        """Send one config block a line at a time; one result per line.
+
+        Each line is its own send_config_set, so the device's answer to it
+        is checked before the next line goes out: at the first line the
+        device rejects the block stops, and every line after it is recorded
+        as skipped, not sent. The first call enters config mode and the last
+        one leaves it, as a single config set would, so the mode wrappers
+        are not sent and get an empty result.
+        """
+        sent = [idx for idx, cmd in enumerate(block) if not _is_mode_wrapper(cmd)]
         if not sent:
             return [SSHResult(command=cmd, output="", exit_code=0) for cmd in block]
+        cmd_verify = not any(_FREE_TEXT_ENTRY.match(block[idx]) for idx in sent)
 
-        start = time.perf_counter()
-        try:
-            output = connection.send_config_set(
-                sent,
-                read_timeout=self.command_timeout,
-                cmd_verify=False,
-            )
-        except Exception as e:
-            latency_ms = (time.perf_counter() - start) * 1000
-            logger.error(f"Config set failed: {e}")
-            return [
-                SSHResult(
-                    command=cmd,
-                    output="",
-                    exit_code=-1,
-                    error=str(e),
-                    latency_ms=latency_ms / len(block),
-                )
-                for cmd in block
-            ]
-        latency_ms = (time.perf_counter() - start) * 1000
-
-        # Guard against None output
-        if output is None:
-            output = ""
-
-        config_error = _detect_cli_error(output)
-        if config_error:
-            logger.error(f"Config set returned CLI error: {config_error}")
-        else:
-            logger.info(f"Config set executed in {latency_ms:.0f}ms: {sent}")
-
-        # Attach the full config-set session output to exactly one result —
-        # the LAST sent line — counted by position. Comparing by value
-        # (cmd == sent[-1]) is unsafe because duplicate values (e.g. blank
-        # lines from Jinja {% endif %}) all match the trailing entry and would
-        # duplicate the session text in the evidence artifact.
         results: list[SSHResult] = []
-        remaining = len(sent)
-        for cmd in block:
+        transcript = ""
+        last_run: SSHResult | None = None
+        skip_reason: str | None = None
+        line_number = 0
+        block_start = time.perf_counter()
+        for idx, cmd in enumerate(block):
+            if skip_reason is not None:
+                results.append(_skipped(cmd, skip_reason))
+                continue
             if _is_mode_wrapper(cmd):
                 results.append(SSHResult(command=cmd, output="", exit_code=0))
                 continue
-            remaining -= 1
-            results.append(
-                SSHResult(
-                    command=cmd,
-                    output=output if remaining == 0 else "",
-                    exit_code=1 if config_error else 0,
-                    error=config_error,
-                    latency_ms=latency_ms / len(sent),
+            line_number += 1
+            mode_options: dict[str, bool] = {}
+            if idx != sent[0]:
+                mode_options["enter_config_mode"] = False
+            if idx != sent[-1]:
+                mode_options["exit_config_mode"] = False
+            start = time.perf_counter()
+            try:
+                output = connection.send_config_set(
+                    [cmd],
+                    read_timeout=self.command_timeout,
+                    cmd_verify=cmd_verify,
+                    **mode_options,
                 )
+            except Exception as e:
+                latency_ms = (time.perf_counter() - start) * 1000
+                logger.error(
+                    f"Config line {line_number} of {len(sent)} on {self.host} failed: "
+                    f"{type(e).__name__}"
+                )
+                last_run = SSHResult(
+                    command=cmd,
+                    output="",
+                    exit_code=-1,
+                    error=self._exception_error(e),
+                    latency_ms=latency_ms,
+                )
+                results.append(last_run)
+                skip_reason = self._skip_reason()
+                continue
+            latency_ms = (time.perf_counter() - start) * 1000
+            output = "" if output is None else str(output)
+            transcript += output
+            config_error = _detect_cli_error(output)
+            last_run = SSHResult(
+                command=cmd,
+                output="",
+                exit_code=1 if config_error else 0,
+                error=config_error,
+                latency_ms=latency_ms,
             )
+            results.append(last_run)
+            if config_error:
+                logger.warning(
+                    f"Config line {line_number} of {len(sent)} on {self.host} returned a CLI error"
+                )
+                skip_reason = self._skip_reason()
+        if skip_reason is None:
+            block_ms = (time.perf_counter() - block_start) * 1000
+            logger.info(f"Config block of {len(sent)} lines ran on {self.host} in {block_ms:.0f}ms")
+
+        # The block's whole session transcript goes on exactly one result,
+        # the last line that ran, as the transcript of a single config set
+        # did: the handler joins the outputs into one evidence artifact.
+        if last_run is not None:
+            last_run.output = transcript
         return results
+
+    def _exception_error(self, error: Exception) -> str:
+        """The error text of a command that raised ``error``.
+
+        netmiko's ReadTimeout names the pattern it waited for, and for a
+        command's echo that is the command itself, regex-escaped: a secret in
+        it would then no longer match the host's redaction of secret values.
+        """
+        if isinstance(error, ReadTimeout):
+            return f"Timed out after {self.command_timeout:g} seconds reading the device's answer"
+        return str(error)
 
     def _execute_commands_sync(self, commands: list[str]) -> list[SSHResult]:
         """
@@ -804,10 +942,6 @@ class SSHTransport:
             # The API returns HTTP 302 redirect to presigned S3 URLs.
             copy_cmd = f"copy {url} {dest_fs}{dest_filename}"
 
-            # Log the command without the full URL (may contain auth tokens)
-            safe_url = url.split("?")[0] if "?" in url else url
-            logger.info(f"Executing: copy {safe_url}... {dest_fs}{dest_filename}")
-
             # Use write_channel directly to send the escaped command
             # (send_command_timing might not handle Ctrl+V properly)
             connection.write_channel(copy_cmd + "\n")
@@ -907,7 +1041,8 @@ class SSHTransport:
             has_error = any(err in output for err in error_patterns)
 
             if has_error:
-                logger.error(f"HTTP transfer failed: {output}")
+                # Not the output: the device echoes the copy command and its URL.
+                logger.error(f"HTTP transfer to {self.host} failed")
                 return {
                     "transferred": False,
                     "output": output,
@@ -925,7 +1060,7 @@ class SSHTransport:
             }
 
         except Exception as e:
-            logger.error(f"HTTP transfer to {self.host} failed: {e}")
+            logger.error(f"HTTP transfer to {self.host} failed: {type(e).__name__}")
             raise
         finally:
             # Unregister from cancellation registry before disconnect
@@ -995,7 +1130,7 @@ class SSHTransport:
         combined_output = ""
 
         try:
-            logger.info(f"Executing timing command on {self.host}: {command[:50]}...")
+            logger.info(f"Executing timing command on {self.host}")
             connection = self._connect_device()
 
             # Register connection for cancellation support
@@ -1020,17 +1155,21 @@ class SSHTransport:
             )
             # Ensure output is always a string
             if raw_output is None:
-                logger.warning(f"Command '{command}' returned None output (connection issue?)")
+                logger.warning(f"Command on {self.host} returned no output (connection issue?)")
             else:
                 combined_output += str(raw_output)
                 self._stream_from_thread(raw_output)
+
+            # Prompts answered so far, lower-cased. Both phases below share
+            # it: a question already in the first output is answered once,
+            # not again when waiting for patterns starts.
+            answered_prompts: set[str] = set()
 
             # Handle prompts if answers provided (case-insensitive matching)
             # Track which prompts have been answered to avoid repeating
             if answers:
                 max_prompt_iterations = 10
                 iterations = 0
-                answered_prompts: set[str] = set()
 
                 while iterations < max_prompt_iterations:
                     # Check for cancellation
@@ -1046,11 +1185,11 @@ class SSHTransport:
                     output_lower = combined_output.lower()
                     for prompt_pattern, answer in answers.items():
                         # Skip prompts we've already answered
-                        if prompt_pattern in answered_prompts:
+                        if prompt_pattern.lower() in answered_prompts:
                             continue
                         if prompt_pattern.lower() in output_lower:
                             logger.info(f"Matched prompt '{prompt_pattern}', sending answer")
-                            answered_prompts.add(prompt_pattern)
+                            answered_prompts.add(prompt_pattern.lower())
                             raw_answer_output = connection.send_command_timing(
                                 answer,
                                 delay_factor=1,
@@ -1073,34 +1212,26 @@ class SSHTransport:
             # long pauses (30-60+ seconds) between output chunks
             if wait_for_patterns:
                 logger.info(f"Waiting for patterns: {wait_for_patterns}")
-                logger.info(
-                    f"Initial output ({len(combined_output)} chars): {combined_output[:200] if combined_output else '(empty)'}..."
-                )
+                logger.info(f"Initial output: {len(combined_output)} chars")
                 pattern_found = False
                 read_interval = 2.0  # Check every 2 seconds
                 last_log_time = time.perf_counter()
                 log_interval = 30.0  # Log progress every 30 seconds
-                # Track prompts we've already answered in THIS wait loop
-                # Track the output length at which we answered each prompt pattern
-                # to avoid re-answering the same prompt appearing in accumulated output
-                answered_prompt_patterns: set[str] = set()
                 # Track position in output up to which we've processed prompts
                 prompt_check_start_pos = 0
 
                 # Check for prompts in initial output BEFORE entering the loop
-                # Prompts may already be present from send_command_timing
-                if answers:
-                    output_lower = combined_output.lower()
-                    for prompt_pattern, answer in answers.items():
-                        prompt_pos = output_lower.find(prompt_pattern.lower())
-                        if prompt_pos >= 0:
-                            logger.info(
-                                f"Matched prompt '{prompt_pattern}' in initial output at pos {prompt_pos}, sending '{answer}'"
-                            )
-                            answered_prompt_patterns.add(prompt_pattern.lower())
-                            connection.write_channel(answer + "\n")
-                            time.sleep(0.5)
-                    prompt_check_start_pos = len(combined_output)
+                # Prompts may already be present from send_command_timing;
+                # the ones the answers loop above answered are skipped.
+                while answers:
+                    prompt, answer, prompt_check_start_pos = _next_prompt(
+                        combined_output, prompt_check_start_pos, answers, answered_prompts
+                    )
+                    if prompt is None:
+                        break
+                    logger.info(f"Matched prompt '{prompt}' in initial output, sending answer")
+                    connection.write_channel(answer + "\n")
+                    time.sleep(0.5)
 
                 while (time.perf_counter() - start_time) < read_timeout:
                     # Check for cancellation at start of each iteration
@@ -1131,24 +1262,21 @@ class SSHTransport:
                             # Handle prompts that appear during long-running commands
                             # This is critical for IOS-XE install which prompts mid-execution
                             # IMPORTANT: Only check NEW output to avoid re-answering old prompts
-                            if answers:
-                                # Only search in the new portion of output
-                                new_output_lower = combined_output[prompt_check_start_pos:].lower()
-                                for prompt_pattern, answer in answers.items():
-                                    pattern_lower = prompt_pattern.lower()
-                                    # Skip patterns we've already answered
-                                    if pattern_lower in answered_prompt_patterns:
-                                        continue
-                                    if pattern_lower in new_output_lower:
-                                        logger.info(
-                                            f"Matched prompt '{prompt_pattern}' in new output, sending '{answer}'"
-                                        )
-                                        answered_prompt_patterns.add(pattern_lower)
-                                        connection.write_channel(answer + "\n")
-                                        time.sleep(0.5)  # Brief pause after answering
-                                        break
-                                # Update the position marker
-                                prompt_check_start_pos = len(combined_output)
+                            while answers:
+                                # Only output not scanned yet (see _next_prompt)
+                                prompt, answer, prompt_check_start_pos = _next_prompt(
+                                    combined_output,
+                                    prompt_check_start_pos,
+                                    answers,
+                                    answered_prompts,
+                                )
+                                if prompt is None:
+                                    break
+                                logger.info(
+                                    f"Matched prompt '{prompt}' in new output, sending answer"
+                                )
+                                connection.write_channel(answer + "\n")
+                                time.sleep(0.5)  # Brief pause after answering
 
                         # Log progress periodically so we can see what's happening
                         current_time = time.perf_counter()
@@ -1156,8 +1284,7 @@ class SSHTransport:
                             elapsed = int(current_time - start_time)
                             logger.info(
                                 f"Still waiting for patterns after {elapsed}s. "
-                                f"Output length: {len(combined_output)}, last 200 chars: "
-                                f"{combined_output[-200:] if combined_output else '(empty)'}"
+                                f"Output length: {len(combined_output)}"
                             )
                             last_log_time = current_time
 
@@ -1169,7 +1296,7 @@ class SSHTransport:
                 if not pattern_found:
                     logger.warning(
                         f"Timeout waiting for patterns after {read_timeout}s. "
-                        f"Output so far: {combined_output[-500:] if combined_output else '(empty)'}"
+                        f"Output length: {len(combined_output)}"
                     )
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -1194,7 +1321,7 @@ class SSHTransport:
 
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            logger.error(f"Timing command failed on {self.host}: {e}")
+            logger.error(f"Timing command failed on {self.host}: {type(e).__name__}")
             return SSHResult(
                 command=command,
                 output=combined_output,

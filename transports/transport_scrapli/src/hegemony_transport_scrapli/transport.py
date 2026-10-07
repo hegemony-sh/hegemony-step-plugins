@@ -23,6 +23,7 @@ netmiko transport for staging steps.
 
 import contextlib
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -185,6 +186,28 @@ def _is_save_command(command_lower: str) -> bool:
     return command_lower.startswith("write") or command_lower.startswith("copy run")
 
 
+#: What IOS asks before a copy to startup-config, unless 'file prompt quiet'
+#: is set: the destination file name, then on some platforms a confirmation
+#: to overwrite it, as send_interactive patterns (anchored, so read as
+#: regular expressions). Enter takes the answer the device offers.
+_COPY_QUESTION_PATTERNS = [r"^Destination filename \[[^\]\n]*\]\?\s*$", r"^.*\[confirm\]\s*$"]
+
+#: Output that ends with one of those questions.
+_COPY_QUESTION_AT_END = re.compile(r"(?:Destination filename \[[^\]\n]*\]\?|\[confirm\])\s*\Z")
+
+#: A copy to startup-config asks at most these two questions.
+_MAX_COPY_ANSWERS = 2
+
+
+def _is_startup_copy(command: str) -> bool:
+    """'copy <source> startup-config', the destination in any abbreviation."""
+    words = command.lower().split()
+    if len(words) != 3 or words[0] != "copy":
+        return False
+    destination = words[2].removeprefix("nvram:")
+    return len(destination) >= 3 and "startup-config".startswith(destination)
+
+
 def _plan_config_set(commands: list[str]) -> list[tuple[bool, list[str]]]:
     """Split a config command set into ordered steps of lines to send.
 
@@ -220,6 +243,35 @@ def _plan_config_set(commands: list[str]) -> list[tuple[bool, list[str]]]:
 def _skipped(command: str, reason: str) -> ScrapliResult:
     """Result for a command not run, with ``reason`` as its error."""
     return ScrapliResult(command=command, output="", exit_code=-1, error=reason)
+
+
+def _next_prompt(
+    output: str, start: int, answers: dict[str, str], answered: set[str]
+) -> tuple[str | None, str, int]:
+    """The first prompt in ``output`` from ``start`` that is not answered yet.
+
+    Matches ignore case. Returns ``(prompt, answer, resume)``: the prompt and
+    its answer, or None and "" when none is there, and where the next scan
+    starts. That is just past the prompt found, so a second question in the
+    same output is found next; or, when none was found, the last characters
+    of ``output`` that could begin a prompt, so a prompt that one read cut in
+    two is found once the rest arrives. The prompt found joins ``answered``.
+    """
+    output_lower = output.lower()
+    found: tuple[int, str, str] | None = None
+    for prompt, answer in answers.items():
+        key = prompt.lower()
+        if not key or key in answered:
+            continue
+        index = output_lower.find(key, start)
+        if index >= 0 and (found is None or index < found[0]):
+            found = (index, prompt, answer)
+    if found is None:
+        longest = max((len(prompt) for prompt in answers), default=1)
+        return None, "", max(start, len(output_lower) - longest + 1)
+    index, prompt, answer = found
+    answered.add(prompt.lower())
+    return prompt, answer, index + len(prompt)
 
 
 class ScrapliTransport:
@@ -411,11 +463,11 @@ class ScrapliTransport:
         Check if commands are a configuration command set.
 
         A config command set starts with 'configure terminal' (or 'conf t' /
-        'config t'); see ``_plan_config_set`` for how it is run.
+        'config t'); see ``_plan_config_set`` for how it is run. The first
+        non-blank command decides, so a leading blank line does not turn
+        configuration mode off.
         """
-        if not commands:
-            return False
-        first_cmd = commands[0].strip().lower()
+        first_cmd = next((cmd.strip().lower() for cmd in commands if cmd.strip()), "")
         return first_cmd in _CONFIG_ENTER_COMMANDS
 
     def _skip_reason(self) -> str:
@@ -432,10 +484,21 @@ class ScrapliTransport:
     @staticmethod
     def _result_from_response(command: str, response: Any) -> ScrapliResult:
         """Map one scrapli ``Response`` onto the SDK result shape."""
-        output = response.result if response.result is not None else ""
-        latency_ms = float(getattr(response, "elapsed_time", 0.0) or 0.0) * 1000
+        return ScrapliTransport._result_from_responses(command, [response])
+
+    @staticmethod
+    def _result_from_responses(
+        command: str, responses: list[Any], output: str | None = None
+    ) -> ScrapliResult:
+        """Map the scrapli ``Response``s of one command onto the SDK result shape.
+
+        ``output`` replaces the responses' joined text when given.
+        """
+        if output is None:
+            output = "\n".join(r.result for r in responses if r.result)
+        latency_ms = sum(float(getattr(r, "elapsed_time", 0.0) or 0.0) for r in responses) * 1000
         cli_error = _detect_cli_error(output)
-        if response.failed or cli_error:
+        if any(r.failed for r in responses) or cli_error:
             return ScrapliResult(
                 command=command,
                 output=output,
@@ -453,23 +516,55 @@ class ScrapliTransport:
     async def _send_exec_command(self, connection, command: str) -> ScrapliResult:
         """Run one command at privilege-exec; a CLI error pattern gives exit code 1."""
         try:
-            response = await connection.send_command(command)
+            if _is_startup_copy(command):
+                result = await self._send_startup_copy(connection, command)
+            else:
+                result = self._result_from_response(command, await connection.send_command(command))
         except Exception as e:
-            logger.error(f"Command '{command}' failed: {e}")
+            logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             return ScrapliResult(command=command, output="", exit_code=-1, error=str(e))
-        result = self._result_from_response(command, response)
         if result.exit_code == 0:
-            logger.info(f"Command '{command}' completed in {result.latency_ms:.0f}ms")
+            logger.info(f"Command on {self.host} completed in {result.latency_ms:.0f}ms")
         else:
-            logger.warning(f"Command '{command}' returned CLI error: {result.error}")
+            logger.warning(f"Command on {self.host} returned a CLI error")
         return result
+
+    async def _send_startup_copy(self, connection, command: str) -> ScrapliResult:
+        """Run a copy to startup-config, answering its questions with Enter.
+
+        Waiting for the prompt alone, as send_command does, runs into the
+        command timeout while the device asks for the destination file name,
+        so each read also stops at the questions such a copy asks. The output
+        keeps neither the command echo nor the trailing prompt, like
+        send_command's.
+        """
+        exec_prompt = connection.privilege_levels[connection.default_desired_privilege_level]
+        responses = []
+        channel_input = command
+        while True:
+            response = await connection.send_interactive(
+                [(channel_input, exec_prompt.pattern)],
+                interaction_complete_patterns=_COPY_QUESTION_PATTERNS,
+            )
+            responses.append(response)
+            if not _COPY_QUESTION_AT_END.search(response.result or ""):
+                break
+            if len(responses) > _MAX_COPY_ANSWERS:
+                raise RuntimeError("The device kept asking questions about the copy")
+            channel_input = ""
+        lines = "\n".join(r.result for r in responses if r.result).splitlines()
+        if lines and lines[0].strip() == command.strip():
+            lines.pop(0)
+        if lines and re.search(exec_prompt.pattern, lines[-1], flags=re.I):
+            lines.pop()
+        return self._result_from_responses(command, responses, "\n".join(lines).strip())
 
     async def _send_config_block(self, connection, block: list[str]) -> list[ScrapliResult]:
         """Send one config block with send_configs; one result per line."""
         try:
             responses = await connection.send_configs(block, stop_on_failed=True)
         except Exception as e:
-            logger.error(f"Config set failed: {e}")
+            logger.error(f"Config set on {self.host} failed: {type(e).__name__}")
             return [
                 ScrapliResult(command=cmd, output="", exit_code=-1, error=str(e)) for cmd in block
             ]
@@ -479,9 +574,9 @@ class ScrapliTransport:
             self._result_from_response(cmd, response)
             for cmd, response in zip(block, responses, strict=False)
         ]
-        for result in results:
+        for line_number, result in enumerate(results, start=1):
             if result.exit_code != 0:
-                logger.warning(f"Config command '{result.command}' failed: {result.error}")
+                logger.warning(f"Config line {line_number} of {len(block)} on {self.host} failed")
         if len(results) < len(block):
             reason = self._skip_reason()
             results.extend(_skipped(cmd, reason) for cmd in block[len(results) :])
@@ -670,7 +765,7 @@ class ScrapliTransport:
         combined_output = ""
 
         try:
-            logger.info(f"Executing timing command on {self.host}: {command[:50]}...")
+            logger.info(f"Executing timing command on {self.host}")
             # Short per-read transport timeout so the loop below polls promptly.
             connection = await self._open_connection(timeout_transport=_TIMING_POLL_SECONDS)
 
@@ -706,20 +801,17 @@ class ScrapliTransport:
                 else:
                     quiet_reads += 1
 
-                # Answer known prompts, each at most once, scanning only new
-                # output so a prompt echoed in scrollback is not re-answered.
-                if answers:
-                    new_output_lower = combined_output[prompt_check_start_pos:].lower()
-                    for prompt_pattern, answer in answers.items():
-                        pattern_lower = prompt_pattern.lower()
-                        if pattern_lower in answered_prompts:
-                            continue
-                        if pattern_lower in new_output_lower:
-                            logger.info(f"Matched prompt '{prompt_pattern}', sending answer")
-                            answered_prompts.add(pattern_lower)
-                            connection.channel.write(answer + "\n")
-                            break
-                    prompt_check_start_pos = len(combined_output)
+                # Answer known prompts, each at most once, scanning only output
+                # not scanned yet (see _next_prompt), so a prompt echoed in
+                # scrollback is not re-answered.
+                while answers:
+                    prompt, answer, prompt_check_start_pos = _next_prompt(
+                        combined_output, prompt_check_start_pos, answers, answered_prompts
+                    )
+                    if prompt is None:
+                        break
+                    logger.info(f"Matched prompt '{prompt}', sending answer")
+                    connection.channel.write(answer + "\n")
 
                 if wait_for_patterns:
                     for pattern in wait_for_patterns:
@@ -734,8 +826,7 @@ class ScrapliTransport:
                         elapsed = int(current_time - start_time)
                         logger.info(
                             f"Still waiting for patterns after {elapsed}s. "
-                            f"Output length: {len(combined_output)}, last 200 chars: "
-                            f"{combined_output[-200:] if combined_output else '(empty)'}"
+                            f"Output length: {len(combined_output)}"
                         )
                         last_log_time = current_time
                 elif quiet_reads >= _QUIET_READS_DONE:
@@ -746,7 +837,7 @@ class ScrapliTransport:
             if wait_for_patterns and not pattern_found:
                 logger.warning(
                     f"Timeout waiting for patterns after {read_timeout}s. "
-                    f"Output so far: {combined_output[-500:] if combined_output else '(empty)'}"
+                    f"Output length: {len(combined_output)}"
                 )
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -770,7 +861,7 @@ class ScrapliTransport:
 
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            logger.error(f"Timing command failed on {self.host}: {e}")
+            logger.error(f"Timing command failed on {self.host}: {type(e).__name__}")
             return ScrapliResult(
                 command=command,
                 output=combined_output,

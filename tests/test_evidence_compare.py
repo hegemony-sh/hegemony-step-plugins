@@ -369,6 +369,80 @@ async def test_a_failed_postcheck_command_fails(monkeypatch: pytest.MonkeyPatch)
     assert diff["diff"]["postcheck_error"] == "% Invalid input detected"
 
 
+def _failed(captures: list[dict], error: str = "Connection timeout: timed out") -> list[dict]:
+    """``captures`` as collect_evidence stores commands that could not run."""
+    return [
+        {
+            **capture,
+            "content_text": "",
+            "content_json": {
+                **capture["content_json"],
+                "success": False,
+                "exit_code": -1,
+                "error": error,
+            },
+        }
+        for capture in captures
+    ]
+
+
+@pytest.mark.parametrize("mode", ["exact", "changed", "subset", "superset", "json_diff"])
+async def test_a_failed_precheck_command_fails(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    # The empty output of an unreachable device differs from the routes and
+    # has no line the postcheck lacks, so 'changed', 'subset' and 'superset'
+    # used to pass.
+    pre = _failed(_collected({"show ip route": ""}))
+    post = _collected({"show ip route": _ROUTES})
+    result = await _compare(pre, post, monkeypatch, mode)
+    assert result.success is False
+    assert result.error == (
+        "Evidence comparison failed: precheck capture failed for r1:show ip route"
+    )
+    assert result.summary == "1 precheck capture(s) failed"
+    diff = result.evidence[0]["content_json"]["diff"]["r1:show ip route"]
+    assert diff == {
+        "passed": False,
+        "diff": {"comparison_type": mode, "precheck_error": "Connection timeout: timed out"},
+    }
+
+
+async def test_failed_captures_on_both_sides_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Two identical errors used to compare equal under "Must match".
+    pre = _failed(_collected({"show ip route": ""})) + [_connection_error("r2")]
+    post = _failed(_collected({"show ip route": ""})) + [_connection_error("r2")]
+    result = await _compare(pre, post, monkeypatch)
+    assert result.success is False
+    assert result.error == (
+        "Evidence comparison failed: "
+        "precheck capture failed for r1:show ip route, r2:connection_error; "
+        "postcheck capture failed for r1:show ip route, r2:connection_error"
+    )
+    assert result.summary == "2 precheck capture(s) failed; 2 postcheck capture(s) failed"
+    diff = result.evidence[0]["content_json"]["diff"]["r2:connection_error"]["diff"]
+    assert diff["precheck_error"] == diff["postcheck_error"] == "timed out"
+
+
+async def test_a_named_artifact_with_a_failed_precheck_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pre = _failed(_collected({"show ip route": ""}))
+    post = _collected({"show ip route": _ROUTES})
+    handler = _handler_with(pre, post, monkeypatch)
+    result = await handler.execute(
+        _ctx(
+            precheck_step_id="precheck",
+            postcheck_step_id="postcheck",
+            comparison_type="changed",
+            artifact_name="r1:show ip route",
+        )
+    )
+    assert result.success is False
+    assert result.error == (
+        "Evidence comparison failed: precheck capture failed for r1:show ip route"
+    )
+    assert result.summary == "1 precheck capture(s) failed"
+
+
 async def test_items_only_in_the_postcheck_do_not_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     pre = _collected({"show ip route": _ROUTES})
     post = _collected({"show ip route": _ROUTES, "show clock": "10:00"})
