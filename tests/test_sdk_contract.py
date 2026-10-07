@@ -178,13 +178,17 @@ def test_handler_services_declares_release_state_hold():
     """Added later: optional, and the default says a host does not support it."""
     method = sdk.HandlerServices.release_state_hold
     assert inspect.iscoroutinefunction(method)
-    assert list(inspect.signature(method).parameters) == ["self", "name"]
+    assert list(inspect.signature(method).parameters) == ["self", "name", "taken_by"]
+    # Added later still: keyword-only, and optional, so older callers still fit.
+    taken_by = inspect.signature(method).parameters["taken_by"]
+    assert taken_by.kind is inspect.Parameter.KEYWORD_ONLY
+    assert taken_by.default is None
 
     class Host(sdk.HandlerServices):
         pass
 
     try:
-        asyncio.run(Host().release_state_hold("network-core"))
+        asyncio.run(Host().release_state_hold("network-core", taken_by="plan"))
     except NotImplementedError:
         pass
     else:

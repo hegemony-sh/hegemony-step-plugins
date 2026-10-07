@@ -340,20 +340,28 @@ HOLD_NOT_ENDED_NOTE = (
 
 
 async def release_state_hold(
-    ctx: HandlerContext, name: str, *, reason: str = "there is nothing to apply"
+    ctx: HandlerContext, name: str, *, taken_by: str, reason: str = "there is nothing to apply"
 ) -> str:
-    """End the run's hold on managed state ``name``, which no apply will end.
+    """End the run's hold on managed state ``name`` if step ``taken_by`` took it.
 
     For a plan with nothing to apply, or one that failed (``reason`` says
-    which in the step's events). Returns "" when the hold was ended, else a
-    note for the step's summary: the hold may then last until the run ends,
-    which never fails the step.
+    which in the step's events): no apply will end the hold that plan's lock
+    took. A hold another plan of the run took is left alone, for that plan's
+    apply. Returns "" when the hold was ended, else a note for the step's
+    summary: the hold may then last until the run ends, which never fails
+    the step.
     """
     release = getattr(ctx.require_services(), "release_state_hold", None)
     if release is None:
         return HOLD_KEPT_NOTE
     try:
-        released = bool(await release(name))
+        try:
+            pending = release(name, taken_by=taken_by)
+        except TypeError:
+            # A platform older than taken_by would end the run's hold whichever
+            # plan took it: keep it until the run ends instead.
+            return HOLD_KEPT_NOTE
+        released = bool(await pending)
     except NotImplementedError:
         return HOLD_KEPT_NOTE
     except Exception as exc:  # noqa: BLE001 - the step itself succeeded

@@ -314,7 +314,9 @@ class TfApplyHandler(BaseHandler):
             summary = "Nothing to apply: the plan has no changes"
             if handoff.state_held and handoff.state == "managed" and handoff.state_name.strip():
                 # No apply will end the plan's hold on the state: end it here.
-                summary += await release_state_hold(ctx, handoff.state_name.strip())
+                summary += await release_state_hold(
+                    ctx, handoff.state_name.strip(), taken_by=plan_step
+                )
             return HandlerResult(
                 success=True,
                 summary=summary,

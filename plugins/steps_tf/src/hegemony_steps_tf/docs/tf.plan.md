@@ -48,8 +48,10 @@ State decides where the state lives:
   ends the hold at once, since there is nothing to apply; when the platform
   cannot end it, the hold may last until the run ends, and the summary says
   so. A plan that fails after its tool started ends the hold as well, if
-  its lock took one. An admin can end the hold with Force unlock on the
-  state's page.
+  its lock took one. Either way the step ends only a hold its own lock
+  took, never one another plan of the run took for its apply; a platform
+  that cannot tell which step took a hold keeps it until the run ends. An
+  admin can end the hold with Force unlock on the state's page.
 - `backend`: the configuration's own backend block, such as S3, Azure
   Storage, GCS, Consul, or PostgreSQL. Backend settings fill a partial block
   (bucket, key, and so on) from a file. A configuration without a backend
