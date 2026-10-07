@@ -33,7 +33,7 @@ from hegemony_step_sdk import (
     for_each_target_device,
 )
 
-from .templates import PWSH_VALUES, command_template_problem, inserts_values
+from .templates import DYNAMIC_SHELL, PWSH_VALUES, command_template_problem, inserts_values
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,10 @@ def command_timeout(deadline: float, limit: float) -> float | None:
     return min(limit, left)
 
 
+#: Interpreters whose quoting ``| quote`` (POSIX quoting) matches.
+_POSIX_SHELLS = frozenset({"default", "sh", "bash"})
+
+
 def command_template_errors(commands: Any, shell: Any = "default") -> list[str]:
     """One error per command line that could let a rendered value become shell syntax.
 
@@ -81,15 +85,20 @@ def command_template_errors(commands: Any, shell: Any = "default") -> list[str]:
     a line must look like: every value ``| quote``-d and standing unquoted.
     ``| quote`` is POSIX quoting, so a ``pwsh`` line takes no values at all:
     PowerShell reads typographic quotes as quotes, and they pass through it.
+    ``shell`` is the setting as written, before templates render, so a line
+    with values also needs one of the POSIX interpreters written out: a
+    template there could render to ``pwsh``.
     """
     if not isinstance(commands, list):
         return []
+    shell = "default" if shell is None else shell
     errors: list[str] = []
     for number, command in enumerate(commands, start=1):
         if not isinstance(command, str):
             continue
-        if shell == "pwsh" and inserts_values(command):
-            errors.append(f"commands line {number}: {PWSH_VALUES}")
+        if shell not in _POSIX_SHELLS and inserts_values(command):
+            problem = PWSH_VALUES if shell == "pwsh" else DYNAMIC_SHELL
+            errors.append(f"commands line {number}: {problem}")
             continue
         problem = command_template_problem(command)
         if problem:

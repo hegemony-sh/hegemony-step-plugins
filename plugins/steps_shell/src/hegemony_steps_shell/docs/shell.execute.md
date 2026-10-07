@@ -57,7 +57,10 @@ they are set at the start of the PowerShell command
 (`$env:KEY = '...'; ...`, the value as a PowerShell single-quoted string) and
 read as `$env:KEY`. A `pwsh` line takes no `{{ }}` values: `| quote` is POSIX
 quoting, and PowerShell also reads typographic quotes (‘ ’) as quotes, so a
-value could end the string. Pass values to `pwsh` in Environment Variables. Names are
+value could end the string. Pass values to `pwsh` in Environment Variables. For
+the same reason a line that takes `{{ }}` values needs the Interpreter written
+out as the login shell, `sh` or `bash`, not as a template, which could render
+to `pwsh`. Names are
 written into the command line as they are, so they must be letters, digits
 and `_`, not starting with a digit; the values are the quoted part. Their values
 appear on the remote command line (for example in the host's process list),
@@ -95,7 +98,8 @@ Metrics record `command_count` (configured commands), `device_count`, and
 The step fails immediately — before contacting any host — when a command
 line inserts a `{{ }}` value without `| quote` or inside quotes, a comment,
 backticks or a here-document, or uses whitespace control, when a `pwsh` line
-inserts a `{{ }}` value, or when no target devices or no commands are
+inserts a `{{ }}` value, or a line does under an Interpreter written as a
+template, or when no target devices or no commands are
 configured. Per host, it fails when the device has
 no management host, when the shell connection cannot be opened, when a command
 exits non-zero, or when a command times out or the transport raises an error

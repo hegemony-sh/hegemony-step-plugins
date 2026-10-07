@@ -134,6 +134,13 @@ PWSH_VALUES = (
 )
 
 
+DYNAMIC_SHELL = (
+    "a line with {{ }} values needs the Interpreter written out as default, sh or "
+    "bash, not as a template: | quote only keeps a value one word for POSIX shells, "
+    "and a template could choose pwsh"
+)
+
+
 def inserts_values(command: str) -> bool:
     """Whether ``command`` renders any ``{{ }}`` value into its text (invalid counts)."""
     if "{" not in command:

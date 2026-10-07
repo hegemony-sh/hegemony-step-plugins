@@ -14,7 +14,7 @@ import pytest
 from hegemony_steps_probe.dns_check import normalize_answer
 from hegemony_steps_probe.http_check import parse_status_spec, status_matches
 from hegemony_steps_shell.execute import ShellExecuteHandler, build_command, pwsh_literal
-from hegemony_steps_shell.templates import PWSH_VALUES, WHITESPACE_CONTROL
+from hegemony_steps_shell.templates import DYNAMIC_SHELL, PWSH_VALUES, WHITESPACE_CONTROL
 
 
 def test_build_command_default_passthrough():
@@ -295,6 +295,28 @@ def test_pwsh_lines_without_values_pass():
     handler = ShellExecuteHandler()
     for command in ["Get-Service nginx", "{% if inputs.force %}Stop-Service x{% endif %}"]:
         assert handler.template_errors({"commands": [command], "shell": "pwsh"}) == []
+
+
+@pytest.mark.parametrize("shell", ["{{ inputs.interpreter }}", "{% if x %}pwsh{% endif %}", 7])
+def test_a_line_with_values_needs_an_interpreter_written_out(shell):
+    """The check sees the setting before it renders: a template could pick pwsh."""
+    handler = ShellExecuteHandler()
+    config = {"commands": ["Write-Output {{ inputs.value | quote }}"], "shell": shell}
+
+    assert handler.template_errors(config) == [f"commands line 1: {DYNAMIC_SHELL}"]
+
+
+@pytest.mark.parametrize("shell", ["default", "sh", "bash", None])
+def test_a_posix_interpreter_written_out_takes_quoted_values(shell):
+    config = {"commands": ["echo {{ inputs.value | quote }}"], "shell": shell}
+
+    assert ShellExecuteHandler().template_errors(config) == []
+
+
+def test_a_templated_interpreter_is_fine_for_lines_without_values():
+    config = {"commands": ["Get-Service nginx"], "shell": "{{ inputs.interpreter }}"}
+
+    assert ShellExecuteHandler().template_errors(config) == []
 
 
 def test_build_command_rejects_unknown_shell():
