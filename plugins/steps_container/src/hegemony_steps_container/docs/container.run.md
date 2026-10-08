@@ -31,9 +31,11 @@ an organization admin stores the login once as a registry credential (host,
 username, password as a secret reference), and the platform hands it to the
 pull whenever an image's host matches. Without a matching credential the pull
 is anonymous, as before. The step's evidence records the image reference it
-ran. For a tagged image that is the tag, which can move between runs; give a
-digest-qualified reference (`image@sha256:…`) when the exact content that ran
-must be on record, and the evidence carries that digest.
+was given (`image`) and the registry digest of the image it pulled
+(`image_digest`). The container runs by that digest, so a tag that moves while
+the step runs cannot change what runs, and the record names exactly the
+content that ran. An image built on the sandbox daemon and never pushed has
+no digest: it runs by its tag, and `image_digest` is empty.
 
 When the platform runs its own container registry, Cache image (on by
 default) keeps a copy of the pulled image there, under the organization's
@@ -133,10 +135,11 @@ Later steps can read `steps.NODE_ID.output.stdout` and
 `steps.NODE_ID.output.data` when the container wrote
 `/hegemony/out/output.json`. The full output is stored as a `container_output` evidence
 artifact - stdout and stderr each capped at 2.5 MB (half of a 5 MB budget),
-with a truncation marker beyond that - that also records the exit code, image, duration, and the separated
+with a truncation marker beyond that - that also records the exit code, image and its digest, duration, and the separated
 stdout/stderr streams. Text files harvested from the new-artifacts folder are
 added as further evidence artifacts; binary files become downloadable run
-artifacts. Metrics record `exit_code`, `duration_seconds`, and `image`.
+artifacts. Metrics record `exit_code`, `duration_seconds`, `image`, and
+`image_digest`.
 While the container runs, its output streams into the step's live log, up to
 5 MB. Past that the live log says so and shows no more; the container goes on,
 and the evidence keeps stdout and stderr as above.

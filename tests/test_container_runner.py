@@ -413,12 +413,14 @@ async def test_run_container_job_stages_files_and_collects(monkeypatch):
         ("ghcr.io/x/tool@sha256:ddd", [], "ghcr.io/x/tool@sha256:ddd"),
     ],
 )
-async def test_a_pinned_job_runs_and_reports_the_image_digest(
-    monkeypatch, image, repo_digests, pinned
+# ``pin_image`` is deprecated and changes nothing: every job runs by digest.
+@pytest.mark.parametrize("pin_image", [False, True])
+async def test_a_job_runs_and_reports_the_image_digest(
+    monkeypatch, image, repo_digests, pinned, pin_image
 ):
     state = _install_docker(monkeypatch, repo_digests=repo_digests)
     job = ContainerJob(
-        config=container_config_from({}, image=image, command=["true"]), pin_image=True
+        config=container_config_from({}, image=image, command=["true"]), pin_image=pin_image
     )
     outcome = await run_container_job(_ctx({}), job)
 
@@ -430,19 +432,34 @@ async def test_a_pinned_job_runs_and_reports_the_image_digest(
 
 
 @pytest.mark.asyncio
-async def test_an_unpinned_job_does_not_look_up_the_digest(monkeypatch):
-    state = _install_docker(monkeypatch, repo_digests=["ghcr.io/x/tool@sha256:bbb"])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        SimpleNamespace(returncode=0, stdout="120000000\n", stderr=""),
+        SimpleNamespace(returncode=0, stdout="not json", stderr=""),
+        SimpleNamespace(returncode=1, stdout="", stderr="No such image"),
+    ],
+)
+async def test_a_digest_the_daemon_cannot_give_leaves_the_job_on_its_tag(monkeypatch, answer):
+    state = _install_docker(monkeypatch)
+    fake_run = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if cmd[1:3] == ["image", "inspect"] and "{{json .RepoDigests}}" in cmd:
+            return answer
+        return fake_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", run)
     job = ContainerJob(config=container_config_from({}, image="ghcr.io/x/tool:1", command=["true"]))
     outcome = await run_container_job(_ctx({}), job)
 
     assert isinstance(outcome, ContainerJobResult)
     assert outcome.image_digest == ""
-    assert not any("{{json .RepoDigests}}" in call for call in state["calls"])
     assert "ghcr.io/x/tool:1" in _create_args(state)
 
 
 @pytest.mark.asyncio
-async def test_an_unpinned_job_with_a_digest_reference_reports_it_without_a_lookup(monkeypatch):
+async def test_a_digest_reference_is_reported_without_a_lookup(monkeypatch):
     """`image@sha256:…` already names exact content: it is the digest, no inspect needed."""
     state = _install_docker(monkeypatch, repo_digests=["ghcr.io/x/tool@sha256:bbb"])
     pinned = "ghcr.io/x/tool@sha256:" + "d" * 64

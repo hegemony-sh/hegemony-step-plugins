@@ -472,9 +472,6 @@ class TfPlanHandler(BaseHandler):
                     handler_id=self.handler_id,
                     extra_hosts=dict(access.extra_hosts) if access else {},
                     stop_grace_seconds=config.stop_grace_seconds,
-                    # tf.apply must run the same tool version: a saved plan is
-                    # refused by any other, and the image's tag may move.
-                    pin_image=True,
                 )
                 ran_tool = True
                 outcome = await run_container_job(ctx, job)
@@ -715,8 +712,10 @@ class TfPlanHandler(BaseHandler):
             "summary": summary,
             "engine": config.engine,
             "image": image,
-            # The image by digest, which tf.apply runs; empty for an image the
-            # registry never saw (built on the sandbox daemon).
+            # The image by digest, which tf.apply runs: it must run the same
+            # tool version, since a saved plan is refused by any other, and the
+            # image's tag may move. Empty for an image the registry never saw
+            # (built on the sandbox daemon).
             "image_digest": outcome.image_digest,
             # tf.apply pulls the plan's image the way the plan did.
             "cache_image": config.cache_image,
