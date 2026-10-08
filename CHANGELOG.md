@@ -1,3 +1,9 @@
+## [0.25.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.24.0...v0.25.0) (2026-10-08)
+
+### Features
+
+* **container:** run every container step by its image digest and record it ([c52e08c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c52e08c0ab2f1a5f0f9b1fcf6e319f03d8be9582))
+
 ## [0.24.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.23.0...v0.24.0) (2026-10-07)
 
 ### Features
