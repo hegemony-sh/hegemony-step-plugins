@@ -450,12 +450,24 @@ async def test_a_digest_the_daemon_cannot_give_leaves_the_job_on_its_tag(monkeyp
         return fake_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr("subprocess.run", run)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    async def record(message: str, device_id: str | None, attrs: dict[str, Any] | None) -> bool:
+        events.append((message, dict(attrs or {})))
+        return True
+
+    ctx = _ctx({})
+    ctx._emit_progress = record
     job = ContainerJob(config=container_config_from({}, image="ghcr.io/x/tool:1", command=["true"]))
-    outcome = await run_container_job(_ctx({}), job)
+    outcome = await run_container_job(ctx, job)
 
     assert isinstance(outcome, ContainerJobResult)
     assert outcome.image_digest == ""
     assert "ghcr.io/x/tool:1" in _create_args(state)
+    # The step's log says it runs by tag, and why that can be.
+    [(message, attrs)] = [e for e in events if e[1].get("milestone") == "image_digest"]
+    assert message.startswith("No registry digest for ghcr.io/x/tool:1: the container runs by tag")
+    assert attrs["digest"] == ""
 
 
 @pytest.mark.asyncio

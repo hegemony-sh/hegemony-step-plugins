@@ -150,9 +150,10 @@ pull and later runs use it, asking ghcr.io only whether the tag moved; a run
 with ghcr.io unreachable uses the copy. An image in a registry that needs a login pulls
 with the organization's registry credential for that host, stored once by an
 admin; the step itself needs no login settings. The step runs the image by
-the registry digest it pulled and records it in its evidence
-(`image_digest`), so the record names the exact image even though the minor
-version's tag moves with each release.
+the registry digest it pulled, names it in its log ("Running the image by
+digest: …") and records it in its evidence (`image_digest`), so the record
+names the exact image even though the minor version's tag moves with each
+release.
 
 To add collections or Python packages, or to host the image yourself, build
 it from a checkout of that repository and push it under your own tag, then

@@ -483,6 +483,12 @@ def _milestones(events) -> list[str]:
     return [attrs.get("milestone") for _msg, attrs in events if attrs.get("milestone")]
 
 
+def _digest_events(events) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (message, attrs) for message, attrs in events if attrs.get("milestone") == "image_digest"
+    ]
+
+
 def _create_argv(captured) -> list[str]:
     return next(cmd for cmd, _env in captured["run"] if cmd[:2] == ["docker", "create"])
 
@@ -500,6 +506,20 @@ async def test_without_a_platform_registry_the_pull_is_as_before(monkeypatch) ->
     assert result.metrics["image_source"] == "upstream"
     assert result.metrics["image_cached"] is False
     assert not [m for m in _milestones(events) if m.startswith("image_cache")]
+    # The step's log names the digest the container runs by, as its evidence does.
+    digest = f"alpine@sha256:{'cc' * 32}"
+    assert _digest_events(events) == [
+        (
+            f"Running the image by digest: {digest}",
+            {
+                "milestone": "image_digest",
+                "image": "alpine:3.20",
+                "served": "alpine:3.20",
+                "digest": digest,
+            },
+        )
+    ]
+    assert result.metrics["image_digest"] == digest
 
 
 async def test_cache_image_off_pulls_straight_from_upstream(monkeypatch) -> None:
@@ -624,6 +644,10 @@ async def test_a_hit_in_the_own_namespace_runs_the_copy(monkeypatch) -> None:
     evidence = next(e for e in result.evidence if e["kind"] == "container_output")
     assert evidence["content_json"]["image_served"] == f"{OWN_COPY}:{KEY_TAG}"
     assert evidence["content_json"]["image_digest"] == f"{OWN_COPY}@sha256:{'cc' * 32}"
+    # The copy's digest is in the step's log too.
+    [(message, attrs)] = _digest_events(events)
+    assert message == f"Running the image by digest: {OWN_COPY}@sha256:{'cc' * 32}"
+    assert attrs["served"] == f"{OWN_COPY}:{KEY_TAG}" and attrs["image"] == "alpine:3.20"
 
 
 async def test_a_copy_in_the_global_namespace_serves_when_the_own_one_is_missing(
