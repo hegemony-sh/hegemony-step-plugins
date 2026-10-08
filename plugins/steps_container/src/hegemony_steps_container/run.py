@@ -2210,6 +2210,21 @@ class RunContainerHandler(BaseHandler):
             )
             if image_digest:
                 config = {**config, "image": image_digest}
+            # The step's log names what runs, digest included, as its evidence does.
+            await _safe_emit_progress(
+                f"Running the image by digest: {image_digest}"
+                if image_digest
+                else (
+                    f"No registry digest for {served}: the container runs by tag "
+                    "(an image built on the sandbox daemon and never pushed has none)"
+                ),
+                attrs={
+                    "milestone": "image_digest",
+                    "image": image,
+                    "served": served,
+                    "digest": image_digest,
+                },
+            )
 
             # 7. Build docker create command (container is created but not started)
             shared_workspace_path: str | None = None

@@ -34,8 +34,10 @@ is anonymous, as before. The step's evidence records the image reference it
 was given (`image`) and the registry digest of the image it pulled
 (`image_digest`). The container runs by that digest, so a tag that moves while
 the step runs cannot change what runs, and the record names exactly the
-content that ran. An image built on the sandbox daemon and never pushed has
-no digest: it runs by its tag, and `image_digest` is empty.
+content that ran. The step's log says it too, right after the pull: "Running
+the image by digest: ghcr.io/…@sha256:…". An image built on the sandbox daemon
+and never pushed has no digest: it runs by its tag, `image_digest` is empty,
+and the log says so.
 
 When the platform runs its own container registry, Cache image (on by
 default) keeps a copy of the pulled image there, under the organization's
