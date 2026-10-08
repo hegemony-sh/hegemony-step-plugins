@@ -131,10 +131,9 @@ class ContainerJob:
     # the SIGTERM when the run script is the container's PID 1 (start it with
     # ``exec``), and can finish in-flight work, save state and release locks.
     stop_grace_seconds: int = 0
-    # Run the pulled image by its registry digest and report it as
-    # ``ContainerJobResult.image_digest``, for a tool that hands its image to a
-    # later step (``tf.apply`` after ``tf.plan``): that step then gets exactly
-    # these bytes, even if the tag moved in between.
+    # Deprecated and ignored: every job now runs the pulled image by its
+    # registry digest and reports it as ``ContainerJobResult.image_digest``.
+    # Kept so a tool wheel that still sets it goes on working.
     pin_image: bool = False
 
 
@@ -162,9 +161,11 @@ class ContainerJobResult:
     # root whose copy failed, or one file over the budget) -> the reason. A path
     # in neither map was simply not written by the step.
     collect_errors: dict[str, str] = field(default_factory=dict)
-    # ``repository@sha256:...`` the container ran from, when the job asked for
-    # ``pin_image`` and the daemon knows the image's registry digest (an image
-    # built on the daemon and never pushed has none); otherwise empty.
+    # ``repository@sha256:...`` the container ran from, when the daemon knows
+    # the image's registry digest (an image built on the daemon and never
+    # pushed has none, and runs by its tag); otherwise empty. A tool that hands
+    # its image to a later step (``tf.apply`` after ``tf.plan``) passes this
+    # on, so that step gets exactly these bytes even if the tag moved.
     image_digest: str = ""
     # The reference the container actually ran by: ``image`` itself, or the
     # platform registry's copy of it when the cache served the step.

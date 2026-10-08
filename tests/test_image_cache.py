@@ -613,7 +613,8 @@ async def test_a_hit_in_the_own_namespace_runs_the_copy(monkeypatch) -> None:
     assert captured["pulled"] == [f"{OWN_COPY}:{KEY_TAG}"]
     assert _docker(captured, "push") == []
     create = _create_argv(captured)
-    assert f"{OWN_COPY}:{KEY_TAG}" in create and "alpine:3.20" not in create
+    # The copy runs by the digest the daemon pulled it by, never the upstream tag.
+    assert f"{OWN_COPY}@sha256:{'cc' * 32}" in create and "alpine:3.20" not in create
     # The global namespace is not consulted once the own copy is found.
     assert all(GLOBAL_REPO not in url for _m, url in registries.requests)
     assert "image_cache_hit" in _milestones(events)
@@ -622,6 +623,7 @@ async def test_a_hit_in_the_own_namespace_runs_the_copy(monkeypatch) -> None:
     assert result.metrics["image_cached"] is False
     evidence = next(e for e in result.evidence if e["kind"] == "container_output")
     assert evidence["content_json"]["image_served"] == f"{OWN_COPY}:{KEY_TAG}"
+    assert evidence["content_json"]["image_digest"] == f"{OWN_COPY}@sha256:{'cc' * 32}"
 
 
 async def test_a_copy_in_the_global_namespace_serves_when_the_own_one_is_missing(
@@ -855,7 +857,7 @@ async def test_no_time_left_skips_saving_the_copy(monkeypatch) -> None:
     assert "image_cache_store_skipped" in _milestones(events)
 
 
-async def test_a_pinned_job_served_from_the_cache_records_the_copy_digest(monkeypatch) -> None:
+async def test_a_job_served_from_the_cache_records_the_copy_digest(monkeypatch) -> None:
     registries, captured = _install(monkeypatch)
     registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
         UPSTREAM_DIGEST
@@ -867,7 +869,6 @@ async def test_a_pinned_job_served_from_the_cache_records_the_copy_digest(monkey
     job = ContainerJob(
         config={"image": "alpine:3.20", "command": ["true"]},
         handler_id="tool.run",
-        pin_image=True,
     )
     outcome = await run_container_job(_handler_ctx(events), job)
     assert not hasattr(outcome, "success"), getattr(outcome, "error", None)

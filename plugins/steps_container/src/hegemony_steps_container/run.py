@@ -2201,18 +2201,15 @@ class RunContainerHandler(BaseHandler):
             if served != image:
                 # The daemon knows the image by the reference it pulled.
                 config = {**config, "image": served}
-            image_digest = ""
-            if job.pin_image:
-                image_digest = await self._image_repo_digest(
-                    docker_bin=docker_bin, image=served, docker_env=docker_env, deadline=deadline
-                )
-                if image_digest:
-                    # The tag can move (another step pulls it) before `docker create`.
-                    config = {**config, "image": image_digest}
-            elif "@sha256:" in image:
-                # A digest-qualified reference already names exact content; record
-                # it as the digest without the inspect a pinned job pays for.
-                image_digest = image
+            # Run the pulled image by its registry digest and record that digest:
+            # the tag can move (another step pulls it) before `docker create`, and
+            # the evidence then names exactly the bytes that ran. A reference that
+            # is already digest-qualified needs no lookup.
+            image_digest = await self._image_repo_digest(
+                docker_bin=docker_bin, image=served, docker_env=docker_env, deadline=deadline
+            )
+            if image_digest:
+                config = {**config, "image": image_digest}
 
             # 7. Build docker create command (container is created but not started)
             shared_workspace_path: str | None = None
@@ -3509,6 +3506,8 @@ class RunContainerHandler(BaseHandler):
         try:
             repo_digests = json.loads(proc.stdout.strip() or "null") or []
         except ValueError:
+            return ""
+        if not isinstance(repo_digests, list):
             return ""
         digest = repo_digest_for(image, [str(entry) for entry in repo_digests])
         if not digest:
