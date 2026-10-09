@@ -51,7 +51,10 @@ concurrency:
 jobs:
   image:
     name: ${{ matrix.image }}
-    runs-on: ubuntu-latest
+    # Runner selection as in ci.yml (CI_RUNNER, else GitHub-hosted). The
+    # self-hosted runners share one Docker daemon, so a pull request's image
+    # carries the run in its tag and is removed at the end of the job.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -159,7 +162,7 @@ jobs:
         with:
           context: images/${{ matrix.image }}
           labels: ${{ steps.labels.outputs.labels }}
-          tags: ${{ matrix.image }}:pr
+          tags: ${{ matrix.image }}:pr-${{ github.run_id }}-${{ github.run_attempt }}
           load: true
           push: false
 
@@ -187,11 +190,12 @@ jobs:
           PUBLISH: ${{ steps.release.outputs.publish }}
           DIGEST: ${{ steps.build.outputs.digest }}
           NAME: ${{ matrix.image }}
+          RUN: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           if [ "$PUBLISH" = "true" ]; then
             echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
           else
-            echo "image=${NAME}:pr" >> "$GITHUB_OUTPUT"
+            echo "image=${NAME}:pr-${RUN}" >> "$GITHUB_OUTPUT"
           fi
 
       # What the steps rely on, checked inside the image before any tag names
@@ -270,3 +274,12 @@ jobs:
             fi
             echo "ok: ${tag} -> ${resolved}"
           done
+
+      # A pull request's image was loaded into the runner's Docker daemon,
+      # which outlives the job on a self-hosted runner.
+      - name: Remove the pull request image
+        if: ${{ always() && steps.release.outputs.publish != 'true' }}
+        env:
+          NAME: ${{ matrix.image }}
+          RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: docker image rm "${NAME}:pr-${RUN}" >/dev/null 2>&1 || true
