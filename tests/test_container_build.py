@@ -1507,8 +1507,10 @@ async def test_images_of_stages_the_target_does_not_need_are_not_pulled(
         # A stage named alpine after a tab: alpine:latest must get no context.
         "FROM alpine:latest AS base\nFROM\tbusybox AS alpine\nCOPY --from=base /base /base\n",
         # Another platform after a tab: alpine:3.20 must get no context either.
-        "FROM alpine:3.20 AS native\nFROM\t--platform=linux/arm64 alpine:3.20 AS arm\n"
-        "FROM scratch\nCOPY --from=native / /native\nCOPY --from=arm / /arm\n",
+        (
+            "FROM alpine:3.20 AS native\nFROM\t--platform=linux/arm64 alpine:3.20 AS arm\n"
+            "FROM scratch\nCOPY --from=native / /native\nCOPY --from=arm / /arm\n"
+        ),
     ],
 )
 async def test_tab_separated_instructions_keep_their_protections(
