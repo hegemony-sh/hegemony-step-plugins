@@ -32,9 +32,10 @@ username, password as a secret reference), and the platform hands it to the
 pull whenever an image's host matches. Without a matching credential the pull
 is anonymous, as before. The step's evidence records the image reference it
 was given (`image`) and the registry digest of the image it pulled
-(`image_digest`). The container runs by that digest, so a tag that moves while
-the step runs cannot change what runs, and the record names exactly the
-content that ran. The step's log says it too, right after the pull: "Running
+(`image_digest`), as the step's own pull reported it. The container runs by
+that digest, so a tag that moves while the step runs, even through another
+step pulling it at the same moment, cannot change what runs, and the record
+names exactly the content that ran. The step's log says it too, right after the pull: "Running
 the image by digest: ghcr.io/…@sha256:…". An image built on the sandbox daemon
 and never pushed has no digest: it runs by its tag, `image_digest` is empty,
 and the log says so.

@@ -51,6 +51,7 @@ from .pull_progress import (
     PullOutcome,
     format_size,
     parse_image_reference,
+    pulled_digest,
     require_docker_host,
     stream_pull,
 )
@@ -120,6 +121,21 @@ def repo_digest_for(image: str, repo_digests: list[str]) -> str:
         if sep and digest.startswith("sha256:") and _familiar_repository(name) == wanted:
             return f"{repository}@{digest}"
     return ""
+
+
+def digest_reference(image: str, digest: str) -> str:
+    """``image``'s repository at ``digest`` (``repository@sha256:...``), or "".
+
+    ``digest`` is what a pull of ``image`` reported. A reference that is
+    already digest-qualified is returned as it is: it names exact content.
+    The repository keeps ``image``'s spelling, as :func:`repo_digest_for`'s
+    does.
+    """
+    if "@" in image:
+        return image
+    if not digest.startswith("sha256:"):
+        return ""
+    return f"{parse_image_reference(image)[0]}@{digest}"
 
 
 def _docker_env(docker_host: str, docker_config_dir: str = "") -> dict[str, str]:
@@ -2203,9 +2219,14 @@ class RunContainerHandler(BaseHandler):
                 config = {**config, "image": served}
             # Run the pulled image by its registry digest and record that digest:
             # the tag can move (another step pulls it) before `docker create`, and
-            # the evidence then names exactly the bytes that ran. A reference that
-            # is already digest-qualified needs no lookup.
-            image_digest = await self._image_repo_digest(
+            # the evidence then names exactly the bytes that ran. The digest is
+            # the one this step's own pull reported; asking the daemon afterwards
+            # (the fallback, for a pull that reported none) could name what a
+            # concurrent pull of the same tag brought instead. A reference that
+            # is already digest-qualified needs neither.
+            image_digest = digest_reference(
+                served, acquired.digest
+            ) or await self._image_repo_digest(
                 docker_bin=docker_bin, image=served, docker_env=docker_env, deadline=deadline
             )
             if image_digest:
@@ -3020,8 +3041,8 @@ class RunContainerHandler(BaseHandler):
         docker_host: str,
         deadline: float,
         emit: Callable[..., Awaitable[None]],
-    ) -> HandlerResult | None:
-        """Pull ``image``, streaming byte progress; returns a failure result or None.
+    ) -> HandlerResult | PullOutcome:
+        """Pull ``image``, streaming byte progress; returns a failure result or what the pull did.
 
         The Engine API path (:func:`stream_pull`) provides throttled
         ``pull_progress`` events; any :class:`EnginePullError` falls back to
@@ -3089,6 +3110,7 @@ class RunContainerHandler(BaseHandler):
             outcome = PullOutcome(
                 up_to_date="image is up to date" in pull_proc.stdout.lower(),
                 bytes_downloaded=BYTES_UNKNOWN,
+                digest=pulled_digest(pull_proc.stdout),
             )
         pull_duration = time.monotonic() - pull_start
         image_size = await self._image_size_bytes(
@@ -3118,7 +3140,7 @@ class RunContainerHandler(BaseHandler):
             if outcome.bytes_downloaded != BYTES_UNKNOWN:
                 attrs["bytes_downloaded"] = outcome.bytes_downloaded
         await emit(message, attrs=attrs)
-        return None
+        return outcome or PullOutcome(up_to_date=False, bytes_downloaded=BYTES_UNKNOWN)
 
     async def _lookup(
         self,
@@ -3179,7 +3201,7 @@ class RunContainerHandler(BaseHandler):
         wants_cache = bool(_bool_setting(job.config.get("cache_image"), True))
         plan = plan_cache(image, cache) if (wants_cache and cache is not None) else None
         if plan is None:
-            failure = await self._pull_image(
+            pulled = await self._pull_image(
                 docker_bin=docker_bin,
                 image=image,
                 docker_env=docker_env,
@@ -3187,11 +3209,14 @@ class RunContainerHandler(BaseHandler):
                 deadline=deadline,
                 emit=emit,
             )
-            if failure is not None:
-                return failure
+            if isinstance(pulled, HandlerResult):
+                return pulled
             in_platform = cache is not None and parse_reference(image).host == cache.registry
             return AcquiredImage(
-                served=image, source="platform" if in_platform else "upstream", cached=False
+                served=image,
+                source="platform" if in_platform else "upstream",
+                cached=False,
+                digest=pulled.digest,
             )
 
         assert cache is not None  # plan_cache returned a plan
@@ -3237,7 +3262,7 @@ class RunContainerHandler(BaseHandler):
                     "pulling it from its registry without the cache",
                     attrs={"milestone": "image_cache_skip", "image": image, "reason": str(exc)},
                 )
-                failure = await self._pull_image(
+                pulled = await self._pull_image(
                     docker_bin=docker_bin,
                     image=image,
                     docker_env=docker_env,
@@ -3245,9 +3270,11 @@ class RunContainerHandler(BaseHandler):
                     deadline=deadline,
                     emit=emit,
                 )
-                if failure is not None:
-                    return failure
-                return AcquiredImage(served=image, source="upstream", cached=False)
+                if isinstance(pulled, HandlerResult):
+                    return pulled
+                return AcquiredImage(
+                    served=image, source="upstream", cached=False, digest=pulled.digest
+                )
             # None: the tag does not exist upstream; the pull below says so.
         key_tag = cache_key_tag(upstream_digest) if upstream_digest else None
 
@@ -3290,7 +3317,7 @@ class RunContainerHandler(BaseHandler):
                     f"Using the cached copy of {image} from the platform registry",
                     attrs={"milestone": "image_cache_hit", "image": image, "copy": copy},
                 )
-            failure = await self._pull_image(
+            pulled = await self._pull_image(
                 docker_bin=docker_bin,
                 image=copy,
                 docker_env=docker_env,
@@ -3298,12 +3325,14 @@ class RunContainerHandler(BaseHandler):
                 deadline=deadline,
                 emit=emit,
             )
-            if failure is None:
-                return AcquiredImage(served=copy, source="cache", cached=False)
+            if not isinstance(pulled, HandlerResult):
+                return AcquiredImage(
+                    served=copy, source="cache", cached=False, digest=pulled.digest
+                )
             # The copy was there a moment ago and cannot be pulled now: the
             # image's own registry is the fallback, and saving a copy afterwards
             # would ask the same registry again.
-            cache_problem = failure.error or "the copy could not be pulled"
+            cache_problem = pulled.error or "the copy could not be pulled"
             await emit(
                 f"Could not pull the cached copy ({cache_problem}); pulling {image} from "
                 "its registry",
@@ -3322,7 +3351,7 @@ class RunContainerHandler(BaseHandler):
         target = image
         if upstream_digest and not reference.digest:
             target = pin_reference(image, upstream_digest)
-        failure = await self._pull_image(
+        pulled = await self._pull_image(
             docker_bin=docker_bin,
             image=target,
             docker_env=docker_env,
@@ -3330,8 +3359,8 @@ class RunContainerHandler(BaseHandler):
             deadline=deadline,
             emit=emit,
         )
-        if failure is not None:
-            return failure
+        if isinstance(pulled, HandlerResult):
+            return pulled
         cached = False
         if key_tag and cache_problem is None:
             tags = [key_tag, *([reference.tag] if reference.tag else [])]
@@ -3344,7 +3373,7 @@ class RunContainerHandler(BaseHandler):
                 deadline=deadline,
                 emit=emit,
             )
-        return AcquiredImage(served=target, source="upstream", cached=cached)
+        return AcquiredImage(served=target, source="upstream", cached=cached, digest=pulled.digest)
 
     async def _store_copy(
         self,
@@ -3497,10 +3526,11 @@ class RunContainerHandler(BaseHandler):
     ) -> str:
         """``repository@sha256:...`` of the pulled ``image``, or "" when unknown.
 
-        Read from the image's RepoDigests, the digests the daemon pulled it by,
-        for the repository ``image`` names (in ``image``'s own spelling). An
-        image built on the daemon and never pushed has none; the step then
-        runs, and reports, the tag. Never fails the step.
+        The fallback for a pull that did not report its digest: read from the
+        image's RepoDigests, the digests the daemon pulled it by, for the
+        repository ``image`` names (in ``image``'s own spelling). An image
+        built on the daemon and never pushed has none; the step then runs, and
+        reports, the tag. Never fails the step.
         """
         if "@" in image:
             return image

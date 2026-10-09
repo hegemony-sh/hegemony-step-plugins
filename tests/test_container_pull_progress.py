@@ -37,6 +37,7 @@ from hegemony_steps_container.pull_progress import (
     build_registry_auth_header,
     format_size,
     parse_image_reference,
+    pulled_digest,
     resolve_engine_endpoint,
     stream_pull,
 )
@@ -494,7 +495,7 @@ async def test_stream_pull_digest_only_terminal_is_accepted() -> None:
         {"status": "Already exists", "id": "aaa"},
         {"status": f"Digest: {_DIGEST}"},
     ]
-    await stream_pull(
+    outcome = await stream_pull(
         image="alpine:3.20",
         docker_host="tcp://dind:2375",
         env={},
@@ -504,6 +505,47 @@ async def test_stream_pull_digest_only_terminal_is_accepted() -> None:
         ),
         now=_Clock([0.0]),
     )
+    # The digest this pull brought, as the daemon named it.
+    assert outcome.digest == _DIGEST
+
+
+async def test_stream_pull_without_a_digest_line_reports_none() -> None:
+    """A daemon that closes with ``Status:`` only leaves the digest to the caller."""
+    lines = [
+        {"status": "Pulling from library/alpine", "id": "3.20"},
+        {"status": "Status: Image is up to date for alpine:3.20"},
+    ]
+    outcome = await stream_pull(
+        image="alpine:3.20",
+        docker_host="tcp://dind:2375",
+        env={},
+        emit=_EmitRecorder(),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=_stream_body(lines))
+        ),
+        now=_Clock([0.0]),
+    )
+    assert outcome.digest == ""
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (f"Digest: {_DIGEST}", _DIGEST),
+        (
+            f"3.20: Pulling from library/alpine\nDigest: {_DIGEST}\n"
+            "Status: Downloaded newer image for alpine:3.20\ndocker.io/library/alpine:3.20\n",
+            _DIGEST,
+        ),
+        ("Status: Image is up to date for alpine:3.20", ""),
+        # Only a whole sha256 digest on its own line counts.
+        ("Digest: sha256:abc", ""),
+        (f"note: Digest: {_DIGEST}", ""),
+        ("", ""),
+    ],
+)
+def test_pulled_digest_reads_the_closing_digest_line(text: str, expected: str) -> None:
+    assert pulled_digest(text) == expected
 
 
 async def test_stream_pull_preflight_failure_becomes_engine_pull_error(monkeypatch) -> None:
@@ -825,6 +867,67 @@ async def test_execute_completion_reads_up_to_date_off_the_cli_pull(monkeypatch)
     # A piped `docker pull` prints no byte progress, so the field is absent
     # rather than a zero that would read as "nothing was downloaded".
     assert "bytes_downloaded" not in attrs
+
+
+def _create_image(captured: dict[str, list]) -> list[str]:
+    """The arguments of the step's ``docker create``."""
+    return next(cmd for cmd, _env in captured["run"] if cmd[:2] == ["docker", "create"])
+
+
+def _asked_for_repo_digests(captured: dict[str, list]) -> bool:
+    return any("{{json .RepoDigests}}" in cmd for cmd, _env in captured["run"])
+
+
+async def test_execute_runs_by_the_digest_the_api_pull_reported(monkeypatch) -> None:
+    """The digest comes from this step's own pull, not a later look at the daemon."""
+    captured = _install_docker_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "hegemony_steps_container.run.stream_pull",
+        AsyncMock(return_value=PullOutcome(up_to_date=False, bytes_downloaded=1, digest=_DIGEST)),
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = await RunContainerHandler().execute(_ctx(events))
+    assert result.success is True
+
+    assert f"alpine@{_DIGEST}" in _create_image(captured)
+    assert not _asked_for_repo_digests(captured)
+    assert result.metrics["image_digest"] == f"alpine@{_DIGEST}"
+
+
+async def test_execute_runs_by_the_digest_the_cli_pull_printed(monkeypatch) -> None:
+    captured = _install_docker_mocks(
+        monkeypatch,
+        pull_stdout=(
+            f"3.20: Pulling from library/alpine\nDigest: {_DIGEST}\n"
+            "Status: Downloaded newer image for alpine:3.20\n"
+        ),
+    )
+    monkeypatch.setattr(
+        "hegemony_steps_container.run.stream_pull",
+        AsyncMock(side_effect=EnginePullUnsupported("TLS daemon")),
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = await RunContainerHandler().execute(_ctx(events))
+    assert result.success is True
+
+    assert f"alpine@{_DIGEST}" in _create_image(captured)
+    assert not _asked_for_repo_digests(captured)
+
+
+async def test_execute_asks_the_daemon_when_the_pull_named_no_digest(monkeypatch) -> None:
+    """A pull that reported no digest leaves the lookup to RepoDigests, as before."""
+    captured = _install_docker_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "hegemony_steps_container.run.stream_pull",
+        AsyncMock(return_value=PullOutcome(up_to_date=False, bytes_downloaded=1)),
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = await RunContainerHandler().execute(_ctx(events))
+    assert result.success is True
+    assert _asked_for_repo_digests(captured)
 
 
 async def test_execute_completion_survives_a_daemon_that_will_not_size_it(monkeypatch) -> None:

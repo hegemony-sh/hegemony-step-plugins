@@ -955,6 +955,7 @@ def _install_docker(
     exit_code: int,
     pull_returncode: int = 0,
     collect_returncode: int = 0,
+    pull_stdout: str = "",
 ) -> dict[str, Any]:
     state: dict[str, Any] = {"roots": {}, "calls": []}
     monkeypatch.setattr(
@@ -966,6 +967,8 @@ def _install_docker(
         state["calls"].append(list(cmd))
         if cmd[1] == "pull" and pull_returncode:
             return SimpleNamespace(returncode=pull_returncode, stdout="", stderr="manifest unknown")
+        if cmd[1] == "pull":
+            return SimpleNamespace(returncode=0, stdout=pull_stdout, stderr="")
         if len(cmd) >= 4 and cmd[1] == "cp":
             src, dest = cmd[2], cmd[3]
             if dest.endswith(":/"):
@@ -1091,6 +1094,24 @@ async def test_ignored_device_ansible_vars_are_reported(monkeypatch):
     assert inventory["all"]["hosts"]["r1"]["ansible_connection"] != "local"
     [note] = [e for e in result.evidence if e["name"] == "ansible_vars_ignored_baseline"]
     assert "- r1: ansible_connection\n" in note["content_text"]
+
+
+@pytest.mark.asyncio
+async def test_the_metrics_name_the_image_by_the_digest_its_pull_reported(monkeypatch):
+    digest = "sha256:" + "e" * 64
+    state = _install_docker(
+        monkeypatch,
+        collected=_results_json({}),
+        exit_code=0,
+        pull_stdout=f"Digest: {digest}\nStatus: Downloaded newer image for {DEFAULT_IMAGE}\n",
+    )
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+
+    pinned = f"{DEFAULT_IMAGE.rsplit(':', 1)[0]}@{digest}"
+    assert result.success is True, result.error
+    assert result.metrics["image_digest"] == pinned
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert pinned in create
 
 
 @pytest.mark.asyncio

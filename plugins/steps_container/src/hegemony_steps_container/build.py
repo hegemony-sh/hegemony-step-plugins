@@ -37,6 +37,10 @@ What a build may reach and use is decided here, never by the Dockerfile:
   no build reads the daemon's build cache (``--no-cache``): the sandbox is
   shared by every organization, and an image or a cached step another
   organization left there must not stand in for one this step is entitled to.
+  With a platform registry they are pulled from the organization's copies
+  (``cache_base_images``, :meth:`BuildImageHandler._base_images`): BuildKit
+  gets each as a named context, by digest, pulled with the step's token like
+  any other image.
   Cache mounts (``RUN --mount=type=cache``) also get a name unique to the
   build (``BUILDKIT_CACHE_MOUNT_NS``), so none is shared with another build
   even if BuildKit kept one across ``--no-cache`` builds.
@@ -75,10 +79,24 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     ImageBuild,
+    ImageCache,
     StepKind,
 )
 
-from .image_cache import login_for, parse_reference
+from . import run as _run
+from .base_images import base_image_references
+from .image_cache import (
+    CachePlan,
+    RegistryClient,
+    RegistryDenied,
+    RegistryUnavailable,
+    cache_key_tag,
+    login_for,
+    parse_reference,
+    pin_reference,
+    plan_cache,
+    upstream_api_url,
+)
 from .pull_progress import require_docker_host
 from .run import RunContainerHandler, _docker_env, repo_digest_for
 from .runner import container_config_from, resolve_secret_values, secret_map_errors
@@ -308,6 +326,27 @@ DESTINATION_REMOTE = "remote"
 
 
 @dataclass(frozen=True, slots=True)
+class BaseImage:
+    """Where the build took one of its Dockerfile's base images from."""
+
+    # The reference as the Dockerfile names it (variables expanded).
+    image: str
+    # The platform registry's copy it was built on (``…@sha256:…``), or "" when
+    # BuildKit pulled it from its own registry.
+    served: str = ""
+    # True when this step saved that copy.
+    cached: bool = False
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "image": self.image,
+            "served": self.served,
+            "source": "cache" if self.served else "upstream",
+            "cached": self.cached,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BuildDestination:
     """Where one build's image goes: its repository, and the registry it is pushed to."""
 
@@ -444,6 +483,19 @@ class BuildImageConfig(BaseModel):
         description="Path of the Dockerfile inside the build context folder.",
         json_schema_extra={"x_placeholder": "Dockerfile"},
     )
+    cache_base_images: bool = Field(
+        default=True,
+        title="Cache base images",
+        description=(
+            "Build on copies of the Dockerfile's base images (FROM and COPY --from) kept in "
+            "the platform registry under this organization, saving a copy on first use, as "
+            "Cache image does for a container step. A tag is still checked against the "
+            "image's registry by digest, and the copy serves when that registry is "
+            "unreachable. Turn off for base images that must come straight from their "
+            "registries every time. No effect when the platform runs no registry, or when "
+            "the build targets another platform."
+        ),
+    )
     build_args: dict[str, str] = Field(
         default_factory=dict,
         title="Build arguments",
@@ -569,6 +621,7 @@ def buildx_argv(
     platform: str = "",
     cache_namespace: str = "",
     push: bool = True,
+    build_contexts: dict[str, str] | None = None,
 ) -> list[str]:
     """The ``docker`` arguments of one build (without the docker binary itself).
 
@@ -577,6 +630,8 @@ def buildx_argv(
     ``cache_namespace`` prefixes the id of every cache mount the Dockerfile
     declares. ``push`` pushes the references; without it the image is loaded
     into the sandbox daemon under them, and goes nowhere else.
+    ``build_contexts`` maps an image reference the Dockerfile uses to the
+    ``docker-image://`` reference BuildKit takes it from instead.
     """
     args = [
         "buildx",
@@ -611,6 +666,8 @@ def buildx_argv(
         args += ["--label", f"{key}={value}"]
     for secret_id, path in sorted((secret_files or {}).items()):
         args += ["--secret", f"id={secret_id},src={path}"]
+    for name, source in sorted((build_contexts or {}).items()):
+        args += ["--build-context", f"{name}={source}"]
     for reference in references:
         args += ["--tag", reference]
     args += ["--push" if push else "--load", context]
@@ -870,7 +927,8 @@ class BuildImageHandler(BaseHandler):
                 return _failure(str(exc), "Build context unavailable")
             dockerfile_path = os.path.join(context_root, *dockerfile.split("/"))
             with open(dockerfile_path, encoding="utf-8", errors="replace") as handle:
-                problem = frontend_error(handle.read())
+                dockerfile_text = handle.read()
+            problem = frontend_error(dockerfile_text)
             if problem:
                 return _failure(f"Invalid Dockerfile: {problem}", "Config validation failed")
 
@@ -880,6 +938,38 @@ class BuildImageHandler(BaseHandler):
             probe = await self._probe_buildx(docker_bin, env)
             if probe is not None:
                 return probe
+
+            # The Dockerfile's base images, from the platform registry's copies.
+            base_images: list[BaseImage] = []
+            cache = getattr(runtime, "image_cache", None)
+            if cache is not None and config.cache_base_images:
+                base_references = base_image_references(
+                    dockerfile_text, config.build_args, config.target.strip()
+                )
+                if base_references and config.platform.strip():
+                    await emit(
+                        "Base images come from their registries: the build targets "
+                        f"{config.platform.strip()}, and a copy in the platform registry holds "
+                        "only the sandbox's own platform",
+                        attrs={
+                            "milestone": "base_image_cache_skip",
+                            "platform": config.platform.strip(),
+                        },
+                    )
+                    base_images = [BaseImage(reference) for reference in base_references]
+                elif base_references:
+                    base_images = await self._base_images(
+                        references=base_references,
+                        cache=cache,
+                        docker_bin=docker_bin,
+                        docker_host=docker_host,
+                        env=env,
+                        deadline=deadline,
+                        emit=emit,
+                    )
+            build_contexts = {
+                base.image: f"docker-image://{base.served}" for base in base_images if base.served
+            }
 
             created = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
             labels = {
@@ -901,6 +991,7 @@ class BuildImageHandler(BaseHandler):
                 platform=config.platform.strip(),
                 cache_namespace=f"hegemony-build-{uuid.uuid4().hex}",
                 push=destination.push,
+                build_contexts=build_contexts,
             )
             source = f"attachments/{context_dir}" if context_dir else "the attachments root"
             network_note = (
@@ -1069,18 +1160,28 @@ class BuildImageHandler(BaseHandler):
                 # Names only: values may be sensitive, and secrets stay with their backend.
                 "build_args": sorted(config.build_args),
                 "secrets": sorted(secrets),
+                # What each base image was built on: a copy in the platform
+                # registry by digest, or its own registry's pull.
+                "base_images": [base.as_record() for base in base_images],
             }
+            base_lines = [
+                f"Base image: {base.image} from {base.served}"
+                for base in base_images
+                if base.served
+            ]
             if destination.push:
                 summary_lines = [
                     f"Image: {repository}",
                     f"Digest: {digest}",
                     *(f"Pushed: {ref}" for ref in references),
+                    *base_lines,
                 ]
                 summary = f"Built and pushed {repository} ({', '.join(tags)})"
             else:
                 summary_lines = [
                     f"Image: {repository}",
                     *(f"Kept in the sandbox: {ref}" for ref in references),
+                    *base_lines,
                 ]
                 summary = f"Built {repository} ({', '.join(tags)}), kept in the sandbox"
             return HandlerResult(
@@ -1196,6 +1297,202 @@ class BuildImageHandler(BaseHandler):
                 "BuildKit not available",
             )
         return None
+
+    async def _base_images(
+        self,
+        *,
+        references: list[str],
+        cache: ImageCache,
+        docker_bin: str,
+        docker_host: str,
+        env: dict[str, str],
+        deadline: float,
+        emit: Callable[..., Awaitable[None]],
+    ) -> list[BaseImage]:
+        """Serve the Dockerfile's base images from the platform registry's cache.
+
+        Each one the way ``container.run`` serves its image: the digest its
+        tag names upstream today (a digest-qualified reference already says),
+        a copy of that digest in the organization's namespace and then the
+        read-only ones, and without one a pull of that digest from upstream
+        and a copy saved (:meth:`RunContainerHandler._store_copy`). With
+        upstream unreachable, the last copy under the tag serves. Anything
+        else (a refused check, an unreachable platform registry, a failed
+        pull or copy) leaves the image to BuildKit's own pull, as without a
+        cache. Never fails the step; out of time, the rest are left alone.
+        """
+        runner = RunContainerHandler()
+        registry = RegistryClient(
+            cache.api_url,
+            login_for(cache.registry, env),
+            trust_env=False,
+            transport=_run._registry_transport(cache.api_url),
+        )
+        served: list[BaseImage] = []
+        for image in references:
+            plan = plan_cache(image, cache)
+            if plan is None:
+                # In the platform registry already, or a registry the cache
+                # cannot name: BuildKit pulls it with the step's logins.
+                served.append(BaseImage(image))
+                continue
+            try:
+                served.append(
+                    await self._base_image(
+                        runner,
+                        registry,
+                        plan,
+                        docker_bin=docker_bin,
+                        docker_host=docker_host,
+                        env=env,
+                        deadline=deadline,
+                        emit=emit,
+                    )
+                )
+            except subprocess.TimeoutExpired:
+                await emit(
+                    "No time left to serve the remaining base images from the platform "
+                    "registry; the build pulls them from their registries",
+                    attrs={"milestone": "base_image_cache_skip", "image": image},
+                )
+                served.extend(BaseImage(rest) for rest in references[len(served) :])
+                break
+        return served
+
+    async def _base_image(
+        self,
+        runner: RunContainerHandler,
+        registry: RegistryClient,
+        plan: CachePlan,
+        *,
+        docker_bin: str,
+        docker_host: str,
+        env: dict[str, str],
+        deadline: float,
+        emit: Callable[..., Awaitable[None]],
+    ) -> BaseImage:
+        """One base image through the cache (see :meth:`_base_images`)."""
+        image = plan.requested
+        reference = plan.reference
+
+        async def skip(reason: str) -> BaseImage:
+            await emit(
+                f"Base image {image} comes from its registry: {reason}",
+                attrs={"milestone": "base_image_cache_skip", "image": image, "reason": reason},
+            )
+            return BaseImage(image)
+
+        upstream_url = upstream_api_url(reference.host)
+        upstream = RegistryClient(
+            upstream_url,
+            login_for(reference.host, env),
+            trust_env=True,
+            transport=_run._registry_transport(upstream_url),
+        )
+        upstream_digest = reference.digest
+        upstream_problem = ""
+        if upstream_digest is None:
+            try:
+                upstream_digest = await runner._lookup(
+                    upstream,
+                    reference.repo,
+                    reference.manifest_reference,
+                    docker_bin=docker_bin,
+                    image=image,
+                    deadline=deadline,
+                )
+            except RegistryUnavailable as exc:
+                upstream_problem = str(exc)
+            except RegistryDenied as exc:
+                # Access may have been withdrawn: no copy stands in for it.
+                return await skip(f"{reference.host} refused the manifest check ({exc})")
+            if upstream_digest is None and not upstream_problem:
+                return await skip(f"{reference.host} does not have it")
+        key_tag = cache_key_tag(upstream_digest) if upstream_digest else ""
+        lookup_tag = key_tag or (reference.tag or "" if upstream_problem else "")
+
+        for repo in plan.read_repos if lookup_tag else ():
+            try:
+                found = await runner._lookup(
+                    registry,
+                    repo,
+                    lookup_tag,
+                    docker_bin=docker_bin,
+                    image=image,
+                    deadline=deadline,
+                )
+            except (RegistryUnavailable, RegistryDenied) as exc:
+                return await skip(f"the platform registry is unavailable ({exc})")
+            if found is None:
+                continue
+            copy = pin_reference(plan.copy_reference(repo, lookup_tag), found)
+            if upstream_problem:
+                await emit(
+                    f"{reference.host} is unreachable ({upstream_problem}); base image {image} "
+                    f"comes from its last copy in the platform registry, {copy}",
+                    attrs={
+                        "milestone": "base_image_cache_stale",
+                        "image": image,
+                        "copy": copy,
+                        "reason": upstream_problem,
+                    },
+                )
+            else:
+                await emit(
+                    f"Base image {image} comes from its copy in the platform registry, {copy}",
+                    attrs={"milestone": "base_image_cache_hit", "image": image, "copy": copy},
+                )
+            return BaseImage(image, served=copy)
+
+        if upstream_problem or not upstream_digest:
+            return await skip(
+                f"{reference.host} is unreachable ({upstream_problem}) and the platform "
+                "registry has no copy of it"
+            )
+        # No copy yet: pull exactly the digest the check named and save it, so
+        # this build and later ones are built on the copy.
+        target = image if reference.digest else pin_reference(image, upstream_digest)
+        pulled = await runner._pull_image(
+            docker_bin=docker_bin,
+            image=target,
+            docker_env=env,
+            docker_host=docker_host,
+            deadline=deadline,
+            emit=emit,
+        )
+        if isinstance(pulled, HandlerResult):
+            return await skip(f"it could not be pulled to save a copy ({pulled.error})")
+        tags = [key_tag, *([reference.tag] if reference.tag else [])]
+        stored = await runner._store_copy(
+            image=target,
+            plan=plan,
+            tags=tags,
+            docker_bin=docker_bin,
+            docker_env=env,
+            deadline=deadline,
+            emit=emit,
+        )
+        if not stored:
+            return await skip("no copy could be saved")
+        try:
+            found = await runner._lookup(
+                registry,
+                plan.write_repo,
+                key_tag,
+                docker_bin=docker_bin,
+                image=image,
+                deadline=deadline,
+            )
+        except (RegistryUnavailable, RegistryDenied) as exc:
+            return await skip(f"the copy just saved cannot be found ({exc})")
+        if found is None:
+            return await skip("the copy just saved cannot be found")
+        copy = pin_reference(plan.copy_reference(plan.write_repo, key_tag), found)
+        await emit(
+            f"Base image {image} comes from the copy just saved to the platform registry, {copy}",
+            attrs={"milestone": "base_image_cached", "image": image, "copy": copy},
+        )
+        return BaseImage(image, served=copy, cached=True)
 
     @staticmethod
     async def _run_build(

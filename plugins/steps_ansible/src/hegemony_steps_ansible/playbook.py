@@ -995,6 +995,7 @@ class AnsiblePlaybookHandler(BaseHandler):
                 "target_devices": sum(len(devices) for devices in devices_by_role.values()),
                 "duration_seconds": outcome.duration_seconds,
                 "image": outcome.image,
+                "image_digest": outcome.image_digest,
                 "image_served": outcome.image_served,
                 "image_source": outcome.image_source,
                 "image_cached": outcome.image_cached,
