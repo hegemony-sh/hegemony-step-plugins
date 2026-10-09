@@ -104,10 +104,11 @@ policy, like the base images.
 
 With a platform registry and Cache base images on (the default), the build
 runs on the organization's copies of its base images, as Cache image does for
-`container.run`. For each image a `FROM` line or a `COPY --from` names (with
-the Dockerfile's `ARG` values before its first `FROM` and the step's build
-arguments filled in), the step asks the image's registry which digest the
-tag names today, looks for a copy of that digest in the organization's
+`container.run`. For each image a `FROM` line or a `COPY --from` names in the
+stages the build uses (the target stage and the stages it depends on, the
+last stage without a target; the Dockerfile's `ARG` values before its first
+`FROM` and the step's build arguments filled in), the step asks the image's
+registry which digest the tag names today, looks for a copy of that digest in the organization's
 namespace and then in the global one, and without one pulls that digest and
 saves a copy. BuildKit then takes the image from the copy, by digest
 (`--build-context`), with the step's platform registry token. With the
@@ -117,9 +118,14 @@ its copy in the platform registry, …@sha256:…"), and the build details recor
 it (`base_images`). An image the cache cannot serve (a refused check, a
 platform registry that does not answer) is pulled from its own registry as
 before. So is every base image of a build for another platform, since a copy
-holds the sandbox's own platform only, and an image named through a variable
-the Dockerfile does not declare before its first `FROM`, or used by
-`RUN --mount=from=…`.
+holds the sandbox's own platform only, and so is an image one of those stages
+uses with another `--platform` than `$BUILDPLATFORM`, wherever else it is
+used. Also left to its registry: an image named through a variable the
+Dockerfile does not declare before its first `FROM`, an image used by
+`RUN --mount=from=…`, and an image whose name, written without Docker Hub's
+host and without `:latest`, is a stage's name (`FROM alpine:latest` beside
+a stage named `alpine`), since BuildKit would put the copy in that stage's
+place.
 
 Pushing to a registry other than the platform's is allowed only under the
 same condition as the network: an open egress policy. The sandbox daemon

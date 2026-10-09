@@ -1435,3 +1435,66 @@ async def test_only_images_are_looked_up_not_stages_or_scratch(fake_docker, regi
     assert result.success, result.error
     assert [record["image"] for record in _base_records(result)] == ["alpine:3.20"]
     assert all("/scratch/" not in url and "/build/" not in url for url in registries.requests)
+
+
+@pytest.mark.asyncio
+async def test_no_context_replaces_a_stage_named_like_a_base_image(fake_docker, registries) -> None:
+    """``alpine:latest`` is the context ``alpine``, which would replace the stage ``alpine``."""
+    registries.manifests[(UPSTREAM, "library/alpine", "latest")] = UPSTREAM_DIGEST
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = COPY_DIGEST
+    dockerfile = (
+        "FROM alpine:latest AS base\n"
+        "RUN echo base > /base\n"
+        "FROM busybox AS alpine\n"
+        "RUN echo final > /final\n"
+        "COPY --from=base /base /base\n"
+    )
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, [], dockerfile))
+
+    assert result.success, result.error
+    assert not any(context.startswith("alpine") for context in _contexts(fake_docker))
+    assert [record["image"] for record in _base_records(result)] == ["busybox"]
+
+
+@pytest.mark.asyncio
+async def test_no_context_reaches_a_stage_built_for_another_platform(
+    fake_docker, registries
+) -> None:
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = COPY_DIGEST
+    dockerfile = (
+        "FROM alpine:3.20 AS native\n"
+        "FROM --platform=linux/arm64 alpine:3.20 AS arm\n"
+        "FROM scratch\n"
+        "COPY --from=native / /native\n"
+        "COPY --from=arm / /arm\n"
+    )
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, [], dockerfile))
+
+    assert result.success, result.error
+    assert _contexts(fake_docker) == []
+    assert registries.requests == []
+
+
+@pytest.mark.asyncio
+async def test_images_of_stages_the_target_does_not_need_are_not_pulled(
+    fake_docker, registries
+) -> None:
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = COPY_DIGEST
+    dockerfile = (
+        "FROM ubuntu:24.04 AS unused\n"
+        "RUN apt-get update\n"
+        "FROM alpine:3.20 AS runtime\n"
+        "RUN echo hello\n"
+        "FROM runtime AS debug\n"
+        "RUN echo debug\n"
+    )
+    result = await BuildImageHandler().execute(
+        _cached_build(fake_docker, [], dockerfile, target="runtime")
+    )
+
+    assert result.success, result.error
+    assert _docker_verbs(fake_docker, "pull") == []
+    assert not any("ubuntu" in url for url in registries.requests)
+    assert _contexts(fake_docker) == [
+        f"alpine:3.20=docker-image://{REGISTRY}/{OWN_REPO}@{COPY_DIGEST}"
+    ]

@@ -5,26 +5,38 @@
 """The images a Dockerfile builds on, as BuildKit will resolve them.
 
 ``container.build`` serves them from the platform registry's cache: BuildKit
-replaces an image reference used in ``FROM`` or ``COPY --from`` with a named
-build context of the same name (``--build-context alpine:3.20=docker-image://
-<copy>@sha256:...``), matching names the way Docker normalizes them, so
-``alpine``, ``alpine:latest`` and ``docker.io/library/alpine`` are one name.
+replaces an image reference used in ``FROM``, ``COPY --from`` or
+``RUN --mount=from=`` with a named build context of the same name
+(``--build-context alpine:3.20=docker-image://<copy>@sha256:...``). Names
+are compared in Docker's familiar form (:func:`familiar_name`), so
+``alpine``, ``alpine:latest`` and ``docker.io/library/alpine`` are one name,
+and a context whose name is a stage's name replaces that whole stage.
 
-Only what can be read from the Dockerfile and the step's build arguments
-alone is returned. A reference that needs a variable the file does not
-declare before its first ``FROM`` (``$TARGETARCH``, say), or an expansion
-form other than ``$NAME``, ``${NAME}``, ``${NAME:-word}`` and
-``${NAME:+word}``, is left out: BuildKit pulls it from its registry as before.
-So are stage names, ``scratch``, stage indexes in ``COPY --from``, a ``FROM``
-with a ``--platform`` other than ``$BUILDPLATFORM`` (a copy holds the one
-platform the sandbox pulled, the build platform), and images a
-``RUN --mount=from=...`` uses.
+What is returned is only what the build of the step's target stage uses and
+the cache can serve as one context for every platform:
+
+- the stages the target depends on (``FROM <stage>``, ``COPY --from`` with a
+  stage name or index, ``RUN --mount=from=``), the last stage without a
+  target: BuildKit builds no other;
+- their ``FROM`` and ``COPY --from`` images, but none whose familiar name is
+  a stage's name, and none that one of those stages uses with a
+  ``--platform`` other than ``$BUILDPLATFORM`` (a copy holds the one platform
+  the sandbox pulled, the build platform; the context would serve it to the
+  other platform too);
+- references read from the Dockerfile and the step's build arguments alone. A
+  reference that needs a variable the file does not declare before its first
+  ``FROM`` (``$TARGETARCH``, say), or an expansion form other than ``$NAME``,
+  ``${NAME}``, ``${NAME:-word}`` and ``${NAME:+word}``, is left out.
+
+Images a ``RUN --mount=from=`` uses are not served from the cache themselves.
+Everything left out is pulled by BuildKit from its registry, as before.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 _NAME_COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
 _HOST_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
@@ -43,6 +55,8 @@ _VARIABLE_RE = re.compile(r"\$(?:\{([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: The one ``FROM --platform`` a copy serves: the platform the build runs on.
 _BUILD_PLATFORM_FLAGS = frozenset({"--platform=$buildplatform", "--platform=${buildplatform}"})
+#: Docker Hub's names for itself, which the familiar form drops.
+_DOCKER_HUB_HOSTS = frozenset({"docker.io", "index.docker.io"})
 
 
 def _escape_character(lines: list[str]) -> str:
@@ -129,64 +143,167 @@ def _global_args(arguments: str, build_args: Mapping[str, str]) -> dict[str, str
     return declared
 
 
-def _usable(reference: str | None, stages: set[str]) -> str | None:
-    if not reference or reference.lower() in stages or reference == "scratch":
-        return None
-    if not _REFERENCE_RE.match(reference):
-        return None
-    return reference
+def familiar_name(reference: str) -> str:
+    """``reference`` as Buildx and BuildKit name a build context or match one.
+
+    Docker's familiar form: Docker Hub's host and its ``library/`` dropped
+    (``docker.io/library/alpine`` is ``alpine``), and a ``:latest`` tag
+    dropped unless a digest follows. Two references with the same familiar
+    name select the same named context, and a stage whose name equals it is
+    replaced by that context entirely.
+    """
+    name, _, digest = reference.partition("@")
+    tag = ""
+    slash, colon = name.rfind("/"), name.rfind(":")
+    if colon > slash:
+        name, tag = name[:colon], name[colon + 1 :]
+    first, separator, rest = name.partition("/")
+    other_registry = separator and (
+        ("." in first or ":" in first or first == "localhost") and first not in _DOCKER_HUB_HOSTS
+    )
+    if not other_registry:
+        if separator and first in _DOCKER_HUB_HOSTS:
+            name = rest
+        if name.startswith("library/") and name.count("/") == 1:
+            name = name[len("library/") :]
+    if digest:
+        return f"{name}{':' + tag if tag else ''}@{digest}"
+    return f"{name}:{tag}" if tag and tag != "latest" else name
 
 
-def base_image_references(dockerfile: str, build_args: Mapping[str, str]) -> list[str]:
-    """The image references ``dockerfile`` builds on, in order and without repeats.
+@dataclass
+class _Stage:
+    """One ``FROM`` and what its instructions take from other stages or images."""
+
+    index: int
+    # The stage's name (``AS name``), lowercased as BuildKit does; "" for none.
+    name: str
+    # The FROM reference with its variables expanded; None when it cannot be.
+    base: str | None
+    # Built for another platform than the build's own (``FROM --platform=...``).
+    foreign: bool
+    # ``COPY --from`` values: a stage name, a stage index or an image.
+    copies: list[str] = field(default_factory=list)
+    # ``RUN --mount=...,from=`` values: the same, never served from the cache.
+    mounts: list[str] = field(default_factory=list)
+
+
+def _stages(dockerfile: str, build_args: Mapping[str, str]) -> list[_Stage]:
+    variables: dict[str, str | None] = {}
+    stages: list[_Stage] = []
+    for instruction in _instructions(dockerfile):
+        keyword, _, rest = instruction.partition(" ")
+        keyword = keyword.upper()
+        words = rest.split()
+        flags = []
+        for word in words:
+            if not word.startswith("--"):
+                break
+            flags.append(word)
+        if keyword == "ARG" and not stages:
+            variables.update(_global_args(rest, build_args))
+        elif keyword == "FROM":
+            names = [word for word in words if not word.startswith("--")]
+            alias = names[2].lower() if len(names) >= 3 and names[1].lower() == "as" else ""
+            foreign = any(
+                flag.lower().startswith("--platform") and flag.lower() not in _BUILD_PLATFORM_FLAGS
+                for flag in flags
+            )
+            base = _expand(names[0], variables) if names else None
+            stages.append(_Stage(len(stages), alias, base, foreign))
+        elif stages and keyword == "COPY":
+            for flag in flags:
+                if flag.lower().startswith("--from="):
+                    stages[-1].copies.append(flag.split("=", 1)[1])
+        elif stages and keyword == "RUN":
+            for flag in flags:
+                if flag.lower().startswith("--mount="):
+                    for option in flag.split("=", 1)[1].split(","):
+                        key, _, value = option.partition("=")
+                        if key.lower() == "from" and value:
+                            stages[-1].mounts.append(value)
+    return stages
+
+
+def base_image_references(
+    dockerfile: str, build_args: Mapping[str, str], target: str = ""
+) -> list[str]:
+    """The image references the build of ``target`` uses, in order and without repeats.
 
     ``build_args`` are the step's build arguments: they set the ``ARG``
     variables declared before the first ``FROM``, which is all a ``FROM``
-    line may use.
+    line may use. ``target`` is the step's target stage; without one the
+    last stage is built. Only the stages it depends on count, as BuildKit
+    builds only those. An image that any of those stages uses for another
+    platform is left out entirely (one named context serves every platform),
+    and so is one whose familiar name is a stage's name (the context would
+    replace that stage).
     """
-    instructions = _instructions(dockerfile)
-    # Every stage name first: ``COPY --from`` may name a stage defined later.
-    stages: set[str] = set()
-    for instruction in instructions:
-        keyword, _, rest = instruction.partition(" ")
-        if keyword.upper() == "FROM":
-            words = [word for word in rest.split() if not word.startswith("--")]
-            if len(words) >= 3 and words[1].lower() == "as":
-                stages.add(words[2].lower())
+    stages = _stages(dockerfile, build_args)
+    if not stages:
+        return []
+    by_name = {stage.name: stage for stage in stages if stage.name}
+    if target:
+        start = by_name.get(target.strip().lower())
+        if start is None:
+            return []
+    else:
+        start = stages[-1]
 
-    variables: dict[str, str | None] = {}
-    seen_from = False
-    found: list[str] = []
-    for instruction in instructions:
-        keyword, _, rest = instruction.partition(" ")
-        keyword = keyword.upper()
-        if keyword == "ARG" and not seen_from:
-            variables.update(_global_args(rest, build_args))
-        elif keyword == "FROM":
-            seen_from = True
-            words = rest.split()
-            flags = [word for word in words if word.startswith("--")]
-            names = [word for word in words if not word.startswith("--")]
-            if not names or any(
-                flag.lower().startswith("--platform") and flag.lower() not in _BUILD_PLATFORM_FLAGS
-                for flag in flags
-            ):
+    def stage_named(value: str) -> _Stage | None:
+        if value.isdigit():
+            index = int(value)
+            return stages[index] if index < len(stages) else None
+        return by_name.get(value.lower())
+
+    reachable: set[int] = set()
+    pending = [start]
+    while pending:
+        stage = pending.pop()
+        if stage.index in reachable:
+            continue
+        reachable.add(stage.index)
+        dependencies: list[_Stage | None] = [stage_named(value) for value in stage.copies]
+        dependencies += [stage_named(value) for value in stage.mounts]
+        if stage.base is not None and stage.base.lower() in by_name:
+            # FROM names only an earlier stage.
+            earlier = by_name[stage.base.lower()]
+            dependencies.append(earlier if earlier.index < stage.index else None)
+        pending.extend(dependency for dependency in dependencies if dependency is not None)
+
+    def image(value: str | None) -> str | None:
+        if not value or "$" in value or value.isdigit() or value.lower() in by_name:
+            return None
+        if value == "scratch" or not _REFERENCE_RE.match(value):
+            return None
+        return value
+
+    wanted: list[str] = []
+    other_platform: set[str] = set()
+    for stage in stages:
+        if stage.index not in reachable:
+            continue
+        used = [image(stage.base), *(image(value) for value in stage.copies)]
+        mounted = [image(value) for value in stage.mounts]
+        for reference in used:
+            if reference is None:
                 continue
-            reference = _usable(_expand(names[0], variables), stages)
-            if reference:
-                found.append(reference)
-        elif keyword == "COPY":
-            for word in rest.split():
-                if not word.startswith("--"):
-                    break
-                if word.lower().startswith("--from="):
-                    value = word.split("=", 1)[1]
-                    if "$" in value or value.isdigit():
-                        continue
-                    reference = _usable(value, stages)
-                    if reference:
-                        found.append(reference)
-    return list(dict.fromkeys(found))
+            if stage.foreign:
+                other_platform.add(familiar_name(reference))
+            else:
+                wanted.append(reference)
+        if stage.foreign:
+            other_platform.update(familiar_name(ref) for ref in mounted if ref is not None)
+
+    found: list[str] = []
+    seen: set[str] = set()
+    for reference in wanted:
+        name = familiar_name(reference)
+        if name in other_platform or name in by_name or name in seen:
+            continue
+        seen.add(name)
+        found.append(reference)
+    return found
 
 
-__all__ = ["base_image_references"]
+__all__ = ["base_image_references", "familiar_name"]

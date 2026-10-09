@@ -943,7 +943,9 @@ class BuildImageHandler(BaseHandler):
             base_images: list[BaseImage] = []
             cache = getattr(runtime, "image_cache", None)
             if cache is not None and config.cache_base_images:
-                base_references = base_image_references(dockerfile_text, config.build_args)
+                base_references = base_image_references(
+                    dockerfile_text, config.build_args, config.target.strip()
+                )
                 if base_references and config.platform.strip():
                     await emit(
                         "Base images come from their registries: the build targets "
