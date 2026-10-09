@@ -737,6 +737,21 @@ def _stage_container_root_dir(staging_root: str, container_path: str) -> None:
     os.makedirs(local_path, exist_ok=True)
 
 
+def _stage_writable_container_dir(staging_root: str, container_path: str) -> None:
+    """Stage a directory the step writes into, writable by any user.
+
+    docker cp creates it root-owned and replaces the owner and mode of a
+    directory the image already has, so an image that runs as another user
+    could not write its results there. The container root itself is never
+    opened up.
+    """
+    relative_path = container_path.strip().lstrip("/")
+    if not relative_path:
+        return
+    _stage_container_root_dir(staging_root, container_path)
+    os.chmod(os.path.join(staging_root, relative_path), 0o777)
+
+
 def _write_staged_text_file(path: str, content: Any) -> None:
     """Write a plain-text snapshot file into the staging directory."""
     with open(path, "w", encoding="utf-8") as fh:
@@ -2296,7 +2311,8 @@ class RunContainerHandler(BaseHandler):
             # The tree holds job files such as secrets at their container mode
             # (0644), so it lives under a private (0700) parent no other user of
             # the worker can enter. The tree's own directories keep 0755: they
-            # become directories of the container, the root included.
+            # become directories of the container, the root included. Only the
+            # folders the step writes into are opened up (below).
             root_dirs_staging_parent = tempfile.mkdtemp(prefix="hegemony-container-roots-")
             root_dirs_staging_dir = os.path.join(root_dirs_staging_parent, "root")
             os.mkdir(root_dirs_staging_dir)
@@ -2309,19 +2325,18 @@ class RunContainerHandler(BaseHandler):
                 working_dir,
             }:
                 _stage_container_root_dir(root_dirs_staging_dir, container_root)
+            # The step writes the files to harvest, as whatever user its image
+            # runs as.
+            _stage_writable_container_dir(root_dirs_staging_dir, new_artifacts_path)
             # The job's own files (step I/O contract, tool inventories and
             # scripts) ride in the same copy as the roots: one docker cp, and
             # their parent directories are created on the way.
             for staged_file in job.files:
                 _write_job_file(root_dirs_staging_dir, staged_file)
             for collect_root in job.collect:
-                _stage_container_root_dir(root_dirs_staging_dir, collect_root)
-                # Writable by whatever user the image runs as: docker cp
-                # creates it root-owned, and results are written by the step.
-                os.chmod(
-                    os.path.join(root_dirs_staging_dir, collect_root.strip().lstrip("/")),
-                    0o777,
-                )
+                # Results are written by the step, as whatever user its image
+                # runs as (the ansible image runs as `runner`).
+                _stage_writable_container_dir(root_dirs_staging_dir, collect_root)
 
             if any(os.scandir(root_dirs_staging_dir)):
                 cp_proc = await self._run_docker(

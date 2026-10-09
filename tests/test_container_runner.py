@@ -29,7 +29,11 @@ import pytest
 
 from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerResult, HandlerServices
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
-from hegemony_steps_container.run import MAX_OUTPUT_DATA_BYTES, RunContainerHandler
+from hegemony_steps_container.run import (
+    MAX_OUTPUT_DATA_BYTES,
+    RunContainerHandler,
+    _stage_writable_container_dir,
+)
 from hegemony_steps_container.runner import (
     COLLECT_GRACE_SECONDS,
     CONTEXT_PATH,
@@ -211,6 +215,42 @@ async def test_a_blank_working_dir_is_the_default_one(monkeypatch, working_dir):
     create = _create_args(state)
     assert create[create.index("-w") + 1] == "/workspace"
     assert "/workspace" in state["dirs"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "harvest_dir", "parent"),
+    [
+        ({}, "/artifacts/new", "/artifacts"),
+        ({"artifacts_path": "/in"}, "/in/new", "/in"),
+        ({"new_artifacts_path": "/out/files"}, "/out/files", "/out"),
+    ],
+)
+async def test_the_harvest_dir_is_writable_by_the_images_user(
+    monkeypatch, config, harvest_dir, parent
+):
+    """docker cp makes the staged directories root-owned, replacing the owner and
+    mode of those the image has: an image that runs as its own user must still be
+    able to write the files to harvest."""
+    state = _install_docker(monkeypatch)
+    result = await RunContainerHandler().execute(_ctx({"image": "alpine:3.20", **config}))
+
+    assert result.success is True, result.error
+    assert state["dirs"][harvest_dir] == 0o777
+    # Only the folders the step writes into are opened up.
+    assert state["roots_staging_mode"] == 0o755
+    assert state["dirs"][parent] == 0o755
+    assert state["dirs"]["/workspace"] == 0o755
+
+
+def test_a_writable_dir_never_opens_up_the_container_root(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir(mode=0o755)
+    os.chmod(root, 0o755)
+    for container_path in ("/", "  ", ""):
+        _stage_writable_container_dir(str(root), container_path)
+    assert os.stat(root).st_mode & 0o777 == 0o755
+    assert not any(root.iterdir())
 
 
 @pytest.mark.asyncio
