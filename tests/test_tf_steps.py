@@ -1215,6 +1215,8 @@ async def test_a_failed_plan_adds_no_note_about_a_hold(monkeypatch, services):
     result = await TfPlanHandler().execute(_ctx(_HOLD, services))
     assert result.success is False
     assert result.summary == "tofu plan failed"
+    # A failed plan still names what ran.
+    assert "image_digest" in result.metrics
 
 
 @pytest.mark.asyncio
@@ -1322,6 +1324,7 @@ async def test_plan_step_records_its_image_by_digest(monkeypatch):
     assert result.success is True, result.error
     assert result.output["image"] == image
     assert result.output["image_digest"] == f"{repository}@sha256:{'a' * 64}"
+    assert result.metrics["image_digest"] == f"{repository}@sha256:{'a' * 64}"
     # The plan ran the very image it hands to the apply.
     create = next(call for call in state["calls"] if call[1] == "create")
     assert f"{repository}@sha256:{'a' * 64}" in create
@@ -1414,6 +1417,7 @@ async def test_apply_step_runs_the_plan_image_by_digest(monkeypatch):
     assert pinned in create
     assert "ghcr.io/hegemony-sh/opentofu-runner:0.6" not in create
     assert result.metrics["image"] == pinned
+    assert result.metrics["image_digest"] == pinned
     assert {"image_served", "image_source", "image_cached"} <= result.metrics.keys()
     # The apply does not look the digest up again.
     assert not any("{{json .RepoDigests}}" in call for call in state["calls"])

@@ -586,6 +586,7 @@ class TfPlanHandler(BaseHandler):
                 metrics={
                     "exit_code": exit_code,
                     "duration_seconds": outcome.duration_seconds,
+                    "image_digest": outcome.image_digest,
                     "image_served": outcome.image_served,
                     "image_source": outcome.image_source,
                     "image_cached": outcome.image_cached,
@@ -618,6 +619,7 @@ class TfPlanHandler(BaseHandler):
                 metrics={
                     "exit_code": exit_code,
                     "duration_seconds": outcome.duration_seconds,
+                    "image_digest": outcome.image_digest,
                     "image_served": outcome.image_served,
                     "image_source": outcome.image_source,
                     "image_cached": outcome.image_cached,
@@ -644,6 +646,7 @@ class TfPlanHandler(BaseHandler):
                 metrics={
                     "exit_code": exit_code,
                     "duration_seconds": outcome.duration_seconds,
+                    "image_digest": outcome.image_digest,
                     "image_served": outcome.image_served,
                     "image_source": outcome.image_source,
                     "image_cached": outcome.image_cached,
@@ -738,6 +741,7 @@ class TfPlanHandler(BaseHandler):
                 "exit_code": exit_code,
                 "duration_seconds": outcome.duration_seconds,
                 "image": image,
+                "image_digest": outcome.image_digest,
                 "image_served": outcome.image_served,
                 "image_source": outcome.image_source,
                 "image_cached": outcome.image_cached,
