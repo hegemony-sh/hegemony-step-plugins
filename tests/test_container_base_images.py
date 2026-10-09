@@ -224,3 +224,24 @@ def test_the_escape_directive_changes_the_continuation_character() -> None:
     assert base_image_references(dockerfile, {}) == [
         "mcr.microsoft.com/windows/servercore:ltsc2022"
     ]
+
+
+@pytest.mark.parametrize("separator", [" ", "\t", " \t "])
+def test_any_whitespace_separates_an_instruction_from_its_arguments(separator: str) -> None:
+    """BuildKit takes tabs as separators: a stage name or a platform must not slip by."""
+    colliding = (
+        f"FROM{separator}alpine:latest AS base\n"
+        f"FROM{separator}busybox{separator}AS{separator}alpine\n"
+        f"COPY{separator}--from=base /base /base\n"
+    )
+    assert base_image_references(colliding, {}) == ["busybox"]
+    mixed = (
+        f"FROM{separator}alpine:3.20 AS native\n"
+        f"FROM{separator}--platform=linux/arm64{separator}alpine:3.20 AS arm\n"
+        "FROM scratch\n"
+        f"COPY{separator}--from=native / /native\n"
+        f"COPY{separator}--from=arm / /arm\n"
+    )
+    assert base_image_references(mixed, {}) == []
+    args = f"ARG{separator}V=3.20\nFROM{separator}alpine:${{V}}\n"
+    assert base_image_references(args, {}) == ["alpine:3.20"]

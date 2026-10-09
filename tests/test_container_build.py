@@ -1498,3 +1498,25 @@ async def test_images_of_stages_the_target_does_not_need_are_not_pulled(
     assert _contexts(fake_docker) == [
         f"alpine:3.20=docker-image://{REGISTRY}/{OWN_REPO}@{COPY_DIGEST}"
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "dockerfile",
+    [
+        # A stage named alpine after a tab: alpine:latest must get no context.
+        "FROM alpine:latest AS base\nFROM\tbusybox AS alpine\nCOPY --from=base /base /base\n",
+        # Another platform after a tab: alpine:3.20 must get no context either.
+        "FROM alpine:3.20 AS native\nFROM\t--platform=linux/arm64 alpine:3.20 AS arm\n"
+        "FROM scratch\nCOPY --from=native / /native\nCOPY --from=arm / /arm\n",
+    ],
+)
+async def test_tab_separated_instructions_keep_their_protections(
+    fake_docker, registries, dockerfile: str
+) -> None:
+    registries.manifests[(UPSTREAM, "library/alpine", "latest")] = UPSTREAM_DIGEST
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = COPY_DIGEST
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, [], dockerfile))
+
+    assert result.success, result.error
+    assert not any(context.startswith("alpine") for context in _contexts(fake_docker))

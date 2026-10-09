@@ -92,6 +92,14 @@ def _instructions(dockerfile: str) -> list[str]:
     return instructions
 
 
+def _split_keyword(instruction: str) -> tuple[str, str]:
+    """An instruction's keyword and its arguments, split on any whitespace (tabs too)."""
+    parts = instruction.split(None, 1)
+    if not parts:
+        return "", ""
+    return parts[0], parts[1] if len(parts) > 1 else ""
+
+
 def _expand(value: str, variables: Mapping[str, str | None]) -> str | None:
     """``value`` with its variables expanded, or None when one cannot be."""
     unresolved = False
@@ -192,7 +200,7 @@ def _stages(dockerfile: str, build_args: Mapping[str, str]) -> list[_Stage]:
     variables: dict[str, str | None] = {}
     stages: list[_Stage] = []
     for instruction in _instructions(dockerfile):
-        keyword, _, rest = instruction.partition(" ")
+        keyword, rest = _split_keyword(instruction)
         keyword = keyword.upper()
         words = rest.split()
         flags = []
