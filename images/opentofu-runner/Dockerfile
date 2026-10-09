@@ -40,7 +40,7 @@
 #       -t registry.example.com/opentofu-runner:custom images/opentofu-runner
 #   docker push registry.example.com/opentofu-runner:custom
 
-ARG GO_VERSION=1.26.8
+ARG GO_VERSION=1.26.9
 
 # The Debian-based Go image, which has git; only the compiled tofu leaves it.
 FROM golang:${GO_VERSION}-bookworm AS tofu
