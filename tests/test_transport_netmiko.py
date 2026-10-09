@@ -91,6 +91,8 @@ def _make_transport() -> SSHTransport:
     t._cancellation_registry = _NullCancellationRegistry()
     t._output_sink = None
     t.streams_timing_output = False
+    t._host_key_verifier = None
+    t._loop = None
     return t
 
 

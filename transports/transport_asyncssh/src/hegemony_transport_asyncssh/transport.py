@@ -30,6 +30,8 @@ from typing import Any
 from hegemony_step_sdk import (
     ConnectionCancellationRegistry,
     DeviceConnectionSpec,
+    HostKeyRejectedError,
+    HostKeyVerifier,
     TransportOutputSink,
 )
 
@@ -91,6 +93,53 @@ _SKIPPED_ERROR = "Skipped: earlier command failed"
 
 #: Error of a result for a command not run because the run was cancelled.
 _CANCELLED_ERROR = "Skipped: the run was cancelled"
+
+
+#: How long a refused connection may spend fetching the key the host presents,
+#: so the report names it. Best effort: the refusal stands either way.
+_PRESENTED_KEY_TIMEOUT_SECONDS = 5.0
+
+
+def _openssh_line(key: Any) -> str:
+    """``<type> <base64>`` of an asyncssh public key, without the comment."""
+    return " ".join(key.export_public_key("openssh").decode("ascii").split()[:2])
+
+
+def _import_host_keys(host: str, port: int, keys: tuple[str, ...]) -> list[Any]:
+    """The trusted keys of ``host:port``, imported for asyncssh."""
+    try:
+        return [asyncssh.import_public_key(line) for line in keys]
+    except (asyncssh.KeyImportError, ValueError) as exc:
+        raise ValueError(f"a trusted SSH host key of {host}:{port} cannot be read: {exc}") from exc
+
+
+def _known_hosts(
+    host: str, port: int, keys: tuple[str, ...] | None
+) -> tuple[list[Any], list[Any], list[Any]] | None:
+    """asyncssh's ``known_hosts`` for one hop: its trusted keys, or None for no check.
+
+    With a key list, asyncssh offers the host only those keys' algorithms and
+    fails the key exchange on any other key, before authentication starts.
+    """
+    if keys is None:
+        return None
+    return (_import_host_keys(host, port, keys), [], [])
+
+
+async def _presented_key(
+    host: str, port: int, *, tunnel: Any, timeout: float, algorithms: list[str] | None = None
+) -> str | None:
+    """The key ``host:port`` presents, fetched by a key exchange alone (no login)."""
+    key = await asyncio.wait_for(
+        asyncssh.get_server_host_key(
+            host,
+            port,
+            tunnel=tunnel if tunnel is not None else (),
+            server_host_key_algs=algorithms or (),
+        ),
+        timeout=timeout,
+    )
+    return _openssh_line(key) if key is not None else None
 
 
 def _is_config_session(commands: list[str]) -> bool:
@@ -164,6 +213,10 @@ class AsyncSSHTransport:
     #: hosts that support them skip wheels without this attribute.
     supports_output_sink = True
 
+    #: Feature flag the host checks before passing ``host_key_verifier``, as
+    #: for the output sink.
+    supports_host_key_verifier = True
+
     def __init__(
         self,
         spec: DeviceConnectionSpec,
@@ -171,6 +224,7 @@ class AsyncSSHTransport:
         cancellation_registry: ConnectionCancellationRegistry | None = None,
         step_run_id: str | None = None,
         output_sink: TransportOutputSink | None = None,
+        host_key_verifier: HostKeyVerifier | None = None,
     ):
         """Initialize the asyncssh transport from a resolved connection spec.
 
@@ -187,6 +241,8 @@ class AsyncSSHTransport:
                 (``execute_commands``) deliberately stays buffered — it batches
                 commands whose text may carry credentials (config pushes), and
                 streaming would require per-command markers that echo them.
+            host_key_verifier: The host's SSH host-key trust. Each hop accepts
+                only the keys it names; None connects without a host-key check.
         """
         if asyncssh is None:
             raise ImportError(
@@ -216,6 +272,7 @@ class AsyncSSHTransport:
         self.connect_timeout = spec.connect_timeout
         self.command_timeout = spec.command_timeout
         self.jump_host = spec.jump_host
+        self._host_key_verifier = host_key_verifier
 
     async def _stream_push(self, text: str) -> None:
         """Push a session chunk to the live-output sink (event loop)."""
@@ -235,15 +292,94 @@ class AsyncSSHTransport:
         except Exception:  # noqa: BLE001 - best-effort tail flush
             logger.debug("output sink flush failed", exc_info=True)
 
+    async def _hop_keys(
+        self, host: str, port: int, *, tunnel: Any, timeout: float
+    ) -> tuple[str, ...] | None:
+        """The keys hop ``host:port`` may present; None connects without a check.
+
+        On first contact the key the host presents is fetched without logging
+        in and recorded through the verifier, so the login that follows
+        accepts only that key and no credential is sent before it is recorded.
+        """
+        verifier = self._host_key_verifier
+        if verifier is None:
+            return None
+        keys = await verifier.trusted_keys(host, port)
+        if keys is None or keys:
+            return keys
+        presented = await _presented_key(host, port, tunnel=tunnel, timeout=timeout)
+        if presented is None:
+            raise HostKeyRejectedError(
+                f"{host}:{port} completed its key exchange without a host key, "
+                "so there is no key to trust"
+            )
+        await verifier.learn(host, port, presented)
+        return (presented,)
+
+    async def _refusal(
+        self,
+        exc: BaseException,
+        host: str,
+        port: int,
+        keys: tuple[str, ...] | None,
+        *,
+        tunnel: Any,
+    ) -> HostKeyRejectedError | None:
+        """The error to raise when ``exc`` is hop ``host:port`` failing its key check.
+
+        ``HostKeyNotVerifiable`` is a key of a trusted type that does not
+        match. A key exchange that found no common host-key algorithm is a
+        mismatch too when the host now presents a key of another type. The
+        presented key is fetched again (best effort) so the report names it.
+        """
+        verifier = self._host_key_verifier
+        if verifier is None or keys is None:
+            return None
+        if isinstance(exc, asyncssh.HostKeyNotVerifiable):
+            algorithms = [
+                algorithm.decode("ascii")
+                for key in _import_host_keys(host, port, keys)
+                for algorithm in key.sig_algorithms
+            ]
+            presented = await self._presented_key_or_none(
+                host, port, tunnel=tunnel, algorithms=algorithms
+            )
+        elif isinstance(exc, asyncssh.KeyExchangeFailed):
+            presented = await self._presented_key_or_none(host, port, tunnel=tunnel)
+            if presented is None or presented in keys:
+                return None
+        else:
+            return None
+        return await verifier.rejected(host, port, presented)
+
+    @staticmethod
+    async def _presented_key_or_none(
+        host: str, port: int, *, tunnel: Any, algorithms: list[str] | None = None
+    ) -> str | None:
+        """The key ``host:port`` presents now, or None when it cannot be fetched."""
+        try:
+            return await _presented_key(
+                host,
+                port,
+                tunnel=tunnel,
+                timeout=_PRESENTED_KEY_TIMEOUT_SECONDS,
+                algorithms=algorithms,
+            )
+        except Exception:  # noqa: BLE001 - the report is best effort
+            logger.debug("could not fetch the SSH host key of %s:%d", host, port, exc_info=True)
+            return None
+
     async def _connect_jump(self):
         """Open SSH session #1 to the bastion (design-dind-sandbox.md §11.1).
 
         Only bastion credentials are presented here — device credentials stay
-        confined to the tunneled device session, and vice versa.
+        confined to the tunneled device session, and vice versa. The bastion's
+        host key is checked like the device's.
         """
         jump = self.jump_host
         assert jump is not None
         logger.info(f"Connecting to jump host {jump.host}:{jump.port} as {jump.username}")
+        keys = await self._hop_keys(jump.host, jump.port, tunnel=None, timeout=self.connect_timeout)
         # Only pass client_keys when the inventory actually supplied one.
         # asyncssh reads an explicit None as "do not attempt public-key auth"
         # and clears agent_path with it, so passing None would silently strip
@@ -253,20 +389,21 @@ class AsyncSSHTransport:
             if jump.private_key
             else {}
         )
-        return await asyncssh.connect(
-            jump.host,
-            port=jump.port,
-            username=jump.username or None,
-            password=jump.password or None,
-            **key_options,
-            # Deliberately unpinned, matching the device hop below: the
-            # platform's trust model is that device inventory (which supplies
-            # the bastion endpoint and credentials) is the source of truth.
-            # Host-key pinning would land on both hops together via a
-            # host_key_policy field once the ssh section grows one.
-            known_hosts=None,
-            connect_timeout=self.connect_timeout,
-        )
+        try:
+            return await asyncssh.connect(
+                jump.host,
+                port=jump.port,
+                username=jump.username or None,
+                password=jump.password or None,
+                **key_options,
+                known_hosts=_known_hosts(jump.host, jump.port, keys),
+                connect_timeout=self.connect_timeout,
+            )
+        except Exception as exc:
+            refusal = await self._refusal(exc, jump.host, jump.port, keys, tunnel=None)
+            if refusal is None:
+                raise
+            raise refusal from exc
 
     async def _connect(self):
         """Open an asyncssh connection from the spec (via the bastion when set)."""
@@ -275,25 +412,36 @@ class AsyncSSHTransport:
         tunnel = None
         if self.jump_host is not None:
             tunnel = await self._connect_jump()
-        # One connect budget across both hops: the device hop gets whatever
-        # the bastion hop left of connect_timeout (floored so a slow bastion
-        # still surfaces as a device-connect timeout, not a zero timeout).
-        remaining = self.connect_timeout - (time.perf_counter() - connect_start)
-        device_timeout = max(remaining, 1.0) if tunnel is not None else self.connect_timeout
         try:
-            connection = await asyncssh.connect(
-                self.host,
-                port=self.port,
-                username=self.username,
-                # Empty password falls back to key/agent auth.
-                password=self.password or None,
-                known_hosts=None,
-                connect_timeout=device_timeout,
-                # SSH session #2 runs inside a direct-tcpip channel of session
-                # #1: end-to-end encrypted, the bastion never sees credentials
-                # or content. () = asyncssh's "no tunnel" sentinel.
-                tunnel=tunnel if tunnel is not None else (),
+            keys = await self._hop_keys(
+                self.host, self.port, tunnel=tunnel, timeout=self.connect_timeout
             )
+            # One connect budget across both hops: the device hop gets
+            # whatever the bastion hop left of connect_timeout (floored so a
+            # slow bastion still surfaces as a device-connect timeout, not a
+            # zero timeout).
+            remaining = self.connect_timeout - (time.perf_counter() - connect_start)
+            device_timeout = max(remaining, 1.0) if tunnel is not None else self.connect_timeout
+            try:
+                connection = await asyncssh.connect(
+                    self.host,
+                    port=self.port,
+                    username=self.username,
+                    # Empty password falls back to key/agent auth.
+                    password=self.password or None,
+                    known_hosts=_known_hosts(self.host, self.port, keys),
+                    connect_timeout=device_timeout,
+                    # SSH session #2 runs inside a direct-tcpip channel of
+                    # session #1: end-to-end encrypted, the bastion never sees
+                    # credentials or content. () = asyncssh's "no tunnel"
+                    # sentinel.
+                    tunnel=tunnel if tunnel is not None else (),
+                )
+            except Exception as exc:
+                refusal = await self._refusal(exc, self.host, self.port, keys, tunnel=tunnel)
+                if refusal is None:
+                    raise
+                raise refusal from exc
         except BaseException:
             if tunnel is not None:
                 with contextlib.suppress(Exception):
