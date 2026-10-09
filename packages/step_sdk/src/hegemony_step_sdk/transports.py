@@ -158,7 +158,6 @@ class HostKeyVerifier(Protocol):
             HostKeyRejectedError: the host may not be dialled (no key is trusted
                 and the organization does not learn new keys).
         """
-        ...
 
     async def learn(self, host: str, port: int, presented_key: str) -> None:
         """Record ``presented_key`` as the trusted key of ``host:port`` (first contact).
@@ -169,7 +168,6 @@ class HostKeyVerifier(Protocol):
             HostKeyRejectedError: another key was recorded for the host
                 meanwhile, or the organization no longer learns keys.
         """
-        ...
 
     async def rejected(
         self, host: str, port: int, presented_key: str | None
@@ -179,7 +177,6 @@ class HostKeyVerifier(Protocol):
         ``presented_key`` is None when the transport could not tell which key
         the host presented. Never raises.
         """
-        ...
 
 
 class ConnectionCancellationRegistry(Protocol):

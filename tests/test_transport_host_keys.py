@@ -21,7 +21,7 @@ import pytest
 
 from hegemony_step_sdk import DeviceConnectionSpec, JumpHostSpec
 from hegemony_transport_asyncssh.transport import AsyncSSHTransport
-from hegemony_transport_netmiko.transport import SSHTransport
+from hegemony_transport_netmiko import transport as netmiko_transport
 from hegemony_transport_scrapli.transport import ScrapliTransport
 from tests.ssh_fakes import (
     JUMP_PASSWORD,
@@ -39,7 +39,7 @@ HOST = "127.0.0.1"
 TRANSPORTS: dict[str, tuple[type, str]] = {
     "asyncssh": (AsyncSSHTransport, "linux"),
     "scrapli": (ScrapliTransport, "ios-xe"),
-    "netmiko": (SSHTransport, "ios-xe"),
+    "netmiko": (netmiko_transport.SSHTransport, "ios-xe"),
 }
 
 
@@ -276,8 +276,6 @@ async def test_a_changed_device_key_behind_the_jump_host_fails_before_the_device
 
 
 async def test_netmiko_removes_its_known_hosts_file(servers, monkeypatch):
-    import hegemony_transport_netmiko.transport as netmiko_transport
-
     written: list[str] = []
     write = netmiko_transport._write_known_hosts
 
