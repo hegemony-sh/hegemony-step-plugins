@@ -102,6 +102,25 @@ mounts get a name of their own, never shared with another build.
 `ADD` with a URL is fetched by the sandbox daemon too, outside the egress
 policy, like the base images.
 
+With a platform registry and Cache base images on (the default), the build
+runs on the organization's copies of its base images, as Cache image does for
+`container.run`. For each image a `FROM` line or a `COPY --from` names (with
+the Dockerfile's `ARG` values before its first `FROM` and the step's build
+arguments filled in), the step asks the image's registry which digest the
+tag names today, looks for a copy of that digest in the organization's
+namespace and then in the global one, and without one pulls that digest and
+saves a copy. BuildKit then takes the image from the copy, by digest
+(`--build-context`), with the step's platform registry token. With the
+image's registry unreachable, the last copy under the tag serves. The step's
+log says where each base image came from ("Base image alpine:3.20 comes from
+its copy in the platform registry, …@sha256:…"), and the build details record
+it (`base_images`). An image the cache cannot serve (a refused check, a
+platform registry that does not answer) is pulled from its own registry as
+before. So is every base image of a build for another platform, since a copy
+holds the sandbox's own platform only, and an image named through a variable
+the Dockerfile does not declare before its first `FROM`, or used by
+`RUN --mount=from=…`.
+
 Pushing to a registry other than the platform's is allowed only under the
 same condition as the network: an open egress policy. The sandbox daemon
 pushes, outside the policy the step's containers are held to, so a stricter

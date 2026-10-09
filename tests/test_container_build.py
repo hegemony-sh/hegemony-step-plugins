@@ -18,7 +18,9 @@ import stat
 import sys
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from hegemony_step_sdk import (
@@ -28,6 +30,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerServices,
     ImageBuild,
+    ImageCache,
 )
 from hegemony_steps_container import ALL_HANDLERS
 from hegemony_steps_container.build import (
@@ -52,6 +55,7 @@ from hegemony_steps_container.build import (
     same_registry_host,
     tag_error,
 )
+from hegemony_steps_container.pull_progress import EnginePullUnsupported
 from hegemony_steps_container.streams import MAX_LIVE_OUTPUT_BYTES
 
 RUN_ID = "1a2b3c4d-0000-4000-8000-000000000001"
@@ -439,6 +443,12 @@ if args[:2] == ["image", "inspect"]:
     print(json.dumps([ref.rsplit(":", 1)[0] + "@" + os.environ["FAKE_DOCKER_DIGEST"]]))
     sys.exit(0)
 
+if args[:1] in (["pull"], ["tag"], ["push"]):
+    save({"argv": args})
+    if args[0] == "pull":
+        print("Status: Downloaded newer image for " + args[1])
+    sys.exit(0)
+
 if args[:2] == ["buildx", "build"]:
     pairs = list(zip(args, args[1:]))
     context = args[-1]
@@ -521,10 +531,12 @@ class _Services:
         build: ImageBuild | None,
         attachments: list[dict[str, Any]] | None = None,
         secrets: dict[str, str] | None = None,
+        cache: ImageCache | None = None,
     ) -> None:
         self.docker_bin = docker_bin
         self.config_dir = config_dir
         self.build = build
+        self.cache = cache
         self.attachments = _ATTACHMENTS if attachments is None else attachments
         self.secrets = secrets or {}
         self.resolved: list[str] = []
@@ -538,6 +550,7 @@ class _Services:
             docker_host="tcp://dind:2375",
             docker_config_dir=self.config_dir,
             image_build=self.build,
+            image_cache=self.cache,
         )
 
     async def fetch_run_attachments(self, run_id: str) -> list[dict]:
@@ -1165,3 +1178,260 @@ async def test_a_build_past_the_step_timeout_is_stopped(fake_docker, monkeypatch
     assert result.summary == "Build timed out"
     (log,) = result.evidence
     assert "#5 0.105 hello" in log["content_text"]
+
+
+# ── Base images from the platform registry's cache ───────────────────────────
+
+CACHE = ImageCache(
+    registry=REGISTRY,
+    api_url=f"http://{REGISTRY}",
+    namespace="orgs/acme",
+    read_namespaces=("global",),
+)
+UPSTREAM = "https://registry-1.docker.io"
+UPSTREAM_DIGEST = "sha256:" + "11" * 32
+COPY_DIGEST = "sha256:" + "22" * 32
+KEY_TAG = "sha256_" + "11" * 32
+OWN_REPO = "orgs/acme/docker.io/library/alpine"
+GLOBAL_REPO = "global/docker.io/library/alpine"
+
+
+class _Registries:
+    """Manifest answers by ``(base_url, repo, reference)``: a digest, None (404), an
+    exception, an httpx response or a callable returning one of those."""
+
+    def __init__(self) -> None:
+        self.manifests: dict[tuple[str, str, str], Any] = {}
+        self.unreachable: set[str] = set()
+        self.requests: list[str] = []
+
+    def transport(self, base_url: str) -> httpx.MockTransport:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            self.requests.append(str(request.url))
+            if base_url in self.unreachable:
+                raise httpx.ConnectError("connection refused")
+            _, _, rest = request.url.path.partition("/v2/")
+            repo, _, reference = rest.rpartition("/manifests/")
+            answer = self.manifests.get((base_url, repo, reference))
+            if callable(answer):
+                answer = answer()
+            if isinstance(answer, Exception):
+                raise answer
+            if isinstance(answer, httpx.Response):
+                return answer
+            if answer is None:
+                return httpx.Response(404)
+            return httpx.Response(200, headers={"Docker-Content-Digest": answer})
+
+        return httpx.MockTransport(handler)
+
+
+@pytest.fixture
+def registries(monkeypatch) -> _Registries:
+    fake = _Registries()
+    monkeypatch.setattr("hegemony_steps_container.run._registry_transport", fake.transport)
+    # Pulls go through the docker CLI fake, which records them.
+    monkeypatch.setattr(
+        "hegemony_steps_container.run.stream_pull",
+        AsyncMock(side_effect=EnginePullUnsupported("off in tests")),
+    )
+    fake.manifests[(UPSTREAM, "library/alpine", "3.20")] = UPSTREAM_DIGEST
+    return fake
+
+
+def _cached_build(
+    fake_docker: dict[str, Any],
+    events: list[tuple[str, dict]],
+    dockerfile: str = "FROM alpine:3.20\nRUN echo hello\n",
+    **config: Any,
+) -> HandlerContext:
+    services = _Services(
+        fake_docker["bin"],
+        fake_docker["config_dir"],
+        build=_target(),
+        attachments=[{"filename": "Dockerfile", "content": dockerfile}],
+        cache=CACHE,
+    )
+    return _ctx({"image": "tools/tool", **config}, services, events)
+
+
+def _contexts(fake_docker: dict[str, Any]) -> list[str]:
+    (build,) = _builds(fake_docker)
+    return [value for flag, value in _pairs(build["argv"]) if flag == "--build-context"]
+
+
+def _docker_verbs(fake_docker: dict[str, Any], verb: str) -> list[list[str]]:
+    return [call["argv"] for call in fake_docker["calls"]() if call["argv"][:1] == [verb]]
+
+
+def _base_records(result) -> list[dict[str, Any]]:
+    details = next(e for e in result.evidence if e["kind"] == "step_result")["content_json"]
+    return details["base_images"]
+
+
+def test_buildx_argv_hands_buildkit_the_base_image_copies() -> None:
+    argv = buildx_argv(
+        context="/ctx",
+        dockerfile="/ctx/Dockerfile",
+        references=["r:1"],
+        network=BUILD_NETWORK_NONE,
+        metadata_file="/m.json",
+        build_contexts={
+            "python:3.12": "docker-image://reg/orgs/acme/docker.io/library/python@sha256:b",
+            "alpine:3.20": "docker-image://reg/orgs/acme/docker.io/library/alpine@sha256:a",
+        },
+    )
+    assert [value for flag, value in _pairs(argv) if flag == "--build-context"] == [
+        "alpine:3.20=docker-image://reg/orgs/acme/docker.io/library/alpine@sha256:a",
+        "python:3.12=docker-image://reg/orgs/acme/docker.io/library/python@sha256:b",
+    ]
+    # The image still comes with --pull: BuildKit fetches the copy with the step's login.
+    assert "--pull" in argv
+
+
+@pytest.mark.asyncio
+async def test_a_base_image_is_built_on_its_copy_in_the_platform_registry(
+    fake_docker, registries
+) -> None:
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = COPY_DIGEST
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, events))
+
+    assert result.success, result.error
+    copy = f"{REGISTRY}/{OWN_REPO}@{COPY_DIGEST}"
+    assert _contexts(fake_docker) == [f"alpine:3.20=docker-image://{copy}"]
+    # A copy was there: nothing pulled or pushed besides the build itself.
+    assert _docker_verbs(fake_docker, "pull") == [] and _docker_verbs(fake_docker, "push") == []
+    hit = next(attrs for _m, attrs in events if attrs.get("milestone") == "base_image_cache_hit")
+    assert hit["copy"] == copy and hit["image"] == "alpine:3.20"
+    assert _base_records(result) == [
+        {"image": "alpine:3.20", "served": copy, "source": "cache", "cached": False}
+    ]
+    summary = next(e for e in result.evidence if e["kind"] == "step_result")["content_text"]
+    assert f"Base image: alpine:3.20 from {copy}" in summary
+
+
+@pytest.mark.asyncio
+async def test_a_base_image_without_a_copy_is_saved_and_built_on(fake_docker, registries) -> None:
+    def copy_once_pushed() -> str | None:
+        return COPY_DIGEST if _docker_verbs(fake_docker, "push") else None
+
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = copy_once_pushed
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, events))
+
+    assert result.success, result.error
+    # Exactly the digest the check named is pulled, and saved under its key and tag.
+    assert _docker_verbs(fake_docker, "pull") == [["pull", f"alpine@{UPSTREAM_DIGEST}"]]
+    assert _docker_verbs(fake_docker, "push") == [
+        ["push", f"{REGISTRY}/{OWN_REPO}:{KEY_TAG}"],
+        ["push", f"{REGISTRY}/{OWN_REPO}:3.20"],
+    ]
+    copy = f"{REGISTRY}/{OWN_REPO}@{COPY_DIGEST}"
+    assert _contexts(fake_docker) == [f"alpine:3.20=docker-image://{copy}"]
+    assert "base_image_cached" in [attrs.get("milestone") for _m, attrs in events]
+    assert _base_records(result) == [
+        {"image": "alpine:3.20", "served": copy, "source": "cache", "cached": True}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_global_copy_serves_when_the_organization_has_none(fake_docker, registries) -> None:
+    registries.manifests[(CACHE.api_url, GLOBAL_REPO, KEY_TAG)] = COPY_DIGEST
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, []))
+
+    assert result.success, result.error
+    assert _contexts(fake_docker) == [
+        f"alpine:3.20=docker-image://{REGISTRY}/{GLOBAL_REPO}@{COPY_DIGEST}"
+    ]
+    assert _docker_verbs(fake_docker, "push") == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_registry_falls_back_to_the_last_copy_by_tag(
+    fake_docker, registries
+) -> None:
+    registries.unreachable.add(UPSTREAM)
+    registries.manifests[(CACHE.api_url, OWN_REPO, "3.20")] = COPY_DIGEST
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, events))
+
+    assert result.success, result.error
+    assert _contexts(fake_docker) == [
+        f"alpine:3.20=docker-image://{REGISTRY}/{OWN_REPO}@{COPY_DIGEST}"
+    ]
+    assert "base_image_cache_stale" in [attrs.get("milestone") for _m, attrs in events]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setup", "reason"),
+    [
+        (
+            lambda r: r.manifests.__setitem__(
+                (UPSTREAM, "library/alpine", "3.20"), httpx.Response(401)
+            ),
+            "refused the manifest check",
+        ),
+        (lambda r: r.unreachable.add(CACHE.api_url), "the platform registry is unavailable"),
+        (lambda r: r.unreachable.add(UPSTREAM), "has no copy of it"),
+    ],
+)
+async def test_a_base_image_the_cache_cannot_serve_comes_from_its_registry(
+    fake_docker, registries, setup, reason
+) -> None:
+    setup(registries)
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, events))
+
+    assert result.success, result.error
+    assert _contexts(fake_docker) == []
+    skips = [msg for msg, attrs in events if attrs.get("milestone") == "base_image_cache_skip"]
+    assert len(skips) == 1 and reason in skips[0]
+    assert _base_records(result) == [
+        {"image": "alpine:3.20", "served": "", "source": "upstream", "cached": False}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_build_for_another_platform_pulls_its_base_images_upstream(
+    fake_docker, registries
+) -> None:
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(
+        _cached_build(fake_docker, events, platform="linux/arm64")
+    )
+
+    assert result.success, result.error
+    assert _contexts(fake_docker) == []
+    assert registries.requests == []
+    [skip] = [attrs for _m, attrs in events if attrs.get("milestone") == "base_image_cache_skip"]
+    assert skip["platform"] == "linux/arm64"
+
+
+@pytest.mark.asyncio
+async def test_cache_base_images_off_leaves_the_base_images_alone(fake_docker, registries) -> None:
+    result = await BuildImageHandler().execute(
+        _cached_build(fake_docker, [], cache_base_images=False)
+    )
+
+    assert result.success, result.error
+    assert _contexts(fake_docker) == []
+    assert registries.requests == []
+    assert _base_records(result) == []
+
+
+@pytest.mark.asyncio
+async def test_only_images_are_looked_up_not_stages_or_scratch(fake_docker, registries) -> None:
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = COPY_DIGEST
+    dockerfile = (
+        "FROM alpine:3.20 AS build\n"
+        "RUN echo hello\n"
+        "FROM scratch\n"
+        "COPY --from=build /etc/os-release /\n"
+    )
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, [], dockerfile))
+
+    assert result.success, result.error
+    assert [record["image"] for record in _base_records(result)] == ["alpine:3.20"]
+    assert all("/scratch/" not in url and "/build/" not in url for url in registries.requests)
