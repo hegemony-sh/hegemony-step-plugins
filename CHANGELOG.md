@@ -1,3 +1,16 @@
+## [0.27.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.26.2...v0.27.0) (2026-10-09)
+
+### Features
+
+* **container:** build on the organization's cached copies of the base images ([54b4e88](https://github.com/hegemony-sh/hegemony-step-plugins/commit/54b4e883c2a39ce7c3b628b2a05f97a883eec999))
+* **tf,ansible:** put image_digest in tf.plan, tf.apply and ansible.playbook metrics ([80c9c7a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/80c9c7a5a3df42ab370142d85490f9f893b1034b))
+
+### Bug Fixes
+
+* **container:** run the image by the digest its own pull reported ([0981367](https://github.com/hegemony-sh/hegemony-step-plugins/commit/09813674aa196fc23c117f2cd55982a216b5582a))
+* **container:** serve only the base images the target's stages use, for one platform ([de85d9a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/de85d9a4bd47adaf799e14ae42a55c4b6fa3543e)), closes [#56](https://github.com/hegemony-sh/hegemony-step-plugins/issues/56)
+* **container:** split Dockerfile instructions on any whitespace, tabs included ([aa9c797](https://github.com/hegemony-sh/hegemony-step-plugins/commit/aa9c79724c7038c890fb12dc32fc79860092ecb6))
+
 ## [0.26.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.26.1...v0.26.2) (2026-10-09)
 
 ### Bug Fixes
