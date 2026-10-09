@@ -4,14 +4,14 @@
 
 [project]
 name = "hegemony-steps-http"
-version = "0.26.1"
+version = "0.26.2"
 description = "HTTP(S) request step handler for Hegemony (http.request)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.26.1",
+    "hegemony-step-sdk==0.26.2",
     "httpx>=0.27.0",
 ]
 
