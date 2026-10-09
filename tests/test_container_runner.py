@@ -229,18 +229,19 @@ async def test_a_blank_working_dir_is_the_default_one(monkeypatch, working_dir):
 async def test_the_harvest_dir_is_writable_by_the_images_user(
     monkeypatch, config, harvest_dir, parent
 ):
-    """docker cp makes the staged directories root-owned, replacing the owner and
-    mode of those the image has: an image that runs as its own user must still be
-    able to write the files to harvest."""
+    """docker cp replaces the owner and mode of the directories the image has (root,
+    or the worker's own user, owns them then): an image that runs as its own user
+    must still be able to write the files to harvest."""
     state = _install_docker(monkeypatch)
     result = await RunContainerHandler().execute(_ctx({"image": "alpine:3.20", **config}))
 
     assert result.success is True, result.error
     assert state["dirs"][harvest_dir] == 0o777
-    # Only the folders the step writes into are opened up.
+    # Only the folders the step writes into are opened up; the others keep the
+    # worker's umask (0755 at 022, 0775 at 002), never writable by others.
     assert state["roots_staging_mode"] == 0o755
-    assert state["dirs"][parent] == 0o755
-    assert state["dirs"]["/workspace"] == 0o755
+    assert state["dirs"][parent] & 0o002 == 0
+    assert state["dirs"]["/workspace"] & 0o002 == 0
 
 
 def test_a_writable_dir_never_opens_up_the_container_root(tmp_path):

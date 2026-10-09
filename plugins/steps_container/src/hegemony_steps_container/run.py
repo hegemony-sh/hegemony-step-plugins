@@ -740,10 +740,10 @@ def _stage_container_root_dir(staging_root: str, container_path: str) -> None:
 def _stage_writable_container_dir(staging_root: str, container_path: str) -> None:
     """Stage a directory the step writes into, writable by any user.
 
-    docker cp creates it root-owned and replaces the owner and mode of a
-    directory the image already has, so an image that runs as another user
-    could not write its results there. The container root itself is never
-    opened up.
+    docker cp gives it an owner of its own (root, or the worker's user) and
+    replaces the owner and mode of a directory the image already has, so an
+    image that runs as another user could not write its results there. The
+    container root itself is never opened up.
     """
     relative_path = container_path.strip().lstrip("/")
     if not relative_path:
