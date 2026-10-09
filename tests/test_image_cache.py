@@ -412,8 +412,12 @@ def _install(
     pull_failures: frozenset[str] = frozenset(),
     push_returncode: int = 0,
     push_results: list[int] | None = None,
+    pull_digests: dict[str, str] | None = None,
 ):
     """Script the registries, the Engine API pull and the docker CLI.
+
+    ``pull_digests`` maps a pulled reference to the digest its pull reports
+    (none by default, which leaves the digest to RepoDigests).
 
     The Engine API pull succeeds for every image but those in ``pull_failures``,
     which raise and whose CLI fallback also fails, so the handler reports the
@@ -429,7 +433,9 @@ def _install(
         if image in pull_failures:
             raise EnginePullError("no such manifest")
         pulled.append(image)
-        return PullOutcome(up_to_date=False, bytes_downloaded=1234)
+        return PullOutcome(
+            up_to_date=False, bytes_downloaded=1234, digest=(pull_digests or {}).get(image, "")
+        )
 
     monkeypatch.setattr("hegemony_steps_container.run.stream_pull", fake_stream_pull)
 
@@ -648,6 +654,28 @@ async def test_a_hit_in_the_own_namespace_runs_the_copy(monkeypatch) -> None:
     [(message, attrs)] = _digest_events(events)
     assert message == f"Running the image by digest: {OWN_COPY}@sha256:{'cc' * 32}"
     assert attrs["served"] == f"{OWN_COPY}:{KEY_TAG}" and attrs["image"] == "alpine:3.20"
+
+
+async def test_a_hit_runs_by_the_digest_its_own_pull_reported(monkeypatch) -> None:
+    """The daemon is not asked afterwards: another pull of the tag could have moved it."""
+    pulled_digest = "sha256:" + "dd" * 32
+    registries, captured = _install(
+        monkeypatch, pull_digests={f"{OWN_COPY}:{KEY_TAG}": pulled_digest}
+    )
+    registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
+        UPSTREAM_DIGEST
+    )
+    registries.manifests[("http://registry.hegemony.internal", OWN_REPO, KEY_TAG)] = (
+        "sha256:" + "22" * 32
+    )
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True
+    assert f"{OWN_COPY}@{pulled_digest}" in _create_argv(captured)
+    inspects = [cmd for cmd, _env in captured["run"] if cmd[:3] == ["docker", "image", "inspect"]]
+    assert not any("RepoDigests" in " ".join(cmd) for cmd in inspects)
+    assert result.metrics["image_digest"] == f"{OWN_COPY}@{pulled_digest}"
 
 
 async def test_a_copy_in_the_global_namespace_serves_when_the_own_one_is_missing(

@@ -32,6 +32,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -309,6 +310,10 @@ class PullOutcome:
 
     up_to_date: bool
     bytes_downloaded: int
+    # The manifest digest the daemon named for this pull (its closing
+    # ``Digest: sha256:...`` line): what this pull put under the reference,
+    # whatever another pull of the same tag does next. "" when it named none.
+    digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -476,6 +481,20 @@ def _is_terminal_status(obj: Mapping[str, Any]) -> bool:
     return isinstance(status, str) and status.startswith(("Status:", "Digest:"))
 
 
+_DIGEST_LINE = re.compile(r"(?m)^\s*Digest:\s*(sha256:[0-9a-f]{64})\s*$")
+
+
+def pulled_digest(text: str) -> str:
+    """The ``sha256:...`` of a ``Digest: sha256:...`` line in ``text``, or "".
+
+    The daemon closes every pull by a tag or a digest with that line, in the
+    API stream's ``status`` and in the docker CLI's output alike: the digest of
+    the manifest it resolved the reference to and pulled.
+    """
+    match = _DIGEST_LINE.search(text)
+    return match.group(1) if match else ""
+
+
 def _says_up_to_date(obj: Mapping[str, Any]) -> bool:
     """True for the daemon's "nothing to fetch" closing line.
 
@@ -576,6 +595,7 @@ async def stream_pull(
     emitted = 0
     saw_terminal = False
     up_to_date = False
+    digest = ""
 
     try:
         # trust_env=False is load-bearing: worker environments carry proxy
@@ -617,6 +637,7 @@ async def stream_pull(
                 if _is_terminal_status(obj):
                     saw_terminal = True
                     up_to_date = up_to_date or _says_up_to_date(obj)
+                    digest = digest or pulled_digest(str(obj.get("status")))
 
                 snap = aggregator.snapshot()
                 if snap.layers_total == 0:
@@ -678,4 +699,5 @@ async def stream_pull(
     return PullOutcome(
         up_to_date=up_to_date,
         bytes_downloaded=snap.bytes_current if measured else BYTES_UNKNOWN,
+        digest=digest,
     )

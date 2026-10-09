@@ -171,6 +171,10 @@ class AcquiredImage:
     source: str
     # True when this step saved a copy to the platform registry.
     cached: bool
+    # The manifest digest the pull of ``served`` reported ("" when it reported
+    # none): the content this step's own pull brought, which the container
+    # then runs by.
+    digest: str = ""
 
 
 def plan_cache(image: str, cache: ImageCache) -> CachePlan | None:
