@@ -121,6 +121,67 @@ class TransportOutputSink(Protocol):
     def flush_from_thread(self, timeout: float = 5.0) -> None: ...
 
 
+class HostKeyRejectedError(ConnectionError):
+    """An SSH host failed its host-key check; no credential was sent to it.
+
+    Transports raise the instance :meth:`HostKeyVerifier.rejected` returns, so
+    the step fails with the host's message: which key is trusted, which one
+    was presented, and what an admin does about it.
+    """
+
+
+class HostKeyVerifier(Protocol):
+    """Host-owned SSH host-key trust for the hops of one connection.
+
+    The host builds one per ``connect()`` call and passes it to transport
+    constructors that advertise ``supports_host_key_verifier = True``
+    (feature-detected, like the output sink). Before a transport dials a hop
+    (the jump host first, then the device) it asks :meth:`trusted_keys` and
+    connects accepting only those keys, so a host presenting any other key
+    fails during the key exchange, before a password or private key is sent.
+
+    Keys are OpenSSH public key lines: ``<type> <base64>``, no comment.
+    ``host`` and ``port`` are the hop's endpoint as the spec names it.
+    """
+
+    async def trusted_keys(self, host: str, port: int) -> tuple[str, ...] | None:
+        """The keys ``host:port`` may present.
+
+        Returns:
+            None to connect without a check (the organization switched checks
+            off). An empty tuple when no key is trusted yet and the host learns
+            one on first contact: the transport fetches the key the host
+            presents without logging in, passes it to :meth:`learn`, then logs
+            in accepting only that key. Otherwise the trusted keys.
+
+        Raises:
+            HostKeyRejectedError: the host may not be dialled (no key is trusted
+                and the organization does not learn new keys).
+        """
+        ...
+
+    async def learn(self, host: str, port: int, presented_key: str) -> None:
+        """Record ``presented_key`` as the trusted key of ``host:port`` (first contact).
+
+        Called before any credential is sent to the host.
+
+        Raises:
+            HostKeyRejectedError: another key was recorded for the host
+                meanwhile, or the organization no longer learns keys.
+        """
+        ...
+
+    async def rejected(
+        self, host: str, port: int, presented_key: str | None
+    ) -> HostKeyRejectedError:
+        """Report that ``host:port`` failed its check; returns the error to raise.
+
+        ``presented_key`` is None when the transport could not tell which key
+        the host presented. Never raises.
+        """
+        ...
+
+
 class ConnectionCancellationRegistry(Protocol):
     """Host-owned registry the transport uses to make blocking I/O cancellable.
 

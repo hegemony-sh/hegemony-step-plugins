@@ -48,6 +48,8 @@ def test_public_surface():
         "SecretWriteResult",
         "DEFAULT_RUN_TIMEOUT_MARGIN_SECONDS",
         "InvalidConfigError",
+        "HostKeyVerifier",
+        "HostKeyRejectedError",
     ):
         assert hasattr(sdk, name), name
         assert name in sdk.__all__, name
@@ -226,6 +228,23 @@ def test_probe_registry_protocol_shape():
         "self",
         "probe_class",
     ]
+
+
+def test_host_key_verifier_protocol_shape():
+    shapes = {
+        "trusted_keys": ["self", "host", "port"],
+        "learn": ["self", "host", "port", "presented_key"],
+        "rejected": ["self", "host", "port", "presented_key"],
+    }
+    for name, parameters in shapes.items():
+        method = getattr(sdk.HostKeyVerifier, name)
+        assert inspect.iscoroutinefunction(method), name
+        assert list(inspect.signature(method).parameters) == parameters, name
+
+
+def test_a_rejected_host_key_is_a_connection_error():
+    # Transports already map ConnectionError and OSError to a failed connect.
+    assert issubclass(sdk.HostKeyRejectedError, ConnectionError)
 
 
 def test_device_connection_spec_repr_hides_secrets():
