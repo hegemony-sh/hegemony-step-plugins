@@ -1,3 +1,9 @@
+## [0.26.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.26.0...v0.26.1) (2026-10-09)
+
+### Bug Fixes
+
+* **images:** build tofu with Go 1.26.9 ([dd2074c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/dd2074ceeb58754c1c98534d133861594d200ebf))
+
 ## [0.26.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.25.0...v0.26.0) (2026-10-08)
 
 ### Features
