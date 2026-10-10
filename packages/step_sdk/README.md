@@ -85,6 +85,16 @@ Handlers reach every platform facility — device transports, secret/template
 resolution, the internal API, notifications — through `ctx.services`
 (`HandlerServices`); plugin code never imports Hegemony internals.
 
+A device transport that checks SSH host keys sets
+`supports_host_key_verifier = True` and takes a `host_key_verifier`
+(`HostKeyVerifier`) at construction. Before it dials a hop it asks
+`trusted_keys(host, port)` and connects accepting only those keys: None means
+no check, an empty tuple means first contact (fetch the key without logging
+in, then `learn` it). A host that presents another key is reported with
+`rejected(...)`, and the transport raises the `HostKeyRejectedError` it
+returns. Without a verifier such a transport refuses to connect; only a
+verifier that answers None (checks switched off) lets it connect unchecked.
+
 The step's own `key=value` tags arrive as `ctx.tags` (`env=prod`,
 `risk=high`, `phase=VERIFY` ...), so a handler can vary its behaviour per
 tag. `phase` and `kind` are ordinary keys of that map, nothing more:

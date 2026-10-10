@@ -21,6 +21,7 @@ is netmiko-only for now and raises :class:`NotImplementedError` — select the
 netmiko transport for staging steps.
 """
 
+import asyncio
 import contextlib
 import logging
 import re
@@ -31,6 +32,8 @@ from typing import Any
 from hegemony_step_sdk import (
     ConnectionCancellationRegistry,
     DeviceConnectionSpec,
+    HostKeyRejectedError,
+    HostKeyVerifier,
     TransportOutputSink,
 )
 
@@ -74,6 +77,53 @@ class _NullCancellationRegistry:
 
 
 _NULL_CANCELLATION = _NullCancellationRegistry()
+
+#: How long a refused connection may spend fetching the key the host presents,
+#: so the report names it. Best effort: the refusal stands either way.
+_PRESENTED_KEY_TIMEOUT_SECONDS = 5.0
+
+
+def _openssh_line(key: Any) -> str:
+    """``<type> <base64>`` of an asyncssh public key, without the comment."""
+    return " ".join(key.export_public_key("openssh").decode("ascii").split()[:2])
+
+
+def _import_host_keys(host: str, port: int, keys: tuple[str, ...]) -> list[Any]:
+    """The trusted keys of ``host:port``, imported for asyncssh."""
+    try:
+        return [asyncssh.import_public_key(line) for line in keys]
+    except (asyncssh.KeyImportError, ValueError) as exc:
+        raise ValueError(f"a trusted SSH host key of {host}:{port} cannot be read: {exc}") from exc
+
+
+def _known_hosts(
+    host: str, port: int, keys: tuple[str, ...] | None
+) -> tuple[list[Any], list[Any], list[Any]] | None:
+    """asyncssh's ``known_hosts`` for one hop: its trusted keys, or None for no check.
+
+    With a key list, asyncssh offers the host only those keys' algorithms and
+    fails the key exchange on any other key, before authentication starts.
+    """
+    if keys is None:
+        return None
+    return (_import_host_keys(host, port, keys), [], [])
+
+
+async def _presented_key(
+    host: str, port: int, *, tunnel: Any, timeout: float, algorithms: list[str] | None = None
+) -> str | None:
+    """The key ``host:port`` presents, fetched by a key exchange alone (no login)."""
+    key = await asyncio.wait_for(
+        asyncssh.get_server_host_key(
+            host,
+            port,
+            tunnel=tunnel if tunnel is not None else (),
+            server_host_key_algs=algorithms or (),
+        ),
+        timeout=timeout,
+    )
+    return _openssh_line(key) if key is not None else None
+
 
 # Common Cisco IOS-XE error patterns in command output (same vocabulary as the
 # netmiko transport, so handlers see identical error surfacing either way).
@@ -285,6 +335,10 @@ class ScrapliTransport:
     #: hosts that support them skip wheels without this attribute.
     supports_output_sink = True
 
+    #: Feature flag the host checks before passing ``host_key_verifier``, as
+    #: for the output sink.
+    supports_host_key_verifier = True
+
     def __init__(
         self,
         spec: DeviceConnectionSpec,
@@ -292,6 +346,7 @@ class ScrapliTransport:
         cancellation_registry: ConnectionCancellationRegistry | None = None,
         step_run_id: str | None = None,
         output_sink: TransportOutputSink | None = None,
+        host_key_verifier: HostKeyVerifier | None = None,
     ):
         """Initialize the scrapli transport from a resolved connection spec.
 
@@ -306,6 +361,10 @@ class ScrapliTransport:
                 straight to the sink. Only timing-mode commands stream
                 (driver ``send_command`` is prompt-based and yields no
                 partial output).
+            host_key_verifier: The host's SSH host-key trust. Each hop accepts
+                only the keys it names. Without one the transport refuses to
+                connect; it never connects unchecked on its own. A verifier that
+                answers None for a host (checks switched off) is the opt-out.
         """
         if AsyncScrapli is None:
             raise ImportError(
@@ -337,6 +396,7 @@ class ScrapliTransport:
         self.connect_timeout = spec.connect_timeout
         self.command_timeout = spec.command_timeout
         self.jump_host = spec.jump_host
+        self._host_key_verifier = host_key_verifier
 
     async def _stream_push(self, text: str) -> None:
         """Push a session chunk to the live-output sink (event loop)."""
@@ -389,18 +449,101 @@ class ScrapliTransport:
             params["timeout_transport"] = timeout_transport
         return params
 
+    async def _hop_keys(
+        self, host: str, port: int, *, tunnel: Any, timeout: float
+    ) -> tuple[str, ...] | None:
+        """The keys hop ``host:port`` may present; None connects without a check.
+
+        On first contact the key the host presents is fetched without logging
+        in and recorded through the verifier, so the login that follows
+        accepts only that key and no credential is sent before it is recorded.
+        Without a verifier the hop is refused before it is dialled.
+        """
+        verifier = self._host_key_verifier
+        if verifier is None:
+            raise HostKeyRejectedError(
+                f"refusing to connect to {host}:{port}: no SSH host-key verifier was given, "
+                "so the key the host presents cannot be checked"
+            )
+        keys = await verifier.trusted_keys(host, port)
+        if keys is None or keys:
+            return keys
+        presented = await _presented_key(host, port, tunnel=tunnel, timeout=timeout)
+        if presented is None:
+            raise HostKeyRejectedError(
+                f"{host}:{port} completed its key exchange without a host key, "
+                "so there is no key to trust"
+            )
+        await verifier.learn(host, port, presented)
+        return (presented,)
+
+    async def _refusal(
+        self,
+        exc: BaseException,
+        host: str,
+        port: int,
+        keys: tuple[str, ...] | None,
+        *,
+        tunnel: Any,
+    ) -> HostKeyRejectedError | None:
+        """The error to raise when ``exc`` is hop ``host:port`` failing its key check.
+
+        ``HostKeyNotVerifiable`` is a key of a trusted type that does not
+        match. A key exchange that found no common host-key algorithm is a
+        mismatch too when the host now presents a key of another type. The
+        presented key is fetched again (best effort) so the report names it.
+        scrapli's asyncssh transport lets both errors through unwrapped.
+        """
+        verifier = self._host_key_verifier
+        if verifier is None or keys is None:
+            return None
+        if isinstance(exc, asyncssh.HostKeyNotVerifiable):
+            algorithms = [
+                algorithm.decode("ascii")
+                for key in _import_host_keys(host, port, keys)
+                for algorithm in key.sig_algorithms
+            ]
+            presented = await self._presented_key_or_none(
+                host, port, tunnel=tunnel, algorithms=algorithms
+            )
+        elif isinstance(exc, asyncssh.KeyExchangeFailed):
+            presented = await self._presented_key_or_none(host, port, tunnel=tunnel)
+            if presented is None or presented in keys:
+                return None
+        else:
+            return None
+        return await verifier.rejected(host, port, presented)
+
+    @staticmethod
+    async def _presented_key_or_none(
+        host: str, port: int, *, tunnel: Any, algorithms: list[str] | None = None
+    ) -> str | None:
+        """The key ``host:port`` presents now, or None when it cannot be fetched."""
+        try:
+            return await _presented_key(
+                host,
+                port,
+                tunnel=tunnel,
+                timeout=_PRESENTED_KEY_TIMEOUT_SECONDS,
+                algorithms=algorithms,
+            )
+        except Exception:  # noqa: BLE001 - the report is best effort
+            logger.debug("could not fetch the SSH host key of %s:%d", host, port, exc_info=True)
+            return None
+
     async def _connect_jump(self):
         """SSH session #1 to the bastion (design-dind-sandbox.md §11.1).
 
         Only bastion credentials are presented here; the device session runs
-        tunneled with device credentials only. Host keys are not pinned —
-        same trust model as the device hop (inventory is the source of truth).
+        tunneled with device credentials only. The bastion's host key is
+        checked like the device's.
         """
         jump = self.jump_host
         assert jump is not None
         if asyncssh is None:  # pragma: no cover - scrapli[asyncssh] brings it
             raise ImportError("asyncssh is required for jump-host support")
         logger.info(f"Connecting to jump host {jump.host}:{jump.port} as {jump.username}")
+        keys = await self._hop_keys(jump.host, jump.port, tunnel=None, timeout=self.connect_timeout)
         # Only pass client_keys when the inventory actually supplied one.
         # asyncssh reads an explicit None as "do not attempt public-key auth"
         # and clears agent_path with it, so passing None would silently strip
@@ -410,15 +553,21 @@ class ScrapliTransport:
             if jump.private_key
             else {}
         )
-        return await asyncssh.connect(
-            jump.host,
-            port=jump.port,
-            username=jump.username or None,
-            password=jump.password or None,
-            **key_options,
-            known_hosts=None,
-            connect_timeout=self.connect_timeout,
-        )
+        try:
+            return await asyncssh.connect(
+                jump.host,
+                port=jump.port,
+                username=jump.username or None,
+                password=jump.password or None,
+                **key_options,
+                known_hosts=_known_hosts(jump.host, jump.port, keys),
+                connect_timeout=self.connect_timeout,
+            )
+        except Exception as exc:
+            refusal = await self._refusal(exc, jump.host, jump.port, keys, tunnel=None)
+            if refusal is None:
+                raise
+            raise refusal from exc
 
     async def _open_connection(self, *, timeout_transport: float | None = None):
         """Construct and open a scrapli connection (via the bastion when set)."""
@@ -432,19 +581,41 @@ class ScrapliTransport:
             # Charging connect_timeout to the bastion login and again to
             # timeout_socket lets a slow bastion double the caller's deadline.
             device_timeout = max(self.connect_timeout - (time.perf_counter() - started), 1.0)
+        try:
+            keys = await self._hop_keys(
+                self.host, self.port, tunnel=tunnel, timeout=device_timeout or self.connect_timeout
+            )
+            # scrapli's asyncssh transport merges transport_options["asyncssh"]
+            # straight into asyncssh.connect(), after its own known_hosts=None:
+            # the bastion session rides the device connection as its tunnel,
+            # and the trusted keys replace scrapli's unchecked default.
+            asyncssh_options: dict[str, Any] = {}
+            if tunnel is not None:
+                asyncssh_options["tunnel"] = tunnel
+            known_hosts = _known_hosts(self.host, self.port, keys)
+            if known_hosts is not None:
+                asyncssh_options["known_hosts"] = known_hosts
+        except BaseException:
+            if tunnel is not None:
+                with contextlib.suppress(Exception):
+                    tunnel.close()
+            raise
         params = self._get_connection_params(
             timeout_transport=timeout_transport, connect_timeout=device_timeout
         )
-        if tunnel is not None:
-            # scrapli's asyncssh transport merges transport_options["asyncssh"]
-            # straight into asyncssh.connect(), so the bastion session rides
-            # the device connection as its tunnel.
-            params["transport_options"] = {"asyncssh": {"tunnel": tunnel}}
+        if asyncssh_options:
+            params["transport_options"] = {"asyncssh": asyncssh_options}
         connection = AsyncScrapli(**params)
         logger.info(f"Connecting to {self.host}:{self.port} as {self.username}")
         connect_start = time.perf_counter()
         try:
-            await connection.open()
+            try:
+                await connection.open()
+            except Exception as exc:
+                refusal = await self._refusal(exc, self.host, self.port, keys, tunnel=tunnel)
+                if refusal is None:
+                    raise
+                raise refusal from exc
         except BaseException:
             if tunnel is not None:
                 with contextlib.suppress(Exception):

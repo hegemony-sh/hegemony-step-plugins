@@ -31,6 +31,7 @@ from hegemony_transport_netmiko.transport import (
     SSHTransport,
     _NullCancellationRegistry,
 )
+from tests.ssh_fakes import checks_off
 
 
 def test_register_registers_the_netmiko_transport():
@@ -91,6 +92,8 @@ def _make_transport() -> SSHTransport:
     t._cancellation_registry = _NullCancellationRegistry()
     t._output_sink = None
     t.streams_timing_output = False
+    t._host_key_verifier = checks_off()
+    t._loop = None
     return t
 
 
@@ -758,7 +761,7 @@ def _jump_transport(*, private_key: str = "") -> SSHTransport:
         ),
     )
     with patch.object(hegemony_transport_netmiko.transport, "ConnectHandler", MagicMock()):
-        return SSHTransport(spec)
+        return SSHTransport(spec, host_key_verifier=checks_off())
 
 
 def test_connect_device_tunnels_through_the_bastion_channel():

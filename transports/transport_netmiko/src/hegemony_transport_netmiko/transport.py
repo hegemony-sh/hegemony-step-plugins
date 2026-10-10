@@ -14,16 +14,21 @@ settings.
 import asyncio
 import contextlib
 import logging
+import os
 import re
 import socket
+import tempfile
 import time
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from functools import partial
-from typing import Any
+from typing import Any, TypeVar
 
 from hegemony_step_sdk import (
     ConnectionCancellationRegistry,
     DeviceConnectionSpec,
+    HostKeyRejectedError,
+    HostKeyVerifier,
     TransportOutputSink,
 )
 
@@ -48,6 +53,86 @@ except ImportError:
     paramiko: Any = None
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+#: How long the executor thread waits for the host's verifier, which runs on
+#: the event loop the transport was called from.
+_VERIFIER_TIMEOUT_SECONDS = 60.0
+
+
+def _known_hosts_name(host: str, port: int) -> str:
+    """The name paramiko looks a host's keys up under: ``[host]:port`` off port 22."""
+    return host if port == 22 else f"[{host}]:{port}"
+
+
+def _key_line(key: Any) -> str:
+    """``<type> <base64>`` of a paramiko public key."""
+    return f"{key.get_name()} {key.get_base64()}"
+
+
+def _paramiko_keys(host: str, port: int, keys: tuple[str, ...]) -> list[Any]:
+    """The trusted keys of ``host:port``, parsed by paramiko."""
+    parsed = []
+    for line in keys:
+        entry = paramiko.hostkeys.HostKeyEntry.from_line(f"{_known_hosts_name(host, port)} {line}")
+        if entry is None or entry.key is None:
+            raise ValueError(f"a trusted SSH host key of {host}:{port} cannot be read")
+        parsed.append(entry.key)
+    return parsed
+
+
+def _set_host_keys(client: Any, host: str, port: int, keys: tuple[str, ...] | None) -> None:
+    """Make a paramiko client accept only ``keys`` from ``host:port``; None accepts any."""
+    if keys is None:
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        return
+    host_keys = client.get_host_keys()
+    for key in _paramiko_keys(host, port, keys):
+        host_keys.add(_known_hosts_name(host, port), key.get_name(), key)
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+
+
+def _write_known_hosts(host: str, port: int, keys: tuple[str, ...]) -> str:
+    """A private known_hosts file holding ``keys`` for ``host:port``; returns its path.
+
+    netmiko builds its paramiko client itself and takes host keys only from a
+    file (``alt_key_file``).
+    """
+    _paramiko_keys(host, port, keys)  # a key paramiko would skip fails here, by name
+    fd, path = tempfile.mkstemp(prefix="hegemony-known-hosts-")
+    with os.fdopen(fd, "w", encoding="ascii") as handle:
+        handle.writelines(f"{_known_hosts_name(host, port)} {line}\n" for line in keys)
+    return path
+
+
+def _bad_host_key(exc: BaseException | None) -> Any | None:
+    """The paramiko ``BadHostKeyException`` behind ``exc``, if any.
+
+    netmiko re-raises paramiko's SSH errors as its own timeout error, so the
+    host-key failure is looked for along the exception chain.
+    """
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, paramiko.BadHostKeyException):
+            return exc
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
+def _presented_key(sock: Any, timeout: float) -> str:
+    """The key the host at the end of ``sock`` presents: a key exchange, no login."""
+    try:
+        transport = paramiko.Transport(sock)
+        try:
+            transport.start_client(timeout=timeout)
+            return _key_line(transport.get_remote_server_key())
+        finally:
+            transport.close()
+    finally:
+        with contextlib.suppress(Exception):
+            sock.close()
 
 
 class _NullCancellationRegistry:
@@ -309,6 +394,10 @@ class SSHTransport:
     #: hosts that support them skip wheels without this attribute.
     supports_output_sink = True
 
+    #: Feature flag the host checks before passing ``host_key_verifier``, as
+    #: for the output sink.
+    supports_host_key_verifier = True
+
     def __init__(
         self,
         spec: DeviceConnectionSpec,
@@ -316,6 +405,7 @@ class SSHTransport:
         cancellation_registry: ConnectionCancellationRegistry | None = None,
         step_run_id: str | None = None,
         output_sink: TransportOutputSink | None = None,
+        host_key_verifier: HostKeyVerifier | None = None,
     ):
         """Initialize the netmiko transport from a resolved connection spec.
 
@@ -330,6 +420,12 @@ class SSHTransport:
                 the sink's thread-safe entry point. Only timing-mode commands
                 stream (``send_command`` is prompt-based and yields no partial
                 output).
+            host_key_verifier: The host's SSH host-key trust. Each hop accepts
+                only the keys it names. Without one the transport refuses to
+                connect; it never connects unchecked on its own. A verifier that
+                answers None for a host (checks switched off) is the opt-out.
+                Netmiko runs in an executor thread, so the verifier is called
+                on the event loop the transport's async methods run on.
         """
         if ConnectHandler is None:
             raise ImportError(
@@ -360,6 +456,94 @@ class SSHTransport:
         self.connect_timeout = spec.connect_timeout
         self.command_timeout = spec.command_timeout
         self.jump_host = spec.jump_host
+        self._host_key_verifier = host_key_verifier
+        #: The event loop of the latest async call, for the verifier.
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    async def _run_in_thread(self, func: Callable[[], _T]) -> _T:
+        """Run blocking netmiko code in the default executor."""
+        loop = asyncio.get_running_loop()
+        self._loop = loop
+        return await loop.run_in_executor(None, func)
+
+    def _from_loop(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
+        """Run a verifier coroutine on the caller's event loop; wait in this thread.
+
+        The async methods record their loop before they hand the blocking work
+        to an executor thread. Called directly, outside them, the coroutine
+        runs on a loop of its own here.
+        """
+        loop = self._loop
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not None and (loop is None or loop is running):
+            # Waiting here would block the very loop the coroutine needs.
+            coroutine.close()
+            raise RuntimeError(
+                "the SSH host-key check cannot wait for the verifier on the event loop "
+                "it runs on; netmiko connects in an executor thread"
+            )
+        if loop is None or loop.is_closed():
+            return asyncio.run(coroutine)
+        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        try:
+            return future.result(timeout=_VERIFIER_TIMEOUT_SECONDS)
+        except BaseException:
+            future.cancel()
+            raise
+
+    def _hop_keys(
+        self, host: str, port: int, *, dial: Callable[[float], Any], timeout: float
+    ) -> tuple[str, ...] | None:
+        """The keys hop ``host:port`` may present; None connects without a check.
+
+        On first contact the key the host presents is fetched over a fresh
+        ``dial(timeout)`` stream without logging in, and recorded through the
+        verifier, so the login that follows accepts only that key and no
+        credential is sent before it is recorded. Without a verifier the hop is
+        refused before it is dialled.
+        """
+        verifier = self._host_key_verifier
+        if verifier is None:
+            raise HostKeyRejectedError(
+                f"refusing to connect to {host}:{port}: no SSH host-key verifier was given, "
+                "so the key the host presents cannot be checked"
+            )
+        keys = self._from_loop(verifier.trusted_keys(host, port))
+        if keys is None or keys:
+            return keys
+        presented = _presented_key(dial(timeout), timeout)
+        self._from_loop(verifier.learn(host, port, presented))
+        return (presented,)
+
+    def _refusal(
+        self, exc: BaseException, host: str, port: int, keys: tuple[str, ...] | None
+    ) -> HostKeyRejectedError | None:
+        """The error to raise when ``exc`` is hop ``host:port`` failing its key check.
+
+        paramiko compares the key the host presents with the trusted ones and
+        raises ``BadHostKeyException``, which carries the presented key.
+        """
+        verifier = self._host_key_verifier
+        if verifier is None or keys is None:
+            return None
+        bad = _bad_host_key(exc)
+        if bad is None:
+            return None
+        return self._from_loop(verifier.rejected(host, port, _key_line(bad.key)))
+
+    def _dial_device(self, bastion: Any, timeout: float) -> Any:
+        """A fresh stream to the device: a socket, or a channel of the bastion."""
+        if bastion is None:
+            return socket.create_connection((self.host, self.port), timeout=timeout)
+        transport = bastion.get_transport()
+        if transport is None:
+            raise OSError("bastion SSH transport unavailable")
+        return transport.open_channel(
+            "direct-tcpip", (self.host, self.port), ("127.0.0.1", 0), timeout=timeout
+        )
 
     def _stream_from_thread(self, text: Any) -> None:
         """Push a session chunk to the live-output sink (executor thread)."""
@@ -398,16 +582,21 @@ class SSHTransport:
 
         Only bastion credentials are presented here (design-dind-sandbox.md
         §11.1); the device session runs inside the returned channel with device
-        credentials only. Host keys are not pinned — same trust model as the
-        device hop (inventory is the source of truth).
+        credentials only. The bastion's host key is checked like the device's.
         """
         jump = self.jump_host
         assert jump is not None
         if paramiko is None:  # pragma: no cover - netmiko always brings paramiko
             raise ImportError("paramiko is required for jump-host support")
         logger.info(f"Connecting to jump host {jump.host}:{jump.port} as {jump.username}")
+        keys = self._hop_keys(
+            jump.host,
+            jump.port,
+            dial=lambda timeout: socket.create_connection((jump.host, jump.port), timeout=timeout),
+            timeout=self.connect_timeout,
+        )
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        _set_host_keys(client, jump.host, jump.port, keys)
         started = time.perf_counter()
         # When the inventory supplies a key, present exactly that one and
         # nothing else — an agent or an on-disk key silently substituting for
@@ -418,16 +607,22 @@ class SSHTransport:
         # be reached at all from this transport.
         explicit_key = self._load_jump_private_key(jump.private_key) if jump.private_key else None
         try:
-            client.connect(
-                jump.host,
-                port=jump.port,
-                username=jump.username or None,
-                password=jump.password or None,
-                pkey=explicit_key,
-                allow_agent=explicit_key is None,
-                look_for_keys=explicit_key is None,
-                timeout=self.connect_timeout,
-            )
+            try:
+                client.connect(
+                    jump.host,
+                    port=jump.port,
+                    username=jump.username or None,
+                    password=jump.password or None,
+                    pkey=explicit_key,
+                    allow_agent=explicit_key is None,
+                    look_for_keys=explicit_key is None,
+                    timeout=self.connect_timeout,
+                )
+            except Exception as exc:
+                refusal = self._refusal(exc, jump.host, jump.port, keys)
+                if refusal is None:
+                    raise
+                raise refusal from exc
             transport = client.get_transport()
             if transport is None:
                 raise OSError("bastion SSH transport unavailable")
@@ -467,16 +662,43 @@ class SSHTransport:
         device_timeout = None
         if self.jump_host is not None:
             bastion, channel, device_timeout = self._open_jump_channel()
-        params = self._get_connection_params(connect_timeout=device_timeout)
-        if bastion is not None:
-            params["sock"] = channel
+        known_hosts_file = None
         try:
-            connection = ConnectHandler(**params)
+            keys = self._hop_keys(
+                self.host,
+                self.port,
+                dial=partial(self._dial_device, bastion),
+                timeout=self.connect_timeout if device_timeout is None else device_timeout,
+            )
+            params = self._get_connection_params(connect_timeout=device_timeout)
+            if bastion is not None:
+                params["sock"] = channel
+            if keys is not None:
+                # Only the trusted keys, from a file of their own: no system or
+                # user known_hosts, and an unknown key is refused, not added.
+                known_hosts_file = _write_known_hosts(self.host, self.port, keys)
+                params.update(
+                    ssh_strict=True,
+                    system_host_keys=False,
+                    alt_host_keys=True,
+                    alt_key_file=known_hosts_file,
+                )
+            try:
+                connection = ConnectHandler(**params)
+            except Exception as exc:
+                refusal = self._refusal(exc, self.host, self.port, keys)
+                if refusal is None:
+                    raise
+                raise refusal from exc
         except BaseException:
             if bastion is not None:
                 with contextlib.suppress(Exception):
                     bastion.close()
             raise
+        finally:
+            if known_hosts_file is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(known_hosts_file)
         if bastion is not None:
             setattr(connection, _JUMP_CLIENT_ATTR, bastion)
         return connection
@@ -881,9 +1103,7 @@ class SSHTransport:
         Returns:
             Dict with: transferred, verified, exists, elapsed_ms
         """
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
+        result = await self._run_in_thread(
             partial(
                 self._scp_put_sync,
                 local_path=local_path,
@@ -1091,9 +1311,7 @@ class SSHTransport:
         Returns:
             Dict with: transferred, output, elapsed_ms
         """
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
+        result = await self._run_in_thread(
             partial(
                 self._http_transfer_sync,
                 url=url,
@@ -1368,9 +1586,7 @@ class SSHTransport:
         Returns:
             SSHResult with combined output
         """
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
+        result = await self._run_in_thread(
             partial(
                 self._execute_command_timing_sync,
                 command,
@@ -1422,9 +1638,5 @@ class SSHTransport:
             return []
 
         # Run blocking Netmiko code in thread pool
-        loop = asyncio.get_event_loop()
-        results = await loop.run_in_executor(
-            None,
-            partial(self._execute_commands_sync, commands),
-        )
+        results = await self._run_in_thread(partial(self._execute_commands_sync, commands))
         return results

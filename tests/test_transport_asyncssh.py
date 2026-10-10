@@ -29,6 +29,7 @@ from hegemony_transport_asyncssh.transport import (
     AsyncSSHTransport,
     _NullCancellationRegistry,
 )
+from tests.ssh_fakes import checks_off
 
 
 def test_register_registers_the_asyncssh_transport():
@@ -66,7 +67,7 @@ def test_construct_requires_username():
 
 def _make_transport() -> AsyncSSHTransport:
     spec = DeviceConnectionSpec(host="192.0.2.10", username="ops", password="pw", platform="linux")
-    return AsyncSSHTransport(spec)
+    return AsyncSSHTransport(spec, host_key_verifier=checks_off())
 
 
 def _completed(stdout: str = "", stderr: str = "", exit_status: int = 0) -> SimpleNamespace:
@@ -412,7 +413,7 @@ def _jump_spec() -> DeviceConnectionSpec:
 
 async def test_jump_host_tunnels_the_device_session():
     """ProxyJump: session #1 to the bastion, session #2 tunneled through it."""
-    transport = AsyncSSHTransport(_jump_spec())
+    transport = AsyncSSHTransport(_jump_spec(), host_key_verifier=checks_off())
     bastion = _connection()
     device = _connection()
     device.run.return_value = _completed(stdout="ok\n")
@@ -464,7 +465,7 @@ async def test_no_jump_host_passes_the_no_tunnel_sentinel():
 
 
 async def test_device_connect_failure_closes_the_bastion_session():
-    transport = AsyncSSHTransport(_jump_spec())
+    transport = AsyncSSHTransport(_jump_spec(), host_key_verifier=checks_off())
     bastion = _connection()
     connect = AsyncMock(side_effect=[bastion, OSError("connection refused")])
 
@@ -483,7 +484,7 @@ async def test_jump_host_private_key_is_used_for_the_bastion():
         platform="linux",
         jump_host=JumpHostSpec(host="dind", username="jump", private_key="PEM"),
     )
-    transport = AsyncSSHTransport(spec)
+    transport = AsyncSSHTransport(spec, host_key_verifier=checks_off())
     bastion = _connection()
     device = _connection()
     device.run.return_value = _completed(stdout="ok\n")
@@ -508,7 +509,7 @@ async def test_password_only_bastion_does_not_pin_client_keys_to_none():
     # carries no private_key would therefore strip agent and default-key auth
     # from the bastion hop while the device hop below keeps both — so the
     # argument must be *absent*, not None.
-    transport = AsyncSSHTransport(_jump_spec())
+    transport = AsyncSSHTransport(_jump_spec(), host_key_verifier=checks_off())
     bastion = _connection()
     device = _connection()
     device.run.return_value = _completed(stdout="ok\n")
