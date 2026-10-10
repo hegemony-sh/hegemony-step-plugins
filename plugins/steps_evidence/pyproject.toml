@@ -4,14 +4,14 @@
 
 [project]
 name = "hegemony-steps-evidence"
-version = "0.27.0"
+version = "0.27.1"
 description = "Evidence assertion and comparison step handlers for Hegemony"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.27.0",
+    "hegemony-step-sdk==0.27.1",
     "httpx>=0.27.0",
 ]
 

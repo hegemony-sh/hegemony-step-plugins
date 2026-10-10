@@ -1,3 +1,9 @@
+## [0.27.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.27.0...v0.27.1) (2026-10-10)
+
+### Bug Fixes
+
+* **container:** let any image user write the files to harvest ([6fece30](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6fece301e2e054095bd322cbd3609b9ca7046eb8))
+
 ## [0.27.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.26.2...v0.27.0) (2026-10-09)
 
 ### Features
