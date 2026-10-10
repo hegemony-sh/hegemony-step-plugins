@@ -1,3 +1,9 @@
+## [0.28.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.28.0...v0.28.1) (2026-10-10)
+
+### Bug Fixes
+
+* **images:** raise golang.org/x/net to v0.60.0 in the OpenTofu runner ([e82c6a3](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e82c6a3b17415e73b994bf1302b19b7f326c8164))
+
 ## [0.28.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.27.1...v0.28.0) (2026-10-10)
 
 ### Features
