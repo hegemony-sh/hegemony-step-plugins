@@ -50,7 +50,7 @@ ARG OPENTOFU_VERSION=1.12.6
 ARG OPENTOFU_COMMIT=b4305e5a5dd2fb79a27897ae30784a181d3a26cb
 # First fixed versions of the modules the scan flags (THIRD-PARTY-NOTICES.md);
 # the modules they need move with them.
-ARG GO_MODULE_RAISES="go.opentelemetry.io/otel/sdk@v1.44.0 golang.org/x/crypto@v0.55.0 golang.org/x/mod@v0.40.0 golang.org/x/net@v0.58.0 golang.org/x/text@v0.41.0 google.golang.org/grpc@v1.83.2 oras.land/oras-go/v2@v2.6.2"
+ARG GO_MODULE_RAISES="go.opentelemetry.io/otel/sdk@v1.44.0 golang.org/x/crypto@v0.57.0 golang.org/x/mod@v0.41.0 golang.org/x/net@v0.60.0 golang.org/x/text@v0.42.0 google.golang.org/grpc@v1.83.2 oras.land/oras-go/v2@v2.6.2"
 
 RUN git clone --quiet --depth 1 --branch "v${OPENTOFU_VERSION}" \
         https://github.com/opentofu/opentofu.git /src \
