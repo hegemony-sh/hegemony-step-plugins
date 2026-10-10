@@ -242,7 +242,9 @@ class AsyncSSHTransport:
                 commands whose text may carry credentials (config pushes), and
                 streaming would require per-command markers that echo them.
             host_key_verifier: The host's SSH host-key trust. Each hop accepts
-                only the keys it names; None connects without a host-key check.
+                only the keys it names. Without one the transport refuses to
+                connect; it never connects unchecked on its own. A verifier that
+                answers None for a host (checks switched off) is the opt-out.
         """
         if asyncssh is None:
             raise ImportError(
@@ -300,10 +302,14 @@ class AsyncSSHTransport:
         On first contact the key the host presents is fetched without logging
         in and recorded through the verifier, so the login that follows
         accepts only that key and no credential is sent before it is recorded.
+        Without a verifier the hop is refused before it is dialled.
         """
         verifier = self._host_key_verifier
         if verifier is None:
-            return None
+            raise HostKeyRejectedError(
+                f"refusing to connect to {host}:{port}: no SSH host-key verifier was given, "
+                "so the key the host presents cannot be checked"
+            )
         keys = await verifier.trusted_keys(host, port)
         if keys is None or keys:
             return keys

@@ -23,6 +23,7 @@ from uuid import uuid4
 from scrapli.exceptions import ScrapliTimeout
 
 from hegemony_step_sdk import DeviceConnectionSpec, HandlerContext, HandlerServices
+from tests.ssh_fakes import checks_off
 
 
 class _FakeSink:
@@ -90,7 +91,7 @@ async def test_scrapli_timing_streams_marker_and_chunks():
     from hegemony_transport_scrapli.transport import ScrapliTransport
 
     sink = _FakeSink()
-    transport = ScrapliTransport(_SPEC, output_sink=sink)
+    transport = ScrapliTransport(_SPEC, output_sink=sink, host_key_verifier=checks_off())
     connection = _scrapli_connection()
     connection.channel.read = AsyncMock(
         side_effect=[b"copying...", ScrapliTimeout("quiet"), b"1234 bytes copied"]
@@ -110,7 +111,7 @@ async def test_scrapli_broken_sink_never_fails_the_command():
     import hegemony_transport_scrapli.transport as transport_module
     from hegemony_transport_scrapli.transport import ScrapliTransport
 
-    transport = ScrapliTransport(_SPEC, output_sink=_BrokenSink())
+    transport = ScrapliTransport(_SPEC, output_sink=_BrokenSink(), host_key_verifier=checks_off())
     connection = _scrapli_connection()
     connection.channel.read = AsyncMock(
         side_effect=[b"done", ScrapliTimeout("q1"), ScrapliTimeout("q2"), ScrapliTimeout("q3")]
@@ -212,7 +213,7 @@ async def test_netmiko_timing_streams_via_thread_marshalling():
         patch.object(transport_module, "ConnectHandler", return_value=connection),
         patch.object(transport_module, "_safe_disconnect"),
     ):
-        transport = SSHTransport(_SPEC, output_sink=sink)
+        transport = SSHTransport(_SPEC, output_sink=sink, host_key_verifier=checks_off())
         result = await transport.execute_command_timing("install add file x", read_timeout=30.0)
 
     assert result.exit_code == 0
@@ -233,7 +234,7 @@ async def test_netmiko_broken_sink_never_fails_the_command():
         patch.object(transport_module, "ConnectHandler", return_value=connection),
         patch.object(transport_module, "_safe_disconnect"),
     ):
-        transport = SSHTransport(_SPEC, output_sink=_BrokenSink())
+        transport = SSHTransport(_SPEC, output_sink=_BrokenSink(), host_key_verifier=checks_off())
         result = await transport.execute_command_timing("show version", read_timeout=30.0)
 
     assert result.exit_code == 0

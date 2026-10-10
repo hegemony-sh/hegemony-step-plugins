@@ -139,6 +139,7 @@ class HostKeyVerifier(Protocol):
     (the jump host first, then the device) it asks :meth:`trusted_keys` and
     connects accepting only those keys, so a host presenting any other key
     fails during the key exchange, before a password or private key is sent.
+    Such a transport refuses to connect when it is given no verifier.
 
     Keys are OpenSSH public key lines: ``<type> <base64>``, no comment.
     ``host`` and ``port`` are the hop's endpoint as the spec names it.

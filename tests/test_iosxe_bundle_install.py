@@ -27,6 +27,7 @@ from hegemony_steps_cisco_iosxe.upgrade.cisco.iosxe_common import (
 )
 from hegemony_steps_cisco_iosxe.upgrade.cisco.iosxe_install import IOSXEInstallDriver
 from tests.iosxe_fakes import UNREACHABLE, Result, ScriptedTransport
+from tests.ssh_fakes import checks_off
 
 INVALID = "                 ^\n% Invalid input detected at '^' marker.\n"
 OLD = "bootflash:isr4300-universalk9.16.09.04.SPA.bin"
@@ -143,7 +144,7 @@ def _netmiko(device: EmulatedIOS):
 
 def _transport():
     spec = DeviceConnectionSpec(host="192.0.2.10", username="admin", password="pw")
-    return netmiko_transport.SSHTransport(spec)
+    return netmiko_transport.SSHTransport(spec, host_key_verifier=checks_off())
 
 
 async def test_bundle_install_against_the_emulator():

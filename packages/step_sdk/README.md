@@ -92,7 +92,8 @@ A device transport that checks SSH host keys sets
 no check, an empty tuple means first contact (fetch the key without logging
 in, then `learn` it). A host that presents another key is reported with
 `rejected(...)`, and the transport raises the `HostKeyRejectedError` it
-returns.
+returns. Without a verifier such a transport refuses to connect; only a
+verifier that answers None (checks switched off) lets it connect unchecked.
 
 The step's own `key=value` tags arrive as `ctx.tags` (`env=prod`,
 `risk=high`, `phase=VERIFY` ...), so a handler can vary its behaviour per

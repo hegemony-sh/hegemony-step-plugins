@@ -12,6 +12,7 @@ hops are covered: a device dialled directly, and a device behind a jump host.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -204,12 +205,24 @@ async def test_checks_switched_off_connect_unchecked(servers, make):
     assert verifier.keys == {}
 
 
-async def test_without_a_verifier_any_key_is_accepted(servers, make):
+async def test_without_a_verifier_the_transport_refuses_to_connect(servers, make):
     port = await servers.device(_ed25519())
 
     result = await _run(make(port, None))
 
-    assert result.exit_code == 0, result.error
+    assert result.exit_code != 0
+    assert f"refusing to connect to {HOST}:{port}: no SSH host-key verifier" in (result.error or "")
+    assert servers.seen.connections == []
+
+
+async def test_without_a_verifier_the_jump_host_is_not_dialled_either(servers, make):
+    jump_port = await servers.bastion(_ed25519())
+    port = await servers.device(_ed25519())
+
+    result = await _run(make(port, None, jump_port=jump_port))
+
+    assert f"refusing to connect to {HOST}:{jump_port}" in (result.error or "")
+    assert servers.seen.connections == []
 
 
 # --- a device behind a jump host ---------------------------------------------------------
@@ -303,12 +316,28 @@ async def test_netmiko_removes_its_known_hosts_file(servers, monkeypatch):
     assert not os.path.exists(written[0])
 
 
-def test_netmiko_refuses_to_check_keys_outside_its_async_methods():
-    # The blocking connect asks the verifier on the event loop the async
-    # methods captured; called directly there is none, and it fails closed.
+def _netmiko_with(verifier: FakeVerifier) -> Any:
     transport_class, platform = TRANSPORTS["netmiko"]
     spec = DeviceConnectionSpec(host=HOST, port=22, username=USERNAME, platform=platform)
-    transport = transport_class(spec, host_key_verifier=FakeVerifier())
+    return transport_class(spec, host_key_verifier=verifier)
 
-    with pytest.raises(RuntimeError, match="needs the event loop"):
-        transport._connect_device()
+
+def test_netmiko_runs_the_verifier_on_a_loop_of_its_own_outside_its_async_methods():
+    # Called directly (no async method recorded a loop), the blocking side
+    # still asks the verifier.
+    verifier = FakeVerifier()
+    verifier.trust(HOST, 22, _ed25519())
+
+    keys = _netmiko_with(verifier)._from_loop(verifier.trusted_keys(HOST, 22))
+
+    assert keys == tuple(verifier.keys[(HOST, 22)])
+
+
+async def test_netmiko_refuses_to_wait_for_the_verifier_on_its_own_loop():
+    # Waiting in the loop's own thread would block the loop the verifier needs.
+    verifier = FakeVerifier()
+    transport = _netmiko_with(verifier)
+    transport._loop = asyncio.get_running_loop()
+
+    with pytest.raises(RuntimeError, match="cannot wait for the verifier"):
+        transport._from_loop(verifier.trusted_keys(HOST, 22))

@@ -421,7 +421,9 @@ class SSHTransport:
                 stream (``send_command`` is prompt-based and yields no partial
                 output).
             host_key_verifier: The host's SSH host-key trust. Each hop accepts
-                only the keys it names; None connects without a host-key check.
+                only the keys it names. Without one the transport refuses to
+                connect; it never connects unchecked on its own. A verifier that
+                answers None for a host (checks switched off) is the opt-out.
                 Netmiko runs in an executor thread, so the verifier is called
                 on the event loop the transport's async methods run on.
         """
@@ -465,18 +467,26 @@ class SSHTransport:
         return await loop.run_in_executor(None, func)
 
     def _from_loop(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
-        """Run a verifier coroutine on the caller's event loop; wait in this thread."""
+        """Run a verifier coroutine on the caller's event loop; wait in this thread.
+
+        The async methods record their loop before they hand the blocking work
+        to an executor thread. Called directly, outside them, the coroutine
+        runs on a loop of its own here.
+        """
         loop = self._loop
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
-        if loop is None or loop is running or loop.is_closed():
+        if running is not None and (loop is None or loop is running):
+            # Waiting here would block the very loop the coroutine needs.
             coroutine.close()
             raise RuntimeError(
-                "the SSH host-key check needs the event loop the transport was called "
-                "from, and connections open in an executor thread"
+                "the SSH host-key check cannot wait for the verifier on the event loop "
+                "it runs on; netmiko connects in an executor thread"
             )
+        if loop is None or loop.is_closed():
+            return asyncio.run(coroutine)
         future = asyncio.run_coroutine_threadsafe(coroutine, loop)
         try:
             return future.result(timeout=_VERIFIER_TIMEOUT_SECONDS)
@@ -492,11 +502,15 @@ class SSHTransport:
         On first contact the key the host presents is fetched over a fresh
         ``dial(timeout)`` stream without logging in, and recorded through the
         verifier, so the login that follows accepts only that key and no
-        credential is sent before it is recorded.
+        credential is sent before it is recorded. Without a verifier the hop is
+        refused before it is dialled.
         """
         verifier = self._host_key_verifier
         if verifier is None:
-            return None
+            raise HostKeyRejectedError(
+                f"refusing to connect to {host}:{port}: no SSH host-key verifier was given, "
+                "so the key the host presents cannot be checked"
+            )
         keys = self._from_loop(verifier.trusted_keys(host, port))
         if keys is None or keys:
             return keys

@@ -79,6 +79,15 @@ class FakeVerifier:
         return HostKeyRejectedError(f"The SSH host key of {host}:{port} does not match")
 
 
+def checks_off() -> FakeVerifier:
+    """A verifier for an organization that switched checks off: every key is accepted.
+
+    The transports refuse to connect without a verifier, so tests that are not
+    about host keys pass this one.
+    """
+    return FakeVerifier(mode="off")
+
+
 class _Device(asyncssh.SSHServer):
     """Accepts one password; records every login attempt and connection."""
 

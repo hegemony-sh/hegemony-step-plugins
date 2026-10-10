@@ -34,5 +34,7 @@ trusts for it. A host that presents another key fails the connection during
 the key exchange, before a password or private key is sent, and the
 transport reports the key it saw to the verifier. On first contact the
 transport fetches the host's key without logging in, has the verifier record
-it, and then logs in accepting only that key. Without a verifier, any host
-key is accepted, as before.
+it, and then logs in accepting only that key. Without a verifier the
+transport refuses to connect: it never connects without checking. Checks
+switched off for a host (the verifier answers None) are the only way to
+connect unchecked.

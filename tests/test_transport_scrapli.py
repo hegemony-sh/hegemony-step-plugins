@@ -28,6 +28,7 @@ from hegemony_transport_scrapli.transport import (
     ScrapliTransport,
     _NullCancellationRegistry,
 )
+from tests.ssh_fakes import checks_off
 
 
 def test_register_registers_the_scrapli_transport():
@@ -76,7 +77,7 @@ def test_construct_requires_username():
 
 def _make_transport() -> ScrapliTransport:
     spec = DeviceConnectionSpec(host="10.0.0.1", username="admin", password="pw")
-    return ScrapliTransport(spec)
+    return ScrapliTransport(spec, host_key_verifier=checks_off())
 
 
 def _response(result: str = "", failed: bool = False, elapsed: float = 0.01) -> MagicMock:
@@ -684,7 +685,7 @@ def _jump_transport() -> ScrapliTransport:
         platform="ios-xe",
         jump_host=JumpHostSpec(host="dind", port=2222, username="jump", password="bastion-pw"),
     )
-    return ScrapliTransport(spec)
+    return ScrapliTransport(spec, host_key_verifier=checks_off())
 
 
 async def test_open_connection_rides_the_bastion_tunnel():
