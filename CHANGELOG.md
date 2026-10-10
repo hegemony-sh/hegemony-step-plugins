@@ -1,3 +1,11 @@
+## [0.28.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.27.1...v0.28.0) (2026-10-10)
+
+### Features
+
+* **sdk:** add HostKeyVerifier, the host's SSH host-key trust for transports ([35caf80](https://github.com/hegemony-sh/hegemony-step-plugins/commit/35caf80af9c8584a3125bfb6dd99030dbe75d353))
+* **transports:** check SSH host keys on both hops through the host's verifier ([fac188c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/fac188c2d5dd4a64d3c0acb6941370739fa99ef4))
+* **transports:** refuse to connect without a host-key verifier ([0ff376b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0ff376bd5a8e1d09bb8f5f33017d5b95df5fa52c))
+
 ## [0.27.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.27.0...v0.27.1) (2026-10-10)
 
 ### Bug Fixes
