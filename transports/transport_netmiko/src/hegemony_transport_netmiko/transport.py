@@ -13,6 +13,7 @@ settings.
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import os
 import re
@@ -29,6 +30,8 @@ from hegemony_step_sdk import (
     DeviceConnectionSpec,
     HostKeyRejectedError,
     HostKeyVerifier,
+    SshAlgorithmRecorder,
+    SshAlgorithms,
     TransportOutputSink,
 )
 
@@ -47,7 +50,8 @@ except ImportError:
     ReadTimeout: type[Exception] = TimeoutError
 
 try:
-    # Netmiko's own SSH library; used only for the optional jump-host hop.
+    # Netmiko's own SSH library: the jump-host hop, the host-key checks and
+    # the record of what each hop agreed on.
     import paramiko
 except ImportError:
     paramiko: Any = None
@@ -133,6 +137,82 @@ def _presented_key(sock: Any, timeout: float) -> str:
     finally:
         with contextlib.suppress(Exception):
             sock.close()
+
+
+if paramiko is not None:
+
+    class _KexinitKeepingTransport(paramiko.Transport):
+        """A paramiko transport that keeps both KEXINIT messages of its first key exchange.
+
+        paramiko keeps no record of the key exchange it agreed on, and clears
+        both messages once the new keys are in use; the agreement follows from
+        them (:meth:`SshAlgorithms.from_kexinit`). paramiko sets them as plain
+        attributes, so these properties see each assignment.
+        """
+
+        client_kexinit = b""
+        server_kexinit = b""
+
+        @property
+        def local_kex_init(self) -> bytes | None:
+            return self.__dict__.get("_local_kex_init")
+
+        @local_kex_init.setter
+        def local_kex_init(self, message: bytes | None) -> None:
+            self.__dict__["_local_kex_init"] = message
+            if message is not None and not self.client_kexinit:
+                self.client_kexinit = message
+
+        @property
+        def remote_kex_init(self) -> bytes | None:
+            return self.__dict__.get("_remote_kex_init")
+
+        @remote_kex_init.setter
+        def remote_kex_init(self, message: bytes | None) -> None:
+            self.__dict__["_remote_kex_init"] = message
+            if message is not None and not self.server_kexinit:
+                self.server_kexinit = message
+
+    #: Passed to ``SSHClient.connect`` so the transport keeps both KEXINIT
+    #: messages. ``transport_factory`` arrived in paramiko 3.2; an older one
+    #: connects as before and no algorithms are recorded.
+    _KEEP_KEXINIT: dict[str, Any] = (
+        {"transport_factory": _KexinitKeepingTransport}
+        if "transport_factory" in inspect.signature(paramiko.SSHClient.connect).parameters
+        else {}
+    )
+
+
+def _keep_kexinit(connection: Any) -> None:
+    """Have netmiko ``connection``, not yet open, keep both KEXINIT messages.
+
+    netmiko builds its paramiko client in ``_build_ssh_client`` and connects
+    it straight after; the client built here connects through a
+    :class:`_KexinitKeepingTransport`. A netmiko without that method connects
+    as before, and no algorithms are recorded.
+    """
+    build = getattr(connection, "_build_ssh_client", None)
+    if build is None:
+        return
+
+    def build_keeping_kexinit() -> Any:
+        client = build()
+        client.connect = partial(client.connect, **_KEEP_KEXINIT)
+        return client
+
+    connection._build_ssh_client = build_keeping_kexinit
+
+
+def _agreed_algorithms(client: Any) -> SshAlgorithms | None:
+    """What the key exchange of a paramiko client agreed on, if its transport kept it."""
+    transport = client.get_transport() if client is not None else None
+    client_kexinit = getattr(transport, "client_kexinit", b"")
+    server_kexinit = getattr(transport, "server_kexinit", b"")
+    if not isinstance(client_kexinit, bytes) or not isinstance(server_kexinit, bytes):
+        return None
+    if not client_kexinit or not server_kexinit:
+        return None
+    return SshAlgorithms.from_kexinit(client_kexinit, server_kexinit)
 
 
 class _NullCancellationRegistry:
@@ -398,6 +478,9 @@ class SSHTransport:
     #: for the output sink.
     supports_host_key_verifier = True
 
+    #: Feature flag the host checks before passing ``ssh_algorithm_recorder``.
+    supports_ssh_algorithm_recorder = True
+
     def __init__(
         self,
         spec: DeviceConnectionSpec,
@@ -406,6 +489,7 @@ class SSHTransport:
         step_run_id: str | None = None,
         output_sink: TransportOutputSink | None = None,
         host_key_verifier: HostKeyVerifier | None = None,
+        ssh_algorithm_recorder: SshAlgorithmRecorder | None = None,
     ):
         """Initialize the netmiko transport from a resolved connection spec.
 
@@ -426,6 +510,9 @@ class SSHTransport:
                 answers None for a host (checks switched off) is the opt-out.
                 Netmiko runs in an executor thread, so the verifier is called
                 on the event loop the transport's async methods run on.
+            ssh_algorithm_recorder: The host's record of what each hop's key
+                exchange agreed on, told once the hop is logged in. Called
+                from the executor thread netmiko runs in.
         """
         if ConnectHandler is None:
             raise ImportError(
@@ -457,6 +544,7 @@ class SSHTransport:
         self.command_timeout = spec.command_timeout
         self.jump_host = spec.jump_host
         self._host_key_verifier = host_key_verifier
+        self._ssh_algorithm_recorder = ssh_algorithm_recorder
         #: The event loop of the latest async call, for the verifier.
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -533,6 +621,18 @@ class SSHTransport:
         if bad is None:
             return None
         return self._from_loop(verifier.rejected(host, port, _key_line(bad.key)))
+
+    def _record_algorithms(self, client: Any, host: str, port: int) -> None:
+        """Tell the host what hop ``host:port`` agreed on; never fails the connection."""
+        recorder = self._ssh_algorithm_recorder
+        if recorder is None:
+            return
+        try:
+            algorithms = _agreed_algorithms(client)
+            if algorithms is not None:
+                recorder.record(host, port, algorithms)
+        except Exception:  # noqa: BLE001 - the record is evidence, not a condition
+            logger.debug("could not record the SSH algorithms of %s:%s", host, port, exc_info=True)
 
     def _dial_device(self, bastion: Any, timeout: float) -> Any:
         """A fresh stream to the device: a socket, or a channel of the bastion."""
@@ -617,12 +717,14 @@ class SSHTransport:
                     allow_agent=explicit_key is None,
                     look_for_keys=explicit_key is None,
                     timeout=self.connect_timeout,
+                    **_KEEP_KEXINIT,
                 )
             except Exception as exc:
                 refusal = self._refusal(exc, jump.host, jump.port, keys)
                 if refusal is None:
                     raise
                 raise refusal from exc
+            self._record_algorithms(client, jump.host, jump.port)
             transport = client.get_transport()
             if transport is None:
                 raise OSError("bastion SSH transport unavailable")
@@ -684,7 +786,11 @@ class SSHTransport:
                     alt_key_file=known_hosts_file,
                 )
             try:
-                connection = ConnectHandler(**params)
+                # Opened in two steps, so the paramiko client netmiko builds
+                # keeps what the key exchange agreed on.
+                connection: Any = ConnectHandler(**params, auto_connect=False)
+                _keep_kexinit(connection)
+                connection._open()
             except Exception as exc:
                 refusal = self._refusal(exc, self.host, self.port, keys)
                 if refusal is None:
@@ -701,6 +807,7 @@ class SSHTransport:
                     os.unlink(known_hosts_file)
         if bastion is not None:
             setattr(connection, _JUMP_CLIENT_ATTR, bastion)
+        self._record_algorithms(getattr(connection, "remote_conn_pre", None), self.host, self.port)
         return connection
 
     def _get_connection_params(self, *, connect_timeout: float | None = None) -> dict[str, Any]:

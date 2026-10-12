@@ -95,6 +95,15 @@ in, then `learn` it). A host that presents another key is reported with
 returns. Without a verifier such a transport refuses to connect; only a
 verifier that answers None (checks switched off) lets it connect unchecked.
 
+A device transport that reports what each SSH hop agreed on sets
+`supports_ssh_algorithm_recorder = True` and takes an
+`ssh_algorithm_recorder` (`SshAlgorithmRecorder`). Once a hop is logged in,
+the jump host first, it calls `record(host, port, algorithms)` with the
+`SshAlgorithms` (key exchange, host key, cipher and MAC) the hop agreed on.
+`SshAlgorithms.from_kexinit` works them out from the two sides' KEXINIT
+messages by the rule both sides follow (RFC 4253 §7.1), so a transport only
+has to keep those messages. A failure to record never fails the connection.
+
 The step's own `key=value` tags arrive as `ctx.tags` (`env=prod`,
 `risk=high`, `phase=VERIFY` ...), so a handler can vary its behaviour per
 tag. `phase` and `kind` are ordinary keys of that map, nothing more:

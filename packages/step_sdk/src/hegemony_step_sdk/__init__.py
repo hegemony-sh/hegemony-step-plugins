@@ -66,6 +66,8 @@ from .transports import (
     HostKeyRejectedError,
     HostKeyVerifier,
     JumpHostSpec,
+    SshAlgorithmRecorder,
+    SshAlgorithms,
     TransportOutputSink,
     TransportRegistry,
 )
@@ -111,6 +113,8 @@ __all__ = [
     "ProbeResult",
     "SecretWriteResult",
     "ShellResult",
+    "SshAlgorithmRecorder",
+    "SshAlgorithms",
     "ShellTransport",
     "StateBackendAccess",
     "StepHandlerRegistry",
