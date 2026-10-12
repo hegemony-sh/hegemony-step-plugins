@@ -15,6 +15,7 @@ members = [
     "hegemony-steps-general",
     "hegemony-steps-http",
     "hegemony-steps-monitor",
+    "hegemony-steps-netbox",
     "hegemony-steps-netcli",
     "hegemony-steps-probe",
     "hegemony-steps-secret",
@@ -549,6 +550,23 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
+
+[[package]]
+name = "hegemony-steps-netbox"
+version = "0.28.1"
+source = { editable = "plugins/steps_netbox" }
+dependencies = [
+    { name = "hegemony-step-sdk" },
+    { name = "hegemony-steps-http" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "hegemony-steps-http", editable = "plugins/steps_http" },
+    { name = "httpx", specifier = ">=0.27.0" },
+]
 
 [[package]]
 name = "hegemony-steps-netcli"

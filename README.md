@@ -37,14 +37,15 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_tf` | `tf.` | plan, apply — OpenTofu or Terraform (built on `container.run`'s runner) |
   | `plugins/steps_http` | `http.` | request |
   | `plugins/steps_secret` | `secret.` | write — store, swap or delete a secret in the organization's secret store |
+  | `plugins/steps_netbox` | `netbox.` | request, ipam.allocate/release, render_config — NetBox objects, IP address management and config rendering (opt-in; needs `hegemony-steps-http`) |
 
 Wheels are versioned in lockstep with the platform. Most are auto-installed;
 `hegemony-steps-cisco-iosxe` and `hegemony-steps-shell` are opt-in (install the
 released wheels explicitly — the demo pins them via demo-plugin-wheels.txt),
 and hardened deployments may omit `hegemony-steps-container` to disable
 container execution entirely, `hegemony-steps-http` to disable arbitrary
-outbound HTTP requests from workers, or `hegemony-steps-secret` to keep flows
-from writing secrets.
+outbound HTTP requests from workers (which removes `hegemony-steps-netbox`
+too), or `hegemony-steps-secret` to keep flows from writing secrets.
 
 ## Development
 
