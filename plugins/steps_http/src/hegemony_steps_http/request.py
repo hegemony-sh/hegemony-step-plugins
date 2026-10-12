@@ -638,6 +638,21 @@ class _Credentials:
     secrets: tuple[str, ...] = field(default=(), repr=False)
 
 
+@dataclass(frozen=True)
+class HttpResponse:
+    """What :meth:`HttpRequestHandler.send` produced.
+
+    ``result`` is what an ``http.request`` step reports. ``data`` is the whole
+    parsed JSON body of the final response (the pages combined, when
+    paginating), with known credentials scrubbed and without the size cap
+    ``output.data`` has; None when the body is not JSON, the response is
+    sensitive, or no response came.
+    """
+
+    result: HandlerResult
+    data: Any = None
+
+
 @dataclass
 class _Exchange:
     """One request the step sent (a redirect hop or a page) and the status it got."""
@@ -877,30 +892,43 @@ class HttpRequestHandler(BaseHandler):
             config = self.parse_config(ctx.config, HttpRequestConfig)
         except InvalidConfigError as exc:
             return exc.result()
-        # Rendered now: a templated value must hold up as well.
+        return (await self.send(ctx.require_services(), config)).result
+
+    async def send(self, services: HandlerServices, config: HttpRequestConfig) -> HttpResponse:
+        """Send the request ``config`` describes, as an ``http.request`` step would.
+
+        For other handlers that speak HTTP (the NetBox steps): every safeguard
+        of this step applies, and the result also carries the whole parsed
+        response. ``config`` is checked as rendered, so it may not hold
+        templates.
+        """
         errors = config_errors(config, allow_templates=False)
         if errors:
-            return InvalidConfigError(HANDLER_ID, errors).result()
-
-        services = ctx.require_services()
+            return HttpResponse(InvalidConfigError(HANDLER_ID, errors).result())
         if getattr(services, "enforce_egress", None) is None:
             # Fail closed: the step dials the URL itself, so without the gate
             # nothing would apply the flow's network policy.
-            return HandlerResult(
-                success=False,
-                error=(
-                    "this platform cannot apply the flow's network policy to the request, "
-                    "so it was not sent"
-                ),
-                summary="Config error",
+            return HttpResponse(
+                HandlerResult(
+                    success=False,
+                    error=(
+                        "this platform cannot apply the flow's network policy to the request, "
+                        "so it was not sent"
+                    ),
+                    summary="Config error",
+                )
             )
         try:
             credentials = await self._credentials(services, config)
             verify = await self._tls_verify(services, config)
             body = _json_body(config)
         except ValueError as exc:
-            return HandlerResult(
-                success=False, error=f"Invalid {HANDLER_ID} config: {exc}", summary="Config error"
+            return HttpResponse(
+                HandlerResult(
+                    success=False,
+                    error=f"Invalid {HANDLER_ID} config: {exc}",
+                    summary="Config error",
+                )
             )
         return await self._run(services, config, credentials, verify, body)
 
@@ -963,7 +991,7 @@ class HttpRequestHandler(BaseHandler):
         credentials: _Credentials,
         verify: Any,
         json_body: tuple[bool, Any],
-    ) -> HandlerResult:
+    ) -> HttpResponse:
         """Send the request (and next pages), then build the output, evidence and result."""
         scrub = Scrubber(credentials.secrets)
         ranges = parse_status_spec(config.expected_status)
@@ -1226,7 +1254,7 @@ class HttpRequestHandler(BaseHandler):
         evidence = [
             {"kind": "transport_meta", "name": "http_request", "content_json": scrub.tree(meta)}
         ]
-        return HandlerResult(
+        result = HandlerResult(
             success=failure is None,
             summary=scrub.text(summary),
             metrics=metrics,
@@ -1234,6 +1262,7 @@ class HttpRequestHandler(BaseHandler):
             error=scrub.text(failure) if failure else None,
             output=scrub.tree(output),
         )
+        return HttpResponse(result, None if config.sensitive else scrub.tree(data))
 
     @staticmethod
     async def _fetch(
@@ -1332,6 +1361,7 @@ __all__ = [
     "HANDLER_ID",
     "HttpRequestConfig",
     "HttpRequestHandler",
+    "HttpResponse",
     "config_errors",
     "parse_status_spec",
     "status_matches",

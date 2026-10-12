@@ -20,7 +20,9 @@ unspecified and multicast destinations are refused. The wheel is its own so
 that a deployment can leave out arbitrary outbound requests from workers
 entirely: without it, flows have no `http.request` step. The handler's page
 (`src/hegemony_steps_http/docs/http.request.md`) documents its fields,
-output and security rules.
+output and security rules. Other wheels that speak HTTP send through the same
+client (`HttpRequestHandler.send`), so these rules apply to them too:
+`hegemony-steps-netbox` does.
 
 Namespace prefix (= entry-point name): `http.` — see the repo-level
 `CONVENTIONS.md` for the naming rules.
