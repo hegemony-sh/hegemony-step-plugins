@@ -445,6 +445,45 @@ class HandlerServices(Protocol):
         """
         raise NotImplementedError
 
+    async def sync_inventory(
+        self, provider: str, *, max_age_seconds: int | None = None
+    ) -> Mapping[str, Any]:
+        """Sync one of the run organization's inventory providers now.
+
+        For handlers declaring ``syncs_inventory`` (``inventory.sync``), so a
+        flow can see what its source of truth holds right now (a device a
+        previous step just created there). ``provider`` is the provider's id
+        (``netbox:primary``) or its name (``primary``); the host finds only
+        the run organization's own providers. With ``max_age_seconds``, no
+        sync runs when the provider's last sync succeeded no longer ago than
+        that.
+
+        Returns a mapping with ``status``: ``ok``, ``partial`` (devices and
+        sites synced, some other object type failed) or ``error`` for a sync
+        that ran; ``fresh`` when none ran because the last one is recent
+        enough; ``busy`` when none ran because another sync of the provider
+        is running (ask again later). Also ``provider_id``,
+        ``provider_name``, ``provider_type`` and ``last_sync_at`` (ISO 8601,
+        when the provider's last sync ended), and for a sync that ran
+        ``history_id``, ``started_at``, ``finished_at``, ``duration_ms``,
+        ``counts`` (``items_added``, ``items_updated``, ``items_unchanged``,
+        ``items_stale``, ``items_restored`` and the same for ``sites_``) and
+        ``error_message``.
+
+        The call returns when the sync has ended, which can take as long as
+        the host's sync deadline. The host refuses, with
+        ``PermissionError``, a handler without ``syncs_inventory`` and a
+        provider an administrator has not opened to flows; raises
+        ``LookupError`` for a provider the organization does not have,
+        ``ValueError`` for a malformed request or a name several providers
+        share, and ``RuntimeError`` when it cannot be reached, the provider
+        is disabled, or the step or run has ended. Each sync is audited with
+        the run and step as the actor. Hosts without support raise
+        ``NotImplementedError``; a platform older than this method has no
+        such attribute at all, so look it up with ``getattr``.
+        """
+        raise NotImplementedError
+
     def open_state_backend(
         self, name: str, *, ttl_seconds: int, hold_until_apply: bool = False
     ) -> AbstractAsyncContextManager[StateBackendAccess]:

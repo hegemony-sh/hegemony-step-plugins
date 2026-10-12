@@ -113,3 +113,11 @@ store that keeps versions, the host leaves no replaced or deleted value
 readable through the store's history, and `read_secret` treats a soft-deleted
 secret as absent. Hosts older than these services lack the methods, so check
 for them with `getattr` and fail clearly.
+
+A handler that starts inventory syncs declares `syncs_inventory = True` and
+calls `services.sync_inventory(provider, max_age_seconds=...)` with one of
+the run organization's inventory providers, by id or by name. The host runs
+the sync only for a provider an administrator has opened to flows, and
+answers `fresh` (none ran: the last one is recent enough) or `busy` (another
+sync is running) instead of syncing when it should not. Check for the method
+with `getattr` too.
