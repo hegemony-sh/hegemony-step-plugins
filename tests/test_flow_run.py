@@ -76,6 +76,35 @@ def test_rendered_settings_are_valid() -> None:
     assert _errors({"flow_name": "X", **rendered}) == []
 
 
+def test_a_template_mapping_needs_a_value() -> None:
+    errors = _errors({"flow_name": "X", "field_mappings": {"force": {"mode": "template"}}})
+    assert errors == ["field_mappings.force.value is required for template mode"]
+
+
+async def test_rendered_template_mappings_pass_whatever_they_rendered_to() -> None:
+    # The platform renders field_mappings keeping each value's type: a run input
+    # that is false, empty, a number or missing reaches the step as such.
+    services = _FakeServices()
+    rendered = {
+        "force": {"mode": "template", "value": False},
+        "csr_b64": {"mode": "template", "value": ""},
+        "validity_days": {"mode": "template", "value": None},
+        "count": {"mode": "template", "value": 0},
+        "name": {"mode": "template", "value": "web-01"},
+    }
+    config = {**_BASE, "flow_name": "X", "wait_for_completion": False, "field_mappings": rendered}
+    assert RunFlowHandler().validate_config(config) == []
+    result = await RunFlowHandler().execute(_ctx(config, services))
+    assert result.success is True, result.error
+    assert services.child_run_payloads[0]["params"] == {
+        "force": False,
+        "csr_b64": "",
+        "validity_days": None,
+        "count": 0,
+        "name": "web-01",
+    }
+
+
 class _FakeServices:
     def __init__(self, statuses: list[str] | None = None) -> None:
         self.child_run_payloads: list[dict[str, Any]] = []

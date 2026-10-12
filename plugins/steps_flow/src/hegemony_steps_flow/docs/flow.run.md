@@ -22,7 +22,9 @@ version runs.
 
 Field mappings feed the child flow's input fields: each field either keeps
 the child's default, receives a literal value, or receives a template that
-is resolved with this flow's context before the child starts. Target
+is resolved with this flow's context before the child starts. A template
+that is a single expression keeps its value's type, so a run input that is
+false, empty, a number or null reaches the child as such. Target
 mappings bind the child's target roles — each role uses mode child_default,
 parent_role (forwarding the devices this run bound to a chosen parent
 role), or none. Both mappings are edited with the dedicated run-flow
