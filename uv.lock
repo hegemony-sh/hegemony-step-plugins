@@ -553,7 +553,7 @@ requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
 
 [[package]]
 name = "hegemony-steps-netbox"
-version = "0.28.1"
+version = "0.29.0"
 source = { editable = "plugins/steps_netbox" }
 dependencies = [
     { name = "hegemony-step-sdk" },
