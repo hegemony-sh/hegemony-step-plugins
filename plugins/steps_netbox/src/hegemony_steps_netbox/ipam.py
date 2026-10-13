@@ -91,17 +91,27 @@ def _values(objects: list[Any], key: str) -> list[Any]:
 
 async def _find(
     client: NetBoxClient, endpoint: str, filters: dict[str, Any], *, at_most: int
-) -> tuple[Reply, list[Any]]:
-    """The objects of ``endpoint`` that ``filters`` match, up to ``at_most`` plus one."""
+) -> tuple[Reply, list[Any], int]:
+    """The objects of ``endpoint`` that ``filters`` match, up to ``at_most`` plus one.
+
+    Also returns how many match in all. NetBox caps a page at its MAX_PAGE_SIZE, which
+    an administrator may set below ``at_most`` plus one, so the page can hold fewer
+    objects than match; its ``count`` still says how many do, and every limit is
+    checked against that.
+    """
     reply = await client.call(
         "GET", endpoint + "/", query={**filters, "limit": at_most + 1}, expected_status="200"
     )
     if not reply.ok:
-        return reply, []
+        return reply, [], 0
     data = reply.data
     if not isinstance(data, dict) or not isinstance(data.get("results"), list):
-        return Reply(status=reply.status, error=f"NetBox did not answer {endpoint} with a list"), []
-    return reply, data["results"]
+        failure = Reply(status=reply.status, error=f"NetBox did not answer {endpoint} with a list")
+        return failure, [], 0
+    results = data["results"]
+    count = data.get("count")
+    total = count if isinstance(count, int) and not isinstance(count, bool) else 0
+    return reply, results, max(total, len(results))
 
 
 class AllocateConfig(NetBoxConnection):
@@ -289,7 +299,7 @@ class AllocateHandler(BaseHandler):
         objects: list[Any] = []
         if config.existing_filters:
             scope = _pool_scope(config.allocate, pool)
-            reply, objects = await _find(
+            reply, objects, matched = await _find(
                 client,
                 resource_endpoint,
                 {**_query(config.existing_filters), **scope},
@@ -297,15 +307,14 @@ class AllocateHandler(BaseHandler):
             )
             if not reply.ok:
                 return self._failed(client, config, reply)
-            if objects and len(objects) != config.count:
+            if matched and matched != config.count:
                 return self._failed(
                     client,
                     config,
                     Reply(
                         status=reply.status,
                         error=(
-                            f"Existing Filters match {len(objects)}"
-                            f"{'+' if len(objects) > config.count else ''} objects, expected "
+                            f"Existing Filters match {matched} objects, expected "
                             f"none or {config.count}: make them match only what this work "
                             "allocated"
                         ),
@@ -382,11 +391,13 @@ class AllocateHandler(BaseHandler):
                     status=reply.status, error=f"NetBox returned no pool from {endpoint}"
                 )
             return reply.data, None
-        reply, pools = await _find(client, endpoint, _query(config.pool_filters), at_most=1)
+        reply, pools, matched = await _find(
+            client, endpoint, _query(config.pool_filters), at_most=1
+        )
         if not reply.ok:
             return {}, reply
-        if len(pools) != 1:
-            found = "no" if not pools else "more than one"
+        if matched != 1 or len(pools) != 1:
+            found = "no" if not matched else "more than one"
             return {}, Reply(
                 status=reply.status,
                 error=f"Pool Filters match {found} {endpoint} object; narrow them to one",
@@ -559,15 +570,16 @@ class ReleaseHandler(BaseHandler):
             ids = [] if gone or not reply.ok else [int(object_id)]
             values: list[Any] = []
         else:
-            reply, objects = await _find(
+            reply, objects, matched = await _find(
                 client, endpoint, _query(config.filters), at_most=config.max_objects
             )
-            if reply.ok and len(objects) > config.max_objects:
+            if reply.ok and matched > config.max_objects:
                 reply = Reply(
                     status=reply.status,
                     error=(
-                        f"Filters match more than {config.max_objects} "
-                        f"{config.resource.replace('_', ' ')} objects; nothing was released "
+                        f"Filters match {matched} "
+                        f"{config.resource.replace('_', ' ')} objects, more than Max Objects "
+                        f"({config.max_objects}); nothing was released "
                         "(narrow the filters or raise Max Objects)"
                     ),
                 )

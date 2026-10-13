@@ -44,6 +44,11 @@ free addresses of a prefix (`ipam/prefixes`, Object ID, Route
 options such as `brief=true` or `fields=id,name`. `limit` and `offset` are set
 by the step.
 
+Get with neither Object ID nor Filters reads the endpoint itself, which suits
+one that answers with a single object, such as `status`. On an endpoint that
+lists objects it fails, because NetBox answers with a page of them: give an
+Object ID or Filters, or use list.
+
 Data is JSON: an object, or a list for many objects at once. Written as text,
 it is parsed as JSON first, so a template that renders JSON works:
 

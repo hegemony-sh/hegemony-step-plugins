@@ -653,7 +653,24 @@ async def test_allocate_refuses_when_existing_filters_match_too_many():
         AllocateHandler, netbox, _config(pool_id="7", existing_filters={"tenant": "a"})
     )
     assert not result.success
-    assert "Existing Filters match 2+ objects, expected none or 1" in result.error
+    assert "Existing Filters match 2 objects, expected none or 1" in result.error
+    assert all(r.method == "GET" for r in netbox.requests)
+
+
+async def test_allocate_counts_existing_matches_past_a_capped_page():
+    """NetBox's MAX_PAGE_SIZE may hold the page to one object while three match."""
+
+    def respond(request, body):
+        if request.url.path == "/api/ipam/prefixes/7/":
+            return _json(PREFIX)
+        return _json({"count": 3, "results": [{"id": 1, "address": "10.20.0.9/24"}]})
+
+    netbox = NetBox(respond)
+    result = await _run(
+        AllocateHandler, netbox, _config(pool_id="7", existing_filters={"tenant": "a"})
+    )
+    assert not result.success
+    assert "Existing Filters match 3 objects, expected none or 1" in result.error
     assert all(r.method == "GET" for r in netbox.requests)
 
 
@@ -736,6 +753,36 @@ async def test_release_by_filters_refuses_to_delete_more_than_max_objects():
     assert netbox.calls[-1] == "DELETE /api/ipam/vlans/"
     assert netbox.bodies[-1] == [{"id": 1}, {"id": 2}]
     assert result.output["values"] == [10, 11]
+
+
+async def test_release_by_filters_counts_matches_past_a_capped_page():
+    """A page NetBox capped below Max Objects + 1 still says how many match in all."""
+
+    def respond(request, body):
+        if request.method == "GET":
+            return _json({"count": 5, "results": [{"id": 1, "vid": 10}, {"id": 2, "vid": 11}]})
+        return httpx.Response(204)
+
+    netbox = NetBox(respond)
+    result = await _run(
+        ReleaseHandler, netbox, _config(resource="vlan", filters={"name": "web"}, max_objects=2)
+    )
+    assert not result.success
+    assert "Filters match 5 vlan objects, more than Max Objects (2)" in result.error
+    assert all(r.method == "GET" for r in netbox.requests)
+
+
+async def test_get_without_an_id_or_filters_reads_a_single_object_endpoint_only():
+    status = NetBox(lambda request, body: _json({"netbox-version": "4.4.1", "plugins": {}}))
+    result = await _run(NetBoxRequestHandler, status, _config(endpoint="status"))
+    assert result.success, result.error
+    assert result.output["object"]["netbox-version"] == "4.4.1"
+
+    page = NetBox(lambda request, body: _json({"count": 2, "results": [DEVICE, DEVICE]}))
+    result = await _run(NetBoxRequestHandler, page, _config(endpoint="dcim/devices"))
+    assert not result.success
+    assert "get reads one object, and dcim/devices answered with a list" in result.error
+    assert result.output["object"] is None
 
 
 # --- netbox.render_config ---------------------------------------------------------------------

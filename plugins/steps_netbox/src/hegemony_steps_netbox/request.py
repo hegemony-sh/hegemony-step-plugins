@@ -363,6 +363,11 @@ def _delete_items(data: list[Any]) -> list[Any]:
     return items
 
 
+def _is_page(value: Any) -> bool:
+    """A NetBox list page: ``count`` and a ``results`` list."""
+    return isinstance(value, dict) and "count" in value and isinstance(value.get("results"), list)
+
+
 def _ids(objects: list[Any]) -> list[Any]:
     return [item.get("id") for item in objects if isinstance(item, dict)]
 
@@ -468,6 +473,17 @@ class NetBoxRequestHandler(BaseHandler):
                 if not found:
                     reply = Reply(status=reply.status)
                     result_value = None
+            if action == "get" and not object_id and not route and _is_page(result_value):
+                # An endpoint such as status/ answers get with one object; a collection
+                # answers with a page of them, which is not the object get promises.
+                reply = Reply(
+                    status=reply.status,
+                    error=(
+                        f"get reads one object, and {endpoint} answered with a list of them: "
+                        "give an Object ID or Filters that match one object, or use list"
+                    ),
+                )
+                result_value = None
 
         output: dict[str, Any] = {
             "status": reply.status,
