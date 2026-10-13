@@ -184,11 +184,14 @@ class HostKeyVerifier(Protocol):
 _MSG_KEXINIT = 20
 
 #: Ciphers with integrity built in (AEAD): the MAC agreed beside them is not used.
+#: The ``AEAD_AES_*`` names are AES-GCM as RFC 5647 names it.
 _AEAD_CIPHERS = frozenset(
     {
         "chacha20-poly1305@openssh.com",
         "aes128-gcm@openssh.com",
         "aes256-gcm@openssh.com",
+        "AEAD_AES_128_GCM",
+        "AEAD_AES_256_GCM",
     }
 )
 

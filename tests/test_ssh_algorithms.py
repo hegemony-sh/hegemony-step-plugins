@@ -77,8 +77,18 @@ def test_each_algorithm_is_the_first_of_the_clients_list_the_server_offers():
     )
 
 
-def test_a_cipher_with_integrity_built_in_has_no_mac():
-    offer = kexinit(("curve25519-sha256",), cipher=("chacha20-poly1305@openssh.com",))
+@pytest.mark.parametrize(
+    "cipher",
+    [
+        "chacha20-poly1305@openssh.com",
+        "aes128-gcm@openssh.com",
+        "aes256-gcm@openssh.com",
+        "AEAD_AES_128_GCM",
+        "AEAD_AES_256_GCM",
+    ],
+)
+def test_a_cipher_with_integrity_built_in_has_no_mac(cipher: str):
+    offer = kexinit(("curve25519-sha256",), cipher=(cipher,))
 
     assert SshAlgorithms.from_kexinit(offer, offer).mac == ""
 
