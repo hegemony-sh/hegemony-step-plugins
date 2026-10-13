@@ -34,6 +34,8 @@ from hegemony_step_sdk import (
     DeviceConnectionSpec,
     HostKeyRejectedError,
     HostKeyVerifier,
+    SshAlgorithmRecorder,
+    SshAlgorithms,
     TransportOutputSink,
 )
 
@@ -61,6 +63,16 @@ logger = logging.getLogger(__name__)
 #: Attribute under which the bastion connection rides its scrapli connection,
 #: so every existing close path tears the tunnel down with the session.
 _JUMP_TUNNEL_ATTR = "_hegemony_jump_tunnel"
+
+
+def _agreed_algorithms(connection: Any) -> SshAlgorithms:
+    """What the key exchange of asyncssh connection ``connection`` agreed on.
+
+    asyncssh has no accessor for the agreed key exchange, but keeps both
+    sides' KEXINIT messages for the exchange hash; the agreement follows from
+    them (:meth:`SshAlgorithms.from_kexinit`).
+    """
+    return SshAlgorithms.from_kexinit(connection._client_kexinit, connection._server_kexinit)
 
 
 class _NullCancellationRegistry:
@@ -339,6 +351,9 @@ class ScrapliTransport:
     #: for the output sink.
     supports_host_key_verifier = True
 
+    #: Feature flag the host checks before passing ``ssh_algorithm_recorder``.
+    supports_ssh_algorithm_recorder = True
+
     def __init__(
         self,
         spec: DeviceConnectionSpec,
@@ -347,6 +362,7 @@ class ScrapliTransport:
         step_run_id: str | None = None,
         output_sink: TransportOutputSink | None = None,
         host_key_verifier: HostKeyVerifier | None = None,
+        ssh_algorithm_recorder: SshAlgorithmRecorder | None = None,
     ):
         """Initialize the scrapli transport from a resolved connection spec.
 
@@ -365,6 +381,8 @@ class ScrapliTransport:
                 only the keys it names. Without one the transport refuses to
                 connect; it never connects unchecked on its own. A verifier that
                 answers None for a host (checks switched off) is the opt-out.
+            ssh_algorithm_recorder: The host's record of what each hop's key
+                exchange agreed on, told once the hop is logged in.
         """
         if AsyncScrapli is None:
             raise ImportError(
@@ -397,6 +415,7 @@ class ScrapliTransport:
         self.command_timeout = spec.command_timeout
         self.jump_host = spec.jump_host
         self._host_key_verifier = host_key_verifier
+        self._ssh_algorithm_recorder = ssh_algorithm_recorder
 
     async def _stream_push(self, text: str) -> None:
         """Push a session chunk to the live-output sink (event loop)."""
@@ -531,6 +550,16 @@ class ScrapliTransport:
             logger.debug("could not fetch the SSH host key of %s:%d", host, port, exc_info=True)
             return None
 
+    def _record_algorithms(self, connection: Any, host: str, port: int) -> None:
+        """Tell the host what hop ``host:port`` agreed on; never fails the connection."""
+        recorder = self._ssh_algorithm_recorder
+        if recorder is None:
+            return
+        try:
+            recorder.record(host, port, _agreed_algorithms(connection))
+        except Exception:  # noqa: BLE001 - the record is evidence, not a condition
+            logger.debug("could not record the SSH algorithms of %s:%s", host, port, exc_info=True)
+
     async def _connect_jump(self):
         """SSH session #1 to the bastion (design-dind-sandbox.md §11.1).
 
@@ -554,7 +583,7 @@ class ScrapliTransport:
             else {}
         )
         try:
-            return await asyncssh.connect(
+            tunnel = await asyncssh.connect(
                 jump.host,
                 port=jump.port,
                 username=jump.username or None,
@@ -568,6 +597,8 @@ class ScrapliTransport:
             if refusal is None:
                 raise
             raise refusal from exc
+        self._record_algorithms(tunnel, jump.host, jump.port)
+        return tunnel
 
     async def _open_connection(self, *, timeout_transport: float | None = None):
         """Construct and open a scrapli connection (via the bastion when set)."""
@@ -625,6 +656,8 @@ class ScrapliTransport:
             # Ride the tunnel on the connection so every close path tears
             # both down.
             setattr(connection, _JUMP_TUNNEL_ATTR, tunnel)
+        # scrapli's asyncssh transport holds the asyncssh connection.
+        self._record_algorithms(connection.transport.session, self.host, self.port)
         connect_time = (time.perf_counter() - connect_start) * 1000
         logger.info(f"Connected to {self.host} in {connect_time:.0f}ms")
         return connection

@@ -180,6 +180,109 @@ class HostKeyVerifier(Protocol):
         """
 
 
+#: SSH_MSG_KEXINIT, the first byte of a key exchange init message (RFC 4253 §12).
+_MSG_KEXINIT = 20
+
+#: Ciphers with integrity built in (AEAD): the MAC agreed beside them is not used.
+#: The ``AEAD_AES_*`` names are AES-GCM as RFC 5647 names it.
+_AEAD_CIPHERS = frozenset(
+    {
+        "chacha20-poly1305@openssh.com",
+        "aes128-gcm@openssh.com",
+        "aes256-gcm@openssh.com",
+        "AEAD_AES_128_GCM",
+        "AEAD_AES_256_GCM",
+    }
+)
+
+
+def _kexinit_lists(message: bytes) -> list[list[str]]:
+    """The algorithm name-lists of a KEXINIT message, in their RFC 4253 §7.1 order.
+
+    The message starts with its type byte, then a 16-byte cookie, then ten
+    name-lists: key exchange, host key, encryption, MAC and compression for
+    each direction, and languages.
+    """
+    if not message or message[0] != _MSG_KEXINIT:
+        raise ValueError("not an SSH KEXINIT message")
+    offset = 1 + 16
+    lists: list[list[str]] = []
+    for _ in range(10):
+        if offset + 4 > len(message):
+            raise ValueError("truncated SSH KEXINIT message")
+        length = int.from_bytes(message[offset : offset + 4], "big")
+        offset += 4
+        if offset + length > len(message):
+            raise ValueError("truncated SSH KEXINIT message")
+        names = message[offset : offset + length].decode("ascii")
+        offset += length
+        lists.append(names.split(",") if names else [])
+    return lists
+
+
+def _first_match(client: list[str], server: list[str]) -> str:
+    """The first algorithm of the client's list the server also offers ('' if none)."""
+    offered = set(server)
+    return next((name for name in client if name in offered), "")
+
+
+@dataclass(frozen=True, slots=True)
+class SshAlgorithms:
+    """The algorithms one SSH connection agreed on, by their SSH names.
+
+    ``kex`` is the key exchange, which decides whether recorded traffic stays
+    safe from a future quantum computer: a hybrid with ML-KEM such as
+    ``mlkem768x25519-sha256`` does, ``curve25519-sha256`` does not.
+    ``host_key`` is the host key's signature algorithm, ``cipher`` and ``mac``
+    those of the client-to-server direction; ``mac`` is empty for a cipher
+    with integrity built in. An empty field is not known.
+    """
+
+    kex: str = ""
+    host_key: str = ""
+    cipher: str = ""
+    mac: str = ""
+
+    @classmethod
+    def from_kexinit(cls, client_kexinit: bytes, server_kexinit: bytes) -> SshAlgorithms:
+        """What the two sides' KEXINIT messages agree on (RFC 4253 §7.1).
+
+        Each algorithm is the first on the client's list that the server also
+        offers: the rule both sides follow, so the result is what the
+        connection uses, whichever library ran it.
+
+        Raises:
+            ValueError: a message is not a well-formed KEXINIT.
+        """
+        client = _kexinit_lists(client_kexinit)
+        server = _kexinit_lists(server_kexinit)
+        cipher = _first_match(client[2], server[2])
+        return cls(
+            kex=_first_match(client[0], server[0]),
+            host_key=_first_match(client[1], server[1]),
+            cipher=cipher,
+            mac="" if cipher in _AEAD_CIPHERS else _first_match(client[4], server[4]),
+        )
+
+
+class SshAlgorithmRecorder(Protocol):
+    """Host-owned record of the algorithms each SSH hop of one connection agreed on.
+
+    The host builds one per ``connect()`` call and passes it to transport
+    constructors that advertise ``supports_ssh_algorithm_recorder = True``
+    (feature-detected, like the host-key verifier). Once a hop is logged in
+    (the jump host first, then the device) the transport reports what its
+    key exchange agreed on, so the step's evidence shows which devices are
+    not yet reached with a quantum-safe key exchange.
+
+    Called from the event loop or from an executor thread (netmiko). Never
+    raises.
+    """
+
+    def record(self, host: str, port: int, algorithms: SshAlgorithms) -> None:
+        """Record that hop ``host:port`` agreed on ``algorithms``."""
+
+
 class ConnectionCancellationRegistry(Protocol):
     """Host-owned registry the transport uses to make blocking I/O cancellable.
 

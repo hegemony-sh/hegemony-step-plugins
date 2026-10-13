@@ -93,6 +93,7 @@ def _make_transport() -> SSHTransport:
     t._output_sink = None
     t.streams_timing_output = False
     t._host_key_verifier = checks_off()
+    t._ssh_algorithm_recorder = None
     t._loop = None
     return t
 

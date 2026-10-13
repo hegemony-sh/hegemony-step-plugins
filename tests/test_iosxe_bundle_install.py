@@ -68,6 +68,9 @@ class EmulatedIOS:
             remote_conn = None
             in_config = False
 
+            def _open(self) -> None:
+                """netmiko connects here; this fake is connected from the start."""
+
             def enable(self) -> None:
                 pass
 

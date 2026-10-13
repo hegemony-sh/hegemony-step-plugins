@@ -37,3 +37,15 @@ connect unchecked.
 Netmiko takes host keys only from a file, so the device hop writes the
 trusted keys to a private temporary `known_hosts` file and removes it once
 the session is open.
+
+## Agreed algorithms
+
+When the host passes an `ssh_algorithm_recorder` (the transport advertises
+`supports_ssh_algorithm_recorder`), each hop, the jump host first and then
+the device, reports the key exchange, host key, cipher and MAC it agreed on
+once it is logged in. paramiko drops both sides' KEXINIT messages after the
+key exchange, so the transport connects through a paramiko transport that
+keeps them (paramiko 3.2 or later), and the agreement is worked out from
+them. paramiko has no post-quantum key exchange, so this transport records a
+classical one even when the device offers more. A failure to record is
+logged and never fails the connection.
