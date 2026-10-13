@@ -19,7 +19,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from hegemony_step_sdk import (
     BaseHandler,
@@ -32,6 +32,26 @@ from hegemony_step_sdk import (
 
 #: How often to ask again while another sync of the provider is running.
 BUSY_POLL_SECONDS = 10.0
+
+
+class _Wait:
+    """The time spent waiting for another sync, not the step's own sync.
+
+    It starts at the first ``busy`` answer and ends when the step asks again
+    after it; while the step sleeps between asks it is still running.
+    """
+
+    def __init__(self) -> None:
+        self.started: float | None = None
+        self.ended: float | None = None
+
+    @property
+    def seconds(self) -> float:
+        if self.started is None:
+            return 0.0
+        end = self.ended if self.ended is not None else time.monotonic()
+        return end - self.started
+
 
 #: The host's documented error types: their messages name the provider and the rule.
 _HOST_ERRORS = (PermissionError, LookupError, ValueError, RuntimeError)
@@ -66,6 +86,16 @@ class InventorySyncConfig(BaseModel):
         ),
         json_schema_extra={"x_placeholder": "netbox:primary", "x_col_span": 2},
     )
+
+    @field_validator("provider")
+    @classmethod
+    def _provider_is_named(cls, value: str) -> str:
+        """Strip the name; one of only spaces names no provider."""
+        value = value.strip()
+        if not value:
+            raise ValueError("name an inventory provider by its id or name")
+        return value
+
     max_age_seconds: int = Field(
         default=0,
         ge=0,
@@ -235,21 +265,20 @@ class InventorySyncHandler(BaseHandler):
                 summary=exc.result().summary,
                 error=str(exc),
             )
-        provider = config.provider.strip()
+        provider = config.provider
         services = ctx.require_services()
         sync = getattr(services, "sync_inventory", None)
         if not callable(sync):
             return self._unavailable(ctx, provider, "its worker lacks sync_inventory")
 
-        started = time.monotonic()
+        wait = _Wait()
         try:
             async with asyncio.timeout(config.timeout_seconds):
-                answer = await self._ask(sync, provider, config, started)
+                answer = await self._ask(sync, provider, config, wait)
         except TimeoutError:
-            waited = time.monotonic() - started
             return _result(
                 ctx,
-                _output(provider, None, waited=waited),
+                _output(provider, None, waited=wait.seconds),
                 success=False,
                 summary="Timed out",
                 error=(
@@ -260,29 +289,37 @@ class InventorySyncHandler(BaseHandler):
         except NotImplementedError:
             return self._unavailable(ctx, provider, "its worker does not support inventory syncs")
         except Exception as exc:
-            waited = time.monotonic() - started
             return _result(
                 ctx,
-                _output(provider, None, waited=waited),
+                _output(provider, None, waited=wait.seconds),
                 success=False,
                 summary=_host_summary(exc),
                 error=f"Could not sync {provider}: {_describe(exc)}",
             )
-        return self._report(ctx, provider, config, answer, waited=time.monotonic() - started)
+        return self._report(ctx, provider, config, answer, waited=wait.seconds)
 
     async def _ask(
-        self, sync: Any, provider: str, config: InventorySyncConfig, started: float
+        self, sync: Any, provider: str, config: InventorySyncConfig, wait: _Wait
     ) -> Mapping[str, Any]:
+        """Ask for the sync; while another one runs, ask again until the wait runs out."""
         max_age = config.max_age_seconds or None
         while True:
+            if wait.started is not None:
+                wait.ended = time.monotonic()
             answer = await sync(provider, max_age_seconds=max_age)
             if not isinstance(answer, Mapping):
                 raise RuntimeError("the platform answered the sync with something unexpected")
             if answer.get("status") != "busy":
                 return answer
-            if time.monotonic() - started + BUSY_POLL_SECONDS > config.wait_seconds:
+            now = time.monotonic()
+            if wait.started is None:
+                wait.started = now
+            wait.ended = None
+            remaining = config.wait_seconds - (now - wait.started)
+            if remaining <= 0:
+                wait.ended = now
                 return answer
-            await asyncio.sleep(BUSY_POLL_SECONDS)
+            await asyncio.sleep(min(BUSY_POLL_SECONDS, remaining))
 
     def _report(
         self,

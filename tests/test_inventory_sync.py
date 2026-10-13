@@ -122,7 +122,18 @@ def test_docs_page_satisfies_the_contract():
 
 def test_a_step_without_a_provider_is_refused_when_saved():
     assert InventorySyncHandler().validate_config({"provider": ""})
+    assert InventorySyncHandler().validate_config({"provider": "   "})
     assert InventorySyncHandler().validate_config({"provider": "netbox:primary"}) == []
+
+
+@pytest.mark.asyncio
+async def test_a_provider_of_only_spaces_fails_before_the_platform_is_asked():
+    services = FakeServices(_answer("ok"))
+
+    result = await _run({"provider": "   "}, services)
+
+    assert result.success is False
+    assert services.calls == []
 
 
 # --- a sync that ran ------------------------------------------------------------------
@@ -209,8 +220,43 @@ async def test_a_sync_still_running_after_the_wait_fails_the_step(no_sleep):
     assert result.success is False
     assert result.summary == "Another sync is running"
     assert result.output["status"] == "busy"
-    # Asked at 0, 10 and 20 s; a fourth ask at 30 s would be past the wait.
-    assert len(services.calls) == 3
+    # Asked at 0, 10, 20 and, when the wait runs out, 25 s.
+    assert no_sleep == [10.0, 10.0, 5.0]
+    assert len(services.calls) == 4
+    assert result.output["waited_seconds"] == 25.0
+
+
+@pytest.mark.asyncio
+async def test_a_wait_shorter_than_the_poll_interval_is_waited_through(no_sleep):
+    services = FakeServices(_answer("busy"), _answer("ok"))
+
+    result = await _run({"provider": "primary", "wait_seconds": 5}, services)
+
+    assert result.success is True
+    assert no_sleep == [5.0]
+    assert len(services.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_only_the_time_spent_waiting_for_another_sync_counts_as_waited(no_sleep):
+    class Host:
+        """A sync that takes 900 s, after one ``busy`` answer when ``busy_first``."""
+
+        def __init__(self, *, busy_first: bool) -> None:
+            self.busy = busy_first
+
+        async def sync_inventory(self, provider: str, *, max_age_seconds: int | None = None):
+            if self.busy:
+                self.busy = False
+                return _answer("busy")
+            await sync_module.asyncio.sleep(900)
+            return _answer("ok")
+
+    uncontended = await _run({"provider": "primary"}, Host(busy_first=False))
+    contended = await _run({"provider": "primary"}, Host(busy_first=True))
+
+    assert uncontended.output["waited_seconds"] == 0.0
+    assert contended.output["waited_seconds"] == 10.0
 
 
 @pytest.mark.asyncio
