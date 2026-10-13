@@ -1,3 +1,13 @@
+## [0.29.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.28.1...v0.29.0) (2026-10-13)
+
+### Features
+
+* **transports:** report the SSH algorithms each hop agreed on ([6417bd5](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6417bd57994d7a724587e62e338c1bee40e029c0))
+
+### Bug Fixes
+
+* **sdk:** treat RFC 5647's AES-GCM names as ciphers with integrity built in ([43c02cf](https://github.com/hegemony-sh/hegemony-step-plugins/commit/43c02cf6ec1af9611912579c94fac5804e7aeeca))
+
 ## [0.28.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.28.0...v0.28.1) (2026-10-10)
 
 ### Bug Fixes

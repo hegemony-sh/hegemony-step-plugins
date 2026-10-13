@@ -38,3 +38,12 @@ it, and then logs in accepting only that key. Without a verifier the
 transport refuses to connect: it never connects without checking. Checks
 switched off for a host (the verifier answers None) are the only way to
 connect unchecked.
+
+## Agreed algorithms
+
+When the host passes an `ssh_algorithm_recorder` (the transport advertises
+`supports_ssh_algorithm_recorder`), each hop, the jump host first and then
+the device, reports the key exchange, host key, cipher and MAC it agreed on
+once it is logged in. asyncssh keeps both sides' KEXINIT messages, and the
+agreement is worked out from them. A failure to record is logged and never
+fails the connection.
