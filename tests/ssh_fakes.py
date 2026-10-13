@@ -162,16 +162,24 @@ class Servers:
         self.seen = Seen()
         self._servers: list[Any] = []
 
-    async def device(self, *host_keys: asyncssh.SSHKey, port: int = 0) -> int:
-        """A device presenting ``host_keys``; returns its port."""
-        return await self._listen(_Device, PASSWORD, host_keys, port)
+    async def device(self, *host_keys: asyncssh.SSHKey, port: int = 0, **options: Any) -> int:
+        """A device presenting ``host_keys``; returns its port.
 
-    async def bastion(self, *host_keys: asyncssh.SSHKey, port: int = 0) -> int:
+        ``options`` go to ``asyncssh.create_server``, e.g. ``kex_algs``.
+        """
+        return await self._listen(_Device, PASSWORD, host_keys, port, options)
+
+    async def bastion(self, *host_keys: asyncssh.SSHKey, port: int = 0, **options: Any) -> int:
         """A jump host presenting ``host_keys``; returns its port."""
-        return await self._listen(_Bastion, JUMP_PASSWORD, host_keys, port)
+        return await self._listen(_Bastion, JUMP_PASSWORD, host_keys, port, options)
 
     async def _listen(
-        self, factory: type[_Device], password: str, host_keys: Any, port: int
+        self,
+        factory: type[_Device],
+        password: str,
+        host_keys: Any,
+        port: int,
+        options: dict[str, Any] | None = None,
     ) -> int:
         server = await asyncssh.create_server(
             lambda: factory(self.seen, password),
@@ -179,6 +187,7 @@ class Servers:
             port,
             server_host_keys=list(host_keys),
             process_factory=_session,
+            **(options or {}),
         )
         self._servers.append(server)
         return server.sockets[0].getsockname()[1]
