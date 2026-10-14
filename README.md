@@ -43,10 +43,11 @@ Wheels are versioned in lockstep with the platform. Most are auto-installed;
 `hegemony-steps-cisco-iosxe` and `hegemony-steps-shell` are opt-in (install the
 released wheels explicitly — the demo pins them via demo-plugin-wheels.txt),
 and hardened deployments may omit `hegemony-steps-container` to disable
-container execution entirely, `hegemony-steps-http` to disable arbitrary
-outbound HTTP requests from workers, `hegemony-steps-secret` to keep flows
-from writing secrets, or `hegemony-steps-inventory` to keep flows from
-starting inventory syncs.
+container execution entirely. `hegemony-steps-http` (outbound HTTP requests
+from workers), `hegemony-steps-secret` (flows writing secrets) and
+`hegemony-steps-inventory` (flows starting inventory syncs) are not in the
+platform's images yet, so they are opt-in too: a deployment that wants them
+installs them like the opt-in wheels above.
 
 ## Development
 

@@ -39,6 +39,10 @@ While another sync of the provider is running (its schedule, a person's
 then asks again every 10 seconds, for up to Wait for a running sync seconds
 (300 by default), and runs its own sync once the other has ended, unless
 that one is recent enough for Skip if synced within. With 0 it fails at once.
+With Skip if synced within at 0, the step syncs again right after the sync
+it waited for, so where flows may overlap each other or the provider's
+schedule, set Skip if synced within to a small value such as 30: the sync
+that just ended then counts, and the step succeeds with status `fresh`.
 
 A sync can take a while: the platform gives the provider's calls 15 minutes
 unless an administrator changed `HEGEMONY_INVENTORY_SYNC_DEADLINE_SECONDS`.

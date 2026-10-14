@@ -468,7 +468,8 @@ class HandlerServices(Protocol):
         ``history_id``, ``started_at``, ``finished_at``, ``duration_ms``,
         ``counts`` (``items_added``, ``items_updated``, ``items_unchanged``,
         ``items_stale``, ``items_restored`` and the same for ``sites_``) and
-        ``error_message``.
+        ``error_message``. These key names are the contract between host and
+        handler: a host may add keys, but never renames or removes one.
 
         The call returns when the sync has ended, which can take as long as
         the host's sync deadline. The host refuses, with

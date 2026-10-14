@@ -148,13 +148,17 @@ def _describe(exc: BaseException) -> str:
 
 
 def _host_summary(exc: BaseException) -> str:
-    if isinstance(exc, PermissionError):
+    """The summary for a host error, by the same exact-type rule as :func:`_describe`."""
+    kind = type(exc)
+    if kind is PermissionError:
         return "Refused by the platform"
-    if isinstance(exc, LookupError):
+    if kind is LookupError:
         return "Provider not found"
-    if isinstance(exc, ValueError):
+    if kind is ValueError:
         return "Rejected by the platform"
-    return "Sync could not be requested"
+    if kind is RuntimeError:
+        return "Sync could not be requested"
+    return "Unexpected error"
 
 
 def _output(provider: str, answer: Mapping[str, Any] | None, *, waited: float) -> dict[str, Any]:
@@ -249,7 +253,7 @@ class InventorySyncHandler(BaseHandler):
     syncs_inventory = True
     run_timeout_field = "timeout_seconds"
     config_model = InventorySyncConfig
-    default_config = {"provider": "", "max_age_seconds": 0}
+    default_config = {"max_age_seconds": 0}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Ask the host for a sync; wait while another sync of the provider runs."""

@@ -322,6 +322,20 @@ async def test_an_unexpected_error_reports_only_its_type():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error", [KeyError("token=abc123"), UnicodeError("token=abc123")])
+async def test_a_subclass_of_a_documented_error_is_unexpected_in_summary_and_error(error):
+    """A KeyError is a LookupError, a UnicodeError a ValueError: neither is the host's."""
+    result = await _run({"provider": "primary"}, FakeServices(error))
+
+    assert result.success is False
+    assert result.summary == "Unexpected error"
+    assert (
+        result.error
+        == f"Could not sync primary: unexpected {type(error).__name__} from the platform"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_platform_without_the_service_says_to_upgrade():
     result = await _run({"provider": "primary"}, OldHost())
 
