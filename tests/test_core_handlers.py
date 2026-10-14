@@ -115,7 +115,9 @@ def test_no_duplicate_ids_across_wheels():
     all_ids: list[str] = []
     for module, _ns, _expected in WHEELS:
         all_ids += [cls.handler_id for cls in module.ALL_HANDLERS]
-    assert len(all_ids) == len(set(all_ids)) == 25
+    # The total follows the table above, so a new wheel never has to guess what
+    # another branch's count will be when the two merge.
+    assert len(all_ids) == len(set(all_ids)) == sum(len(expected) for _, _, expected in WHEELS)
 
 
 def test_connectivity_check_type_is_registry_driven():
