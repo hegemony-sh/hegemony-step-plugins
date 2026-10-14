@@ -1363,24 +1363,39 @@ _TRANSIENT_ERRORS = (
 )
 
 
+#: TLS errors that are a dropped connection rather than a handshake the server
+#: refused: the peer went away, which the next attempt may not meet again.
+_DROPPED_TLS_ERRORS = (ssl.SSLEOFError, ssl.SSLSyscallError, ssl.SSLZeroReturnError)
+_DROPPED_TLS_REASONS = frozenset({"UNEXPECTED_EOF_WHILE_READING"})
+
+
 def _is_transient(exc: BaseException) -> bool:
     """Whether the request may not have reached the server (see ``HttpResponse.transient``).
 
     A connection that failed in the TLS handshake (a certificate the step does
-    not trust, a name mismatch) is not: the same certificate answers the next
-    attempt. httpx wraps that ``ssl.SSLError`` in a ``ConnectError``, so the
-    cause chain is read.
+    not trust, a name mismatch, a protocol the server refuses) is not: the
+    next attempt meets the same server. httpx raises that ``ssl.SSLError`` as
+    a ``ConnectError`` from httpcore's, which re-raises it ``from None``, so
+    the error is found through ``__context__`` where ``__cause__`` is unset.
+    A connection the peer dropped during the handshake stays transient.
     """
     if not isinstance(exc, _TRANSIENT_ERRORS):
         return False
+    seen: set[int] = set()
     cause: BaseException | None = exc
-    for _ in range(8):
-        if cause is None:
-            break
-        if isinstance(cause, ssl.SSLError):
+    while cause is not None and id(cause) not in seen and len(seen) < 8:
+        seen.add(id(cause))
+        if isinstance(cause, ssl.SSLError) and not _is_dropped_tls(cause):
             return False
-        cause = cause.__cause__
+        cause = cause.__cause__ if cause.__cause__ is not None else cause.__context__
     return True
+
+
+def _is_dropped_tls(exc: ssl.SSLError) -> bool:
+    """Whether ``exc`` says the peer went away, not that it refused the handshake."""
+    if isinstance(exc, _DROPPED_TLS_ERRORS):
+        return True
+    return getattr(exc, "reason", None) in _DROPPED_TLS_REASONS
 
 
 def _describe_error(exc: BaseException, timeout_seconds: int) -> str:

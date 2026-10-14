@@ -25,6 +25,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
+import httpcore
 import httpx
 import pytest
 
@@ -2043,11 +2044,37 @@ async def test_merged_pages_over_the_output_limit_leave_data_out():
     assert result.output["extracted"] == {"last": 20999, "first": 10000}
 
 
+def _connect_error_from(tls_error: ssl.SSLError) -> httpx.ConnectError:
+    """A ConnectError with the chain httpx and httpcore build around a TLS failure.
+
+    httpcore re-raises the ``ssl`` error ``from None``, so it survives only as the
+    ``__context__`` of httpcore's error, which httpx then raises its own error from.
+    """
+    try:
+        try:
+            try:
+                raise tls_error
+            except ssl.SSLError as exc:
+                raise httpcore.ConnectError(str(exc)) from None
+        except httpcore.ConnectError as exc:
+            raise httpx.ConnectError(str(exc)) from exc
+    except httpx.ConnectError as exc:
+        return exc
+    raise AssertionError("unreachable")
+
+
 def _tls_failure() -> httpx.ConnectError:
-    """A ConnectError as httpx raises it from a certificate the client does not trust."""
-    error = httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
-    error.__cause__ = ssl.SSLCertVerificationError("certificate verify failed")
-    return error
+    """The client does not trust the server's certificate."""
+    return _connect_error_from(
+        ssl.SSLCertVerificationError(
+            1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"
+        )
+    )
+
+
+def _tls_dropped() -> httpx.ConnectError:
+    """The peer closed the connection during the handshake."""
+    return _connect_error_from(ssl.SSLEOFError(8, "EOF occurred in violation of protocol"))
 
 
 @pytest.mark.parametrize(
@@ -2057,8 +2084,9 @@ def _tls_failure() -> httpx.ConnectError:
         ("https://api.example.test/x", httpx.ReadTimeout("slow"), True, False),
         ("https://api.example.test/x", httpx.RemoteProtocolError("dropped"), True, False),
         # A failed TLS handshake is a ConnectError too, but the next attempt meets the
-        # same certificate.
+        # same certificate; a peer that dropped the handshake may be back.
         ("https://api.example.test/x", _tls_failure(), False, False),
+        ("https://api.example.test/x", _tls_dropped(), True, False),
         # Refused by the step itself: nothing was sent, and trying again changes nothing.
         ("https://loopback.example.test/x", None, False, False),
         ("https://api.example.test/x", None, False, True),

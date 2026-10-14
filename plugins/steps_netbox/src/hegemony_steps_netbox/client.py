@@ -466,7 +466,8 @@ class NetBoxClient:
         response = await self._http.send(self.services, config)
         self.totals.elapsed_ms += round((time.perf_counter() - started) * 1000)
         result = response.result
-        # Only what http.request sent counts: a config it refused sent nothing.
+        # The requests http.request's record lists (a config it refused lists
+        # none), so the metric agrees with the step's netbox evidence record.
         self.totals.requests += self._log(result.evidence)
         output = result.output or {}
         self.totals.size_bytes += int(output.get("size_bytes") or 0)

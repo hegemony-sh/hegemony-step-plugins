@@ -349,6 +349,52 @@ async def test_reads_are_retried_while_netbox_is_busy_and_writes_are_not(no_wait
     assert "HTTP 503" in result.error
 
 
+class _CutShort(httpx.AsyncByteStream):
+    """A body whose connection drops after the status and part of the body arrived."""
+
+    async def __aiter__(self):
+        yield b'{"id": 33,'
+        raise httpx.ReadError("connection reset while reading")
+
+
+async def test_reads_are_retried_when_the_body_drops_after_the_status_and_writes_are_not(
+    no_waiting,
+):
+    def dropping() -> Callable[[httpx.Request, Any], httpx.Response]:
+        calls = iter([True, False])
+
+        def respond(request: httpx.Request, body: Any) -> httpx.Response:
+            if next(calls, False):
+                return httpx.Response(
+                    200, stream=_CutShort(), headers={"content-type": "application/json"}
+                )
+            return _json(DEVICE if request.method == "GET" else {"id": 33})
+
+        return respond
+
+    netbox = NetBox(dropping())
+    result = await _run(
+        NetBoxRequestHandler, netbox, _config(endpoint="dcim/devices", object_id="33")
+    )
+    assert result.success, result.error
+    assert len(netbox.requests) == 2
+    assert result.metrics["requests"] == 2
+    assert no_waiting == [1]
+
+    netbox = NetBox(dropping())
+    result = await _run(
+        NetBoxRequestHandler,
+        netbox,
+        _config(
+            action="update", endpoint="dcim/devices", object_id="33", data={"status": "offline"}
+        ),
+    )
+    assert not result.success
+    assert len(netbox.requests) == 1
+    assert result.output["status"] == 200
+    assert result.metrics["requests"] == 1
+
+
 async def test_reads_are_retried_after_a_dropped_connection_and_writes_are_not(no_waiting):
     def flaky() -> Callable[[httpx.Request, Any], httpx.Response]:
         calls = iter([True, False])
@@ -432,6 +478,10 @@ async def test_a_token_http_request_refuses_is_named_by_the_netbox_setting():
     assert result.error.startswith("Invalid netbox.request config: token resolved to a value")
     assert "auth_secret" not in result.error
     assert netbox.requests == []
+    # Nothing was sent, and the metric says so, as the netbox record does.
+    assert result.metrics["requests"] == 0
+    [record] = [e for e in result.evidence if e["name"] == "netbox"]
+    assert record["content_json"]["requests"] == []
 
 
 # --- netbox.request: writes ---------------------------------------------------------
