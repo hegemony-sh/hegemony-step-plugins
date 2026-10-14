@@ -37,6 +37,7 @@ EXPECTED_MODULES = (
     "hegemony_steps_tf",
     "hegemony_steps_http",
     "hegemony_steps_secret",
+    "hegemony_steps_inventory",
     "hegemony_steps_netbox",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
@@ -59,6 +60,7 @@ EXPECTED_ENTRY_POINTS = {
     "tf",
     "http",
     "secret",
+    "inventory",
     "netbox",
 }
 

@@ -121,6 +121,7 @@ EXPECTED_RUN_TIMEOUT_FIELDS = {
     "container.run": "timeout_seconds",
     "general.noop": "delay_seconds",
     "general.sleep": "duration_seconds",
+    "inventory.sync": "timeout_seconds",
     "probe.wait_reachable": "max_wait_seconds",
     "tf.apply": "timeout_seconds",
     "tf.plan": "timeout_seconds",

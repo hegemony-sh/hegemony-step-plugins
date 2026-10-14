@@ -419,6 +419,11 @@ class BaseHandler(ABC):
     # may refuse the handler outright (at save or at run time) where an
     # administrator has not enabled secret writes by steps.
     writes_secrets: bool = False
+    # True for handlers that start syncs of the run organization's inventory
+    # providers (inventory.sync). The host grants ``services.sync_inventory``
+    # only to such handlers, and only for providers an administrator has
+    # opened to flows.
+    syncs_inventory: bool = False
     # True for handlers that keep run-scoped state keyed by the step's node id
     # (tf.plan's working directory under /shared, tf.apply's lookup of the
     # plan step's output). Two executions of one node at the same time would
