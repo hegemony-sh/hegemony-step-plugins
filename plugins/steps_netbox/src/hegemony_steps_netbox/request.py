@@ -264,15 +264,17 @@ def config_errors(config: NetBoxRequestConfig, *, allow_templates: bool) -> list
 
     data: Any = None
     has_data = False
+    parsed = False  # Data was read as JSON (null included), so its shape can be checked
     if not unchecked(config.data):
         try:
             has_data, data = json_value("data", config.data)
+            parsed = has_data
         except ValueError as exc:
             errors.append(str(exc))
     elif config.data is not None:
         has_data = True
     action = config.action
-    if action in {"update", "delete"} and not object_id and data is not None:
+    if action in {"update", "delete"} and not object_id and parsed:
         errors.extend(_bulk_errors(action, data, allow_templates=allow_templates))
     if action in {"get", "list"} and has_data:
         errors.append(f"{action} sends no data: clear Data")

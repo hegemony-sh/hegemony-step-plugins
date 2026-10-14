@@ -464,18 +464,19 @@ class NetBoxClient:
         )
         started = time.perf_counter()
         response = await self._http.send(self.services, config)
-        self.totals.requests += 1
         self.totals.elapsed_ms += round((time.perf_counter() - started) * 1000)
         result = response.result
-        self._log(result.evidence)
+        # Only what http.request sent counts: a config it refused sent nothing.
+        self.totals.requests += self._log(result.evidence)
         output = result.output or {}
         self.totals.size_bytes += int(output.get("size_bytes") or 0)
         status = output.get("status")
         if not result.success:
             self.totals.evidence.extend(result.evidence)
             error = self._http_error(result.error or "the request failed")
-            transient = status is None and response.transient
-            return Reply(status=status, error=error), (0.0 if transient else None)
+            # A read is also retried when the connection dropped while the
+            # answer was being read: NetBox's status alone is no answer.
+            return Reply(status=status, error=error), (0.0 if response.transient else None)
         data = self.scrub.tree(response.data)
         if status is not None and status_matches(status, parse_status_spec(expected_status)):
             return Reply(status=status, data=data), None
@@ -492,18 +493,21 @@ class NetBoxClient:
             return reply, _retry_after(headers)
         return reply, None
 
-    def _log(self, evidence: list[dict[str, Any]]) -> None:
-        """Add the requests ``http.request``'s record lists to the step's log."""
+    def _log(self, evidence: list[dict[str, Any]]) -> int:
+        """Add the requests ``http.request``'s record lists to the step's log; how many."""
+        sent = 0
         for record in evidence:
             if record.get("name") != "http_request":
                 continue
             content = record.get("content_json")
             requests = content.get("requests") if isinstance(content, dict) else None
             for exchange in requests if isinstance(requests, list) else []:
+                sent += 1
                 if len(self.totals.log) < MAX_LOGGED_REQUESTS:
                     self.totals.log.append(exchange)
                 else:
                     self.totals.unlogged += 1
+        return sent
 
     def _http_error(self, error: str) -> str:
         """``error`` scrubbed; a refused http.request config named by the NetBox settings."""

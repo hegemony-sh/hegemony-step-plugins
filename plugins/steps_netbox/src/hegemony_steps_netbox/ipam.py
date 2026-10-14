@@ -106,7 +106,18 @@ async def _find(
     if not reply.ok:
         return reply, [], 0
     objects = reply.data if isinstance(reply.data, list) else []
-    matched = max(reply.count or 0, len(objects))
+    if reply.count is None:
+        # Without NetBox's count the pages read may be a part of the matches.
+        failure = Reply(
+            status=reply.status,
+            error=(
+                f"NetBox did not say how many {endpoint} objects match the filters (its answer "
+                "has no count), so the step could not tell whether it read them all; nothing "
+                "was changed"
+            ),
+        )
+        return failure, [], 0
+    matched = max(reply.count, len(objects))
     if matched > at_most:
         # The caller refuses this many; the pages need no further judging.
         return reply, objects, matched

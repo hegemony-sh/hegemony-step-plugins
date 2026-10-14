@@ -46,7 +46,8 @@ run's live view shows each object as it is rendered.
 - `ok` and `object_type`.
 
 Each configuration is also stored as evidence, `Rendered configuration
-(<name>)`, attached to its device.
+(<name>)`, attached to its device; a repeated name is keyed as in `configs`,
+`Rendered configuration (<name> (<id>))`.
 
 ## Security
 

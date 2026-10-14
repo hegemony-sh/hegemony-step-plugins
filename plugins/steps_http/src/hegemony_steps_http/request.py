@@ -1183,7 +1183,7 @@ class HttpRequestHandler(BaseHandler):
                 TimeoutError,
             ) as exc:
                 failure = _describe_error(exc, config.request_timeout_seconds)
-                transient = isinstance(exc, _TRANSIENT_ERRORS)
+                transient = _is_transient(exc)
 
         elapsed_ms = _elapsed_ms(started)
         last = exchanges[-1] if exchanges else None
@@ -1361,6 +1361,26 @@ _TRANSIENT_ERRORS = (
     httpx.WriteError,
     httpx.RemoteProtocolError,
 )
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Whether the request may not have reached the server (see ``HttpResponse.transient``).
+
+    A connection that failed in the TLS handshake (a certificate the step does
+    not trust, a name mismatch) is not: the same certificate answers the next
+    attempt. httpx wraps that ``ssl.SSLError`` in a ``ConnectError``, so the
+    cause chain is read.
+    """
+    if not isinstance(exc, _TRANSIENT_ERRORS):
+        return False
+    cause: BaseException | None = exc
+    for _ in range(8):
+        if cause is None:
+            break
+        if isinstance(cause, ssl.SSLError):
+            return False
+        cause = cause.__cause__
+    return True
 
 
 def _describe_error(exc: BaseException, timeout_seconds: int) -> str:

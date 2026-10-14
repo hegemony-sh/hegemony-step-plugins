@@ -97,8 +97,10 @@ default 30, bounds each request; Max Response Size (default 4 MiB, at most
   picks a list item.
 
 Later steps read `steps.<id>.output.object.name` or
-`steps.<id>.output.ids`. Each request is recorded as evidence with its method,
-URL, status and timing.
+`steps.<id>.output.ids`. The step's `netbox` evidence record lists each
+request with its method, URL, status and timing (the first 1000; past that,
+`requests_not_listed` counts the rest), and `http.request`'s own record is
+kept for a request that failed.
 
 ## Security
 

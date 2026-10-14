@@ -18,6 +18,7 @@ import gzip
 import hashlib
 import http.server
 import json
+import ssl
 import threading
 import zlib
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -2042,12 +2043,22 @@ async def test_merged_pages_over_the_output_limit_leave_data_out():
     assert result.output["extracted"] == {"last": 20999, "first": 10000}
 
 
+def _tls_failure() -> httpx.ConnectError:
+    """A ConnectError as httpx raises it from a certificate the client does not trust."""
+    error = httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+    error.__cause__ = ssl.SSLCertVerificationError("certificate verify failed")
+    return error
+
+
 @pytest.mark.parametrize(
     ("url", "raise_error", "transient", "sent"),
     [
         ("https://api.example.test/x", httpx.ConnectError("refused"), True, False),
         ("https://api.example.test/x", httpx.ReadTimeout("slow"), True, False),
         ("https://api.example.test/x", httpx.RemoteProtocolError("dropped"), True, False),
+        # A failed TLS handshake is a ConnectError too, but the next attempt meets the
+        # same certificate.
+        ("https://api.example.test/x", _tls_failure(), False, False),
         # Refused by the step itself: nothing was sent, and trying again changes nothing.
         ("https://loopback.example.test/x", None, False, False),
         ("https://api.example.test/x", None, False, True),

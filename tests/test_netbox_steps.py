@@ -709,16 +709,30 @@ def test_bulk_update_and_delete_accept_ids_objects_and_templates():
         assert handler.validate_config(config) == [], (action, data)
 
 
-async def test_a_malformed_bulk_delete_sends_nothing():
+@pytest.mark.parametrize("data", [{"id": 5}, "null"])
+async def test_a_malformed_bulk_delete_sends_nothing(data):
+    """An object in Data, or JSON null (a truncated list output rendered with tojson)."""
     netbox = NetBox(lambda request, body: httpx.Response(204))
     result = await _run(
         NetBoxRequestHandler,
         netbox,
-        _config(action="delete", endpoint="dcim/devices", data={"id": 5}),
+        _config(action="delete", endpoint="dcim/devices", data=data, changelog_message="m"),
     )
     assert not result.success
     assert "delete needs an Object ID" in result.error
     assert netbox.requests == []
+
+
+def test_json_null_in_data_is_refused_for_a_bulk_update_or_delete_when_saved():
+    """A chained list rendered with tojson is null when that output was too large."""
+    for action, message in (
+        ("delete", "delete needs an Object ID, or a list in Data"),
+        ("update", "update needs an Object ID, or a list in Data"),
+    ):
+        errors = NetBoxRequestHandler().validate_config(
+            _config(action=action, endpoint="dcim/devices", data="null")
+        )
+        assert any(message in error for error in errors), (action, errors)
 
 
 # --- netbox.ipam.allocate / release ---------------------------------------------------------
@@ -985,6 +999,26 @@ async def test_release_by_filters_releases_nothing_when_the_pages_shift_while_re
     assert not result.success, why
     assert "changed while the step read them" in result.error
     assert "run the step again" in result.error
+    assert all(r.method == "GET" for r in netbox.requests)
+    assert result.output["released"] == 0
+
+
+async def test_release_by_filters_releases_nothing_when_netbox_gives_no_count():
+    """A list answer without NetBox's count cannot say whether the page is every match."""
+    vlans = [{"id": 1, "vid": 10}, {"id": 2, "vid": 11}, {"id": 3, "vid": 12}]
+
+    def page(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params.get("offset", "0"))
+        return _json({"results": vlans[offset : offset + 1]})
+
+    netbox = NetBox(
+        lambda request, body: page(request) if request.method == "GET" else httpx.Response(204)
+    )
+    result = await _run(
+        ReleaseHandler, netbox, _config(resource="vlan", filters={"name": "web"}, max_objects=3)
+    )
+    assert not result.success
+    assert "did not say how many ipam/vlans objects match" in result.error
     assert all(r.method == "GET" for r in netbox.requests)
     assert result.output["released"] == 0
 
