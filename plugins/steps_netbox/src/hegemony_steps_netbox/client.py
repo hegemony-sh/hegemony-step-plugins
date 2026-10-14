@@ -12,6 +12,15 @@ and credentials scrubbed from everything the step reports. This module adds
 what is NetBox's own: the API path, the token's header (``Token`` for a v1
 token, ``Bearer`` for a v2 ``nbt_`` token), offset pagination, retries of
 reads while NetBox is busy, and error messages taken from NetBox's answer.
+
+Each request (a page, a retry, a rendered device) goes through ``send()`` on
+its own, so each opens its own connection and, with a CA bundle, resolves the
+bundle and builds its TLS context again. That keeps every safeguard on every
+request; a session-style entry point in the http wheel would save the cost.
+
+The evidence holds one ``netbox`` record per step, listing every request
+(method, URL, status, time). ``http.request``'s own record, with its preview
+of the body, is kept only for a request that failed.
 """
 
 from __future__ import annotations
@@ -29,6 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from hegemony_step_sdk import HandlerResult, HandlerServices
 from hegemony_steps_http.request import (
+    HANDLER_ID as HTTP_HANDLER_ID,
     HttpRequestConfig,
     HttpRequestHandler,
     parse_status_spec,
@@ -59,16 +69,16 @@ MAX_RETRY_WAIT_SECONDS = 30
 MAX_OUTPUT_DATA_BYTES = 64 * 1024
 #: Characters of a NetBox error message kept in the step's error.
 MAX_ERROR_CHARS = 600
+#: Requests listed in the step's ``netbox`` evidence record; the rest are counted.
+MAX_LOGGED_REQUESTS = 1000
 
 #: A v2 token (NetBox 4.5+) starts with this and is sent as a bearer token.
 V2_TOKEN_PREFIX = "nbt_"
 #: Statuses a read is retried on: NetBox (or its proxy) is busy or restarting.
 RETRY_STATUSES = frozenset({429, 502, 503, 504})
-#: Transport failures a read is retried on (the request may not have arrived).
-_TRANSIENT_ERROR_RE = re.compile(
-    r"timed out|ConnectError|ConnectTimeout|ReadError|ReadTimeout|WriteError|"
-    r"RemoteProtocolError|PoolTimeout"
-)
+#: How http.request reports a config it refused, and the NetBox setting behind each field.
+_HTTP_CONFIG_ERROR = f"Invalid {HTTP_HANDLER_ID} config: "
+_HTTP_FIELDS = {"auth_secret": "token"}
 #: One path segment of a REST endpoint or route (``dcim``, ``ip-addresses``).
 _SEGMENT = r"[a-z0-9][a-z0-9_-]*"
 ENDPOINT_RE = re.compile(rf"^{_SEGMENT}(/{_SEGMENT})*$")
@@ -325,6 +335,10 @@ class _Totals:
     elapsed_ms: int = 0
     size_bytes: int = 0
     evidence: list[dict[str, Any]] = field(default_factory=list)
+    #: Every request sent (redirect hops and retries included), for the netbox record.
+    log: list[dict[str, Any]] = field(default_factory=list)
+    #: Requests sent beyond MAX_LOGGED_REQUESTS.
+    unlogged: int = 0
 
 
 class NetBoxClient:
@@ -450,25 +464,53 @@ class NetBoxClient:
         self.totals.requests += 1
         self.totals.elapsed_ms += round((time.perf_counter() - started) * 1000)
         result = response.result
-        self.totals.evidence.extend(result.evidence)
+        self._log(result.evidence)
         output = result.output or {}
         self.totals.size_bytes += int(output.get("size_bytes") or 0)
         status = output.get("status")
         if not result.success:
-            error = self.scrub.text(result.error or "the request failed")
-            transient = status is None and bool(_TRANSIENT_ERROR_RE.search(error))
+            self.totals.evidence.extend(result.evidence)
+            error = self._http_error(result.error or "the request failed")
+            transient = status is None and response.transient
             return Reply(status=status, error=error), (0.0 if transient else None)
         data = self.scrub.tree(response.data)
         if status is not None and status_matches(status, parse_status_spec(expected_status)):
             return Reply(status=status, data=data), None
+        self.totals.evidence.extend(result.evidence)
+        headers = output.get("headers") or {}
         reply = Reply(
             status=status,
             data=data,
-            error=netbox_error(status, data, str(output.get("body") or "")),
+            error=netbox_error(
+                status, data, str(output.get("body") or ""), location=headers.get("location")
+            ),
         )
         if status in RETRY_STATUSES:
-            return reply, _retry_after(output.get("headers") or {})
+            return reply, _retry_after(headers)
         return reply, None
+
+    def _log(self, evidence: list[dict[str, Any]]) -> None:
+        """Add the requests ``http.request``'s record lists to the step's log."""
+        for record in evidence:
+            if record.get("name") != "http_request":
+                continue
+            content = record.get("content_json")
+            requests = content.get("requests") if isinstance(content, dict) else None
+            for exchange in requests if isinstance(requests, list) else []:
+                if len(self.totals.log) < MAX_LOGGED_REQUESTS:
+                    self.totals.log.append(exchange)
+                else:
+                    self.totals.unlogged += 1
+
+    def _http_error(self, error: str) -> str:
+        """``error`` scrubbed; a refused http.request config named by the NetBox settings."""
+        error = self.scrub.text(error)
+        if not error.startswith(_HTTP_CONFIG_ERROR):
+            return error
+        detail = error[len(_HTTP_CONFIG_ERROR) :]
+        for http_field, netbox_field in _HTTP_FIELDS.items():
+            detail = detail.replace(http_field, netbox_field)
+        return f"Invalid {self.handler_id} config: {detail}"
 
     async def list_all(self, path: str, query: dict[str, Any], *, max_results: int) -> Reply:
         """Every object of a list endpoint, page by page, up to ``max_results``.
@@ -517,8 +559,10 @@ class NetBoxClient:
     ) -> HandlerResult:
         """The step's result, with the requests' evidence and every credential scrubbed."""
         evidence = list(self.totals.evidence)
-        if record is not None:
-            evidence.append({"kind": "transport_meta", "name": "netbox", "content_json": record})
+        content: dict[str, Any] = {**(record or {}), "requests": list(self.totals.log)}
+        if self.totals.unlogged:
+            content["requests_not_listed"] = self.totals.unlogged
+        evidence.append({"kind": "transport_meta", "name": "netbox", "content_json": content})
         all_metrics = {
             "requests": self.totals.requests,
             "elapsed_ms": self.totals.elapsed_ms,
@@ -555,8 +599,18 @@ def _messages(value: Any) -> str:
     return json.dumps(value)
 
 
-def netbox_error(status: int | None, data: Any, body: str) -> str:
-    """A step error from NetBox's answer to a request it did not carry out."""
+def netbox_error(status: int | None, data: Any, body: str, *, location: str | None = None) -> str:
+    """A step error from NetBox's answer to a request it did not carry out.
+
+    ``location`` is the Location header of a redirect, which the step does not follow.
+    """
+    if status is not None and 300 <= status < 400:
+        where = f" to {location}" if location else ""
+        return (
+            f"NetBox answered with a redirect (HTTP {status}){where}, which the step does not "
+            "follow: set NetBox URL to the address NetBox serves its API at (https:// rather "
+            "than http://, or the path NetBox is served under)"
+        )
     if isinstance(data, dict) and isinstance(data.get("detail"), str):
         detail = data["detail"]
     elif isinstance(data, list) and any(data):

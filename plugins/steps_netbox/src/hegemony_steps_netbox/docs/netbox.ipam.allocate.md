@@ -38,9 +38,10 @@ Filters find what an earlier attempt already took, such as
 `dns_name=web-01.example.com` or `description=order-4711`. When they match
 Count objects, the step returns those without taking anything; when they
 match none, it allocates; any other number fails the step. The search stays
-inside the pool for prefixes (the prefix and its VRF) and VLAN groups, and
-covers all of NetBox for IP ranges and ASN ranges, so make the filters
-specific there. Empty Existing Filters always allocate.
+inside the pool for prefixes (the prefix and its VRF), VLAN groups and ASN
+ranges (between the range's first and last ASN); for IP ranges it stays in
+the range's VRF but covers every address there, so make the filters specific.
+Empty Existing Filters always allocate.
 
 ## Output
 

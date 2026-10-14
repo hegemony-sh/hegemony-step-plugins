@@ -349,6 +349,91 @@ async def test_reads_are_retried_while_netbox_is_busy_and_writes_are_not(no_wait
     assert "HTTP 503" in result.error
 
 
+async def test_reads_are_retried_after_a_dropped_connection_and_writes_are_not(no_waiting):
+    def flaky() -> Callable[[httpx.Request, Any], httpx.Response]:
+        calls = iter([True, False])
+
+        def respond(request: httpx.Request, body: Any) -> httpx.Response:
+            if next(calls, False):
+                raise httpx.ConnectError("connection refused", request=request)
+            return _json(DEVICE if request.method == "GET" else {"id": 1}, 200)
+
+        return respond
+
+    netbox = NetBox(flaky())
+    result = await _run(
+        NetBoxRequestHandler, netbox, _config(endpoint="dcim/devices", object_id="33")
+    )
+    assert result.success, result.error
+    assert len(netbox.requests) == 2
+
+    netbox = NetBox(flaky())
+    result = await _run(
+        NetBoxRequestHandler,
+        netbox,
+        _config(action="update", endpoint="dcim/devices", object_id="33", data={"name": "x"}),
+    )
+    assert not result.success
+    assert len(netbox.requests) == 1
+    assert "ConnectError" in result.error
+
+
+async def test_evidence_lists_every_request_and_keeps_previews_of_failed_ones_only():
+    def respond(request: httpx.Request, body: Any) -> httpx.Response:
+        offset = int(request.url.params.get("offset", "0"))
+        if offset >= 4:
+            return _json({"count": 5, "results": [DEVICE]}, 200)
+        return _json({"count": 5, "results": [DEVICE, DEVICE]}, 200)
+
+    result = await _run(
+        NetBoxRequestHandler, NetBox(respond), _config(action="list", endpoint="dcim/devices")
+    )
+    assert result.success, result.error
+    assert [e["name"] for e in result.evidence] == ["netbox"]
+    requests = result.evidence[0]["content_json"]["requests"]
+    assert [r["status"] for r in requests] == [200, 200, 200]
+    assert all(set(r) == {"method", "url", "status", "elapsed_ms"} for r in requests)
+
+    gone = NetBox(lambda request, body: _json({"detail": "Not found."}, 404))
+    result = await _run(
+        NetBoxRequestHandler, gone, _config(endpoint="dcim/devices", object_id="33")
+    )
+    assert not result.success
+    assert [e["name"] for e in result.evidence] == ["http_request", "netbox"]
+    assert "Not found." in result.evidence[0]["content_json"]["body_preview"]
+
+
+async def test_a_redirect_names_its_location():
+    netbox = NetBox(
+        lambda request, body: httpx.Response(
+            301, headers={"Location": "https://netbox.example.test/netbox/api/dcim/devices/33/"}
+        )
+    )
+    result = await _run(
+        NetBoxRequestHandler, netbox, _config(endpoint="dcim/devices", object_id="33")
+    )
+    assert not result.success
+    assert result.error.startswith(
+        "NetBox answered with a redirect (HTTP 301) to "
+        "https://netbox.example.test/netbox/api/dcim/devices/33/"
+    )
+    assert "set NetBox URL" in result.error
+
+
+async def test_a_token_http_request_refuses_is_named_by_the_netbox_setting():
+    netbox = NetBox(lambda request, body: _json(DEVICE))
+    result = await _run(
+        NetBoxRequestHandler,
+        netbox,
+        _config(endpoint="dcim/devices", object_id="33"),
+        services=FakeServices(token="0123456789abcdef0123456789abcdéf"),
+    )
+    assert not result.success
+    assert result.error.startswith("Invalid netbox.request config: token resolved to a value")
+    assert "auth_secret" not in result.error
+    assert netbox.requests == []
+
+
 # --- netbox.request: writes ---------------------------------------------------------
 
 
@@ -592,6 +677,50 @@ def test_templated_values_pass_when_the_flow_is_saved():
     assert NetBoxRequestHandler().validate_config(config) == []
 
 
+@pytest.mark.parametrize(
+    ("action", "data", "message"),
+    [
+        ("delete", {"id": 5}, "delete needs an Object ID, or a list in Data of object IDs"),
+        ("delete", "5", "delete needs an Object ID, or a list in Data of object IDs"),
+        ("update", [1, 2], "'data' item 1 must be an object with its id"),
+        ("update", [{"name": "x"}], "'data' item 1 must be an object with its id"),
+        ("update", {"name": "x"}, "update needs an Object ID, or a list in Data of objects"),
+        ("delete", [{"name": "x"}], "'data' item 1 must be an object ID or an object with its id"),
+        ("delete", [5, 0], "'data' item 2 must be an object ID or an object with its id"),
+        ("delete", [True], "'data' item 1 must be an object ID or an object with its id"),
+        ("delete", [], "the list in Data is empty: nothing to delete"),
+    ],
+)
+def test_bulk_update_and_delete_data_is_checked_when_the_flow_is_saved(action, data, message):
+    config = _config(action=action, endpoint="dcim/devices", data=data)
+    errors = NetBoxRequestHandler().validate_config(config)
+    assert any(message in error for error in errors), errors
+
+
+def test_bulk_update_and_delete_accept_ids_objects_and_templates():
+    handler = NetBoxRequestHandler()
+    for action, data in [
+        ("delete", [5, "6", {"id": 7}]),
+        ("delete", ["{{ steps.find.output.id }}", {"id": "{{ inputs.id }}"}]),
+        ("update", [{"id": 5, "status": "active"}, {"id": "6", "status": "offline"}]),
+        ("update", "{{ steps.build.output.objects | tojson }}"),
+    ]:
+        config = _config(action=action, endpoint="dcim/devices", data=data)
+        assert handler.validate_config(config) == [], (action, data)
+
+
+async def test_a_malformed_bulk_delete_sends_nothing():
+    netbox = NetBox(lambda request, body: httpx.Response(204))
+    result = await _run(
+        NetBoxRequestHandler,
+        netbox,
+        _config(action="delete", endpoint="dcim/devices", data={"id": 5}),
+    )
+    assert not result.success
+    assert "delete needs an Object ID" in result.error
+    assert netbox.requests == []
+
+
 # --- netbox.ipam.allocate / release ---------------------------------------------------------
 
 
@@ -637,6 +766,7 @@ async def test_allocate_reuses_what_existing_filters_find_in_the_pool():
         "parent": ["10.20.0.0/24"],
         "vrf_id": ["3"],
         "limit": ["2"],
+        "offset": ["0"],
     }
     assert result.output["allocated"] is False
     assert result.output["value"] == "10.20.0.9/24"
@@ -772,6 +902,93 @@ async def test_release_by_filters_counts_matches_past_a_capped_page():
     assert all(r.method == "GET" for r in netbox.requests)
 
 
+def _capped(objects: list[dict[str, Any]], *, page_size: int = 1, lose_after: int | None = None):
+    """A list endpoint whose MAX_PAGE_SIZE is ``page_size``; pages by offset."""
+
+    def page(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params.get("offset", "0"))
+        limit = min(int(request.url.params.get("limit", "50")), page_size)
+        results = objects[offset : offset + limit]
+        if lose_after is not None and offset >= lose_after:
+            results = []
+        return _json({"count": len(objects), "results": results})
+
+    return page
+
+
+async def test_release_by_filters_reads_every_match_past_a_capped_page():
+    vlans = [{"id": 1, "vid": 10}, {"id": 2, "vid": 11}, {"id": 3, "vid": 12}]
+    page = _capped(vlans)
+    netbox = NetBox(
+        lambda request, body: page(request) if request.method == "GET" else httpx.Response(204)
+    )
+    result = await _run(
+        ReleaseHandler, netbox, _config(resource="vlan", filters={"name": "web"}, max_objects=3)
+    )
+    assert result.success, result.error
+    assert [netbox.query(i)["offset"] for i in range(3)] == [["0"], ["1"], ["2"]]
+    assert netbox.calls[-1] == "DELETE /api/ipam/vlans/"
+    assert netbox.bodies[-1] == [{"id": 1}, {"id": 2}, {"id": 3}]
+    assert result.output["released"] == 3
+
+
+async def test_release_by_filters_releases_nothing_when_the_matches_change_while_read():
+    vlans = [{"id": 1, "vid": 10}, {"id": 2, "vid": 11}, {"id": 3, "vid": 12}]
+    page = _capped(vlans, lose_after=1)
+    netbox = NetBox(
+        lambda request, body: page(request) if request.method == "GET" else httpx.Response(204)
+    )
+    result = await _run(
+        ReleaseHandler, netbox, _config(resource="vlan", filters={"name": "web"}, max_objects=3)
+    )
+    assert not result.success
+    assert "NetBox listed 1 of the 3 ipam/vlans objects that match" in result.error
+    assert all(r.method == "GET" for r in netbox.requests)
+
+
+async def test_allocate_reuses_every_existing_match_past_a_capped_page():
+    addresses = [
+        {"id": 1, "address": "10.20.0.1/24"},
+        {"id": 2, "address": "10.20.0.2/24"},
+        {"id": 3, "address": "10.20.0.3/24"},
+    ]
+    page = _capped(addresses)
+
+    def respond(request, body):
+        if request.url.path == "/api/ipam/prefixes/7/":
+            return _json(PREFIX)
+        return page(request)
+
+    netbox = NetBox(respond)
+    result = await _run(
+        AllocateHandler, netbox, _config(pool_id="7", count=3, existing_filters={"tenant": "a"})
+    )
+    assert result.success, result.error
+    assert result.output["allocated"] is False
+    assert result.output["values"] == ["10.20.0.1/24", "10.20.0.2/24", "10.20.0.3/24"]
+    assert all(r.method == "GET" for r in netbox.requests)
+
+
+async def test_allocate_keeps_the_search_for_an_earlier_asn_inside_the_range():
+    asn_range = {"id": 4, "start": 65000, "end": 65099}
+
+    def respond(request, body):
+        if request.url.path == "/api/ipam/asn-ranges/4/":
+            return _json(asn_range)
+        return _json({"count": 1, "results": [{"id": 9, "asn": 65010}]})
+
+    netbox = NetBox(respond)
+    result = await _run(
+        AllocateHandler,
+        netbox,
+        _config(allocate="asn_from_range", pool_id="4", existing_filters={"description": "web"}),
+    )
+    assert result.success, result.error
+    query = netbox.query()
+    assert query["asn__gte"] == ["65000"] and query["asn__lte"] == ["65099"]
+    assert result.output["value"] == 65010
+
+
 async def test_get_without_an_id_or_filters_reads_a_single_object_endpoint_only():
     status = NetBox(lambda request, body: _json({"netbox-version": "4.4.1", "plugins": {}}))
     result = await _run(NetBoxRequestHandler, status, _config(endpoint="status"))
@@ -819,6 +1036,40 @@ async def test_render_config_renders_for_each_target_device():
         "Rendered configuration (web-02)",
     ]
     assert rendered[0]["device_id"] == "uuid-web-01"
+
+
+async def test_render_config_keys_devices_that_share_a_name_by_id_and_reports_progress():
+    progress: list[tuple[str, str | None]] = []
+
+    async def emit(message: str, device_id: str | None, attrs: Any) -> bool:
+        progress.append((message, device_id))
+        return True
+
+    def respond(request, body):
+        device_id = request.url.path.split("/")[4]
+        return _json({"content": f"hostname d{device_id}\n"})
+
+    result = await _run(
+        RenderConfigHandler,
+        NetBox(respond),
+        _config(),
+        target_devices_by_role={
+            "fleet": [
+                _device("web-01", "33"),
+                {**_device("web-01", "34"), "id": "uuid-web-01-lyon"},
+                _device("db-01", "35"),
+            ]
+        },
+        target_roles=["fleet"],
+        _emit_progress=emit,
+    )
+    assert result.success, result.error
+    assert set(result.output["configs"]) == {"web-01 (33)", "web-01 (34)", "db-01"}
+    assert progress == [
+        ("web-01 (33): rendered (1 of 3)", "uuid-web-01"),
+        ("web-01 (34): rendered (2 of 3)", "uuid-web-01-lyon"),
+        ("db-01: rendered (3 of 3)", "uuid-db-01"),
+    ]
 
 
 async def test_render_config_keeps_going_when_one_device_fails():

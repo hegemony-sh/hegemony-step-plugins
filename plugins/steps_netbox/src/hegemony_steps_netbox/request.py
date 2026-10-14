@@ -35,6 +35,7 @@ from .client import (
     MAX_RESPONSE_BYTES_LIMIT,
     MAX_RESULTS_LIMIT,
     MAX_RETRIES,
+    OBJECT_ID_RE,
     Method,
     NetBoxClient,
     NetBoxConnection,
@@ -271,6 +272,8 @@ def config_errors(config: NetBoxRequestConfig, *, allow_templates: bool) -> list
     elif config.data is not None:
         has_data = True
     action = config.action
+    if action in {"update", "delete"} and not object_id and data is not None:
+        errors.extend(_bulk_errors(action, data, allow_templates=allow_templates))
     if action in {"get", "list"} and has_data:
         errors.append(f"{action} sends no data: clear Data")
     if action == "list" and object_id:
@@ -279,11 +282,8 @@ def config_errors(config: NetBoxRequestConfig, *, allow_templates: bool) -> list
         errors.append("create needs Data: the object to create, or a list of them")
     if action == "create" and object_id:
         errors.append("create takes no Object ID: NetBox assigns it")
-    if action == "update":
-        if not has_data:
-            errors.append("update needs Data: the fields to change")
-        elif not object_id and data is not None and not isinstance(data, list):
-            errors.append("update needs an Object ID, or a list in Data of objects with their id")
+    if action == "update" and not has_data:
+        errors.append("update needs Data: the fields to change")
     if object_id and isinstance(data, list) and action in {"update", "delete"}:
         errors.append(
             f"a list in Data {action}s many objects at once: clear Object ID (each object "
@@ -320,6 +320,44 @@ def config_errors(config: NetBoxRequestConfig, *, allow_templates: bool) -> list
             parse_path(path)
         except PathError as exc:
             errors.append(f"'extract.{name}': {exc}")
+    return errors
+
+
+def _bulk_errors(action: str, data: Any, *, allow_templates: bool) -> list[str]:
+    """Why ``data`` is not the list an update or delete without Object ID sends."""
+    if not isinstance(data, list):
+        if action == "update":
+            return ["update needs an Object ID, or a list in Data of objects with their id"]
+        return [
+            "delete needs an Object ID, or a list in Data of object IDs or objects with their "
+            'id, such as [5, 6] or [{"id": 5}]'
+        ]
+    if not data:
+        return [f"the list in Data is empty: nothing to {action}"]
+
+    def is_id(value: Any) -> bool:
+        if allow_templates and is_templated(value):
+            return True
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, int):
+            return value > 0
+        return isinstance(value, str) and bool(OBJECT_ID_RE.match(value.strip()))
+
+    errors: list[str] = []
+    for index, item in enumerate(data, 1):
+        if allow_templates and is_templated(item):
+            continue
+        if isinstance(item, dict) and is_id(item.get("id")):
+            continue
+        if action == "delete" and not isinstance(item, dict) and is_id(item):
+            continue
+        wanted = (
+            "an object with its id"
+            if action == "update"
+            else "an object ID or an object with its id"
+        )
+        errors.append(f"'data' item {index} must be {wanted}")
     return errors
 
 

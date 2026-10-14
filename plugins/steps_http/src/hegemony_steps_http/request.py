@@ -646,11 +646,15 @@ class HttpResponse:
     parsed JSON body of the final response (the pages combined, when
     paginating), with known credentials scrubbed and without the size cap
     ``output.data`` has; None when the body is not JSON, the response is
-    sensitive, or no response came.
+    sensitive, or no response came. ``transient`` is true when no usable
+    response came because of a timeout or a dropped or refused connection,
+    so the request may not have reached the server and a read may be tried
+    again.
     """
 
     result: HandlerResult
     data: Any = None
+    transient: bool = False
 
 
 @dataclass
@@ -1090,6 +1094,7 @@ class HttpRequestHandler(BaseHandler):
         items: list[Any] = []
         more_pages = False
         failure: str | None = None
+        transient = False
         started = time.perf_counter()
 
         async with httpx.AsyncClient(**client_options) as client:
@@ -1178,6 +1183,7 @@ class HttpRequestHandler(BaseHandler):
                 TimeoutError,
             ) as exc:
                 failure = _describe_error(exc, config.request_timeout_seconds)
+                transient = isinstance(exc, _TRANSIENT_ERRORS)
 
         elapsed_ms = _elapsed_ms(started)
         last = exchanges[-1] if exchanges else None
@@ -1262,7 +1268,7 @@ class HttpRequestHandler(BaseHandler):
             error=scrub.text(failure) if failure else None,
             output=scrub.tree(output),
         )
-        return HttpResponse(result, None if config.sensitive else scrub.tree(data))
+        return HttpResponse(result, None if config.sensitive else scrub.tree(data), transient)
 
     @staticmethod
     async def _fetch(
@@ -1344,6 +1350,17 @@ def _json_size(value: Any) -> int:
     """Bytes of ``value`` as compact UTF-8 JSON."""
     text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return len(text.encode("utf-8", errors="surrogatepass"))
+
+
+#: Failures where the request may not have reached the server (see HttpResponse.transient).
+_TRANSIENT_ERRORS = (
+    TimeoutError,
+    httpx.TimeoutException,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+)
 
 
 def _describe_error(exc: BaseException, timeout_seconds: int) -> str:

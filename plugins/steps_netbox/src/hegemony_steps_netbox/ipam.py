@@ -94,24 +94,28 @@ async def _find(
 ) -> tuple[Reply, list[Any], int]:
     """The objects of ``endpoint`` that ``filters`` match, up to ``at_most`` plus one.
 
-    Also returns how many match in all. NetBox caps a page at its MAX_PAGE_SIZE, which
-    an administrator may set below ``at_most`` plus one, so the page can hold fewer
-    objects than match; its ``count`` still says how many do, and every limit is
-    checked against that.
+    Also returns how many match in all (NetBox's ``count``). Pages are read by
+    offset, so a NetBox whose MAX_PAGE_SIZE is below ``at_most`` plus one still
+    yields every match. When no more than ``at_most`` match, the objects read are
+    exactly those that match, or the call fails: a caller never acts on part of
+    them.
     """
-    reply = await client.call(
-        "GET", endpoint + "/", query={**filters, "limit": at_most + 1}, expected_status="200"
-    )
+    reply = await client.list_all(endpoint + "/", filters, max_results=at_most + 1)
     if not reply.ok:
         return reply, [], 0
-    data = reply.data
-    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
-        failure = Reply(status=reply.status, error=f"NetBox did not answer {endpoint} with a list")
+    objects = reply.data if isinstance(reply.data, list) else []
+    matched = max(reply.count or 0, len(objects))
+    if matched <= at_most and len(objects) != matched:
+        failure = Reply(
+            status=reply.status,
+            error=(
+                f"NetBox listed {len(objects)} of the {matched} {endpoint} objects that match "
+                "(they changed while the step read them); nothing was changed, run the step "
+                "again"
+            ),
+        )
         return failure, [], 0
-    results = data["results"]
-    count = data.get("count")
-    total = count if isinstance(count, int) and not isinstance(count, bool) else 0
-    return reply, results, max(total, len(results))
+    return reply, objects, matched
 
 
 class AllocateConfig(NetBoxConnection):
@@ -195,9 +199,9 @@ class AllocateConfig(NetBoxConnection):
             "Filters that find what an earlier attempt of the same work already took, "
             "such as dns_name=web-01.example.com. When they match Count objects the step "
             "returns those and takes nothing new, so a re-run does not allocate twice; "
-            "when they match none it allocates. Searched within the pool for prefixes and "
-            "VLAN groups, and across NetBox otherwise, so make them specific. Empty always "
-            "allocates."
+            "when they match none it allocates. Searched within the pool for prefixes, "
+            "VLAN groups and ASN ranges, within the range's VRF for IP ranges, so make them "
+            "specific there. Empty always allocates."
         ),
         json_schema_extra={
             "x_widget": "env-vars",
@@ -307,7 +311,8 @@ class AllocateHandler(BaseHandler):
             )
             if not reply.ok:
                 return self._failed(client, config, reply)
-            if matched and matched != config.count:
+            # _find read every match when no more than Count match.
+            if matched and (matched != config.count or len(objects) != matched):
                 return self._failed(
                     client,
                     config,
@@ -427,6 +432,11 @@ def _pool_scope(allocate: str, pool: dict[str, Any]) -> dict[str, Any]:
         return {"within": str(pool["prefix"]), "vrf_id": vrf_filter}
     if allocate == "vlan_from_group":
         return {"group_id": str(pool["id"])}
+    if allocate == "asn_from_range" and pool.get("start") and pool.get("end"):
+        return {"asn__gte": str(pool["start"]), "asn__lte": str(pool["end"])}
+    if allocate == "ip_from_range":
+        # NetBox has no filter for addresses within a range; its VRF at least.
+        return {"vrf_id": vrf_filter}
     return {}
 
 

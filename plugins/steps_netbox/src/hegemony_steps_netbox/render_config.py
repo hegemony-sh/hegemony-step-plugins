@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import Counter
 from typing import Any, Literal
 
 import httpx
@@ -190,7 +191,11 @@ class RenderConfigHandler(BaseHandler):
         failed: list[dict[str, Any]] = []
         texts: dict[str, str] = {}
         evidence: list[dict[str, Any]] = []
-        for object_id, name, device_id in objects:
+        # NetBox device names are unique per site and tenant only: a repeated
+        # name is told apart by its NetBox ID in configs and the evidence.
+        names = Counter(name for _, name, _ in objects)
+        for done, (object_id, name, device_id) in enumerate(objects, 1):
+            key = name if names[name] == 1 else f"{name} ({object_id})"
             reply = await client.call(
                 "POST",
                 f"{endpoint}/{object_id}/render-config/",
@@ -209,6 +214,7 @@ class RenderConfigHandler(BaseHandler):
                         "error": reply.error or "NetBox returned no rendered content",
                     }
                 )
+                await _progress(ctx, f"{key}: not rendered ({done} of {len(objects)})", device_id)
                 continue
             template = data.get("configtemplate")
             template_name = template.get("name") if isinstance(template, dict) else None
@@ -220,16 +226,17 @@ class RenderConfigHandler(BaseHandler):
                 "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
             }
             rendered.append(entry)
-            texts[name] = content
+            texts[key] = content
             evidence.append(
                 {
                     "kind": "cli_output",
-                    "name": f"Rendered configuration ({name})",
+                    "name": f"Rendered configuration ({key})",
                     "device_id": device_id,
                     "content_text": content,
                     "content_json": {**entry, "object_type": config.object_type},
                 }
             )
+            await _progress(ctx, f"{key}: rendered ({done} of {len(objects)})", device_id)
         client.totals.evidence.extend(evidence)
 
         configs_fit = json_size(texts) <= MAX_OUTPUT_DATA_BYTES
@@ -257,6 +264,11 @@ class RenderConfigHandler(BaseHandler):
             metrics={"ok": not failed, "rendered": len(rendered), "failed": len(failed)},
             record={"object_type": config.object_type, "rendered": rendered, "failed": failed},
         )
+
+
+async def _progress(ctx: HandlerContext, message: str, device_id: Any) -> None:
+    """Tell the run's live view how far the step got."""
+    await ctx.emit_progress(message, str(device_id) if device_id is not None else None)
 
 
 def _objects(ctx: HandlerContext, config: RenderConfigConfig) -> list[tuple[str, str, Any]]:

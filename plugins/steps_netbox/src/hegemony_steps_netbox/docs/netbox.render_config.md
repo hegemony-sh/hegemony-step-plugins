@@ -29,12 +29,15 @@ each object's config context for this rendering only, such as
 
 The step asks NetBox `POST /api/dcim/devices/<id>/render-config/` (or
 `virtualization/virtual-machines`) for each object in turn. Rendering changes
-nothing in NetBox, so each request is retried while NetBox is busy.
+nothing in NetBox, so each request is retried while NetBox is busy. The
+run's live view shows each object as it is rendered.
 
 ## Output
 
 - `configs`: the rendered configurations by device name (by ID with Object
-  IDs), such as `steps.render.output.configs['web-01']`; null when together
+  IDs), such as `steps.render.output.configs['web-01']`; two devices with the
+  same name (in different sites) are keyed `web-01 (33)` and `web-01 (34)`
+  with their NetBox IDs. Null when together
   they are larger than 64 KiB (`configs_truncated` is then true), in which case
   the evidence still holds each one.
 - `rendered`: one entry per configuration: `id`, `name`, `template` (the
