@@ -322,6 +322,16 @@ async def test_an_unexpected_error_reports_only_its_type():
 
 
 @pytest.mark.asyncio
+async def test_a_timeout_error_the_host_raises_is_not_the_steps_own_timeout():
+    """Only the step's deadline reports "Timed out"; a host's TimeoutError is unexpected."""
+    result = await _run({"provider": "primary"}, FakeServices(TimeoutError("token=abc123")))
+
+    assert result.success is False
+    assert result.summary == "Unexpected error"
+    assert result.error == "Could not sync primary: unexpected TimeoutError from the platform"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("error", [KeyError("token=abc123"), UnicodeError("token=abc123")])
 async def test_a_subclass_of_a_documented_error_is_unexpected_in_summary_and_error(error):
     """A KeyError is a LookupError, a UnicodeError a ValueError: neither is the host's."""

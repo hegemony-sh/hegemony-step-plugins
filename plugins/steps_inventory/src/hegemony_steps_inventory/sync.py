@@ -53,8 +53,15 @@ class _Wait:
         return end - self.started
 
 
-#: The host's documented error types: their messages name the provider and the rule.
-_HOST_ERRORS = (PermissionError, LookupError, ValueError, RuntimeError)
+#: The host's documented error types, each with the summary the step reports for it.
+#: Their messages name the provider and the rule, so ``_describe`` passes them on.
+_HOST_SUMMARIES: dict[type[BaseException], str] = {
+    PermissionError: "Refused by the platform",
+    LookupError: "Provider not found",
+    ValueError: "Rejected by the platform",
+    RuntimeError: "Sync could not be requested",
+}
+_HOST_ERRORS = tuple(_HOST_SUMMARIES)
 
 #: The counts a sync that ran reports, in the order the summary names them.
 COUNT_KEYS = (
@@ -149,16 +156,7 @@ def _describe(exc: BaseException) -> str:
 
 def _host_summary(exc: BaseException) -> str:
     """The summary for a host error, by the same exact-type rule as :func:`_describe`."""
-    kind = type(exc)
-    if kind is PermissionError:
-        return "Refused by the platform"
-    if kind is LookupError:
-        return "Provider not found"
-    if kind is ValueError:
-        return "Rejected by the platform"
-    if kind is RuntimeError:
-        return "Sync could not be requested"
-    return "Unexpected error"
+    return _HOST_SUMMARIES.get(type(exc), "Unexpected error")
 
 
 def _output(provider: str, answer: Mapping[str, Any] | None, *, waited: float) -> dict[str, Any]:
@@ -276,10 +274,14 @@ class InventorySyncHandler(BaseHandler):
             return self._unavailable(ctx, provider, "its worker lacks sync_inventory")
 
         wait = _Wait()
+        deadline = asyncio.timeout(config.timeout_seconds)
         try:
-            async with asyncio.timeout(config.timeout_seconds):
+            async with deadline:
                 answer = await self._ask(sync, provider, config, wait)
-        except TimeoutError:
+        except TimeoutError as exc:
+            if not deadline.expired():
+                # The host raised it; the step's own time limit did not run out.
+                return self._host_failed(ctx, provider, exc, wait)
             return _result(
                 ctx,
                 _output(provider, None, waited=wait.seconds),
@@ -293,14 +295,21 @@ class InventorySyncHandler(BaseHandler):
         except NotImplementedError:
             return self._unavailable(ctx, provider, "its worker does not support inventory syncs")
         except Exception as exc:
-            return _result(
-                ctx,
-                _output(provider, None, waited=wait.seconds),
-                success=False,
-                summary=_host_summary(exc),
-                error=f"Could not sync {provider}: {_describe(exc)}",
-            )
+            return self._host_failed(ctx, provider, exc, wait)
         return self._report(ctx, provider, config, answer, waited=wait.seconds)
+
+    @staticmethod
+    def _host_failed(
+        ctx: HandlerContext, provider: str, exc: BaseException, wait: _Wait
+    ) -> HandlerResult:
+        """The result for a host error: its message for a documented type, else its type."""
+        return _result(
+            ctx,
+            _output(provider, None, waited=wait.seconds),
+            success=False,
+            summary=_host_summary(exc),
+            error=f"Could not sync {provider}: {_describe(exc)}",
+        )
 
     async def _ask(
         self, sync: Any, provider: str, config: InventorySyncConfig, wait: _Wait
