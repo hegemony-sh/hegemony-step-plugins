@@ -97,6 +97,7 @@ def test_container_backed_defaults_off():
     assert sdk.BaseHandler.node_scoped_state is False
     assert sdk.BaseHandler.builds_images is False
     assert sdk.BaseHandler.writes_secrets is False
+    assert sdk.BaseHandler.syncs_inventory is False
 
 
 def test_handler_services_declares_open_state_backend():
@@ -124,6 +125,15 @@ def test_handler_services_declares_the_secret_store_methods():
         "self",
         "path",
     ]
+
+
+def test_handler_services_declares_sync_inventory():
+    """Added after the first hosts shipped: handlers feature-detect it with getattr."""
+    assert inspect.iscoroutinefunction(sdk.HandlerServices.sync_inventory)
+    parameters = inspect.signature(sdk.HandlerServices.sync_inventory).parameters
+    assert list(parameters) == ["self", "provider", "max_age_seconds"]
+    assert parameters["max_age_seconds"].default is None
+    assert parameters["max_age_seconds"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_the_secret_store_defaults_say_a_host_does_not_support_them():

@@ -37,6 +37,7 @@ EXPECTED_MODULES = (
     "hegemony_steps_tf",
     "hegemony_steps_http",
     "hegemony_steps_secret",
+    "hegemony_steps_inventory",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
     "hegemony_transport_scrapli",
@@ -58,6 +59,7 @@ EXPECTED_ENTRY_POINTS = {
     "tf",
     "http",
     "secret",
+    "inventory",
 }
 
 # Entry-point names under hegemony.probes (probe wheels).
