@@ -64,7 +64,7 @@ the saved plan before writing them anywhere.
 
 ## The Image
 
-OpenTofu runs in `ghcr.io/hegemony-sh/opentofu-runner:0.30` by default:
+OpenTofu runs in `ghcr.io/hegemony-sh/opentofu-runner:0.31` by default:
 OpenTofu at an exact version on Alpine Linux, with git and an SSH client for
 module sources, built from `images/opentofu-runner` in the plugin repository.
 `tofu` is compiled there from the OpenTofu release's source, with Go libraries

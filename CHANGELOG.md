@@ -1,3 +1,19 @@
+## [0.31.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.30.0...v0.31.0) (2026-10-14)
+
+### Features
+
+* **http:** let other handlers send through http.request's client ([3ef263f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3ef263f0e0882521e84b3184bb0cf4a316120812))
+* **netbox:** add NetBox steps: request, ipam allocate/release, render_config ([8a723e0](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8a723e01ff57bb80c0ac04d08723d127fafd368e))
+
+### Bug Fixes
+
+* **http:** find a refused TLS handshake behind httpcore's from None ([7cde73b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7cde73b7ac68ee713282453645c510659116e64f))
+* **netbox:** check NetBox's match count, and refuse a get of a whole list ([6422010](https://github.com/hegemony-sh/hegemony-step-plugins/commit/64220107d625d8d1116bbc50569a13354ac03036))
+* **netbox:** honour Retry-After dates and zero, keep render keys unique ([6bd9b9c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6bd9b9cebb06c4e243707dc20b2af417c946848d))
+* **netbox:** read every match before acting, check bulk Data when saved ([640559e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/640559ed983766bad3eb0cfc93eeb0f6460cd620))
+* **netbox:** refuse null bulk Data, a countless list, and a TLS retry ([cf304cb](https://github.com/hegemony-sh/hegemony-step-plugins/commit/cf304cb52a57c4c629a11cc9815633e543801acb))
+* **netbox:** refuse to act on matches that shifted while they were paged ([b30403f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b30403faa3fad68dd046717ddfcbdbaa6b6da87b))
+
 ## [0.30.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.29.1...v0.30.0) (2026-10-14)
 
 ### Features
