@@ -192,10 +192,16 @@ class RenderConfigHandler(BaseHandler):
         texts: dict[str, str] = {}
         evidence: list[dict[str, Any]] = []
         # NetBox device names are unique per site and tenant only: a repeated
-        # name is told apart by its NetBox ID in configs and the evidence.
+        # name is told apart by its NetBox ID in configs and the evidence, and
+        # a key still taken (a device named like that) by a counter.
         names = Counter(name for _, name, _ in objects)
+        keys: set[str] = set()
         for done, (object_id, name, device_id) in enumerate(objects, 1):
-            key = name if names[name] == 1 else f"{name} ({object_id})"
+            key = base = name if names[name] == 1 else f"{name} ({object_id})"
+            number = 2
+            while key in keys:
+                key, number = f"{base} #{number}", number + 1
+            keys.add(key)
             reply = await client.call(
                 "POST",
                 f"{endpoint}/{object_id}/render-config/",

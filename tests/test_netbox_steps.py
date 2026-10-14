@@ -12,7 +12,9 @@ client run for real without touching the network.
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import json
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -347,6 +349,39 @@ async def test_reads_are_retried_while_netbox_is_busy_and_writes_are_not(no_wait
     assert not result.success
     assert len(busy.requests) == 1
     assert "HTTP 503" in result.error
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "waits"),
+    [
+        ({"Retry-After": "0"}, [0.0]),
+        ({"Retry-After": "999"}, [30]),
+        ({"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}, [0.0]),
+        ({"Retry-After": "soon"}, [1]),
+        ({}, [1]),
+    ],
+    ids=["zero", "capped", "past-date", "unreadable", "missing"],
+)
+async def test_reads_wait_as_retry_after_asks_or_back_off(no_waiting, retry_after, waits):
+    answers = iter([_json({}, 503, **retry_after), _json(DEVICE)])
+    netbox = NetBox(lambda request, body: next(answers))
+    result = await _run(
+        NetBoxRequestHandler, netbox, _config(endpoint="dcim/devices", object_id="33")
+    )
+    assert result.success, result.error
+    assert no_waiting == waits
+
+
+async def test_reads_wait_until_a_retry_after_date(no_waiting):
+    when = email.utils.formatdate(time.time() + 20, usegmt=True)
+    answers = iter([_json({}, 429, **{"Retry-After": when}), _json(DEVICE)])
+    netbox = NetBox(lambda request, body: next(answers))
+    result = await _run(
+        NetBoxRequestHandler, netbox, _config(endpoint="dcim/devices", object_id="33")
+    )
+    assert result.success, result.error
+    assert len(no_waiting) == 1
+    assert 15 < no_waiting[0] <= 20
 
 
 class _CutShort(httpx.AsyncByteStream):
@@ -1217,6 +1252,34 @@ async def test_render_config_keys_devices_that_share_a_name_by_id_and_reports_pr
         ("web-01 (34): rendered (2 of 3)", "uuid-web-01-lyon"),
         ("db-01: rendered (3 of 3)", "uuid-db-01"),
     ]
+
+
+async def test_render_config_keys_stay_unique_when_a_device_is_named_like_a_key():
+    def respond(request, body):
+        device_id = request.url.path.split("/")[4]
+        return _json({"content": f"hostname d{device_id}\n"})
+
+    result = await _run(
+        RenderConfigHandler,
+        NetBox(respond),
+        _config(),
+        target_devices_by_role={
+            "fleet": [
+                _device("web", "33"),
+                {**_device("web", "34"), "id": "uuid-web-lyon"},
+                _device("web (33)", "35"),
+            ]
+        },
+        target_roles=["fleet"],
+    )
+    assert result.success, result.error
+    assert result.output["configs"] == {
+        "web (33)": "hostname d33\n",
+        "web (34)": "hostname d34\n",
+        "web (33) #2": "hostname d35\n",
+    }
+    rendered = [e["name"] for e in result.evidence if e.get("kind") == "cli_output"]
+    assert rendered[2] == "Rendered configuration (web (33) #2)"
 
 
 async def test_render_config_keeps_going_when_one_device_fails():

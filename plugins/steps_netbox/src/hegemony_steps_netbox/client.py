@@ -26,10 +26,13 @@ of the body, is kept only for a request that failed.
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Any, Literal
 from urllib.parse import urlencode
 
@@ -64,6 +67,8 @@ MAX_TIMEOUT_SECONDS = 600
 MAX_RETRIES = 5
 #: Longest wait before a retry, whatever Retry-After asks for.
 MAX_RETRY_WAIT_SECONDS = 30
+#: A retry wait NetBox did not set: back off 1, 2, 4… seconds instead.
+_BACKOFF = -1.0
 #: Largest object or list a step puts in its output, in bytes of compact JSON.
 #: Outputs are chained into later steps' templates, so they stay small.
 MAX_OUTPUT_DATA_BYTES = 64 * 1024
@@ -424,7 +429,7 @@ class NetBoxClient:
             reply, wait = await self._once(method, path, query, body, expected_status, budget)
             if attempt == attempts or wait is None:
                 break
-            await asyncio.sleep(wait if wait > 0 else min(2 ** (attempt - 1), 8))
+            await asyncio.sleep(wait if wait >= 0 else min(2 ** (attempt - 1), 8))
         return reply
 
     async def _once(
@@ -436,7 +441,11 @@ class NetBoxClient:
         expected_status: str,
         budget: int | None,
     ) -> tuple[Reply, float | None]:
-        """Send one request. Also returns how long to wait before a retry (None: do not)."""
+        """Send one request. Also returns how long to wait before a retry.
+
+        The wait is None when the request must not be retried, and ``_BACKOFF``
+        when NetBox did not say how long to wait.
+        """
         headers = {"Accept": "application/json"}
         branch = self.connection.branch.strip()
         if branch:
@@ -477,7 +486,7 @@ class NetBoxClient:
             error = self._http_error(result.error or "the request failed")
             # A read is also retried when the connection dropped while the
             # answer was being read: NetBox's status alone is no answer.
-            return Reply(status=status, error=error), (0.0 if response.transient else None)
+            return Reply(status=status, error=error), (_BACKOFF if response.transient else None)
         data = self.scrub.tree(response.data)
         if status is not None and status_matches(status, parse_status_spec(expected_status)):
             return Reply(status=status, data=data), None
@@ -596,12 +605,24 @@ class NetBoxClient:
 
 
 def _retry_after(headers: dict[str, str]) -> float:
-    """Seconds a Retry-After header asks to wait (0: none given), capped."""
-    value = next((v for k, v in headers.items() if k.lower() == "retry-after"), "")
+    """Seconds a Retry-After header asks to wait, capped (``_BACKOFF``: none given).
+
+    The header holds either seconds or an HTTP date (RFC 9110, section 10.2.3).
+    """
+    value = next((v for k, v in headers.items() if k.lower() == "retry-after"), "").strip()
     try:
-        return min(max(float(value.strip()), 0.0), MAX_RETRY_WAIT_SECONDS)
+        seconds = float(value)
     except ValueError:
-        return 0.0
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return _BACKOFF
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = when.timestamp() - time.time()
+    if not math.isfinite(seconds):
+        return _BACKOFF
+    return min(max(seconds, 0.0), MAX_RETRY_WAIT_SECONDS)
 
 
 def _messages(value: Any) -> str:

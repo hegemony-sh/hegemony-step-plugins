@@ -73,10 +73,10 @@ Branch works in a NetBox Branching branch (its schema ID, sent as
 
 Retries (default 2, at most 5) repeat a read while NetBox is busy or
 unreachable: HTTP 429, 502, 503 or 504, a timeout, or a dropped connection,
-waiting as `Retry-After` asks (at most 30 s) or 1, 2, 4 s. Writes are never
-repeated, because NetBox may already have made the change. Timeout (sec),
-default 30, bounds each request; Max Response Size (default 4 MiB, at most
-16 MiB) bounds everything the step reads.
+waiting as `Retry-After` asks (seconds or a date, at most 30 s) or 1, 2, 4 s.
+Writes are never repeated, because NetBox may already have made the change.
+Timeout (sec), default 30, bounds each request; Max Response Size (default
+4 MiB, at most 16 MiB) bounds everything the step reads.
 
 ## Output
 
