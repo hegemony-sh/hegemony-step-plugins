@@ -35,10 +35,10 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_shell` | `shell.` | execute (opt-in) |
   | `plugins/steps_ansible` | `ansible.` | playbook (built on `container.run`'s runner) |
   | `plugins/steps_tf` | `tf.` | plan, apply — OpenTofu or Terraform (built on `container.run`'s runner) |
-  | `plugins/steps_http` | `http.` | request (opt-in) |
-  | `plugins/steps_secret` | `secret.` | write — store, swap or delete a secret in the organization's secret store (opt-in) |
-  | `plugins/steps_inventory` | `inventory.` | sync — sync an inventory provider of the run's organization now (opt-in) |
-  | `plugins/steps_netbox` | `netbox.` | request, ipam.allocate/release, render_config — NetBox objects, IP address management and config rendering (opt-in; needs `hegemony-steps-http`) |
+  | `plugins/steps_http` | `http.` | request |
+  | `plugins/steps_secret` | `secret.` | write — store, swap or delete a secret in the organization's secret store |
+  | `plugins/steps_inventory` | `inventory.` | sync — sync an inventory provider of the run's organization now |
+  | `plugins/steps_netbox` | `netbox.` | request, ipam.allocate/release, render_config — NetBox objects, IP address management and config rendering (needs `hegemony-steps-http`) |
 
 Wheels are versioned in lockstep with the platform. Most are auto-installed;
 `hegemony-steps-cisco-iosxe` and `hegemony-steps-shell` are opt-in (install the
@@ -48,8 +48,8 @@ container execution entirely. `hegemony-steps-http` (outbound HTTP requests
 from workers), `hegemony-steps-secret` (flows writing secrets),
 `hegemony-steps-inventory` (flows starting inventory syncs) and
 `hegemony-steps-netbox` (NetBox steps, which need `hegemony-steps-http`) are
-not in the platform's images yet, so they are opt-in too: a deployment that
-wants them installs them like the opt-in wheels above.
+in the platform's images too; a hardened deployment may leave any of them
+out, and each is inert until an administrator allows what it does.
 
 ## Development
 

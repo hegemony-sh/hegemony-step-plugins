@@ -16,11 +16,10 @@ name and never talks to the source itself: it calls the platform's
 opened to flows, skips the sync when the last one is recent enough, and
 audits every sync. See `src/hegemony_steps_inventory/docs/inventory.sync.md`.
 
-**Opt-in wheel**: not in the platform's images. A wheel of its own
-(CONVENTIONS.md, "Wheel granularity"), because starting syncs from a flow puts
-load on a source of truth: a deployment that wants it installs the released
-wheel, and one that must not allow it simply does not. Installed, it syncs
-nothing until an administrator ticks "Flows may sync this provider" on a
+**In the platform's images**, as a wheel of its own (CONVENTIONS.md, "Wheel
+granularity"), because starting syncs from a flow puts load on a source of
+truth: a deployment that must not allow it leaves the wheel out. Installed, it
+syncs nothing until an administrator ticks "Flows may sync this provider" on a
 provider, on a platform whose worker provides the `sync_inventory` service.
 
 Namespace prefix (= entry-point name): `inventory.` — see the repo-level

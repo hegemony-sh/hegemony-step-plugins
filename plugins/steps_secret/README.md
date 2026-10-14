@@ -19,10 +19,9 @@ redaction and audit every call. Its output names keys and the reference
 later steps read them through, never the values. See
 `src/hegemony_steps_secret/docs/secret.write.md`.
 
-**Opt-in wheel**: not in the platform's images. A wheel of its own
-(CONVENTIONS.md, "Wheel granularity"), because writing secrets from a flow
-is a security surface: a deployment that wants it installs the released
-wheel, and one that must not allow it simply does not. Installed, it writes
+**In the platform's images**, as a wheel of its own (CONVENTIONS.md, "Wheel
+granularity"), because writing secrets from a flow is a security surface: a
+deployment that must not allow it leaves the wheel out. Installed, it writes
 nothing until an administrator enables secret writes by steps for the
 organization, on a platform whose worker provides the secret store services.
 

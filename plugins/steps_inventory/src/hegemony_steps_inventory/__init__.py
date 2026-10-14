@@ -6,9 +6,9 @@
 
 Syncs the run organization's inventory providers through the host's
 ``sync_inventory`` service, so a flow sees what its source of truth holds
-right now. An opt-in wheel of its own, not in the platform's images:
-starting syncs from a flow puts load on a source of truth, so a deployment
-that wants it installs it.
+right now. A wheel of its own, in the platform's images: starting syncs
+from a flow puts load on a source of truth, so a deployment that must not
+allow it leaves the wheel out.
 
 Registers under the ``hegemony.step_handlers`` entry-point group; the entry
 point name is the claimed handler-id namespace prefix (``inventory``).
