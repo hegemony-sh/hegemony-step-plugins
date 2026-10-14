@@ -1,3 +1,15 @@
+## [0.30.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.29.1...v0.30.0) (2026-10-14)
+
+### Features
+
+* **inventory:** add inventory.sync, a step that syncs an inventory provider ([bbcd360](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bbcd3603855bac12e3cb33cc31a9323b9c73d224))
+
+### Bug Fixes
+
+* **inventory:** agree on unexpected errors, document the overlap case ([925e158](https://github.com/hegemony-sh/hegemony-step-plugins/commit/925e1583c58883e6301b5fc9acc4a932a37abc3e))
+* **inventory:** one host-error table, and a host TimeoutError is unexpected ([609f36d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/609f36d3a0e4692151bb5c2fb5477c659ccccea8))
+* **inventory:** wait through the whole window and report only time spent waiting ([35a1265](https://github.com/hegemony-sh/hegemony-step-plugins/commit/35a1265b8c4d6280099df77e491f0905314c7799))
+
 ## [0.29.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.29.0...v0.29.1) (2026-10-14)
 
 ### Bug Fixes

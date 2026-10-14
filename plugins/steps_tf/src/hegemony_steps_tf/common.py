@@ -78,7 +78,7 @@ LockTimeout = Annotated[
 #: write the run's shared workspace, and have a POSIX sh with ``timeout``.
 #: tf.plan records the image's digest and tf.apply runs that.
 DEFAULT_IMAGES: dict[str, str] = {
-    "opentofu": "ghcr.io/hegemony-sh/opentofu-runner:0.29",
+    "opentofu": "ghcr.io/hegemony-sh/opentofu-runner:0.30",
     "terraform": "hashicorp/terraform:1.16.4",
 }
 BINARIES: dict[str, str] = {"opentofu": "tofu", "terraform": "terraform"}
