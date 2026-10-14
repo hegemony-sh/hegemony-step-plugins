@@ -2060,7 +2060,6 @@ def _connect_error_from(tls_error: ssl.SSLError) -> httpx.ConnectError:
             raise httpx.ConnectError(str(exc)) from exc
     except httpx.ConnectError as exc:
         return exc
-    raise AssertionError("unreachable")
 
 
 def _tls_failure() -> httpx.ConnectError:
