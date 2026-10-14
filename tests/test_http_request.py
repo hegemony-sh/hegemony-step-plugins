@@ -18,12 +18,14 @@ import gzip
 import hashlib
 import http.server
 import json
+import ssl
 import threading
 import zlib
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
+import httpcore
 import httpx
 import pytest
 
@@ -32,6 +34,7 @@ from hegemony_step_sdk.docs import check_page, load_docs_bundle
 from hegemony_steps_http import register, request as request_module, security
 from hegemony_steps_http.jsonpath import PathError, get_path, parse_path, replace_at
 from hegemony_steps_http.request import (
+    HttpRequestConfig,
     HttpRequestHandler,
     parse_status_spec,
     status_matches,
@@ -2039,3 +2042,68 @@ async def test_merged_pages_over_the_output_limit_leave_data_out():
     assert result.output["pages"] == 2
     assert result.output["data"] is None and result.output["data_truncated"] is True
     assert result.output["extracted"] == {"last": 20999, "first": 10000}
+
+
+def _connect_error_from(tls_error: ssl.SSLError) -> httpx.ConnectError:
+    """A ConnectError with the chain httpx and httpcore build around a TLS failure.
+
+    httpcore re-raises the ``ssl`` error ``from None``, so it survives only as the
+    ``__context__`` of httpcore's error, which httpx then raises its own error from.
+    """
+    try:
+        try:
+            try:
+                raise tls_error
+            except ssl.SSLError as exc:
+                raise httpcore.ConnectError(str(exc)) from None
+        except httpcore.ConnectError as exc:
+            raise httpx.ConnectError(str(exc)) from exc
+    except httpx.ConnectError as exc:
+        return exc
+
+
+def _tls_failure() -> httpx.ConnectError:
+    """The client does not trust the server's certificate."""
+    return _connect_error_from(
+        ssl.SSLCertVerificationError(
+            1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"
+        )
+    )
+
+
+def _tls_dropped() -> httpx.ConnectError:
+    """The peer closed the connection during the handshake."""
+    return _connect_error_from(ssl.SSLEOFError(8, "EOF occurred in violation of protocol"))
+
+
+@pytest.mark.parametrize(
+    ("url", "raise_error", "transient", "sent"),
+    [
+        ("https://api.example.test/x", httpx.ConnectError("refused"), True, False),
+        ("https://api.example.test/x", httpx.ReadTimeout("slow"), True, False),
+        ("https://api.example.test/x", httpx.RemoteProtocolError("dropped"), True, False),
+        # A failed TLS handshake is a ConnectError too, but the next attempt meets the
+        # same certificate; a peer that dropped the handshake may be back.
+        ("https://api.example.test/x", _tls_failure(), False, False),
+        ("https://api.example.test/x", _tls_dropped(), True, False),
+        # Refused by the step itself: nothing was sent, and trying again changes nothing.
+        ("https://loopback.example.test/x", None, False, False),
+        ("https://api.example.test/x", None, False, True),
+    ],
+)
+async def test_send_says_when_the_request_may_not_have_reached_the_server(
+    url: str, raise_error: Exception | None, transient: bool, sent: bool
+):
+    """``transient`` is what another handler decides retries by, not the error's wording."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if raise_error is not None:
+            raise raise_error
+        return httpx.Response(200, json={"ok": True})
+
+    handler = HttpRequestHandler(transport=httpx.MockTransport(respond))
+    response = await handler.send(
+        cast(HandlerServices, FakeServices()), HttpRequestConfig(url=url, method="GET")
+    )
+    assert response.transient is transient
+    assert response.result.success is sent

@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[project]
+name = "hegemony-steps-netbox"
+version = "0.30.0"
+description = "NetBox step handlers for Hegemony (REST calls, IP address management, config rendering)"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE-*.txt"]
+requires-python = ">=3.11"
+# Every NetBox call goes through http.request's client, so a deployment that
+# leaves out outbound HTTP from workers (no hegemony-steps-http) has no
+# NetBox steps either.
+dependencies = [
+    "hegemony-step-sdk==0.30.0",
+    "hegemony-steps-http==0.30.0",
+    "httpx>=0.27.0",
+]
+
+[project.entry-points."hegemony.step_handlers"]
+"netbox" = "hegemony_steps_netbox:register"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "hegemony_steps_netbox"
+module-root = "src"

@@ -638,6 +638,25 @@ class _Credentials:
     secrets: tuple[str, ...] = field(default=(), repr=False)
 
 
+@dataclass(frozen=True)
+class HttpResponse:
+    """What :meth:`HttpRequestHandler.send` produced.
+
+    ``result`` is what an ``http.request`` step reports. ``data`` is the whole
+    parsed JSON body of the final response (the pages combined, when
+    paginating), with known credentials scrubbed and without the size cap
+    ``output.data`` has; None when the body is not JSON, the response is
+    sensitive, or no response came. ``transient`` is true when no usable
+    response came because of a timeout or a dropped or refused connection,
+    so the request may not have reached the server and a read may be tried
+    again.
+    """
+
+    result: HandlerResult
+    data: Any = None
+    transient: bool = False
+
+
 @dataclass
 class _Exchange:
     """One request the step sent (a redirect hop or a page) and the status it got."""
@@ -877,30 +896,43 @@ class HttpRequestHandler(BaseHandler):
             config = self.parse_config(ctx.config, HttpRequestConfig)
         except InvalidConfigError as exc:
             return exc.result()
-        # Rendered now: a templated value must hold up as well.
+        return (await self.send(ctx.require_services(), config)).result
+
+    async def send(self, services: HandlerServices, config: HttpRequestConfig) -> HttpResponse:
+        """Send the request ``config`` describes, as an ``http.request`` step would.
+
+        For other handlers that speak HTTP (the NetBox steps): every safeguard
+        of this step applies, and the result also carries the whole parsed
+        response. ``config`` is checked as rendered, so it may not hold
+        templates.
+        """
         errors = config_errors(config, allow_templates=False)
         if errors:
-            return InvalidConfigError(HANDLER_ID, errors).result()
-
-        services = ctx.require_services()
+            return HttpResponse(InvalidConfigError(HANDLER_ID, errors).result())
         if getattr(services, "enforce_egress", None) is None:
             # Fail closed: the step dials the URL itself, so without the gate
             # nothing would apply the flow's network policy.
-            return HandlerResult(
-                success=False,
-                error=(
-                    "this platform cannot apply the flow's network policy to the request, "
-                    "so it was not sent"
-                ),
-                summary="Config error",
+            return HttpResponse(
+                HandlerResult(
+                    success=False,
+                    error=(
+                        "this platform cannot apply the flow's network policy to the request, "
+                        "so it was not sent"
+                    ),
+                    summary="Config error",
+                )
             )
         try:
             credentials = await self._credentials(services, config)
             verify = await self._tls_verify(services, config)
             body = _json_body(config)
         except ValueError as exc:
-            return HandlerResult(
-                success=False, error=f"Invalid {HANDLER_ID} config: {exc}", summary="Config error"
+            return HttpResponse(
+                HandlerResult(
+                    success=False,
+                    error=f"Invalid {HANDLER_ID} config: {exc}",
+                    summary="Config error",
+                )
             )
         return await self._run(services, config, credentials, verify, body)
 
@@ -963,7 +995,7 @@ class HttpRequestHandler(BaseHandler):
         credentials: _Credentials,
         verify: Any,
         json_body: tuple[bool, Any],
-    ) -> HandlerResult:
+    ) -> HttpResponse:
         """Send the request (and next pages), then build the output, evidence and result."""
         scrub = Scrubber(credentials.secrets)
         ranges = parse_status_spec(config.expected_status)
@@ -1062,6 +1094,7 @@ class HttpRequestHandler(BaseHandler):
         items: list[Any] = []
         more_pages = False
         failure: str | None = None
+        transient = False
         started = time.perf_counter()
 
         async with httpx.AsyncClient(**client_options) as client:
@@ -1150,6 +1183,7 @@ class HttpRequestHandler(BaseHandler):
                 TimeoutError,
             ) as exc:
                 failure = _describe_error(exc, config.request_timeout_seconds)
+                transient = _is_transient(exc)
 
         elapsed_ms = _elapsed_ms(started)
         last = exchanges[-1] if exchanges else None
@@ -1226,7 +1260,7 @@ class HttpRequestHandler(BaseHandler):
         evidence = [
             {"kind": "transport_meta", "name": "http_request", "content_json": scrub.tree(meta)}
         ]
-        return HandlerResult(
+        result = HandlerResult(
             success=failure is None,
             summary=scrub.text(summary),
             metrics=metrics,
@@ -1234,6 +1268,7 @@ class HttpRequestHandler(BaseHandler):
             error=scrub.text(failure) if failure else None,
             output=scrub.tree(output),
         )
+        return HttpResponse(result, None if config.sensitive else scrub.tree(data), transient)
 
     @staticmethod
     async def _fetch(
@@ -1317,6 +1352,52 @@ def _json_size(value: Any) -> int:
     return len(text.encode("utf-8", errors="surrogatepass"))
 
 
+#: Failures where the request may not have reached the server (see HttpResponse.transient).
+_TRANSIENT_ERRORS = (
+    TimeoutError,
+    httpx.TimeoutException,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+)
+
+
+#: TLS errors that are a dropped connection rather than a handshake the server
+#: refused: the peer went away, which the next attempt may not meet again.
+_DROPPED_TLS_ERRORS = (ssl.SSLEOFError, ssl.SSLSyscallError, ssl.SSLZeroReturnError)
+_DROPPED_TLS_REASONS = frozenset({"UNEXPECTED_EOF_WHILE_READING"})
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Whether the request may not have reached the server (see ``HttpResponse.transient``).
+
+    A connection that failed in the TLS handshake (a certificate the step does
+    not trust, a name mismatch, a protocol the server refuses) is not: the
+    next attempt meets the same server. httpx raises that ``ssl.SSLError`` as
+    a ``ConnectError`` from httpcore's, which re-raises it ``from None``, so
+    the error is found through ``__context__`` where ``__cause__`` is unset.
+    A connection the peer dropped during the handshake stays transient.
+    """
+    if not isinstance(exc, _TRANSIENT_ERRORS):
+        return False
+    seen: set[int] = set()
+    cause: BaseException | None = exc
+    while cause is not None and id(cause) not in seen and len(seen) < 8:
+        seen.add(id(cause))
+        if isinstance(cause, ssl.SSLError) and not _is_dropped_tls(cause):
+            return False
+        cause = cause.__cause__ if cause.__cause__ is not None else cause.__context__
+    return True
+
+
+def _is_dropped_tls(exc: ssl.SSLError) -> bool:
+    """Whether ``exc`` says the peer went away, not that it refused the handshake."""
+    if isinstance(exc, _DROPPED_TLS_ERRORS):
+        return True
+    return getattr(exc, "reason", None) in _DROPPED_TLS_REASONS
+
+
 def _describe_error(exc: BaseException, timeout_seconds: int) -> str:
     """A step error for a request that failed before a usable response."""
     if isinstance(exc, (RequestRefused, _BodyError)):
@@ -1332,6 +1413,7 @@ __all__ = [
     "HANDLER_ID",
     "HttpRequestConfig",
     "HttpRequestHandler",
+    "HttpResponse",
     "config_errors",
     "parse_status_spec",
     "status_matches",

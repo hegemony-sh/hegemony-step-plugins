@@ -52,6 +52,14 @@ platforms, transports, and libraries multiply.
    and depend on `hegemony-steps-container`, so omitting container execution
    omits them too (see [Building a tool handler](#building-a-tool-handler)).
 
+5. **Integration namespaces** — handlers that speak one external system's own
+   API, whose objects and concepts shape the config schema: `netbox`
+   (`netbox.request`, the `netbox.ipam.allocate` / `.release` family,
+   `netbox.render_config`). They reach the system through a capability
+   handler's client (`http.request`'s `HttpRequestHandler.send`) rather than
+   their own, so that handler's safeguards apply, and depend on its wheel at
+   the same version.
+
 Third-party plugins claim their own prefix (e.g. `acme.`) and organize
 below it (`acme.ipam.allocate`).
 

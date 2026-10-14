@@ -24,6 +24,7 @@ import hegemony_steps_general
 import hegemony_steps_http
 import hegemony_steps_inventory
 import hegemony_steps_monitor
+import hegemony_steps_netbox
 import hegemony_steps_netcli
 import hegemony_steps_probe
 import hegemony_steps_secret
@@ -62,6 +63,16 @@ WHEELS = [
     (hegemony_steps_http, "http", {"http.request"}),
     (hegemony_steps_secret, "secret", {"secret.write"}),
     (hegemony_steps_inventory, "inventory", {"inventory.sync"}),
+    (
+        hegemony_steps_netbox,
+        "netbox",
+        {
+            "netbox.request",
+            "netbox.ipam.allocate",
+            "netbox.ipam.release",
+            "netbox.render_config",
+        },
+    ),
 ]
 
 HIDDEN_IDS = {"general.noop"}
