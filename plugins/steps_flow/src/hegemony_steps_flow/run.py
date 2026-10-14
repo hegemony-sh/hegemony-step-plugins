@@ -78,12 +78,12 @@ def _validate_field_mappings(value: Any) -> list[str]:
                 f"{', '.join(sorted(_FIELD_MAPPING_MODES))}"
             )
             continue
+        # The platform checks these settings as written (saving a flow) and
+        # again once rendered (running it). Rendering keeps each value's own
+        # type, so a template's value then is whatever it rendered to: false,
+        # a number, null or empty text are all values to pass to the child.
         if mode in {"literal", "template"} and "value" not in mapping:
             errors.append(f"field_mappings.{field_id}.value is required for {mode} mode")
-        if mode == "template" and (
-            not isinstance(mapping.get("value"), str) or not mapping.get("value").strip()
-        ):
-            errors.append(f"field_mappings.{field_id}.value must be a non-empty string")
     return errors
 
 

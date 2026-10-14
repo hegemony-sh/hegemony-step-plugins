@@ -1,3 +1,9 @@
+## [0.29.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.29.0...v0.29.1) (2026-10-14)
+
+### Bug Fixes
+
+* **flow:** pass a template field mapping whatever it renders to ([31b31fd](https://github.com/hegemony-sh/hegemony-step-plugins/commit/31b31fd33ed8a525f4bb61731970072316fd54e5))
+
 ## [0.29.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.28.1...v0.29.0) (2026-10-13)
 
 ### Features
