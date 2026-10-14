@@ -41,6 +41,8 @@ Objects; the deletion itself is never retried.
 
 ## When It Fails
 
-The step fails when Filters match more than Max Objects, when nothing matches
-and Missing is OK is off, and when NetBox refuses the deletion (with its
-message, for example a token without delete permission).
+The step fails when Filters match more than Max Objects, when the matching
+objects change while the step reads them (nothing is released either way; run
+the step again), when nothing matches and Missing is OK is off, and when
+NetBox refuses the deletion (with its message, for example a token without
+delete permission).

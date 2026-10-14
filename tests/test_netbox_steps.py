@@ -946,6 +946,69 @@ async def test_release_by_filters_releases_nothing_when_the_matches_change_while
     assert all(r.method == "GET" for r in netbox.requests)
 
 
+def _shifting(before: list[dict[str, Any]], after: list[dict[str, Any]]):
+    """A list endpoint of one object per page that changes from ``before`` to ``after``
+    after its first page was read."""
+    first, later = _capped(before), _capped(after)
+
+    def page(request: httpx.Request) -> httpx.Response:
+        return (first if request.url.params.get("offset", "0") == "0" else later)(request)
+
+    return page
+
+
+@pytest.mark.parametrize(
+    ("after", "why"),
+    [
+        (
+            [{"id": 0, "vid": 9}, {"id": 1, "vid": 10}, {"id": 2, "vid": 11}, {"id": 3, "vid": 12}],
+            "grew",
+        ),
+        ([{"id": 1, "vid": 10}, {"id": 3, "vid": 12}], "shrank"),
+    ],
+)
+async def test_release_by_filters_releases_nothing_when_the_pages_shift_while_read(after, why):
+    """An insert or a delete between two pages shifts the next offsets.
+
+    The count then differs from the first page's, and an insert also repeats an
+    object; either way nothing is deleted, since the step cannot tell which
+    objects match.
+    """
+    vlans = [{"id": 1, "vid": 10}, {"id": 2, "vid": 11}, {"id": 3, "vid": 12}]
+    page = _shifting(vlans, after)
+    netbox = NetBox(
+        lambda request, body: page(request) if request.method == "GET" else httpx.Response(204)
+    )
+    result = await _run(
+        ReleaseHandler, netbox, _config(resource="vlan", filters={"name": "web"}, max_objects=4)
+    )
+    assert not result.success, why
+    assert "changed while the step read them" in result.error
+    assert "run the step again" in result.error
+    assert all(r.method == "GET" for r in netbox.requests)
+    assert result.output["released"] == 0
+
+
+async def test_allocate_reuses_nothing_when_the_pages_shift_while_read():
+    """The same shift under Existing Filters: nothing is reused and nothing allocated."""
+    addresses = [{"id": n, "address": f"10.20.0.{n}/24"} for n in (1, 2, 3)]
+    page = _shifting(addresses, [{"id": 0, "address": "10.20.0.9/24"}, *addresses])
+
+    def respond(request, body):
+        if request.url.path == "/api/ipam/prefixes/7/":
+            return _json(PREFIX)
+        return page(request)
+
+    netbox = NetBox(respond)
+    result = await _run(
+        AllocateHandler, netbox, _config(pool_id="7", count=3, existing_filters={"tenant": "a"})
+    )
+    assert not result.success
+    assert "changed while the step read them" in result.error
+    assert all(r.method == "GET" for r in netbox.requests)
+    assert result.output["allocated"] is False
+
+
 async def test_allocate_reuses_every_existing_match_past_a_capped_page():
     addresses = [
         {"id": 1, "address": "10.20.0.1/24"},

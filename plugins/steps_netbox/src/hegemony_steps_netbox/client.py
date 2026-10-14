@@ -321,6 +321,9 @@ class Reply:
     count: int | None = None
     #: A list call stopped at its limit while NetBox had more.
     more: bool = False
+    #: A list call saw NetBox's ``count`` change between its pages: the objects
+    #: were changing while they were read, so offset pages may not line up.
+    count_changed: bool = False
 
     @property
     def ok(self) -> bool:
@@ -517,10 +520,13 @@ class NetBoxClient:
 
         Pages are fetched by offset rather than by NetBox's ``next`` links:
         behind a proxy those may name another scheme or host than the one
-        the step was given.
+        the step was given. ``count`` is the first page's; a later page that
+        counts differently sets ``count_changed``, since the objects were
+        changing while they were read and offset pages then may not line up.
         """
         objects: list[Any] = []
         count: int | None = None
+        changed = False
         while True:
             limit = min(PAGE_SIZE, max_results - len(objects))
             page = await self.call(
@@ -537,15 +543,20 @@ class NetBoxClient:
                     status=page.status,
                     error=f"NetBox did not answer {path} with a list of objects",
                 )
-            if count is None and isinstance(data.get("count"), int):
-                count = data["count"]
+            if isinstance(data.get("count"), int):
+                if count is None:
+                    count = data["count"]
+                elif data["count"] != count:
+                    changed = True
             results = data["results"]
             objects.extend(results[: max_results - len(objects)])
             total = count if count is not None else len(objects)
             if not results or len(objects) >= total:
-                return Reply(status=page.status, data=objects, count=count, more=False)
+                return Reply(status=page.status, data=objects, count=count, count_changed=changed)
             if len(objects) >= max_results:
-                return Reply(status=page.status, data=objects, count=count, more=True)
+                return Reply(
+                    status=page.status, data=objects, count=count, more=True, count_changed=changed
+                )
 
     def result(
         self,

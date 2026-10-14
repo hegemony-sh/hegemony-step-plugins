@@ -70,6 +70,7 @@ lost answer cannot take a second address; reading the pool is.
 
 The step fails when the pool is not found (or Pool Filters match none or more
 than one), when the pool has not enough free space for Count, when Existing
-Filters match another number than none or Count, and when NetBox refuses the
-request (with its message: a field it rejects, a missing `name` for a VLAN, a
-token without permission).
+Filters match another number than none or Count or the objects they match
+change while the step reads them (run the step again), and when NetBox refuses
+the request (with its message: a field it rejects, a missing `name` for a VLAN,
+a token without permission).

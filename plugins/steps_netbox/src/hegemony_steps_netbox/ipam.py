@@ -98,14 +98,29 @@ async def _find(
     offset, so a NetBox whose MAX_PAGE_SIZE is below ``at_most`` plus one still
     yields every match. When no more than ``at_most`` match, the objects read are
     exactly those that match, or the call fails: a caller never acts on part of
-    them.
+    them. Objects that change while the pages are read shift the later pages, so
+    the call also fails when NetBox's count changes between pages or an object
+    comes back twice.
     """
     reply = await client.list_all(endpoint + "/", filters, max_results=at_most + 1)
     if not reply.ok:
         return reply, [], 0
     objects = reply.data if isinstance(reply.data, list) else []
     matched = max(reply.count or 0, len(objects))
-    if matched <= at_most and len(objects) != matched:
+    if matched > at_most:
+        # The caller refuses this many; the pages need no further judging.
+        return reply, objects, matched
+    ids = [value for value in _values(objects, "id") if value is not None]
+    if reply.count_changed or len(set(ids)) != len(ids):
+        failure = Reply(
+            status=reply.status,
+            error=(
+                f"the {endpoint} objects that match changed while the step read them, so it "
+                "could not tell which to act on; nothing was changed, run the step again"
+            ),
+        )
+        return failure, [], 0
+    if len(objects) != matched:
         failure = Reply(
             status=reply.status,
             error=(
