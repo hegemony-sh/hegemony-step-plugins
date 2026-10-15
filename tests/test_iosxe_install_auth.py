@@ -6,7 +6,8 @@
 
 The transports never raise for a login the device refuses: every command
 comes back with exit code -1, no output and an error. The install step must
-read that as a failure - not as an install that finished without a reload.
+read that as a failure - not as an install that finished without a reload -
+and its error names the refused login in every mode, timing mode included.
 Each test dials a real SSH server in this process (``tests/ssh_fakes.py``)
 that refuses the password, so what is under test is the transport's own
 handling of the SSH library's authentication error.
@@ -111,7 +112,7 @@ async def test_timing_mode_reports_a_refused_login_as_a_failure(servers, refusin
 
     assert result.exit_code == -1
     assert result.output == ""
-    assert result.error
+    assert (result.error or "").startswith("Authentication failed: ")
     _assert_login_refused(servers)
 
 
@@ -129,7 +130,7 @@ async def test_the_driver_fails_when_the_install_session_login_is_refused(
     assert result.reboot_triggered is False
     assert result.activated is False
     assert result.committed is False
-    assert (result.error or "").startswith("Install session failed: ")
+    assert (result.error or "").startswith("Install session failed: Authentication failed: ")
     assert ssh.commands[-1].startswith("install add file flash:img.bin")
     _assert_login_refused(servers)
 
@@ -152,7 +153,7 @@ async def test_the_step_fails_when_the_install_session_login_is_refused(servers,
     assert status["success"] is False
     assert status["reboot_triggered"] is False
     assert status["went_down"] is None
-    assert status["error"].startswith("Install session failed: ")
+    assert status["error"].startswith("Install session failed: Authentication failed: ")
     assert "Success: False" in evidence["content_text"]
     assert "Reboot Triggered: False" in evidence["content_text"]
     _assert_login_refused(servers)
