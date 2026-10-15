@@ -6,8 +6,9 @@
 
 The remote-shell paradigm: run commands on Linux/Unix hosts over an
 exec-channel transport (SSH today; WinRM slots in behind the same
-``ShellTransport`` surface). Opt-in wheel — not auto-installed with the
-platform; installing it makes ``shell.*`` appear in the editor.
+``ShellTransport`` surface). In the platform's images, so ``shell.*``
+is in every editor; a deployment that must not run commands on hosts
+builds its api and worker images without the wheel.
 
 Registers under the ``hegemony.step_handlers`` entry-point group; the entry
 point name is the claimed handler-id namespace prefix (``shell``).

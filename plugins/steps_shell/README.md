@@ -14,7 +14,8 @@ in `sh`/`bash`/`pwsh`. The transport (SSH today, WinRM planned) is resolved
 from `device.access_config` via the platform's `open_shell` service; per
 CONVENTIONS.md, neither transport nor interpreter ever appears in handler ids.
 
-**Opt-in wheel**: not auto-installed with the platform. Install the released
-wheel (the demo pins it via `demo-plugin-wheels.txt`) and the handler appears
-in the flow editor — this wheel doubles as the reference for out-of-tree
-handler plugins.
+**In the platform's images**: the handler is in every instance's flow editor,
+and a deployment that must not run commands on hosts builds its api and worker
+images without the wheel (`uv pip uninstall hegemony-steps-shell` in a derived
+image). It reaches only devices whose access config holds SSH credentials. This wheel
+doubles as the reference for out-of-tree handler plugins.
