@@ -32,7 +32,7 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_container` | `container.` | run |
   | `plugins/steps_flow` | `flow.` | run, notify |
   | `plugins/steps_cisco_iosxe` | `cisco.iosxe.` | upgrade.preflight/stage/install/verify/cleanup (opt-in) |
-  | `plugins/steps_shell` | `shell.` | execute (opt-in) |
+  | `plugins/steps_shell` | `shell.` | execute — commands on Linux/Unix hosts over SSH |
   | `plugins/steps_ansible` | `ansible.` | playbook (built on `container.run`'s runner) |
   | `plugins/steps_tf` | `tf.` | plan, apply — OpenTofu or Terraform (built on `container.run`'s runner) |
   | `plugins/steps_http` | `http.` | request |
@@ -41,15 +41,16 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_netbox` | `netbox.` | request, ipam.allocate/release, render_config — NetBox objects, IP address management and config rendering (needs `hegemony-steps-http`) |
 
 Wheels are versioned in lockstep with the platform. Most are auto-installed;
-`hegemony-steps-cisco-iosxe` and `hegemony-steps-shell` are opt-in (install the
-released wheels explicitly — the demo pins them via demo-plugin-wheels.txt),
-and hardened deployments may omit `hegemony-steps-container` to disable
-container execution entirely. `hegemony-steps-http` (outbound HTTP requests
-from workers), `hegemony-steps-secret` (flows writing secrets),
-`hegemony-steps-inventory` (flows starting inventory syncs) and
-`hegemony-steps-netbox` (NetBox steps, which need `hegemony-steps-http`) are
-in the platform's images too; a hardened deployment may leave any of them
-out, and each is inert until an administrator allows what it does.
+`hegemony-steps-cisco-iosxe` is opt-in (install the released wheel explicitly —
+the demo pins it via demo-plugin-wheels.txt), and hardened deployments may omit
+`hegemony-steps-container` to disable container execution entirely.
+`hegemony-steps-shell` (commands on hosts whose access config holds SSH
+credentials) is in the platform's images too, as are `hegemony-steps-http`
+(outbound HTTP requests from workers), `hegemony-steps-secret` (flows writing
+secrets), `hegemony-steps-inventory` (flows starting inventory syncs) and
+`hegemony-steps-netbox` (NetBox steps, which need `hegemony-steps-http`). A
+hardened deployment may leave any of them out; the last four are inert until
+an administrator allows what they do.
 
 ## Development
 
