@@ -8,7 +8,8 @@ Syncs the run organization's inventory providers through the host's
 ``sync_inventory`` service, so a flow sees what its source of truth holds
 right now. A wheel of its own, in the platform's images: starting syncs
 from a flow puts load on a source of truth, so a deployment that must not
-allow it leaves the wheel out.
+allow it builds its api and worker images without the wheel. Installed, it
+syncs only providers an administrator has opened to flows.
 
 Registers under the ``hegemony.step_handlers`` entry-point group; the entry
 point name is the claimed handler-id namespace prefix (``inventory``).

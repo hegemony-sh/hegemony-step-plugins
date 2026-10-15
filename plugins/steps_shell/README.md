@@ -15,6 +15,7 @@ from `device.access_config` via the platform's `open_shell` service; per
 CONVENTIONS.md, neither transport nor interpreter ever appears in handler ids.
 
 **In the platform's images**: the handler is in every instance's flow editor,
-and a deployment that must not run commands on hosts leaves the wheel out. It
-reaches only devices whose access config holds SSH credentials. This wheel
+and a deployment that must not run commands on hosts builds its api and worker
+images without the wheel (`uv pip uninstall hegemony-steps-shell` in a derived
+image). It reaches only devices whose access config holds SSH credentials. This wheel
 doubles as the reference for out-of-tree handler plugins.

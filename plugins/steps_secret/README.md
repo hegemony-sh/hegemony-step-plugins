@@ -21,9 +21,11 @@ later steps read them through, never the values. See
 
 **In the platform's images**, as a wheel of its own (CONVENTIONS.md, "Wheel
 granularity"), because writing secrets from a flow is a security surface: a
-deployment that must not allow it leaves the wheel out. Installed, it writes
-nothing until an administrator enables secret writes by steps for the
-organization, on a platform whose worker provides the secret store services.
+deployment that must not allow it builds its api and worker images without the
+wheel (`uv pip uninstall hegemony-steps-secret` in a derived image). Installed,
+it writes nothing until an organization admin turns on secret writes by steps,
+and then only under the path prefixes they name, on a platform whose worker
+provides the secret store services.
 
 Namespace prefix (= entry-point name): `secret.` — see the repo-level
 `CONVENTIONS.md` for the naming rules.

@@ -18,8 +18,9 @@ audits every sync. See `src/hegemony_steps_inventory/docs/inventory.sync.md`.
 
 **In the platform's images**, as a wheel of its own (CONVENTIONS.md, "Wheel
 granularity"), because starting syncs from a flow puts load on a source of
-truth: a deployment that must not allow it leaves the wheel out. Installed, it
-syncs nothing until an administrator ticks "Flows may sync this provider" on a
+truth: a deployment that must not allow it builds its api and worker images
+without the wheel (`uv pip uninstall hegemony-steps-inventory` in a derived
+image). Installed, it syncs nothing until an administrator ticks "Flows may sync this provider" on a
 provider, on a platform whose worker provides the `sync_inventory` service.
 
 Namespace prefix (= entry-point name): `inventory.` — see the repo-level
