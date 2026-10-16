@@ -4,14 +4,14 @@
 
 [project]
 name = "hegemony-transport-scrapli"
-version = "0.31.1"
+version = "0.31.2"
 description = "Scrapli network-CLI device transport for Hegemony"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.31.1",
+    "hegemony-step-sdk==0.31.2",
     # asyncssh extra: already the platform's SSH library. The default "system"
     # transport shells out to a local ssh binary (not in worker images), and the
     # paramiko extra caps paramiko <4 for the whole install.

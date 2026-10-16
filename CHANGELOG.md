@@ -1,3 +1,9 @@
+## [0.31.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.31.1...v0.31.2) (2026-10-16)
+
+### Bug Fixes
+
+* **netcli:** say why each device failed in collect_evidence's error ([940259f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/940259f5b831dc980f937843366c80c7a702dcc5))
+
 ## [0.31.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.31.0...v0.31.1) (2026-10-16)
 
 ### Bug Fixes
