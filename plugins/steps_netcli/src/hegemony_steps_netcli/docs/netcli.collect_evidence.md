@@ -56,5 +56,8 @@ Per device, it counts as failed when the device has no management host,
 when connecting or executing raises an error, or when any command returns a
 non-zero exit code. Collection continues on the remaining devices either
 way, and all collected evidence is kept — but if any device failed, the
-step fails and its error names the failing devices. A command that runs
-past Command timeout counts as failed.
+step fails and its error names each failing device with why it failed
+(its first failure). Devices that failed for the same reason are listed
+together before that reason, for example every device behind a jump host
+that refused the connection: `Failed on: r1, r2 (reason); r3 (other reason)`.
+A command that runs past Command timeout counts as failed.
