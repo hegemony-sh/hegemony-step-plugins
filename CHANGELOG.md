@@ -1,3 +1,9 @@
+## [0.31.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.31.0...v0.31.1) (2026-10-16)
+
+### Bug Fixes
+
+* **transports:** name a refused login in timing mode ([b821f0d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b821f0d2493378546a80eb5a63e5f29d1dac9c1a))
+
 ## [0.31.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.30.0...v0.31.0) (2026-10-14)
 
 ### Features
