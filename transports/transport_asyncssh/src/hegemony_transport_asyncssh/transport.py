@@ -808,6 +808,17 @@ class AsyncSSHTransport:
                 latency_ms=elapsed_ms,
             )
 
+        except asyncssh.PermissionDenied as e:
+            # Named as execute_commands names it, so a refused login reads as one.
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            logger.error(f"Authentication failed to {self.host}: {e}")
+            return ExecResult(
+                command=command,
+                output=combined_output,
+                exit_code=-1,
+                error=f"Authentication failed: {e}",
+                latency_ms=elapsed_ms,
+            )
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             logger.error(f"Timing command failed on {self.host}: {type(e).__name__}")
