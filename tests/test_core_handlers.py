@@ -1122,3 +1122,91 @@ def test_netcli_command_timeout_is_bounded(handler: BaseHandler):
     assert handler.validate_config({**config, "command_timeout_seconds": 3600}) == []
     assert handler.validate_config({**config, "command_timeout_seconds": 0})
     assert handler.validate_config({**config, "command_timeout_seconds": 3601})
+
+
+class _FailingConnects:
+    """services.connect stand-in: each device fails the way ``failures`` names it.
+
+    A string is the error every command returns (a transport that folds a
+    refused connection into its results); an exception is raised by connect.
+    """
+
+    def __init__(self, failures: dict[str, str | Exception | int]) -> None:
+        self.failures = failures
+
+    def connect(self, device, **kwargs):
+        failure = self.failures[device["name"]]
+        if isinstance(failure, Exception):
+            raise failure
+
+        class _Result:
+            command = "show ip ospf neighbor"
+            output = ""
+            exit_code = failure if isinstance(failure, int) else 1
+            error = None if isinstance(failure, int) else failure
+            latency_ms = 1.0
+
+        class _Transport:
+            async def execute_commands(self, commands):
+                return [_Result() for _ in commands]
+
+        return _Transport()
+
+
+def _collect_ctx(services: Any, *names: str, **device: Any) -> HandlerContext:
+    devices = [{"id": name, "name": name, "mgmt_host": "192.0.2.1", **device} for name in names]
+    return HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        config={"commands": ["show ip ospf neighbor"]},
+        target_roles=["primary"],
+        target_devices_by_role={"primary": devices},
+        services=cast(HandlerServices, services),
+    )
+
+
+async def test_collect_evidence_says_why_each_device_failed():
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    refused = "SSH connection failed: The SSH host key of dind:2222 does not match"
+    services = _FailingConnects(
+        {
+            "dc1-core-01": refused,
+            "dc1-core-02": refused,
+            "dc2-core-01": TimeoutError("timed out connecting to 172.20.30.41:22"),
+            "dc2-core-02": refused,
+        }
+    )
+
+    result = await CollectEvidenceHandler().execute(
+        _collect_ctx(services, "dc1-core-01", "dc1-core-02", "dc2-core-01", "dc2-core-02")
+    )
+
+    assert result.success is False
+    # Devices behind one jump host fail alike: the reason is said once.
+    assert result.error == (
+        f"Failed on: dc1-core-01, dc1-core-02, dc2-core-02 ({refused}); "
+        "dc2-core-01 (timed out connecting to 172.20.30.41:22)"
+    )
+    assert result.metrics is not None
+    assert result.metrics["failed_devices"] == 4
+
+
+async def test_collect_evidence_names_an_exit_code_without_error_text():
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    result = await CollectEvidenceHandler().execute(_collect_ctx(_FailingConnects({"r1": 2}), "r1"))
+
+    assert result.error == "Failed on: r1 (CLI command failed with exit code 2)"
+
+
+async def test_collect_evidence_names_a_device_without_a_management_host():
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    result = await CollectEvidenceHandler().execute(
+        _collect_ctx(_FailingConnects({}), "r1", mgmt_host=None)
+    )
+
+    assert result.error == "Failed on: r1 (no mgmt_host configured)"

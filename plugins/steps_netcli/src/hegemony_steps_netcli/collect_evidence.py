@@ -67,6 +67,28 @@ class CollectEvidenceConfig(BaseModel):
     )
 
 
+def _cli_failure_detail(*, error: str | None, exit_code: int) -> str:
+    """Why a command failed, as the step's error says it (as ``netcli.execute`` does)."""
+    if error:
+        return error
+    return f"CLI command failed with exit code {exit_code}"
+
+
+def _failed_on(failures: list[tuple[str, str]]) -> str:
+    """The step's error: the failed devices, those that failed alike listed together.
+
+    ``failures`` holds ``(device, reason)`` in device order. Devices behind one
+    broken jump host all fail with the same message, which is then said once:
+    ``Failed on: r1, r2 (reason A); r3 (reason B)``.
+    """
+    by_reason: dict[str, list[str]] = {}
+    for device, reason in failures:
+        by_reason.setdefault(reason, []).append(device)
+    return "Failed on: " + "; ".join(
+        f"{', '.join(devices)} ({reason})" for reason, devices in by_reason.items()
+    )
+
+
 @dataclass
 class _DeviceOutcome:
     """One device's results, merged in device order after the fan-out.
@@ -75,10 +97,12 @@ class _DeviceOutcome:
     stays deterministic when devices run in parallel.
     """
 
+    device_name: str = ""
     evidence: list[dict] = field(default_factory=list)
     succeeded: int = 0
     failed: int = 0
-    failed_label: str | None = None
+    #: Why the device failed: its first failure.
+    failure: str | None = None
 
 
 class CollectEvidenceHandler(BaseHandler):
@@ -131,13 +155,13 @@ class CollectEvidenceHandler(BaseHandler):
         )
 
         async def _process_device(device: dict) -> _DeviceOutcome:
-            outcome = _DeviceOutcome()
             device_id = device.get("id", "unknown")
             device_name = device.get("name", device_id)
+            outcome = _DeviceOutcome(device_name=device_name)
             host = device.get("mgmt_host")
             if not host:
                 outcome.failed += 1
-                outcome.failed_label = device_name
+                outcome.failure = "no mgmt_host configured"
                 outcome.evidence.append(
                     {
                         "kind": "error",
@@ -183,12 +207,14 @@ class CollectEvidenceHandler(BaseHandler):
                         outcome.succeeded += 1
                     else:
                         outcome.failed += 1
-                        if outcome.failed_label is None:
-                            outcome.failed_label = device_name
+                        if outcome.failure is None:
+                            outcome.failure = _cli_failure_detail(
+                                error=result.error, exit_code=result.exit_code
+                            )
 
             except Exception as e:
-                if outcome.failed_label is None:
-                    outcome.failed_label = f"{device_name} ({e})"
+                if outcome.failure is None:
+                    outcome.failure = str(e)
                 # Add error evidence for this device
                 outcome.evidence.append(
                     {
@@ -215,7 +241,9 @@ class CollectEvidenceHandler(BaseHandler):
         total_success = sum(outcome.succeeded for outcome in outcomes)
         total_failure = sum(outcome.failed for outcome in outcomes)
         failed_devices = [
-            outcome.failed_label for outcome in outcomes if outcome.failed_label is not None
+            (outcome.device_name, outcome.failure)
+            for outcome in outcomes
+            if outcome.failure is not None
         ]
 
         metrics = {
@@ -229,7 +257,7 @@ class CollectEvidenceHandler(BaseHandler):
         if failed_devices:
             return HandlerResult(
                 success=False,
-                error=f"Failed on: {', '.join(failed_devices)}",
+                error=_failed_on(failed_devices),
                 summary=f"Evidence collected from {len(target_devices) - len(failed_devices)}/{len(target_devices)} devices",
                 metrics=metrics,
                 evidence=all_evidence,
