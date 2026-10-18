@@ -1332,3 +1332,98 @@ async def test_render_config_renders_virtual_machines_by_id():
     )
     assert result.success, result.error
     assert netbox.calls == ["POST /api/virtualization/virtual-machines/12/render-config/"]
+
+
+class OrgTrustServices(FakeServices):
+    """A host that also serves the run organization's trusted CAs."""
+
+    def __init__(self, org_pem: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.org_pem = org_pem
+        self.trust_calls = 0
+
+    async def trusted_ca_certificates(self) -> str:
+        self.trust_calls += 1
+        return self.org_pem
+
+
+def _org_ca_pem(name: str) -> str:
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+
+
+def _verify_options(monkeypatch) -> list[Any]:
+    """The ``verify`` value of every client http.request builds for the NetBox steps."""
+    from hegemony_steps_http import request as request_module
+
+    seen: list[Any] = []
+    real_client = httpx.AsyncClient
+
+    def client(**kwargs):
+        seen.append(kwargs.get("verify"))
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(request_module.httpx, "AsyncClient", client)
+    return seen
+
+
+def _ca_names(context: Any) -> set[str]:
+    return {
+        value
+        for cert in context.get_ca_certs()
+        for rdn in cert.get("subject", ())
+        for key, value in rdn
+        if key == "commonName"
+    }
+
+
+async def test_netbox_trusts_the_organization_cas_unless_a_ca_bundle_pins_others(monkeypatch):
+    import ssl
+
+    seen = _verify_options(monkeypatch)
+    netbox = NetBox(lambda request, body: _json(DEVICE))
+    services = OrgTrustServices(_org_ca_pem("Org NetBox Root"))
+    result = await _run(
+        NetBoxRequestHandler,
+        netbox,
+        _config(endpoint="dcim/devices", object_id="33"),
+        services=services,
+    )
+    assert result.success, result.error
+    assert isinstance(seen[-1], ssl.SSLContext)
+    assert "Org NetBox Root" in _ca_names(seen[-1])
+    assert len(_ca_names(seen[-1])) > 1  # the public authorities stay trusted
+
+    pinned = _org_ca_pem("Pinned NetBox Root")
+    result = await _run(
+        NetBoxRequestHandler,
+        netbox,
+        _config(endpoint="dcim/devices", object_id="33", ca_bundle=pinned),
+        services=services,
+    )
+    assert result.success, result.error
+    assert _ca_names(seen[-1]) == {"Pinned NetBox Root"}
+
+    # A host without the service: the client verifies against its default store.
+    await _run(NetBoxRequestHandler, netbox, _config(endpoint="dcim/devices", object_id="33"))
+    assert seen[-1] is True

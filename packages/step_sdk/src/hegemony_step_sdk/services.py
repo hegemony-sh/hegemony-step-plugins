@@ -520,6 +520,31 @@ class HandlerServices(Protocol):
         """
         raise NotImplementedError
 
+    async def trusted_ca_certificates(self) -> str:
+        """PEM text of the run organization's trusted CA certificates.
+
+        Administrators keep this list per organization (Settings, Trusted
+        CAs) for private CAs the worker's system store does not hold. A
+        handler that verifies TLS adds these certificates to the system store
+        (see :mod:`hegemony_step_sdk.trust`); a ``ca_bundle`` the step sets
+        replaces both, as before.
+
+        The list is the run organization's own: the organization the run
+        belongs to, which for a flow shared from the platform's shared
+        organization is the organization that runs it. The shared
+        organization's list never applies to another organization's run, and
+        two organizations' lists are never combined. Returns ``""`` when the
+        organization trusts no extra CA. The certificates are public, so
+        nothing is registered for redaction.
+
+        Raises ``RuntimeError`` when the list cannot be loaded. Hosts without
+        support raise ``NotImplementedError``; a platform older than this
+        method has no such attribute at all. Use
+        :func:`hegemony_step_sdk.trust.org_trusted_ca_pem`, which treats both
+        as "no extra CA".
+        """
+        raise NotImplementedError
+
     def validate_secret_ref(
         self, ref: Any, *, field_name: str, required: bool = False
     ) -> str | None:

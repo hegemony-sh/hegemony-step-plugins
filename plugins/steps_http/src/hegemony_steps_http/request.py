@@ -40,6 +40,7 @@ from hegemony_step_sdk import (
     InvalidConfigError,
     StepKind,
 )
+from hegemony_step_sdk.trust import add_trusted_cas, org_trusted_ca_pem
 
 from .jsonpath import PathError, get_path, parse_path, replace_at
 from .security import (
@@ -336,9 +337,10 @@ class HttpRequestConfig(BaseModel):
         title="CA Bundle",
         description=(
             "PEM certificates to trust for this request instead of the public certificate "
-            "authorities, such as an internal CA: the PEM text, a secret reference, or a "
-            "{{ secret('...') }} template. Empty trusts the public authorities. Ignored "
-            "when Verify TLS certificate is off."
+            "authorities and the organization's trusted CAs, which pins them: the PEM text, "
+            "a secret reference, or a {{ secret('...') }} template. Empty trusts the public "
+            "authorities plus the organization's trusted CAs (Settings, Trusted CAs). "
+            "Ignored when Verify TLS certificate is off."
         ),
         json_schema_extra={
             "x_placeholder": "-----BEGIN CERTIFICATE-----",
@@ -934,6 +936,14 @@ class HttpRequestHandler(BaseHandler):
                     summary="Config error",
                 )
             )
+        except RuntimeError as exc:
+            return HttpResponse(
+                HandlerResult(
+                    success=False,
+                    error=f"Could not load the organization's trusted CAs: {exc}",
+                    summary="Trusted CAs unavailable",
+                )
+            )
         return await self._run(services, config, credentials, verify, body)
 
     @staticmethod
@@ -973,11 +983,32 @@ class HttpRequestHandler(BaseHandler):
 
     @staticmethod
     async def _tls_verify(services: HandlerServices, config: HttpRequestConfig) -> Any:
-        """``verify`` for the client: False, True, or a context trusting the CA bundle."""
+        """``verify`` for the client: False, True, or a context trusting the CA bundle.
+
+        Without a CA bundle the client trusts its default store plus the run
+        organization's trusted CAs (just the default store when it has none,
+        or on a host without the service). A CA bundle replaces both: only
+        its CAs are trusted. Raises ``RuntimeError`` when the host cannot
+        load the organization's list for an ``https://`` URL. A plain
+        ``http://`` request is still sent then: its first hop needs no
+        trust, and an HTTPS hop it is redirected to trusts the default
+        store alone, which is stricter, never looser.
+        """
         if not config.verify_tls:
             return False
         if not config.ca_bundle.strip():
-            return True
+            try:
+                org_pem = await org_trusted_ca_pem(services)
+            except RuntimeError:
+                if httpx.URL(config.url).scheme == "https":
+                    raise
+                return True
+            if org_pem is None:
+                return True
+            try:
+                return add_trusted_cas(httpx.create_ssl_context(trust_env=False), org_pem)
+            except (ssl.SSLError, ValueError) as exc:
+                raise RuntimeError(f"a trusted CA could not be loaded: {exc}") from None
         pem = await resolve_secret_text(
             services, config.ca_bundle, field="ca_bundle", source=f"{HANDLER_ID}.ca_bundle"
         )

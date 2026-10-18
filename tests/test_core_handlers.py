@@ -850,6 +850,79 @@ async def test_http_probe_brackets_ipv6_literals_and_gates_every_hop(monkeypatch
     assert gated == [("2001:db8::7", 8080)]
 
 
+async def test_http_probe_trusts_the_organization_cas_on_https(monkeypatch):
+    """HTTPS checks trust the default store plus the organization's trusted CAs;
+    a host without the service, or an organization without CAs, verifies as before."""
+    import ssl
+
+    import httpx
+
+    from hegemony_steps_probe import http_check
+    from hegemony_steps_probe.http_check import HttpProbeHandler
+
+    verify_seen: list[Any] = []
+    real_client = httpx.AsyncClient
+
+    def client_with_mock_transport(**kwargs):
+        verify_seen.append(kwargs.get("verify"))
+        kwargs["transport"] = httpx.MockTransport(lambda request: httpx.Response(200))
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(http_check.httpx, "AsyncClient", client_with_mock_transport)
+
+    from pathlib import Path
+
+    import certifi
+
+    pem = Path(certifi.where()).read_text(encoding="ascii")
+    start = pem.index("-----BEGIN CERTIFICATE-----")
+    end = pem.index("-----END CERTIFICATE-----", start) + len("-----END CERTIFICATE-----")
+    org_ca = pem[start:end] + "\n"
+
+    class _Services:
+        def __init__(self, org_pem: str | None) -> None:
+            self.org_pem = org_pem
+
+        async def enforce_egress(self, host, port, *, proto, kind):
+            return None
+
+        def __getattr__(self, name):
+            org_pem = self.org_pem
+            if name == "trusted_ca_certificates" and org_pem is not None:
+
+                async def trusted_ca_certificates() -> str:
+                    return org_pem
+
+                return trusted_ca_certificates
+            raise AttributeError(name)
+
+    config = {"scheme": "https", "path": "/", "port": 8443}
+    for services in (_Services(org_ca), _Services(""), _Services(None)):
+        ctx = _ip_target_ctx(config, ["192.0.2.7"], services=services)
+        result = await HttpProbeHandler().execute(ctx)
+        assert result.success is True, result.error
+    with_org, empty, old_host = verify_seen
+    assert isinstance(with_org, ssl.SSLContext)
+    assert empty is True and old_host is True
+
+    ctx = _ip_target_ctx({**config, "verify_tls": False}, ["192.0.2.7"], services=_Services(org_ca))
+    await HttpProbeHandler().execute(ctx)
+    assert verify_seen[-1] is False
+
+    class _Unavailable(_Services):
+        async def trusted_ca_certificates(self) -> str:
+            raise RuntimeError("database unavailable")
+
+    # Plain HTTP still runs; an HTTPS check fails rather than trust less than it should.
+    plain = _ip_target_ctx({**config, "scheme": "http"}, ["192.0.2.7"], services=_Unavailable(None))
+    assert (await HttpProbeHandler().execute(plain)).success is True
+    assert verify_seen[-1] is True
+    secure = _ip_target_ctx(config, ["192.0.2.7"], services=_Unavailable(None))
+    failed = await HttpProbeHandler().execute(secure)
+    assert failed.success is False
+    assert failed.error == "Could not load the organization's trusted CAs: database unavailable"
+
+
 async def test_http_probe_fails_only_the_target_whose_request_cannot_be_made(monkeypatch):
     """Only an IPv6 address is bracketed, and a URL that does not parse, or a
     request that raises something other than an httpx.HTTPError, fails that

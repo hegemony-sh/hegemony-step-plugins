@@ -41,8 +41,13 @@ outdated protocol versions; the second verifies the chain with the worker's
 normal TLS settings. A server that presents another certificate to the second
 handshake than to the first (one that verifies) gets no chain verdict:
 `chain_ok` stays empty and `chain_error` says why. Chains are verified against
-the worker's system trust store or, when CA bundle is set, against only the
-certificates in that bundle. Every certificate in the bundle counts as
+the worker's system trust store plus the organization's trusted CAs, which
+administrators manage under Settings, Trusted CAs (the list of the
+organization the run belongs to, also for a flow shared with it), so a
+private CA the organization added verifies without a CA bundle. When CA
+bundle is set, chains are verified against only the certificates in that
+bundle, which pins them: neither the system store nor the organization's
+trusted CAs count then. Every certificate in the bundle counts as
 trusted, so an internal intermediate or a single pinned server certificate
 works too. CA bundle takes PEM text or a secret reference, either bare
 (`vault://orgs/acme/secrets/tls/internal-ca`) or as a `{{ secret('...') }}`
@@ -178,6 +183,10 @@ Later steps read the results as `steps.NODE_ID.output.KEY`:
 - `all_ok`: whether every endpoint passed every enabled assertion.
 - `min_days_left`: the fewest days left over all certificates, empty when no
   certificate was read.
+- `trust_store`: what chains were verified against: `ca_bundle` (only the CA
+  bundle), `system+org` (the system store plus the organization's trusted
+  CAs) or `system` (the system store alone: the organization trusts no extra
+  CA, or the platform does not offer the list).
 
 Every key is present on every record; a value that could not be determined
 is empty (null), for instance the certificate fields of an unreachable

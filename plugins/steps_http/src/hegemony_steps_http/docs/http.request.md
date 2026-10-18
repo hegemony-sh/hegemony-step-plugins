@@ -61,10 +61,13 @@ POST; other redirects, 307 and 308 among them, repeat the method and body, but
 only on the same scheme, host and port: one that would send the body anywhere
 else is refused.
 
-Verify TLS certificate is on by default. CA Bundle trusts the PEM
-certificates you give (an internal CA, say) for this request instead of the
-public certificate authorities; like Secret it may be PEM text, a secret
-reference or a template. Turn verification off only for test endpoints.
+Verify TLS certificate is on by default. The server's certificate is checked
+against the public certificate authorities plus the organization's trusted
+CAs, which administrators manage under Settings, Trusted CAs (the list of the
+organization the run belongs to). CA Bundle trusts only the PEM certificates
+you give for this request instead of both, which pins them; like Secret it
+may be PEM text, a secret reference or a template. Turn verification off only
+for test endpoints.
 
 Max Response Size (default 1 MiB, at most 16 MiB) is the largest response
 body the step reads, summed over all pages. A larger body fails the step; it
@@ -152,7 +155,8 @@ combined with it.
   addresses are left to the egress policy.
 - **Worker settings.** The step ignores the worker's proxy variables, `.netrc`
   and certificate-file variables: the request goes directly to the URL, and
-  trusts the public authorities or CA Bundle only.
+  trusts the public authorities plus the organization's trusted CAs, or CA
+  Bundle only.
 - **Credentials.** Credentials are sent only to the URL's own scheme, host and
   port: a redirect to anywhere else, even to the same host over the other
   scheme, drops them, and drops every header set in Headers except Accept,

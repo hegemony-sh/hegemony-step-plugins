@@ -22,6 +22,12 @@ token (`Authorization: Token`). The token needs an `https://` URL; Allow token
 over HTTP sends it to an `http://` URL anyway, for an internal NetBox without
 HTTPS. Give the token only the permissions the flow needs.
 
+With Verify TLS certificate on (the default), NetBox's certificate is checked
+against the public certificate authorities plus the organization's trusted
+CAs, which administrators manage under Settings, Trusted CAs; a NetBox behind
+a private CA the organization added needs no CA Bundle. CA Bundle trusts only
+the certificates it holds instead of both, which pins them.
+
 Endpoint is the REST path after `/api/`, such as `dcim/devices`,
 `ipam/ip-addresses` or `plugins/<plugin>/<objects>`; a leading `/api/` and
 slashes are dropped. Action decides what the step does:
