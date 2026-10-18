@@ -160,8 +160,10 @@ class NetBoxConnection(BaseModel):
         title="CA Bundle",
         description=(
             "PEM certificates to trust for NetBox instead of the public certificate "
-            "authorities, such as an internal CA: the PEM text, a secret reference, or a "
-            "{{ secret('...') }} template. Ignored when Verify TLS certificate is off."
+            "authorities and the organization's trusted CAs, which pins them: the PEM text, "
+            "a secret reference, or a {{ secret('...') }} template. Empty trusts the public "
+            "authorities plus the organization's trusted CAs (Settings, Trusted CAs). "
+            "Ignored when Verify TLS certificate is off."
         ),
         json_schema_extra={
             "x_placeholder": "-----BEGIN CERTIFICATE-----",

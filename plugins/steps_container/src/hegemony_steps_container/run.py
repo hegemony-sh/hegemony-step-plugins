@@ -31,6 +31,12 @@ from hegemony_step_sdk import (
     ImageCache,
     StepKind,
 )
+from hegemony_step_sdk.trust import (
+    CONTAINER_CA_BUNDLE,
+    CONTAINER_ORG_CAS,
+    combined_ca_pem,
+    org_trusted_ca_pem,
+)
 
 from .image_cache import (
     AcquiredImage,
@@ -416,6 +422,20 @@ class RunContainerConfig(BaseModel):
             "x_col_span": 2,
             "x_advanced": True,
         },
+    )
+    trusted_cas: bool = Field(
+        default=False,
+        title="Trust the organization's CAs",
+        description=(
+            "Give the container the worker's system trust store plus the organization's "
+            "trusted CAs (Settings, Trusted CAs) as a read-only file, "
+            f"{CONTAINER_CA_BUNDLE}, and point SSL_CERT_FILE, REQUESTS_CA_BUNDLE and "
+            f"CURL_CA_BUNDLE at it; NODE_EXTRA_CA_CERTS points at {CONTAINER_ORG_CAS}, "
+            "the organization's CAs alone. These replace the image's own trust store, so "
+            "it is off by default; a variable set in Environment Variables wins. No effect "
+            "when the organization trusts no extra CA."
+        ),
+        json_schema_extra={"x_advanced": True, "x_col_span": 2},
     )
     mounted_artifacts: list[str] | None = Field(
         default=None,
@@ -1097,6 +1117,30 @@ def _context_file(ctx: HandlerContext) -> StagedFile:
         content=json.dumps(payload, indent=2, sort_keys=True, default=str, ensure_ascii=False)
         + "\n",
     )
+
+
+#: Variables ``trusted_cas`` points at the combined bundle, and the one that
+#: takes the organization's CAs alone (Node adds it to its built-in store).
+_CA_BUNDLE_VARIABLES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+_EXTRA_CA_VARIABLE = "NODE_EXTRA_CA_CERTS"
+
+
+def _with_trusted_cas(
+    config: dict[str, Any], org_pem: str
+) -> tuple[list[StagedFile], dict[str, Any]]:
+    """The read-only CA files to stage, and ``config`` with the variables pointing at them.
+
+    A variable the step sets itself in ``env`` keeps the step's value.
+    """
+    files = [
+        StagedFile(path=CONTAINER_CA_BUNDLE, content=combined_ca_pem(org_pem), mode=0o444),
+        StagedFile(path=CONTAINER_ORG_CAS, content=org_pem, mode=0o444),
+    ]
+    env = dict(config.get("env") or {})
+    for name in _CA_BUNDLE_VARIABLES:
+        env.setdefault(name, CONTAINER_CA_BUNDLE)
+    env.setdefault(_EXTRA_CA_VARIABLE, CONTAINER_ORG_CAS)
+    return files, {**config, "env": env}
 
 
 def _write_job_file(staging_root: str, staged_file: StagedFile) -> None:
@@ -1798,8 +1842,21 @@ class RunContainerHandler(BaseHandler):
                 error=f"Invalid container config: {e}",
                 summary="Config validation failed",
             )
+        job_config = ctx.config
+        if ctx.config.get("trusted_cas") is True:
+            try:
+                org_pem = await org_trusted_ca_pem(ctx.services)
+            except RuntimeError as e:
+                return HandlerResult(
+                    success=False,
+                    error=f"Could not load the organization's trusted CAs: {e}",
+                    summary="Trusted CAs unavailable",
+                )
+            if org_pem is not None:
+                trust_files, job_config = _with_trusted_cas(ctx.config, org_pem)
+                files.extend(trust_files)
         job = ContainerJob(
-            config=ctx.config,
+            config=job_config,
             files=files,
             collect=[OUTPUT_DIR],
             handler_id=self.handler_id,

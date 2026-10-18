@@ -39,6 +39,7 @@ from hegemony_step_sdk import (
     StepKind,
 )
 from hegemony_step_sdk.concurrency import for_each_target_device
+from hegemony_step_sdk.trust import add_trusted_cas, org_trusted_ca_pem
 
 from . import tls_certs
 from .targets import DEFAULT_MAX_PARALLEL_TARGETS, all_probe_targets
@@ -169,7 +170,8 @@ class TlsProbeConfig(BaseModel):
         title="Require valid chain",
         description=(
             "Fail the step when a certificate does not chain to a trusted CA: the "
-            "worker's system trust store, or only the CA bundle when one is set."
+            "worker's system trust store plus the organization's trusted CAs "
+            "(Settings, Trusted CAs), or only the CA bundle when one is set."
         ),
     )
     require_hostname_match: bool = Field(
@@ -210,9 +212,10 @@ class TlsProbeConfig(BaseModel):
         default="",
         title="CA bundle",
         description=(
-            "PEM certificates to trust instead of the worker's system store when "
-            "validating chains, or a secret reference holding them (a bare "
-            "reference or a secret() template)."
+            "PEM certificates to trust instead of the worker's system store and the "
+            "organization's trusted CAs when validating chains, which pins them, or a "
+            "secret reference holding them (a bare reference or a secret() template). "
+            "Empty trusts the system store plus the organization's trusted CAs."
         ),
         json_schema_extra={
             "x_rows": 4,
@@ -350,15 +353,21 @@ def observe_context() -> ssl.SSLContext:
     return context
 
 
-def verify_context(ca_pem: str | None) -> ssl.SSLContext:
-    """Verifying client context: the system store, or only ``ca_pem`` when given.
+def verify_context(ca_pem: str | None, org_pem: str | None = None) -> ssl.SSLContext:
+    """Verifying client context: only ``ca_pem`` when given, else the system store plus ``org_pem``.
+
+    ``org_pem`` holds the run organization's trusted CAs; a CA bundle the
+    step sets replaces them as it replaces the system store.
 
     The host name is not checked here (it is checked locally), strict X.509
     mode is off so the verdict does not depend on the Python version, and
     every trusted certificate counts as an anchor, an intermediate included -
     the same rules the offline validator applies to a pasted certificate.
     """
-    context = ssl.create_default_context(cadata=ca_pem) if ca_pem else ssl.create_default_context()
+    if ca_pem:
+        context = ssl.create_default_context(cadata=ca_pem)
+    else:
+        context = add_trusted_cas(ssl.create_default_context(), org_pem)
     context.check_hostname = False
     context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
     strict = getattr(ssl, "VERIFY_X509_STRICT", 0)
@@ -510,6 +519,8 @@ class _TlsRun:
         enforce: Callable[..., Awaitable[Any]] | None,
         bundle_anchors: list[x509.Certificate] | None,
         bundle_pem: str | None,
+        org_anchors: list[x509.Certificate] | None = None,
+        org_pem: str | None = None,
     ) -> None:
         """Hold the settings and trust anchors for one run; contexts are built on first use."""
         self.settings = settings
@@ -518,6 +529,10 @@ class _TlsRun:
         self.enforce = enforce
         self.bundle_anchors = bundle_anchors
         self.bundle_pem = bundle_pem
+        # The run organization's trusted CAs, added to the system store; a
+        # CA bundle replaces both, so they are unused with one.
+        self.org_anchors = [] if bundle_anchors is not None else list(org_anchors or [])
+        self.org_pem = None if bundle_pem is not None else org_pem
         self.timeout = float(self.config.attempt_timeout_seconds)
         self.client: httpx.AsyncClient | None = None
         self._observe: ssl.SSLContext | None = None
@@ -606,7 +621,7 @@ class _TlsRun:
     def verify_context(self) -> ssl.SSLContext:
         """The verifying context for the second handshake, built once per run."""
         if self._verify is None:
-            self._verify = verify_context(self.bundle_pem)
+            self._verify = verify_context(self.bundle_pem, self.org_pem)
         return self._verify
 
     async def probe_endpoint(self, plan: dict[str, Any]) -> dict[str, Any]:
@@ -677,23 +692,41 @@ class _TlsRun:
                 record,
                 leaf,
                 hostname=server_name,
-                issuer_candidates=served_chain + list(self.bundle_anchors or []),
+                issuer_candidates=served_chain + self.anchors_beyond_system(),
             )
         except tls_certs._UNREADABLE as exc:
             record["error"] = _unreadable_reason(exc)
         return record
+
+    def anchors_beyond_system(self) -> list[x509.Certificate]:
+        """The CA bundle's certificates, or else the organization's trusted CAs."""
+        if self.bundle_anchors is not None:
+            return list(self.bundle_anchors)
+        return list(self.org_anchors)
+
+    @property
+    def trust_store(self) -> str:
+        """What chains are verified against: ``ca_bundle``, ``system+org`` or ``system``."""
+        if self.bundle_anchors is not None:
+            return "ca_bundle"
+        return "system+org" if self.org_anchors else "system"
 
     # --- pasted certificate ----------------------------------------------
 
     async def evaluate_pem(
         self, plan: dict[str, Any], certs: list[x509.Certificate]
     ) -> dict[str, Any]:
-        """Check a pasted certificate and chain offline, against the CA bundle or the system store."""
+        """Check a pasted certificate and chain offline.
+
+        Against the CA bundle, or else the system store plus the
+        organization's trusted CAs.
+        """
         record = self.blank_record(plan)
         leaf, chain = certs[0], certs[1:]
         anchors = self.bundle_anchors
         if anchors is None:
             anchors = await asyncio.to_thread(tls_certs.load_system_anchors)
+            anchors = anchors + self.org_anchors
         if anchors:
             # The path search is CPU-bound (signature checks), so it runs off the event loop.
             record["chain_ok"], record["chain_error"] = await asyncio.to_thread(
@@ -1195,6 +1228,20 @@ class TlsProbeHandler(BaseHandler):
             return _config_error("Invalid CA bundle: no PEM certificate found")
         bundle_pem = tls_certs.certificates_to_pem(bundle_anchors) if bundle_anchors else None
 
+        org_anchors: list[x509.Certificate] = []
+        org_pem: str | None = None
+        if bundle_anchors is None:
+            try:
+                org_text = await org_trusted_ca_pem(ctx.services)
+                org_anchors = tls_certs.load_pem_certificates(org_text) if org_text else []
+            except (RuntimeError, ValueError) as exc:
+                return HandlerResult(
+                    success=False,
+                    error=f"Could not load the organization's trusted CAs: {exc}",
+                    summary="Trusted CAs unavailable",
+                )
+            org_pem = tls_certs.certificates_to_pem(org_anchors) if org_anchors else None
+
         checks_revocation = config.check_ocsp or config.check_crl
         needs_network = bool(plans) or checks_revocation
         enforce = getattr(ctx.require_services(), "enforce_egress", None) if needs_network else None
@@ -1211,12 +1258,23 @@ class TlsProbeHandler(BaseHandler):
             enforce=enforce,
             bundle_anchors=bundle_anchors,
             bundle_pem=bundle_pem,
+            org_anchors=org_anchors,
+            org_pem=org_pem,
         )
         if bundle_pem is not None and plans:
             try:
                 run.verify_context()
             except ssl.SSLError as exc:
                 return _config_error(f"Invalid CA bundle: {exc}")
+        elif org_pem is not None and plans:
+            try:
+                run.verify_context()
+            except ssl.SSLError as exc:
+                return HandlerResult(
+                    success=False,
+                    error=f"Could not load the organization's trusted CAs: {exc}",
+                    summary="Trusted CAs unavailable",
+                )
 
         async with contextlib.AsyncExitStack() as stack:
             if checks_revocation:
@@ -1249,7 +1307,7 @@ class TlsProbeHandler(BaseHandler):
 
         for record in records:
             run.assess(record)
-        return _result(records, config, pem_mode=bool(supplied))
+        return _result(records, config, pem_mode=bool(supplied), trust_store=run.trust_store)
 
 
 def _evidence_name(record: dict[str, Any]) -> str:
@@ -1268,7 +1326,11 @@ def _evidence_name(record: dict[str, Any]) -> str:
 
 
 def _result(
-    records: list[dict[str, Any]], config: TlsProbeConfig, *, pem_mode: bool
+    records: list[dict[str, Any]],
+    config: TlsProbeConfig,
+    *,
+    pem_mode: bool,
+    trust_store: str = "system",
 ) -> HandlerResult:
     """The step result: summary text, metrics, evidence, output and the error for failing endpoints."""
     summary = summarize(records, config.warn_days)
@@ -1301,6 +1363,7 @@ def _result(
         "summary": summary,
         "all_ok": not failing,
         "min_days_left": min_days,
+        "trust_store": trust_store,
     }
     if not failing:
         return HandlerResult(

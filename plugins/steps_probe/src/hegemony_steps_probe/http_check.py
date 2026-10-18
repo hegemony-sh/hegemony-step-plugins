@@ -7,6 +7,7 @@
 import asyncio
 import ipaddress
 import logging
+import ssl
 import time
 from typing import Any, Literal
 
@@ -22,6 +23,7 @@ from hegemony_step_sdk import (
     StepKind,
     for_each_target_device,
 )
+from hegemony_step_sdk.trust import add_trusted_cas, org_trusted_ca_pem
 
 from .targets import (
     DEFAULT_MAX_PARALLEL_TARGETS,
@@ -143,9 +145,10 @@ class HttpProbeConfig(BaseModel):
         default=True,
         title="Verify TLS certificate",
         description=(
-            "Validate the server's TLS certificate on HTTPS checks; turn off "
-            "for devices with self-signed certificates. Enabled by default "
-            "and ignored by plain HTTP checks."
+            "Validate the server's TLS certificate on HTTPS checks against the "
+            "public certificate authorities plus the organization's trusted CAs "
+            "(Settings, Trusted CAs); turn off for devices with self-signed "
+            "certificates. Enabled by default and ignored by plain HTTP checks."
         ),
         json_schema_extra={"x_show_when": {"field": "scheme", "value": "https"}},
     )
@@ -250,8 +253,23 @@ class HttpProbeHandler(BaseHandler):
             except Exception as exc:
                 raise _EgressRefused(exc) from exc
 
+        # HTTPS checks trust the client's default store plus the run
+        # organization's trusted CAs (just the default store when it has none).
+        verify: bool | ssl.SSLContext = verify_tls
+        if verify_tls:
+            try:
+                org_pem = await org_trusted_ca_pem(ctx.services)
+                if org_pem is not None:
+                    verify = add_trusted_cas(httpx.create_ssl_context(), org_pem)
+            except (RuntimeError, ssl.SSLError, ValueError) as exc:
+                return HandlerResult(
+                    success=False,
+                    error=f"Could not load the organization's trusted CAs: {exc}",
+                    summary="Trusted CAs unavailable",
+                )
+
         async with httpx.AsyncClient(
-            verify=verify_tls,
+            verify=verify,
             follow_redirects=follow_redirects,
             timeout=timeout_sec,
             event_hooks={"request": [_authorize_request]},

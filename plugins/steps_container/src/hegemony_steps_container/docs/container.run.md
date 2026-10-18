@@ -118,6 +118,21 @@ output; a literal is not, so keep real secrets in a backend. Unlike
 environment variables, secret files never appear in the sandbox's container
 metadata.
 
+Trust the organization's CAs (off by default) gives the container the CA
+certificates the organization's administrators trust (Settings, Trusted CAs;
+the list of the organization the run belongs to, also for a flow shared with
+it). Two read-only files are placed in the container:
+`/hegemony/ca/ca-bundle.pem` holds the worker's system trust store followed by
+the organization's CAs, and `/hegemony/ca/org-cas.pem` the organization's CAs
+alone. `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` point at the
+first, so OpenSSL, Python `requests` and curl trust public and private
+servers alike; `NODE_EXTRA_CA_CERTS` points at the second, which Node.js adds
+to its built-in store. Those first three replace the image's own trust store
+for the tools that read them, which is why the option is off by default: an
+image that brings its own CAs keeps working unchanged. A variable you set in
+Environment Variables wins over the one the option sets, and the option
+changes nothing when the organization trusts no extra CA.
+
 Defaults: working directory `/workspace`, 512m memory, 1.0 CPUs, 300 s
 timeout, normal Docker networking. Turn on "Disable network access" for full
 isolation, or set an egress policy mode with allow/deny rules for a

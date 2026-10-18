@@ -130,3 +130,14 @@ the sync only for a provider an administrator has opened to flows, and
 answers `fresh` (none ran: the last one is recent enough) or `busy` (another
 sync is running) instead of syncing when it should not. Check for the method
 with `getattr` too.
+
+A handler that verifies TLS trusts the worker's system store plus the run
+organization's trusted CAs, which administrators keep under Settings, Trusted
+CAs. `services.trusted_ca_certificates()` returns that list as PEM text (`""`
+for none). It is the run organization's own list: for a flow shared from the
+platform's shared organization, the list of the organization that runs it;
+two organizations' lists are never combined. `hegemony_step_sdk.trust` wraps
+it: `org_trusted_ca_pem(services)` returns None on a host without the
+service, and `add_trusted_cas(context, pem)` adds the certificates to an
+`ssl` context. A `ca_bundle` a step sets still replaces both (it pins those
+CAs).

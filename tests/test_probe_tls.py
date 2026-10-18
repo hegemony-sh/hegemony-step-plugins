@@ -1106,7 +1106,8 @@ async def test_device_target_reports_the_served_certificate(pki, tmp_path):
         )
     assert result.success is True, result.error
     output = result.output
-    assert set(output) == {"endpoints", "summary", "all_ok", "min_days_left"}
+    assert set(output) == {"endpoints", "summary", "all_ok", "min_days_left", "trust_store"}
+    assert output["trust_store"] == "ca_bundle"
     assert output["all_ok"] is True
     assert output["min_days_left"] == 41
     [record] = output["endpoints"]
@@ -3191,3 +3192,84 @@ def test_a_crl_without_next_update_counts_for_a_limited_time(pki):
         f"(produced {issued.strftime('%Y-%m-%dT%H:%M:%SZ')})"
     )
     assert outcome["crl_next_update"] is None
+
+
+# --- The organization's trusted CAs -------------------------------------------
+
+
+class OrgTrustServices(FakeServices):
+    """A host that serves the run organization's trusted CAs."""
+
+    def __init__(self, org_pem: str = "", *, error: BaseException | None = None, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.org_pem = org_pem
+        self.error = error
+        self.trust_calls = 0
+
+    async def trusted_ca_certificates(self) -> str:
+        self.trust_calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.org_pem
+
+
+async def test_a_private_ca_verifies_once_the_organization_trusts_it(pki, tmp_path):
+    leaf = pki.leaves["rsa"]
+    async with tls_server(tmp_path, leaf) as port:
+        config = {"endpoints": f"127.0.0.1:{port}", "require_valid_chain": True}
+        without = await run_step(config, services=OrgTrustServices(""))
+        trusted = await run_step(config, services=OrgTrustServices(pki.root_pem))
+    [record] = without.output["endpoints"]
+    assert record["chain_ok"] is False
+    assert without.success is False
+    assert without.output["trust_store"] == "system"
+    [record] = trusted.output["endpoints"]
+    assert (record["chain_ok"], record["chain_error"]) == (True, None)
+    assert trusted.success is True, trusted.error
+    assert trusted.output["trust_store"] == "system+org"
+
+
+async def test_a_ca_bundle_pins_its_cas_over_the_organization_list(pki, tmp_path):
+    unrelated = issue("Unrelated Root", ec.generate_private_key(ec.SECP256R1()), ca=True)
+    services = OrgTrustServices(pki.root_pem)
+    leaf = pki.leaves["rsa"]
+    async with tls_server(tmp_path, leaf) as port:
+        result = await run_step(
+            {"endpoints": f"127.0.0.1:{port}", "ca_bundle": pem_of(unrelated)},
+            services=services,
+        )
+    [record] = result.output["endpoints"]
+    assert record["chain_ok"] is False
+    assert result.output["trust_store"] == "ca_bundle"
+    # With a CA bundle the organization's list is not even asked for.
+    assert services.trust_calls == 0
+
+
+async def test_a_pasted_certificate_chains_to_an_organization_ca(pki, monkeypatch):
+    monkeypatch.setattr(tls_certs, "load_system_anchors", lambda: [])
+    leaf = pki.leaves["rsa"].cert
+    config = {"pem": pem_of(leaf, pki.inter), "require_valid_chain": True}
+    result = await run_step(config, services=OrgTrustServices(pki.root_pem))
+    [record] = result.output["endpoints"]
+    assert record["chain_ok"] is True, record["chain_error"]
+    assert result.output["trust_store"] == "system+org"
+
+
+async def test_a_host_without_trusted_ca_support_verifies_as_before(pki, tmp_path):
+    class Unsupported(FakeServices):
+        async def trusted_ca_certificates(self) -> str:
+            raise NotImplementedError
+
+    leaf = pki.leaves["rsa"]
+    async with tls_server(tmp_path, leaf) as port:
+        result = await run_step({"endpoints": f"127.0.0.1:{port}"}, services=Unsupported())
+    [record] = result.output["endpoints"]
+    assert record["chain_ok"] is False
+    assert result.output["trust_store"] == "system"
+
+
+async def test_an_unavailable_organization_list_fails_the_step(pki):
+    services = OrgTrustServices(error=RuntimeError("database unavailable"))
+    result = await run_step({"endpoints": "127.0.0.1:1"}, services=services)
+    assert result.success is False
+    assert result.error == "Could not load the organization's trusted CAs: database unavailable"

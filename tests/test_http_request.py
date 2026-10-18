@@ -1244,6 +1244,105 @@ async def test_a_ca_bundle_replaces_the_default_trust_store(monkeypatch):
     assert seen[0]["verify"] is False
 
 
+def _private_ca_pem(name: str = "Org Private Root") -> str:
+    """A self-signed CA certificate no public trust store holds."""
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+
+
+class OrgTrustServices(FakeServices):
+    """A host that also serves the run organization's trusted CAs."""
+
+    def __init__(self, org_pem: str = "", *, error: BaseException | None = None, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.org_pem = org_pem
+        self.error = error
+        self.trust_calls = 0
+
+    async def trusted_ca_certificates(self) -> str:
+        self.trust_calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.org_pem
+
+
+def _subjects(context: ssl.SSLContext) -> set[str]:
+    names = set()
+    for cert in context.get_ca_certs():
+        for rdn in cert.get("subject", ()):
+            names.update(value for key, value in rdn if key == "commonName")
+    return names
+
+
+async def test_the_organization_cas_join_the_default_trust_store(monkeypatch):
+    import certifi
+
+    services = OrgTrustServices(_private_ca_pem())
+    seen = _spy_client(monkeypatch)
+    result = await HttpRequestHandler().execute(
+        _ctx({"url": "https://api.example.test/"}, services)
+    )
+    assert result.success is True, result.error
+    verify = seen[0]["verify"]
+    assert isinstance(verify, ssl.SSLContext)
+    assert "Org Private Root" in _subjects(verify)
+    # The public authorities stay trusted too: the default store is extended, not replaced.
+    public = ssl.create_default_context(cafile=certifi.where())
+    assert len(verify.get_ca_certs()) == len(public.get_ca_certs()) + 1
+
+
+async def test_a_ca_bundle_pins_its_cas_over_the_organization_list(monkeypatch):
+    bundle = _private_ca_pem("Pinned Root")
+    services = OrgTrustServices(_private_ca_pem())
+    seen = _spy_client(monkeypatch)
+    result = await HttpRequestHandler().execute(
+        _ctx({"url": "https://api.example.test/", "ca_bundle": bundle}, services)
+    )
+    assert result.success is True, result.error
+    verify = seen[0]["verify"]
+    assert _subjects(verify) == {"Pinned Root"}
+    assert services.trust_calls == 0
+
+
+@pytest.mark.parametrize("services", [FakeServices(), OrgTrustServices("")])
+async def test_without_organization_cas_the_client_verifies_as_before(monkeypatch, services):
+    seen = _spy_client(monkeypatch)
+    result = await HttpRequestHandler().execute(
+        _ctx({"url": "https://api.example.test/"}, services)
+    )
+    assert result.success is True, result.error
+    assert seen[0]["verify"] is True
+
+
+async def test_an_unavailable_organization_list_sends_nothing():
+    services = OrgTrustServices(error=RuntimeError("database unavailable"))
+    recorder = Recorder(lambda request: httpx.Response(200))
+    result = await _handler(recorder).execute(_ctx({"url": "https://api.example.test/"}, services))
+    assert result.success is False
+    assert result.error == "Could not load the organization's trusted CAs: database unavailable"
+    assert recorder.requests == []
+
+
 async def test_a_ca_bundle_reference_without_a_certificate_fails():
     services = FakeServices(secrets={"vault://orgs/acme/secrets/ca": "just text"})
     recorder = Recorder(lambda request: httpx.Response(200))

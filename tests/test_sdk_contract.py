@@ -573,3 +573,61 @@ def test_step_kind_is_documented_as_informational():
     doc = sdk.StepKind.__doc__ or ""
     assert "Informational only" in doc
     assert "Determines how the engine treats the step" not in doc
+
+
+def test_handler_services_declares_trusted_ca_certificates():
+    """Added later: optional, and the default says a host does not support it."""
+    method = sdk.HandlerServices.trusted_ca_certificates
+    assert inspect.iscoroutinefunction(method)
+    assert list(inspect.signature(method).parameters) == ["self"]
+
+    class Host(sdk.HandlerServices):
+        pass
+
+    try:
+        asyncio.run(Host().trusted_ca_certificates())
+    except NotImplementedError:
+        pass
+    else:
+        raise AssertionError("a host without support must raise NotImplementedError")
+
+
+def test_org_trusted_ca_pem_falls_back_to_no_extra_ca():
+    from hegemony_step_sdk import trust
+
+    pem = "-----BEGIN CERTIFICATE-----\nQQ==\n-----END CERTIFICATE-----"
+
+    class Unsupported(sdk.HandlerServices):
+        pass
+
+    class Serving:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        async def trusted_ca_certificates(self) -> str:
+            return self.text
+
+    class Failing:
+        async def trusted_ca_certificates(self) -> str:
+            raise RuntimeError("down")
+
+    assert asyncio.run(trust.org_trusted_ca_pem(None)) is None
+    assert asyncio.run(trust.org_trusted_ca_pem(object())) is None
+    assert asyncio.run(trust.org_trusted_ca_pem(Unsupported())) is None
+    assert asyncio.run(trust.org_trusted_ca_pem(Serving(""))) is None
+    assert asyncio.run(trust.org_trusted_ca_pem(Serving("  " + pem + "\n\n"))) == pem + "\n"
+    try:
+        asyncio.run(trust.org_trusted_ca_pem(Failing()))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("a host that cannot load the list must not look like an empty one")
+
+
+def test_combined_ca_pem_puts_the_system_store_first():
+    from hegemony_step_sdk import trust
+
+    assert trust.combined_ca_pem("ORG\n", system_pem="SYSTEM\n") == "SYSTEM\nORG\n"
+    assert trust.combined_ca_pem(None, system_pem="SYSTEM") == "SYSTEM\n"
+    assert trust.combined_ca_pem("", system_pem="") == ""
+    assert "-----BEGIN CERTIFICATE-----" in trust.system_ca_pem()

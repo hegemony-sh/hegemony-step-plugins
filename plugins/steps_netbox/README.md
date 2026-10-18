@@ -17,8 +17,10 @@ Every call to NetBox goes through `http.request`'s client
 (`hegemony-steps-http`, a dependency): each request passes the flow's egress
 policy, loopback, link-local (cloud instance metadata included), unspecified
 and multicast destinations are refused, the API token is never sent over
-plain HTTP unless the step allows it, and the token is scrubbed from
-everything the step reports. A deployment without `hegemony-steps-http` has
+plain HTTP unless the step allows it, NetBox's certificate is checked against
+the public certificate authorities plus the organization's trusted CAs
+(Settings, Trusted CAs) unless CA Bundle pins other ones, and the token is
+scrubbed from everything the step reports. A deployment without `hegemony-steps-http` has
 no NetBox steps either. Each handler's page under
 `src/hegemony_steps_netbox/docs/` documents its fields, output and security
 rules.
