@@ -1,3 +1,13 @@
+## [0.32.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.31.2...v0.32.0) (2026-10-18)
+
+### Features
+
+* **sdk,steps:** trust the run organization's CAs in TLS checks ([8445846](https://github.com/hegemony-sh/hegemony-step-plugins/commit/844584672fad0c85928c35258784bd0938ea6606))
+
+### Bug Fixes
+
+* **steps:** send plain HTTP when the organization's CA list is unavailable ([ce0ca33](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ce0ca338212af0227e3a92f419cfa76cefbf1fcf))
+
 ## [0.31.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.31.1...v0.31.2) (2026-10-16)
 
 ### Bug Fixes
