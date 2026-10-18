@@ -255,6 +255,9 @@ class HttpProbeHandler(BaseHandler):
 
         # HTTPS checks trust the client's default store plus the run
         # organization's trusted CAs (just the default store when it has none).
+        # A plain HTTP check still runs when the list cannot be loaded: only an
+        # HTTPS hop it is redirected to needs it, and that hop then trusts the
+        # default store alone, which is stricter, never looser.
         verify: bool | ssl.SSLContext = verify_tls
         if verify_tls:
             try:
@@ -262,11 +265,12 @@ class HttpProbeHandler(BaseHandler):
                 if org_pem is not None:
                     verify = add_trusted_cas(httpx.create_ssl_context(), org_pem)
             except (RuntimeError, ssl.SSLError, ValueError) as exc:
-                return HandlerResult(
-                    success=False,
-                    error=f"Could not load the organization's trusted CAs: {exc}",
-                    summary="Trusted CAs unavailable",
-                )
+                if scheme == "https":
+                    return HandlerResult(
+                        success=False,
+                        error=f"Could not load the organization's trusted CAs: {exc}",
+                        summary="Trusted CAs unavailable",
+                    )
 
         async with httpx.AsyncClient(
             verify=verify,

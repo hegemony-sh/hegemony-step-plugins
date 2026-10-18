@@ -909,6 +909,19 @@ async def test_http_probe_trusts_the_organization_cas_on_https(monkeypatch):
     await HttpProbeHandler().execute(ctx)
     assert verify_seen[-1] is False
 
+    class _Unavailable(_Services):
+        async def trusted_ca_certificates(self) -> str:
+            raise RuntimeError("database unavailable")
+
+    # Plain HTTP still runs; an HTTPS check fails rather than trust less than it should.
+    plain = _ip_target_ctx({**config, "scheme": "http"}, ["192.0.2.7"], services=_Unavailable(None))
+    assert (await HttpProbeHandler().execute(plain)).success is True
+    assert verify_seen[-1] is True
+    secure = _ip_target_ctx(config, ["192.0.2.7"], services=_Unavailable(None))
+    failed = await HttpProbeHandler().execute(secure)
+    assert failed.success is False
+    assert failed.error == "Could not load the organization's trusted CAs: database unavailable"
+
 
 async def test_http_probe_fails_only_the_target_whose_request_cannot_be_made(monkeypatch):
     """Only an IPv6 address is bracketed, and a URL that does not parse, or a

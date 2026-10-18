@@ -2206,3 +2206,14 @@ async def test_send_says_when_the_request_may_not_have_reached_the_server(
     )
     assert response.transient is transient
     assert response.result.success is sent
+
+
+async def test_a_plain_http_request_is_sent_when_the_organization_list_is_unavailable(
+    monkeypatch,
+):
+    """Plain HTTP needs no trust; an HTTPS hop it is redirected to trusts the default store."""
+    seen = _spy_client(monkeypatch)
+    services = OrgTrustServices(error=RuntimeError("database unavailable"))
+    result = await HttpRequestHandler().execute(_ctx({"url": "http://api.example.test/"}, services))
+    assert result.success is True, result.error
+    assert seen[0]["verify"] is True

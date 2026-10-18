@@ -989,12 +989,20 @@ class HttpRequestHandler(BaseHandler):
         organization's trusted CAs (just the default store when it has none,
         or on a host without the service). A CA bundle replaces both: only
         its CAs are trusted. Raises ``RuntimeError`` when the host cannot
-        load the organization's list.
+        load the organization's list for an ``https://`` URL. A plain
+        ``http://`` request is still sent then: its first hop needs no
+        trust, and an HTTPS hop it is redirected to trusts the default
+        store alone, which is stricter, never looser.
         """
         if not config.verify_tls:
             return False
         if not config.ca_bundle.strip():
-            org_pem = await org_trusted_ca_pem(services)
+            try:
+                org_pem = await org_trusted_ca_pem(services)
+            except RuntimeError:
+                if httpx.URL(config.url).scheme == "https":
+                    raise
+                return True
             if org_pem is None:
                 return True
             try:

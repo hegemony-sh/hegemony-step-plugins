@@ -84,6 +84,7 @@ def system_ca_pem() -> str:
 
         candidates.append(certifi.where())
     except ImportError:
+        # No certifi: the files the ssl module reports are the only candidates.
         pass
     for path in candidates:
         if not os.path.isfile(path):
