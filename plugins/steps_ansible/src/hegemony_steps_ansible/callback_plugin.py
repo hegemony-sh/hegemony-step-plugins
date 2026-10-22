@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+# SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
 #
 # SPDX-License-Identifier: MIT
 
@@ -19,7 +20,8 @@ asks of every copy.
 from string import Template
 
 CALLBACK_TEMPLATE = Template('''\
-# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+# SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
 #
 # SPDX-License-Identifier: MIT
 #

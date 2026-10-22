@@ -1,5 +1,6 @@
 <!--
-SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
 
 SPDX-License-Identifier: AGPL-3.0-or-later
 -->
@@ -26,6 +27,12 @@ The source is licensed under `AGPL-3.0-or-later`, apart from the one MIT file
 that [LICENSING.md](LICENSING.md) describes. Your contribution is licensed
 under the same terms, and contributing it transfers no copyright to the
 project. There is no Contributor License Agreement.
+
+The project's own files name Rexonix s.r.o. as the copyright holder and Jakub
+Trávník as the author (see [LICENSING.md](LICENSING.md)). If you do not write
+on behalf of Rexonix s.r.o., you keep the copyright in your contribution and
+may add your own `SPDX-FileCopyrightText` line to the header of a file you
+change, as REUSE recommends.
 
 Every commit must be signed off under the
 [Developer Certificate of Origin](https://developercertificate.org/) (DCO),
@@ -67,6 +74,20 @@ message lint); `task ci` runs the checks above plus the licence checks
 (`task licenses:images`, `task licenses:packages`). Every new file carries an
 SPDX header, as the existing ones do, so that `reuse lint` passes.
 
+A first-party file names Rexonix s.r.o. as the copyright holder and Jakub
+Trávník as the author, in the file's own comment syntax:
+
+<!-- REUSE-IgnoreStart -->
+
+```python
+# SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+```
+
+<!-- REUSE-IgnoreEnd -->
+
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/);
 `commitlint.config.mjs` holds the rules, and the pull request's commits are
 linted. The type decides whether a merge releases (see [Releasing](#releasing)).
@@ -79,7 +100,8 @@ Every wheel documents its own handlers, and CI enforces it
 - **One page per handler id** at `src/<package>/docs/<handler_id>.md`,
   shipped in the wheel as package data and read by hosts through
   `hegemony_step_sdk.docs.load_docs_bundle`. A page opens with the SPDX
-  header, has exactly one H1 naming its subject, names its handler id in a
+  header in an HTML comment (holder, `SPDX-FileContributor`, blank line,
+  licence), has exactly one H1 naming its subject, names its handler id in a
   code span, and describes the step for the flow author using it - not for
   a developer of this repository. No raw HTML outside the SPDX comment, no
   images, no mermaid, no relative links; placeholders and `{{ ... }}`

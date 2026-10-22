@@ -1,12 +1,12 @@
 version = 1
 SPDX-PackageName = "hegemony-step-plugins"
-SPDX-PackageSupplier = "Jakub Travnik <jakub.travnik@gmail.com>"
+SPDX-PackageSupplier = "Rexonix s.r.o."
 SPDX-PackageDownloadLocation = "https://github.com/hegemony-sh/hegemony-step-plugins"
 
 [[annotations]]
 path = "uv.lock"
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2025-2026 Jakub Travnik <jakub.travnik@gmail.com>"
+SPDX-FileCopyrightText = "2025-2026 Rexonix s.r.o."
 SPDX-License-Identifier = "AGPL-3.0-or-later"
 
 # JSON config files (no comment syntax) and the changelog semantic-release
@@ -19,5 +19,5 @@ path = [
     "CHANGELOG.md",
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2025-2026 Jakub Travnik <jakub.travnik@gmail.com>"
+SPDX-FileCopyrightText = "2025-2026 Rexonix s.r.o."
 SPDX-License-Identifier = "AGPL-3.0-or-later"
