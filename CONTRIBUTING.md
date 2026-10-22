@@ -28,11 +28,12 @@ that [LICENSING.md](LICENSING.md) describes. Your contribution is licensed
 under the same terms, and contributing it transfers no copyright to the
 project. There is no Contributor License Agreement.
 
-The project's own files name Rexonix s.r.o. as the copyright holder and Jakub
-Trávník as the author (see [LICENSING.md](LICENSING.md)). If you do not write
-on behalf of Rexonix s.r.o., you keep the copyright in your contribution and
-may add your own `SPDX-FileCopyrightText` line to the header of a file you
-change, as REUSE recommends.
+The project's own files name Rexonix s.r.o. as the copyright holder, and those
+with an SPDX header also name Jakub Trávník as the author (see
+[LICENSING.md](LICENSING.md)). If you do not write on behalf of Rexonix s.r.o.,
+you keep the copyright in your contribution and may add your own
+`SPDX-FileCopyrightText` line to the header of a file you change, as REUSE
+recommends.
 
 Every commit must be signed off under the
 [Developer Certificate of Origin](https://developercertificate.org/) (DCO),
@@ -74,8 +75,8 @@ message lint); `task ci` runs the checks above plus the licence checks
 (`task licenses:images`, `task licenses:packages`). Every new file carries an
 SPDX header, as the existing ones do, so that `reuse lint` passes.
 
-A first-party file names Rexonix s.r.o. as the copyright holder and Jakub
-Trávník as the author, in the file's own comment syntax:
+A first-party file with an SPDX header names Rexonix s.r.o. as the copyright
+holder and Jakub Trávník as the author, in the file's own comment syntax:
 
 <!-- REUSE-IgnoreStart -->
 
