@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# Gitleaks configuration: the default ruleset, plus the two test values below.
+# Docs: https://github.com/gitleaks/gitleaks#configuration
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Invented NetBox API tokens in tests/test_netbox_steps.py, not credentials"
+# Matched against the finding's secret. tests/test_netbox_steps.py builds one
+# token in NetBox's v1 format (40 hex digits) and one in its v2 format
+# (nbt_<key>.<token>) to check that the step sends the right header for each
+# and scrubs the token from its output. Both are counting patterns made up for
+# the tests; no NetBox instance issued them. Only these exact values are
+# allowed, so a real token pasted into the tests is still found.
+regexes = [
+  '''^0123456789abcdef0123456789abcdef01234567$''',
+  '''^nbt_abcdef123456\.0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJ$''',
+]
