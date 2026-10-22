@@ -143,10 +143,11 @@ jobs:
           RANGE_START: ${{ github.event.pull_request.base.sha || github.event.before }}
           RANGE_END: ${{ github.event.pull_request.head.sha || github.sha }}
         # A push that creates the branch reports an all-zero `before`; with
-        # nothing to diff against, the scan reads the pushed commit alone.
+        # nothing to diff against, the scan reads every commit reachable from
+        # the pushed tip, since all of them are new to the branch.
         run: |
           if [ -z "${RANGE_START//0/}" ]; then
-            log_opts="-1 $RANGE_END"
+            log_opts="$RANGE_END"
           else
             log_opts="$RANGE_START..$RANGE_END"
           fi
