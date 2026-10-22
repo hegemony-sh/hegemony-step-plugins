@@ -12,14 +12,19 @@ repository is licensed under `AGPL-3.0-or-later`, and under no other
 licence. See [LICENSE](LICENSE) and
 [LICENSES/AGPL-3.0-or-later.txt](LICENSES/AGPL-3.0-or-later.txt).
 
-The copyright holder is Rexonix s.r.o., and the author is Jakub Trávník. Each
-first-party file's header says so in REUSE form: `SPDX-FileCopyrightText`
-names Rexonix s.r.o. and `SPDX-FileContributor` names Jakub Trávník.
+Rexonix s.r.o. holds the copyright in the project's own files, and Jakub
+Trávník is their author. Each first-party file that carries an SPDX header says
+so in REUSE form: `SPDX-FileCopyrightText` names Rexonix s.r.o. and
+`SPDX-FileContributor` names Jakub Trávník. Files without a header (`uv.lock`,
+the JSON configuration files `.releaserc.json` and `.github/renovate.json`, and
+`CHANGELOG.md`, which semantic-release rewrites) are annotated in `REUSE.toml`
+instead, which names the copyright holder but not the author.
 
 Contributions are accepted under the same licence, with a
 [Developer Certificate of Origin](https://developercertificate.org/) sign-off
-on every commit; there is no Contributor License Agreement. See
-[CONTRIBUTING.md](CONTRIBUTING.md).
+on every commit; there is no Contributor License Agreement. A contributor who
+does not write on behalf of Rexonix s.r.o. keeps the copyright in their
+contribution. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Keep source file SPDX identifiers as:
 
