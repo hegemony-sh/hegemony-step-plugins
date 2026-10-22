@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import signal
+import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -659,7 +662,11 @@ def _run_bounded(command: str, deadline: int, path: str | None = None) -> tuple[
 def test_bounded_stops_a_command_at_the_deadline():
     """A worker that died stops nothing: the step's own script stops the tool."""
     code, took = _run_bounded("bounded sleep 30", int(time.time()) + 1)
-    assert code in (124, 143)  # coreutils, BusyBox
+    # SIGTERM ended the command: 143 from GNU coreutils with --preserve-status
+    # and from BusyBox, which runs it in its own process; 15 from uutils
+    # coreutils 0.12.0, which gives the bare number after -k; 124 only from a
+    # timeout without --preserve-status (GNU coreutils before 8.21).
+    assert code in (143, 15, 124)
     assert took < 10
 
 
@@ -698,12 +705,11 @@ def _mark_ready(ready: Path) -> str:
     )
 
 
-def test_bounded_passes_a_stop_request_on_to_the_command(tmp_path):
-    """``docker stop`` signals the script (PID 1); the tool must get it, not wait for SIGKILL.
+def _stop_a_saving_tool(tmp_path: Path, path: str | None = None) -> tuple[int, str]:
+    """Stop the script while ``bounded`` runs a tool that saves and exits 7 on SIGTERM.
 
-    A shell waiting for a foreground command would run its trap only after the
-    command ends. The tool here saves and exits 7 on SIGTERM; after the stop
-    request the script starts nothing new and keeps the tool's status.
+    The script then asks ``bounded`` to start another command, and exits with
+    the tool's status: returns that status and the script's output.
     """
     ready = tmp_path / "ready"
     tool = (
@@ -722,19 +728,31 @@ def test_bounded_passes_a_stop_request_on_to_the_command(tmp_path):
             'exit "$code"',
         ]
     )
-    proc = subprocess.Popen(["sh", "-c", script], stdout=subprocess.PIPE, text=True)
+    env = {**os.environ, "PATH": path} if path is not None else None
+    proc = subprocess.Popen(["sh", "-c", script], stdout=subprocess.PIPE, text=True, env=env)
     started = time.monotonic()
     while not ready.exists():
         assert time.monotonic() - started < 10, "the tool never started"
         time.sleep(0.05)
     proc.send_signal(signal.SIGTERM)
     out, _ = proc.communicate(timeout=10)
+    assert time.monotonic() - started < 10
+    return proc.returncode, out
 
-    assert proc.returncode == 7
+
+def test_bounded_passes_a_stop_request_on_to_the_command(tmp_path):
+    """``docker stop`` signals the script (PID 1); the tool must get it, not wait for SIGKILL.
+
+    A shell waiting for a foreground command would run its trap only after the
+    command ends. The tool here saves and exits 7 on SIGTERM; after the stop
+    request the script starts nothing new and keeps the tool's status.
+    """
+    code, out = _stop_a_saving_tool(tmp_path)
+
+    assert code == 7
     assert "tool: saved" in out
     assert "started after the stop request" not in out
     assert "second: 143" in out
-    assert time.monotonic() - started < 10
 
 
 def test_bounded_starts_nothing_when_stopped_while_it_prepares(tmp_path):
@@ -806,3 +824,125 @@ def test_bounded_passes_on_only_the_first_stop_request(tmp_path):
 
     assert proc.returncode == 9
     assert terms.read_text().splitlines() == ["TERM"]
+
+
+def _timeout_stub(tmp_path: Path, script: str) -> tuple[str, Path]:
+    """Put ``script`` first on PATH as ``timeout``.
+
+    Returns that PATH and the file the stub logs its calls to, one line of
+    arguments per call.
+    """
+    calls = tmp_path / "calls"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "timeout"
+    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {shlex.quote(str(calls))}\n{script}')
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    return f"{bin_dir}{os.pathsep}{os.environ['PATH']}", calls
+
+
+#: How uutils coreutils' ``timeout -k`` (0.12.0) answers a SIGTERM sent to
+#: ``timeout`` itself: it passes the signal on to the command and, once the
+#: command has exited, exits 124 whatever the command's status, unless it was
+#: given --preserve-status. It never stops the command at the deadline. Python
+#: rather than sh: its wait never loses the command's status to the signal.
+_UUTILS_LIKE_TIMEOUT = """\
+import signal
+import subprocess
+import sys
+
+args = sys.argv[1:]
+preserve = args[0] == "--preserve-status"
+if preserve:
+    args = args[1:]
+while args[0] in ("-s", "-k"):
+    args = args[2:]
+forwarded = False
+
+
+def forward(signum, frame):
+    global forwarded
+    forwarded = True
+    child.send_signal(signal.SIGTERM)
+
+
+child = subprocess.Popen(args[1:])
+signal.signal(signal.SIGTERM, forward)
+status = child.wait()
+if forwarded and not preserve:
+    sys.exit(124)
+sys.exit(128 - status if status < 0 else status)
+"""
+
+
+def _timeout_without_preserve_status() -> str:
+    """A ``timeout`` that rejects --preserve-status, as GNU coreutils before 8.21
+    does, and is otherwise the host's own."""
+    real = shutil.which("timeout")
+    assert real is not None
+    return (
+        'case "$1" in\n'
+        "  --preserve-status)\n"
+        "    echo \"timeout: unrecognized option '--preserve-status'\" >&2\n"
+        "    echo \"Try 'timeout --help' for more information.\" >&2\n"
+        "    exit 125 ;;\n"
+        "esac\n"
+        f'exec {shlex.quote(real)} "$@"\n'
+    )
+
+
+def _host_timeout_is_uutils() -> bool:
+    real = shutil.which("timeout")
+    assert real is not None
+    done = subprocess.run([real, "--version"], capture_output=True, text=True)
+    return "uutils" in done.stdout
+
+
+def test_bounded_keeps_the_status_of_a_command_stopped_through_timeout(tmp_path):
+    """The stop request reaches the command through ``timeout``, and uutils
+    coreutils' ``timeout -k`` (the default on newer Ubuntu releases) then gives
+    124 for a tool that saved and exited 7: a stopped step would read as one
+    that ran out of time. With --preserve-status it gives the tool's 7. A stub
+    that answers as uutils does stands in for the host's ``timeout``.
+    """
+    program = tmp_path / "uutils_like_timeout.py"
+    program.write_text(_UUTILS_LIKE_TIMEOUT)
+    run = f'exec {shlex.quote(sys.executable)} {shlex.quote(str(program))} "$@"\n'
+    path, calls = _timeout_stub(tmp_path, run)
+    code, out = _stop_a_saving_tool(tmp_path, path)
+
+    assert code == 7
+    assert "tool: saved" in out
+    assert "second: 143" in out
+    [probe, launch] = calls.read_text().splitlines()
+    assert probe == "--preserve-status -s TERM -k 300 5 true"
+    assert launch.startswith("--preserve-status -s TERM -k 300 ")
+
+
+def test_bounded_stops_a_command_at_the_deadline_without_preserve_status(tmp_path):
+    """A ``timeout`` without --preserve-status still bounds the command, with -k."""
+    path, calls = _timeout_stub(tmp_path, _timeout_without_preserve_status())
+    code, took = _run_bounded("bounded sleep 30", int(time.time()) + 1, path)
+
+    assert code in (124, 143)  # coreutils, BusyBox
+    assert took < 10
+    assert calls.read_text().splitlines() == [
+        "--preserve-status -s TERM -k 300 5 true",
+        "-s TERM -k 300 5 true",
+        "-s TERM -k 300 1 sleep 30",
+    ]
+
+
+def test_bounded_passes_a_stop_request_on_without_preserve_status(tmp_path):
+    """A ``timeout`` without --preserve-status still gets the stop request to the command."""
+    path, calls = _timeout_stub(tmp_path, _timeout_without_preserve_status())
+    code, out = _stop_a_saving_tool(tmp_path, path)
+
+    # uutils' timeout -k gives 124 here, which is why bounded prefers
+    # --preserve-status wherever timeout has it.
+    assert code == (124 if _host_timeout_is_uutils() else 7)
+    assert "tool: saved" in out
+    assert "second: 143" in out
+    [*probes, launch] = calls.read_text().splitlines()
+    assert probes == ["--preserve-status -s TERM -k 300 5 true", "-s TERM -k 300 5 true"]
+    assert launch.startswith("-s TERM -k 300 ")

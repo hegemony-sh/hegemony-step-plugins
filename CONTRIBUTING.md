@@ -6,10 +6,26 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 # Contributing
 
-This repository is part of the Hegemony project. Its source is licensed under
-`AGPL-3.0-or-later`. Your contribution is licensed under the same terms, and
-contributing it transfers no copyright to the project. There is no Contributor
-License Agreement.
+This repository is part of the Hegemony project: the step-handler SDK and the
+plugin wheels the platform runs. See the [README](README.md) for what is here
+and how it relates to the platform.
+
+## Code of Conduct and security
+
+By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+Report vulnerabilities privately through the process in
+[SECURITY.md](SECURITY.md), by email to
+[security@hegemony.sh](mailto:security@hegemony.sh). Do **not** open public
+issues for vulnerabilities, leaked secrets, exploit details, or suspected
+compromise.
+
+## Licensing and DCO
+
+The source is licensed under `AGPL-3.0-or-later`, apart from the one MIT file
+that [LICENSING.md](LICENSING.md) describes. Your contribution is licensed
+under the same terms, and contributing it transfers no copyright to the
+project. There is no Contributor License Agreement.
 
 Every commit must be signed off under the
 [Developer Certificate of Origin](https://developercertificate.org/) (DCO),
@@ -26,6 +42,34 @@ the agent and submits the work, as its author; the agent is credited in a
 `Co-authored-by:` trailer and never signs off in its own name. See the
 platform's
 [CONTRIBUTING.md](https://github.com/hegemony-sh/hegemony/blob/develop/CONTRIBUTING.md#licensing-and-dco).
+
+## Local setup and checks
+
+You need Python 3.11 or newer and [uv](https://docs.astral.sh/uv/);
+[Task](https://taskfile.dev/) is optional, because every task is a plain
+`uv run` command. CI runs these, and a pull request needs them green:
+
+```bash
+uv sync --frozen --all-packages
+uv run ruff check packages plugins probes transports tests scripts
+uv run ruff format --check packages plugins probes transports tests scripts
+uv run reuse lint
+uv run ty check
+uv run pytest
+uv run python scripts/check_docs.py
+uv run python scripts/build_wheels.py
+uv run python scripts/smoke_install_wheels.py
+```
+
+`task setup` installs the workspace and the pre-commit hooks (formatting,
+typos, secret scan with gitleaks, workflow scan with zizmor, REUSE, commit
+message lint); `task ci` runs the checks above plus the licence checks
+(`task licenses:images`, `task licenses:packages`). Every new file carries an
+SPDX header, as the existing ones do, so that `reuse lint` passes.
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/);
+`commitlint.config.mjs` holds the rules, and the pull request's commits are
+linted. The type decides whether a merge releases (see [Releasing](#releasing)).
 
 ## Documentation
 
@@ -54,7 +98,7 @@ wheels and asserts one page per registered handler.
 ## Releasing
 
 A merge to `main` is a release. The `Release` workflow calls the shared
-[`plugin-release.yml`](https://github.com/hegemony-sh/hegemony-workflows)
+[`plugin-release.yml`](https://github.com/hegemony-sh/hegemony-github-workflows)
 workflow, which runs [semantic-release](https://semantic-release.gitbook.io/):
 it reads the Conventional Commits since the last tag, derives the next
 version from them, bumps every package and SDK pin (`scripts/set_version.py`),
@@ -81,16 +125,17 @@ release a minor.
 
 Releases are immutable. The pipeline refuses to run when a GitHub Release for
 the next tag already exists and never replaces published assets: fix forward
-with a new commit, which becomes the next release. Attestations are created
-only for public repositories, so releases cut while this repository is
-private ship checksums only.
+with a new commit, which becomes the next release. Build provenance
+attestations are created only for public repositories, so releases cut while
+this repository was private ship `SHA256SUMS` only. Those checksums detect a
+damaged download, not a replaced release.
 
 One failure a re-run cannot repair: semantic-release pushes the release
 commit and the `vX.Y.Z` tag before it publishes the GitHub Release, so if
 publication fails after that push the tag exists without a Release, and the
 next run reads the tag as the last release. Publish that tag's assets by hand
 from a checkout of the tag, as the shared workflow's
-[README](https://github.com/hegemony-sh/hegemony-workflows#recovering-a-tag-without-a-release)
+[README](https://github.com/hegemony-sh/hegemony-github-workflows#recovering-a-tag-without-a-release)
 describes (`gh release create vX.Y.Z --verify-tag ... dist/*.whl
 dist/SHA256SUMS` after rebuilding the wheels at that tag).
 
