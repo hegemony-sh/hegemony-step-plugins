@@ -8,7 +8,7 @@ rules:
   unpinned-uses:
     config:
       # Everything is pinned to a commit SHA, the organization's own
-      # hegemony-workflows release workflow included: it receives the release
+      # hegemony-github-workflows release workflow included: it receives the release
       # token, so a bump to it is a reviewed pull request, not a branch move.
       policies:
         "*": hash-pin

@@ -501,10 +501,26 @@ def deadline_shell_lines(deadline: int, kill_after: int = KILL_AFTER_SECONDS) ->
     access it was given (a managed-state token and lock). ``bounded`` sends the
     command SIGTERM at ``deadline`` (a Unix time) and SIGKILL ``kill_after``
     seconds later (:data:`KILL_AFTER_SECONDS` by default), through ``timeout``
-    from BusyBox or coreutils. With a ``timeout`` that has no ``-k`` it sends
-    only SIGTERM, and in an image without ``timeout`` the command runs
-    unbounded, as before. The command's exit status is returned (BusyBox
-    gives 143 when the deadline stopped it, coreutils 124).
+    from BusyBox, GNU coreutils or uutils coreutils. With a ``timeout`` that
+    has no ``-k`` it sends only SIGTERM, and in an image without ``timeout``
+    the command runs unbounded, as before.
+
+    The command's exit status is returned, also when a stop request or the
+    deadline ended it:
+
+    - GNU coreutils (8.21 and later) and uutils coreutils run it with
+      ``--preserve-status``. Without it ``timeout`` gives 124 in place of the
+      command's status at the deadline, and uutils ``timeout -k`` also after
+      a stop request, though the command exited with a status of its own. A
+      command a signal ended gives 128 + the signal's number (143 for
+      SIGTERM, 137 for SIGKILL); uutils 0.12.0 gives the bare number instead
+      (15 for SIGTERM) once the deadline or a stop request has come, except
+      137 for its own SIGKILL.
+    - BusyBox's ``timeout`` has no ``--preserve-status`` and needs none: it
+      runs the command in its own process, so ``bounded`` gets the command's
+      status itself (143 when SIGTERM ended it).
+    - A coreutils ``timeout`` without ``--preserve-status`` (GNU before 8.21)
+      gives 124 when the deadline stopped the command.
 
     The lines also pass a stop request on: a shell waiting for a foreground
     command runs its traps only after the command ends, so ``bounded`` runs
@@ -544,6 +560,10 @@ def deadline_shell_lines(deadline: int, kill_after: int = KILL_AFTER_SECONDS) ->
         '  if [ "$left" -lt 1 ]; then left=1; fi',
         "  if ! command -v timeout >/dev/null 2>&1; then",
         "    hegemony_how=none",
+        # The command's own status, not 124 (see above). BusyBox has no
+        # --preserve-status and so takes the next probe.
+        f"  elif timeout --preserve-status -s TERM {kill} 5 true >/dev/null 2>&1; then",
+        "    hegemony_how=preserve",
         f"  elif timeout -s TERM {kill} 5 true >/dev/null 2>&1; then",
         "    hegemony_how=kill",
         "  else",
@@ -553,6 +573,7 @@ def deadline_shell_lines(deadline: int, kill_after: int = KILL_AFTER_SECONDS) ->
         f"  {stopped}",
         '  case "$hegemony_how" in',
         '    none) "$@" & ;;',
+        f'    preserve) timeout --preserve-status -s TERM {kill} "$left" "$@" & ;;',
         f'    kill) timeout -s TERM {kill} "$left" "$@" & ;;',
         '    *) timeout -s TERM "$left" "$@" & ;;',
         "  esac",

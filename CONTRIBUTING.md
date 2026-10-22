@@ -98,7 +98,7 @@ wheels and asserts one page per registered handler.
 ## Releasing
 
 A merge to `main` is a release. The `Release` workflow calls the shared
-[`plugin-release.yml`](https://github.com/hegemony-sh/hegemony-workflows)
+[`plugin-release.yml`](https://github.com/hegemony-sh/hegemony-github-workflows)
 workflow, which runs [semantic-release](https://semantic-release.gitbook.io/):
 it reads the Conventional Commits since the last tag, derives the next
 version from them, bumps every package and SDK pin (`scripts/set_version.py`),
@@ -135,7 +135,7 @@ commit and the `vX.Y.Z` tag before it publishes the GitHub Release, so if
 publication fails after that push the tag exists without a Release, and the
 next run reads the tag as the last release. Publish that tag's assets by hand
 from a checkout of the tag, as the shared workflow's
-[README](https://github.com/hegemony-sh/hegemony-workflows#recovering-a-tag-without-a-release)
+[README](https://github.com/hegemony-sh/hegemony-github-workflows#recovering-a-tag-without-a-release)
 describes (`gh release create vX.Y.Z --verify-tag ... dist/*.whl
 dist/SHA256SUMS` after rebuilding the wheels at that tag).
 
