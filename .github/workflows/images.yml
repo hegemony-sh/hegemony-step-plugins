@@ -51,9 +51,11 @@ concurrency:
 jobs:
   image:
     name: ${{ matrix.image }}
-    # Runner selection as in ci.yml (CI_RUNNER, else GitHub-hosted). The
-    # self-hosted runners share one Docker daemon, so a pull request's image
-    # carries the run in its tag and is removed at the end of the job.
+    # Runner selection as in ci.yml (CI_RUNNER, else GitHub-hosted); read the
+    # note there before the repository takes pull requests from forks: a pull
+    # request that changes an image builds and runs that image on this runner.
+    # The self-hosted runners share one Docker daemon, so a pull request's
+    # image carries the run in its tag and is removed at the end of the job.
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     permissions:
