@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: 2025-2026 Jakub Trávník <jakub.travnik@gmail.com>
+# SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
@@ -127,9 +128,16 @@ def load_docs_bundle(package: str) -> dict[str, str]:
 # importable by hosts and harvest tooling so every consumer of a page judges
 # it by the same rules.
 
+# A copyright holder line, then any further holder or SPDX-FileContributor
+# lines (a first-party page names Rexonix s.r.o. and then its author), a blank
+# line and the licence.
+# REUSE-IgnoreStart
 SPDX_HEADER_RE = re.compile(
-    r"\A<!--\nSPDX-FileCopyrightText: [^\n]+\n\nSPDX-License-Identifier: [^\n]+\n-->\n"
+    r"\A<!--\nSPDX-FileCopyrightText: [^\n]+\n"
+    r"(?:SPDX-File(?:CopyrightText|Contributor): [^\n]+\n)*"
+    r"\nSPDX-License-Identifier: [^\n]+\n-->\n"
 )
+# REUSE-IgnoreEnd
 H1_RE = re.compile(r"^# (.+)$", re.MULTILINE)
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 FENCE_RE = re.compile(r"^[ \t]*(```+|~~~+).*?^[ \t]*\1[ \t]*$", re.DOTALL | re.MULTILINE)
