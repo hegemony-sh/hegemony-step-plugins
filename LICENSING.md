@@ -26,7 +26,8 @@ on every commit; there is no Contributor License Agreement. A contributor who
 does not write on behalf of Rexonix s.r.o. keeps the copyright in their
 contribution. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Keep source file SPDX identifiers as:
+Keep first-party source code SPDX identifiers as
+(preserve third-party notices):
 
 ```text
 SPDX-License-Identifier: AGPL-3.0-or-later
@@ -37,6 +38,14 @@ SPDX expression and `license-files`, and holds a copy of each named text from
 `LICENSES/` as `LICENSE-<id>.txt`, which an installed wheel keeps under
 `*.dist-info/licenses/`. `scripts/package_licenses.py` writes the copies;
 `task licenses:packages`, a test and the wheel smoke install check them.
+
+## Code of Conduct
+
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) adapts Contributor Covenant 2.1 by
+Coraline Ada Ehmke and its contributors. That document retains **CC-BY-4.0**,
+with upstream attribution and local changes recorded in the file. Its license
+text is in [LICENSES/CC-BY-4.0.txt](LICENSES/CC-BY-4.0.txt). This documentation
+exception does not change the licenses of the project's code or plugin wheels.
 
 ## One MIT file
 

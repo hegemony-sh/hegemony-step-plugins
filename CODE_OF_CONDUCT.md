@@ -1,8 +1,9 @@
 <!--
+SPDX-FileCopyrightText: Coraline Ada Ehmke and Contributor Covenant contributors
 SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
 SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
 
-SPDX-License-Identifier: AGPL-3.0-or-later
+SPDX-License-Identifier: CC-BY-4.0
 -->
 
 # Contributor Covenant Code of Conduct
@@ -78,6 +79,15 @@ Community leaders will follow these Community Impact Guidelines in determining t
 ## Attribution
 
 This Code of Conduct is adapted from the [Contributor Covenant](https://www.contributor-covenant.org), version 2.1, available at <https://www.contributor-covenant.org/version/2/1/code_of_conduct.html>.
+
+Contributor Covenant 2.1 is by Coraline Ada Ehmke and its contributors,
+licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+The [upstream license][covenant-license] is included in the
+[local copy](LICENSES/CC-BY-4.0.txt). This adaptation retains that license.
+Local changes set the reporting address, explicitly include pull requests
+in enforcement, and adjust formatting, heading capitalization and punctuation.
+
+[covenant-license]: https://github.com/EthicalSource/contributor_covenant/blob/91532d80ea5f39b6685aff4892bc6854bf2f6d6f/LICENSE.md
 
 Community Impact Guidelines were inspired by [Mozilla's code of conduct enforcement ladder](https://github.com/mozilla/diversity).
 
