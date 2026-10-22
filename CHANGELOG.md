@@ -1,3 +1,9 @@
+## [0.32.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.1...v0.32.2) (2026-10-22)
+
+### Bug Fixes
+
+* **images:** raise Go and klauspost/compress in opentofu-runner for two HIGH advisories ([bff1744](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bff1744da6cee1e30976d159ac630a039f3598da))
+
 ## [0.32.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.0...v0.32.1) (2026-10-22)
 
 ### Bug Fixes
