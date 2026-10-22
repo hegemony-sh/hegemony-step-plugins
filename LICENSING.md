@@ -93,4 +93,3 @@ repository reviews its own:
   product that competes with HashiCorp's. It is pulled only when a `tf.plan`
   step selects the `terraform` engine; OpenTofu (MPL-2.0), in
   opentofu-runner, is the default.
-
