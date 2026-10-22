@@ -4,14 +4,14 @@
 
 [project]
 name = "hegemony-steps-inventory"
-version = "0.32.2"
+version = "0.32.3"
 description = "Inventory step handlers for Hegemony (sync an inventory provider from a flow)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.32.2",
+    "hegemony-step-sdk==0.32.3",
 ]
 
 [project.entry-points."hegemony.step_handlers"]
