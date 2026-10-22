@@ -1,3 +1,15 @@
+## [0.32.3](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.2...v0.32.3) (2026-10-22)
+
+### Bug Fixes
+
+* **container:** keep the tool's exit status when a stop request reaches timeout ([8d9502c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8d9502c002e3456146fef7d01bb4fcc3e87a2050))
+
+## [0.32.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.1...v0.32.2) (2026-10-22)
+
+### Bug Fixes
+
+* **images:** raise Go and klauspost/compress in opentofu-runner for two HIGH advisories ([bff1744](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bff1744da6cee1e30976d159ac630a039f3598da))
+
 ## [0.32.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.0...v0.32.1) (2026-10-22)
 
 ### Bug Fixes
