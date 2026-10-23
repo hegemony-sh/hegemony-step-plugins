@@ -13,7 +13,7 @@ license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
     "hegemony-step-sdk==0.32.3",
-    "asyncssh>=2.23.0",
+    "asyncssh>=2.24.0",
 ]
 
 [project.entry-points."hegemony.device_transports"]

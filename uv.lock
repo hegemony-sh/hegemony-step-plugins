@@ -609,7 +609,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=43" },
-    { name = "dnspython", specifier = ">=2.6.0" },
+    { name = "dnspython", specifier = ">=2.6.1" },
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
     { name = "httpx", specifier = ">=0.27.0" },
 ]
@@ -666,7 +666,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "asyncssh", specifier = ">=2.23.0" },
+    { name = "asyncssh", specifier = ">=2.24.0" },
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
 ]
 
