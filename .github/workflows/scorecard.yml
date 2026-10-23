@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: 2025-2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# OpenSSF Scorecard, the same workflow as the platform repository's. Results,
+# the badge and the code-scanning alerts only appear once the repository is
+# public.
+
+name: Scorecard
+
+on:
+  # Classic branch protection only. A ruleset change arrives on the
+  # repository_ruleset webhook event, which is not a workflow trigger, so
+  # after importing or editing a ruleset run this workflow by hand
+  # (workflow_dispatch).
+  branch_protection_rule:
+  schedule:
+    # Weekly, on Tuesday at 04:23 UTC.
+    - cron: "23 4 * * 2"
+  push:
+    # The default branch: Scorecard refuses to run on any other branch for
+    # a push, and a push is what re-scores the repository after a change.
+    branches: [main]
+  workflow_dispatch:
+
+# Nothing at the workflow level: the job states what it needs. The Scorecard
+# API also rejects results from a workflow with write permissions up here.
+permissions: {}
+
+jobs:
+  analysis:
+    name: Scorecard Analysis
+    # GitHub-hosted, not CI_RUNNER: with publish_results the Scorecard API
+    # checks the workflow's shape: an Ubuntu-hosted runner, no containers, and
+    # no steps beyond the four actions below.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      security-events: write # upload the SARIF file to code scanning
+      id-token: write # publish_results proves the workflow's identity with OIDC
+      contents: read # check out the repository
+      actions: read # Scorecard reads workflow settings and runs
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload results to code scanning
+        uses: github/codeql-action/upload-sarif@ce5e7eeac396d720fe2d802714996c8ce561e311 # v3.39.0
+        with:
+          sarif_file: results.sarif

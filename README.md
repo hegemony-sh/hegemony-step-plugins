@@ -13,6 +13,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 [![Latest release](https://img.shields.io/github/v/release/hegemony-sh/hegemony-step-plugins?label=Release)](https://github.com/hegemony-sh/hegemony-step-plugins/releases)
 [![FOSSA license scan](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-step-plugins.svg?type=shield&issueType=license)](https://app.fossa.com/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-step-plugins?ref=badge_shield&issueType=license)
 [![FOSSA security scan](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-step-plugins.svg?type=shield&issueType=security)](https://app.fossa.com/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-step-plugins?ref=badge_shield&issueType=security)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hegemony-sh/hegemony-step-plugins/badge)](https://scorecard.dev/viewer/?uri=github.com/hegemony-sh/hegemony-step-plugins)
 
 Step-handler SDK and plugin wheels for [Hegemony](https://github.com/hegemony-sh/hegemony),
 a self-hosted orchestration platform for long-running infrastructure changes.
