@@ -256,7 +256,6 @@ class UpgradeDriver(ABC):
         Returns:
             PreflightResult with validation status and device info
         """
-        ...
 
     @abstractmethod
     async def stage(
@@ -293,7 +292,6 @@ class UpgradeDriver(ABC):
         Returns:
             StageResult with transfer and verification status
         """
-        ...
 
     @abstractmethod
     async def install(
@@ -326,7 +324,6 @@ class UpgradeDriver(ABC):
         Returns:
             InstallResult with installation status and reboot indication
         """
-        ...
 
     @abstractmethod
     async def verify(
@@ -354,7 +351,6 @@ class UpgradeDriver(ABC):
         Returns:
             VerifyResult with version and commit status
         """
-        ...
 
     @abstractmethod
     async def cleanup(
@@ -377,7 +373,6 @@ class UpgradeDriver(ABC):
         Returns:
             CleanupResult with removed packages list
         """
-        ...
 
     def select_transfer_method(
         self,

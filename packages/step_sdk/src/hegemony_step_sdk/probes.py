@@ -72,7 +72,6 @@ class BaseProbe(ABC):
         Implementations should not raise for expected failures (timeout,
         refused, unresolved) — return ``ProbeResult(ok=False, error_kind=…)``.
         """
-        ...
 
 
 class ProbeRegistry(Protocol):
@@ -80,4 +79,3 @@ class ProbeRegistry(Protocol):
 
     def register_probe(self, probe_class: type) -> None:
         """Register a probe type from its class (must define ``probe_id``)."""
-        ...

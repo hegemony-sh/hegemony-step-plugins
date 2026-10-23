@@ -102,11 +102,9 @@ class ShellTransport(Protocol):
 
     async def run(self, command: str, *, timeout: float | None = None) -> ShellResult:
         """Run one command on the remote host and capture its result."""
-        ...
 
     async def close(self) -> None:
         """Close the underlying connection (idempotent)."""
-        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,11 +307,9 @@ class HandlerServices(Protocol):
         ``platform``/timeout arguments override the transport defaults only when
         given; ``step_run_id`` opts the connection into cancellation tracking.
         """
-        ...
 
     async def resolve_secret_ref(self, ref: str | None, *, source: str) -> str | None:
         """Resolve a single ``{{ secret/env/file(...) }}`` reference (or pass ``None`` through)."""
-        ...
 
     async def resolve_device_credentials(self, device: dict[str, Any]) -> DeviceCredentials:
         """Resolve ``device.access_config`` into login material for an external tool.
@@ -327,7 +323,6 @@ class HandlerServices(Protocol):
         malformed (no username, neither a password nor a private key, a broken
         jump-host block).
         """
-        ...
 
     # --- Secret store writes -------------------------------------------------
     #
@@ -501,7 +496,6 @@ class HandlerServices(Protocol):
         own steps can lock or write it. A platform older than this parameter
         raises ``TypeError``; pass it only when set.
         """
-        ...
 
     async def release_state_hold(self, name: str, *, taken_by: str | None = None) -> bool:
         """End this run's hold on the managed state ``name`` early.
@@ -550,15 +544,12 @@ class HandlerServices(Protocol):
         self, ref: Any, *, field_name: str, required: bool = False
     ) -> str | None:
         """Validate a reference string without resolving it; returns the normalized ref."""
-        ...
 
     async def render_template(self, template: str) -> str:
         """Render a full Jinja template with the platform's resolver."""
-        ...
 
     def contains_template(self, value: str) -> bool:
         """Whether ``value`` contains Jinja template syntax."""
-        ...
 
     def open_api_client(self, *, timeout: float = 30.0) -> httpx.AsyncClient:
         """Build an ``httpx.AsyncClient`` scoped to the internal API (base URL + auth).
@@ -567,7 +558,6 @@ class HandlerServices(Protocol):
         for internal endpoints (artifacts, child runs, notifications); the client is
         version-locked with the host, so those paths are not third-party ABI.
         """
-        ...
 
     async def dispatch_notification(
         self,
@@ -578,7 +568,6 @@ class HandlerServices(Protocol):
         body: str,
     ) -> None:
         """Send a notification through the host's provider registry (raises on failure)."""
-        ...
 
     async def format_run_notification(
         self,
@@ -594,23 +583,18 @@ class HandlerServices(Protocol):
         get the full notification context (run.*, event, ui_base_url, step outputs,
         secret()/env() helpers) in a single just-in-time pass.
         """
-        ...
 
     async def create_child_run(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Create a child flow run; returns the creation response (``run_id``, …)."""
-        ...
 
     async def fetch_run(self, run_id: str) -> dict[str, Any]:
         """Fetch a compact run status payload (``status``, ``error_message``, …)."""
-        ...
 
     async def fetch_run_outputs(self, run_id: str) -> dict[str, Any]:
         """Fetch evaluated flow outputs for a terminal run."""
-        ...
 
     async def cancel_run(self, run_id: str) -> bool:
         """Best-effort cancellation of a run; returns whether the API accepted it."""
-        ...
 
     def container_runtime(self) -> ContainerRuntime:
         """Describe the platform's container-execution environment (docker binary, workspaces).
@@ -619,7 +603,6 @@ class HandlerServices(Protocol):
         :attr:`ContainerRuntime.image_build`: how the step names what it builds
         and where it may push it.
         """
-        ...
 
     async def open_shell(
         self,
@@ -633,7 +616,6 @@ class HandlerServices(Protocol):
         ``winrm`` section selects the WinRM transport once the host implements
         it). Caller owns the transport lifecycle (``close()`` in a finally).
         """
-        ...
 
     async def run_probe(
         self,
@@ -649,7 +631,6 @@ class HandlerServices(Protocol):
         ``probe.*`` handlers share a single implementation with monitors.
         Raises ``KeyError`` if ``check_type`` is not registered.
         """
-        ...
 
     async def enforce_egress(
         self,
@@ -670,7 +651,6 @@ class HandlerServices(Protocol):
         target; returns None when the policy permits it or none is in force.
         Hosts that implement no policy make this a no-op.
         """
-        ...
 
     def is_check_registered(self, check_id: str) -> bool:
         """Whether ``check_id`` is a known, registered probe/check type.
@@ -678,7 +658,6 @@ class HandlerServices(Protocol):
         Backs ``monitor.*`` config validation without the handler importing the
         host probe registry.
         """
-        ...
 
     async def start_monitor(
         self,
@@ -698,23 +677,18 @@ class HandlerServices(Protocol):
         (``{instance_id, selector_index, selector_type, role, device_id,
         address}``) and hand them here. Raises on failure.
         """
-        ...
 
     async def stop_monitor(self, monitor_id: str, *, reason: str = "step_requested") -> bool:
         """Stop a running background monitor; returns whether one was stopped."""
-        ...
 
     async def fetch_run_attachments(self, run_id: str) -> list[dict]:
         """Fetch the attachments resolved for a run (``filename``/``content`` dicts)."""
-        ...
 
     async def fetch_run_step_outputs(self, run_id: str) -> dict[str, dict[str, Any]]:
         """Fetch completed step outputs for a run, keyed by step id."""
-        ...
 
     async def fetch_run_artifacts(self, run_id: str) -> list[dict]:
         """Fetch the evidence artifacts produced during a run."""
-        ...
 
     async def upload_binary_artifact(
         self,
@@ -731,4 +705,3 @@ class HandlerServices(Protocol):
         device_id: str | None = None,
     ) -> bool:
         """Stream a file to run artifact storage; best-effort, returns success."""
-        ...
