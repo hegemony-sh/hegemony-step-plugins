@@ -185,7 +185,7 @@ def test_every_transport_advertises_the_recorder():
 
 
 @pytest.mark.asyncio
-async def test_the_device_hop_records_what_its_key_exchange_agreed_on(servers, make, transport_id):
+async def test_the_device_hop_records_what_its_key_exchange_agreed_on(servers, make):
     port = await servers.device(_ed25519())
     recorder = Recorder()
 
@@ -193,11 +193,7 @@ async def test_the_device_hop_records_what_its_key_exchange_agreed_on(servers, m
 
     [(host, recorded_port, algorithms)] = recorder.records
     assert (host, recorded_port) == (HOST, port)
-    if transport_id == "netmiko":
-        # paramiko has no post-quantum key exchange.
-        assert algorithms.kex in ("curve25519-sha256", "curve25519-sha256@libssh.org")
-    else:
-        assert algorithms.kex == "mlkem768x25519-sha256"
+    assert algorithms.kex == "mlkem768x25519-sha256"
     assert algorithms.host_key == "ssh-ed25519"
     assert algorithms.cipher
 

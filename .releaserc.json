@@ -109,7 +109,10 @@
         "assets": [
           "dist/*.whl",
           "dist/SHA256SUMS"
-        ]
+        ],
+        "successComment": false,
+        "failComment": false,
+        "releasedLabels": false
       }
     ]
   ]

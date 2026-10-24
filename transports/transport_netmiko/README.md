@@ -47,6 +47,7 @@ the device, reports the key exchange, host key, cipher and MAC it agreed on
 once it is logged in. paramiko drops both sides' KEXINIT messages after the
 key exchange, so the transport connects through a paramiko transport that
 keeps them (paramiko 3.2 or later), and the agreement is worked out from
-them. paramiko has no post-quantum key exchange, so this transport records a
-classical one even when the device offers more. A failure to record is
-logged and never fails the connection.
+them. paramiko 5.1.0 and later offer the post-quantum
+`mlkem768x25519-sha256` key exchange first when `cryptography` supports
+ML-KEM; an older paramiko records a classical one even when the device
+offers more. A failure to record is logged and never fails the connection.
