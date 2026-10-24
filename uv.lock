@@ -8,7 +8,6 @@ members = [
     "hegemony-step-plugins-workspace",
     "hegemony-step-sdk",
     "hegemony-steps-ansible",
-    "hegemony-steps-cisco-iosxe",
     "hegemony-steps-container",
     "hegemony-steps-evidence",
     "hegemony-steps-flow",
@@ -449,21 +448,6 @@ dependencies = [
 requires-dist = [
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
     { name = "hegemony-steps-container", editable = "plugins/steps_container" },
-]
-
-[[package]]
-name = "hegemony-steps-cisco-iosxe"
-version = "0.32.5"
-source = { editable = "plugins/steps_cisco_iosxe" }
-dependencies = [
-    { name = "hegemony-step-sdk" },
-    { name = "httpx" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
-    { name = "httpx", specifier = ">=0.27.0" },
 ]
 
 [[package]]

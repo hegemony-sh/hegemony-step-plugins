@@ -21,11 +21,11 @@ platforms, transports, and libraries multiply.
 
 - The **namespace prefix** is claimed by exactly one plugin wheel and equals
   that wheel's entry-point name under `hegemony.step_handlers` (e.g.
-  `netcli`, `cisco.iosxe`). The host registry rejects ids a plugin registers
+  `netcli`, `netbox`). The host registry rejects ids a plugin registers
   outside its claimed prefix.
 - The **local name** after the prefix is normally one snake_case segment.
   Dotted local names are allowed only for a genuine workflow family
-  (`cisco.iosxe.upgrade.preflight` … `.upgrade.cleanup`).
+  (`netbox.ipam.allocate` and `netbox.ipam.release`).
 - Never derive a handler's group by splitting its id on dots — ownership
   comes from the registry's claimed prefix, and editor grouping comes from
   the handler's `category` metadata.
@@ -41,8 +41,8 @@ platforms, transports, and libraries multiply.
    transport — its config is payload-shaped, so it is a different handler in
    a different namespace.
 3. **Vendor-platform namespaces** — only for workflows whose semantics are
-   themselves platform-specific: `cisco.iosxe` today; `cisco.nxos`,
-   `cisco.iosxr`, `arista.eos` as they appear. Vendor first, platform second.
+   themselves platform-specific: none today; `cisco.iosxe`, `cisco.nxos`,
+   `arista.eos` as they appear. Vendor first, platform second.
 
 4. **Tool namespaces** — handlers that drive one external tool whose own
    concepts shape the config schema (a playbook, a plan file): `ansible`,
@@ -138,8 +138,9 @@ Apply in order:
    another vendor?** Yes → paradigm or capability namespace. No →
    vendor-platform namespace. (This is why `netcli.execute` is not
    `cisco.iosxe.execute_cli`: "send CLI lines, capture output" is
-   vendor-neutral — the dialect comes from `device.platform` — while the
-   IOS-XE upgrade workflow's install/bundle modes shape its config schema.)
+   vendor-neutral — the dialect comes from `device.platform` — while a
+   workflow whose config schema encodes one platform's concepts belongs
+   under that platform's namespace.)
 2. **Does it authenticate into a target's management plane, or observe from
    outside?** Outside observation → `probe.` (background variants →
    `monitor.`). Credentialed interaction → a paradigm namespace.

@@ -17,7 +17,6 @@ from typing import Any, cast
 
 import pytest
 
-import hegemony_steps_cisco_iosxe
 import hegemony_steps_container
 import hegemony_steps_evidence
 import hegemony_steps_flow
@@ -49,17 +48,6 @@ WHEELS = [
     (hegemony_steps_container, "container", {"container.run", "container.build"}),
     (hegemony_steps_shell, "shell", {"shell.execute"}),
     (hegemony_steps_flow, "flow", {"flow.run", "flow.notify"}),
-    (
-        hegemony_steps_cisco_iosxe,
-        "cisco.iosxe",
-        {
-            "cisco.iosxe.upgrade.preflight",
-            "cisco.iosxe.upgrade.stage",
-            "cisco.iosxe.upgrade.install",
-            "cisco.iosxe.upgrade.verify",
-            "cisco.iosxe.upgrade.cleanup",
-        },
-    ),
     (hegemony_steps_monitor, "monitor", {"monitor.connectivity"}),
     (hegemony_steps_http, "http", {"http.request"}),
     (hegemony_steps_secret, "secret", {"secret.write"}),
