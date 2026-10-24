@@ -1,3 +1,10 @@
+## [0.32.5](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.4...v0.32.5) (2026-10-24)
+
+### Bug Fixes
+
+* **deps:** move to dnspython 2.9.0 and filelock 4.2.4 for two advisories ([f3e2809](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f3e28092589ea38f21b7be547a1cf2d0282bb60e))
+* **deps:** raise the asyncssh and dnspython floors past their advisories ([f998e29](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f998e29f95b64dbb31fc4bcffc65779c4c980ce3))
+
 ## [0.32.4](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.3...v0.32.4) (2026-10-24)
 
 ### Bug Fixes

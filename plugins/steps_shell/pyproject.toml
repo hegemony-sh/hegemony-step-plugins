@@ -5,14 +5,14 @@
 
 [project]
 name = "hegemony-steps-shell"
-version = "0.32.4"
+version = "0.32.5"
 description = "Remote shell execution step handlers for Hegemony (Linux/Unix hosts; WinRM planned)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.32.4",
+    "hegemony-step-sdk==0.32.5",
     # Parses command templates for template_errors; renders nothing.
     "jinja2>=3.1",
 ]
