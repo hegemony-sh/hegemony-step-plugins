@@ -36,7 +36,6 @@ members = [
     "plugins/steps_evidence",
     "plugins/steps_container",
     "plugins/steps_flow",
-    "plugins/steps_cisco_iosxe",
     "plugins/steps_shell",
     "plugins/steps_monitor",
     "plugins/steps_ansible",
@@ -59,7 +58,6 @@ hegemony-steps-netcli = { workspace = true }
 hegemony-steps-evidence = { workspace = true }
 hegemony-steps-container = { workspace = true }
 hegemony-steps-flow = { workspace = true }
-hegemony-steps-cisco-iosxe = { workspace = true }
 hegemony-steps-shell = { workspace = true }
 hegemony-steps-monitor = { workspace = true }
 hegemony-steps-ansible = { workspace = true }
@@ -92,7 +90,6 @@ known-first-party = [
     "hegemony_steps_evidence",
     "hegemony_steps_container",
     "hegemony_steps_flow",
-    "hegemony_steps_cisco_iosxe",
     "hegemony_steps_shell",
     "hegemony_steps_monitor",
     "hegemony_steps_ansible",

@@ -20,7 +20,7 @@ a self-hosted orchestration platform for long-running infrastructure changes.
 The platform's documentation is at [hegemony.sh](https://hegemony.sh).
 
 Step handlers implement the work one flow step performs (run CLI commands on
-devices, launch a container, stage an upgrade image, …). Handler types are
+devices, launch a container, run an Ansible playbook, …). Handler types are
 pluggable: wheels register handler classes under the `hegemony.step_handlers`
 entry-point group and the platform discovers them at startup.
 
@@ -55,8 +55,8 @@ entry-point group and the platform discovers them at startup.
 - Handler wheels, one namespace prefix each (see `CONVENTIONS.md` for the
   naming/grouping rules — the entry-point name is the claimed prefix).
   Every wheel in the table is installed in the platform's api and worker
-  images unless it is marked opt-in; see below for how each one is limited
-  and how a deployment leaves one out:
+  images; see below for how each one is limited and how a deployment leaves
+  one out:
 
   | Wheel | Namespace | Handlers |
   | --- | --- | --- |
@@ -66,7 +66,6 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_evidence` | `evidence.` | assert, compare |
   | `plugins/steps_container` | `container.` | run |
   | `plugins/steps_flow` | `flow.` | run, notify |
-  | `plugins/steps_cisco_iosxe` | `cisco.iosxe.` | upgrade.preflight/stage/install/verify/cleanup (opt-in) |
   | `plugins/steps_shell` | `shell.` | execute — commands on Linux/Unix hosts over SSH |
   | `plugins/steps_monitor` | `monitor.` | connectivity — start a background monitor that probes targets on a schedule (the platform runs the monitor itself) |
   | `plugins/steps_ansible` | `ansible.` | playbook (built on `container.run`'s runner) |
@@ -78,10 +77,7 @@ entry-point group and the platform discovers them at startup.
 
 Device transports (`transports/`: netmiko, scrapli, asyncssh) and the network
 probes (`probes/probe_net`) are wheels of the same kind and release with the
-rest. `hegemony-steps-cisco-iosxe` is opt-in: install the released wheel
-explicitly (the platform's demo pins it in `demo-plugin-wheels.txt` in
-[`hegemony-demo-data`](https://github.com/hegemony-sh/hegemony-demo-data)).
-Every other wheel ships in the platform's images. The platform has no runtime
+rest. Every wheel ships in the platform's images. The platform has no runtime
 switch that hides an installed step, so a deployment that must not offer one
 builds its api and worker images without the wheel (`uv pip uninstall` in a
 derived image; see the platform's
@@ -107,8 +103,8 @@ The wheels that reach outside the worker are limited in different ways:
 The wheels are not on PyPI. Each release publishes them as assets of its
 [GitHub Release](https://github.com/hegemony-sh/hegemony-step-plugins/releases)
 `vX.Y.Z`, with a `SHA256SUMS` file listing every wheel. Install by hand to add
-the opt-in wheel, or a wheel of your own, to a derived platform image, or to
-use the SDK on its own; the platform's images already carry the rest.
+a wheel of your own to a derived platform image, or to use the SDK on its
+own; the platform's images already carry the rest.
 
 A wheel pins `hegemony-step-sdk` to its own exact version, and the SDK is not
 on an index, so name the SDK wheel of the same release in the same command,
