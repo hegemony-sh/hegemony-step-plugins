@@ -31,4 +31,3 @@ class StepHandlerRegistry(Protocol):
         ``supported_kinds``, editor metadata, and ``config_model``.
         Raises ``ValueError`` on duplicate handler ids.
         """
-        ...

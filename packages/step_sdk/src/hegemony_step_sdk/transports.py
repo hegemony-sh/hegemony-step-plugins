@@ -306,4 +306,3 @@ class TransportRegistry(Protocol):
 
     def register_transport(self, transport_class: type) -> None:
         """Register a transport type from its class (must define ``transport_id``)."""
-        ...
