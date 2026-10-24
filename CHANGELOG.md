@@ -1,3 +1,11 @@
+## [0.32.4](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.3...v0.32.4) (2026-10-24)
+
+### Bug Fixes
+
+* **deps:** move to netmiko 4.8.0 and paramiko 5.1.0 for CVE-2026-44405 ([19e1f4d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/19e1f4d569693e9acd529536acb9dd1889547ab1))
+* **deps:** upgrade virtualenv to 21.14.13 for CVE-2026-113713 ([7bfef8b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7bfef8b4363dd6dc722b7d242ec02c343b467165))
+* **release:** stop release comments from failing a published release ([056148a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/056148a94184d6c94cca579ff1137370bf1c544e))
+
 ## [0.32.3](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.2...v0.32.3) (2026-10-22)
 
 ### Bug Fixes
