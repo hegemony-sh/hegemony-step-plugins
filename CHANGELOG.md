@@ -1,3 +1,21 @@
+## [0.33.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.5...v0.33.0) (2026-10-24)
+
+### ⚠ BREAKING CHANGES
+
+* **steps-cisco-iosxe:** hegemony-steps-cisco-iosxe is no longer built or
+released, and the cisco.iosxe.upgrade.preflight, .stage, .install,
+.verify and .cleanup step types no longer exist. They had not been tested
+recently enough to ship. A flow that uses one of them fails validation on
+a platform that runs this release; earlier releases keep the wheel.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Ex7hc3CFzGrHoCwqYiqGJL
+Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
+
+### Features
+
+* **steps-cisco-iosxe:** remove the IOS XE upgrade steps ([0a1c964](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0a1c964b8e985c87e9c2897173ea1270ed564301))
+
 ## [0.32.5](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.4...v0.32.5) (2026-10-24)
 
 ### Bug Fixes

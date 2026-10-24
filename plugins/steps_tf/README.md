@@ -33,7 +33,7 @@ from output.
 Both steps run on the platform's Docker-in-Docker sandbox through
 `container.run`'s runner (this wheel depends on `hegemony-steps-container`),
 under the flow's egress policy. OpenTofu's default image is
-`ghcr.io/hegemony-sh/opentofu-runner:0.32`, built and published from
+`ghcr.io/hegemony-sh/opentofu-runner:0.33`, built and published from
 `images/opentofu-runner/` in this repository; Terraform's is HashiCorp's
 `hashicorp/terraform` at an exact version. `tf.apply` runs the plan's image by
 the registry digest the plan recorded, or by its tag when the image has no
