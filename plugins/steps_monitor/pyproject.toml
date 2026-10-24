@@ -5,14 +5,14 @@
 
 [project]
 name = "hegemony-steps-monitor"
-version = "0.32.4"
+version = "0.32.5"
 description = "Background connectivity-monitor step handlers for Hegemony"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.32.4",
+    "hegemony-step-sdk==0.32.5",
 ]
 
 [project.entry-points."hegemony.step_handlers"]
