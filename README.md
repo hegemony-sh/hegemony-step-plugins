@@ -179,3 +179,5 @@ runs the tests; the commands CI runs are in
 Ansible; see [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md). The repository
 is [REUSE](https://reuse.software/) compliant: every file carries its licence
 in an SPDX header.
+
+[![FOSSA license report](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-step-plugins.svg?type=large&issueType=license)](https://app.fossa.com/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-step-plugins?ref=badge_large&issueType=license)
