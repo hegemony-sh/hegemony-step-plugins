@@ -8,9 +8,6 @@ released, and the cisco.iosxe.upgrade.preflight, .stage, .install,
 recently enough to ship. A flow that uses one of them fails validation on
 a platform that runs this release; earlier releases keep the wheel.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01Ex7hc3CFzGrHoCwqYiqGJL
-Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 
 ### Features
 
@@ -316,9 +313,6 @@ Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 * **tf:** tf.apply refuses a plan made by the previous version of
 tf.plan, which recorded no digest. Plan again after upgrading.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
-Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 
 ### Features
 
@@ -341,9 +335,6 @@ Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 packages.conf by itself. Flows that relied on the automatic boot rewrite
 must enable fix_boot_config.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
-Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 
 ### Bug Fixes
 
@@ -364,17 +355,11 @@ Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 address in Hostname to Resolve passed before and now fails. Set Hostname
 to Resolve to a DNS name.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
-Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 * **probe:** a probe.connectivity step or monitor.connectivity
 monitor using DNS Resolve on an IP address target without Hostname to
 Resolve passed before and now fails. Set Hostname to Resolve, or target
 a device by its name.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
-Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 
 ### Features
 
@@ -402,9 +387,6 @@ postcheck pair or its postcheck capture failed; these used to be
 skipped. On text, subset and superset now compare lines (subset used to
 need identical text, and superset always failed).
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
-Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 
 ### Features
 
@@ -433,17 +415,11 @@ longer exist. A flow that still has one of these steps is refused on
 save as an unknown handler, and a run that reaches such a step fails it.
 Use monitor.connectivity instead before upgrading.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
-Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 * **flow:** the flow.git_sync step handler no longer exists. A flow
 that still has a flow.git_sync step is refused on save as an unknown
 handler, and a run that reaches such a step fails it. Remove those steps
 before upgrading.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
-Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 
 ### Features
 
@@ -463,9 +439,6 @@ Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 * **ansible:** Ansible no longer templates extra variable values. Write
 Ansible expressions in the playbook instead.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
-Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 * **shell:** a shell.execute step whose commands insert a {{ }} value
 without | quote now fails before contacting any host. Add | quote, or
 pass the value under Environment Variables and read it as "$NAME". With
@@ -473,9 +446,6 @@ the default interpreter environment variables are exported, which needs a
 POSIX login shell. The | quote filter ships with the platform release that
 calls template_errors.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
-Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 
 ### Features
 
@@ -498,9 +468,6 @@ that still has a netcli.poll_until step is refused on save as an unknown
 handler, and a run that reaches such a step fails it. Replace those steps
 before upgrading.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LhWmMf82Cr3rWPxzUR15EQ
-Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 
 ### Features
 
@@ -646,8 +613,6 @@ Signed-off-by: Jakub Trávník <jakub.travnik@gmail.com>
 the sandbox daemon; container.run refuses "", a bare unix:// and a tcp://
 with no host instead of inheriting the worker's environment.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01FVnouGuBTDymAFUEF8gMUy
 
 ### Bug Fixes
 
@@ -664,8 +629,6 @@ ctx.tags.get("kind", "") instead; a host that built the context with
 those two keyword arguments passes tags= instead. Positional
 construction of HandlerContext shifts by two fields.
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_011ztw52e4SE3cob8UUEXsRs
 
 ### Features
 
