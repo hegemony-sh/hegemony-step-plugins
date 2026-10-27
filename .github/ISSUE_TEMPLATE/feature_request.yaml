@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Feature request
+description: Propose a change or an addition to the step handlers or the SDK
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What do you need to do that the step handlers do not support today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: Configuration, SDK or behaviour changes you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: hegemony
+    attributes:
+      label: Impact on Hegemony
+      description: Does the change need a new or changed platform API, a change to the SDK contract, or a newer Hegemony release?

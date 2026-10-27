@@ -123,11 +123,25 @@ sha256sum -c --ignore-missing SHA256SUMS
 uv pip install ./hegemony_step_sdk-*.whl ./hegemony_steps_http-*.whl ./hegemony_steps_netbox-*.whl
 ```
 
-Replace `X.Y.Z` with a published version (the newest is on the Releases page).
+Replace `X.Y.Z` with the release your Hegemony version pins (see
+[Compatibility](#compatibility)); the newest is on the Releases page.
 `pip install` takes the same wheel files. The wheel file names use underscores
 (`hegemony_steps_http-X.Y.Z-py3-none-any.whl`), the package names dashes
 (`hegemony-steps-http`). `SHA256SUMS` is published beside the wheels in the
 same release, so it detects a damaged download, not a replaced release.
+
+## Compatibility
+
+Each Hegemony release pins one release of this repository in its
+`.github/plugin-pins.json` and is built and tested against exactly that
+release. Install the release your platform pins; the newest one is on the
+[Releases page](https://github.com/hegemony-sh/hegemony-step-plugins/releases).
+
+| Hegemony | hegemony-step-plugins |
+| --- | --- |
+| 1.0.0 | 0.33.0 |
+
+Hegemony versions before 1.0.0 were not released publicly.
 
 ## Develop a handler
 
@@ -165,19 +179,19 @@ runs the tests; the commands CI runs are in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and listed in
 [CONTRIBUTING.md](CONTRIBUTING.md#local-setup-and-checks).
 
-## Community
+## Contributing, security and licence
 
-- [CONTRIBUTING.md](CONTRIBUTING.md): how to contribute, the DCO sign-off every
-  commit needs, and how releases are made.
-- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): the Contributor Covenant.
-- [SECURITY.md](SECURITY.md): report vulnerabilities privately to
-  [security@hegemony.sh](mailto:security@hegemony.sh), not in a public issue.
-
-## Licence
-
-`AGPL-3.0-or-later`, apart from one MIT-licensed file that runs inside
-Ansible; see [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md). The repository
-is [REUSE](https://reuse.software/) compliant: every file carries its licence
-in an SPDX header.
+- Read [Contributing](CONTRIBUTING.md) first. Every commit needs a DCO sign-off
+  (`git commit -s`) and follows Conventional Commits, because merges to `main`
+  drive releases: `feat`, `fix`, `perf` and `revert` commits publish a new
+  version.
+- Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes
+  ([security@hegemony.sh](mailto:security@hegemony.sh)), and do not open
+  public issues for them.
+- Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+- Licensed under `AGPL-3.0-or-later`, apart from one MIT-licensed file that
+  runs inside Ansible; see [LICENSE](LICENSE) and [Licensing](LICENSING.md).
+  The repository is [REUSE](https://reuse.software/) compliant: every file
+  carries its licence in an SPDX header.
 
 [![FOSSA license report](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-step-plugins.svg?type=large&issueType=license)](https://app.fossa.com/projects/git%2Bgithub.com%2Fhegemony-sh%2Fhegemony-step-plugins?ref=badge_large&issueType=license)

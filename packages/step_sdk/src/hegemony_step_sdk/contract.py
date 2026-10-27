@@ -369,13 +369,13 @@ class BaseHandler(ABC):
     display_name: str = ""
     # One-line description shown alongside the display name.
     description: str = ""
-    # Editor grouping (e.g. "Checks", "Actions", "Upgrade", "Monitors").
+    # Editor grouping (e.g. "Checks", "Actions", "Monitors").
     category: str = ""
     # Hidden handlers stay registered and executable (existing flow definitions
     # keep resolving) but are omitted from editor pickers — internal handlers.
     hidden: bool = False
     # Built-in step timeout for this handler when neither the step policy nor
-    # the flow sets one. Long-running handlers (device upgrades, child flows)
+    # the flow sets one. Long-running handlers (Ansible playbooks, child flows)
     # declare hours here; the engine also derives its heartbeat treatment from
     # it, instead of string-matching on handler ids. None -> engine default.
     default_timeout_seconds: int | None = None
