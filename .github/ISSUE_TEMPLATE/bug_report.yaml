@@ -45,6 +45,8 @@ body:
     id: observed
     attributes:
       label: Observed behaviour
-      description: Include the error and traceback from the API or worker log if there is one.
+      description: >-
+        Include the error and traceback from the API or worker log if there is
+        one. Remove passwords, tokens, keys and other secrets before you paste.
     validations:
       required: true
