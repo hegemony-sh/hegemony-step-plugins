@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: 2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Bug report
+description: Something in a package of this repository does not work as documented
+labels: ["bug"]
+body:
+  - type: input
+    id: package
+    attributes:
+      label: Package and release
+      description: The wheel and the release it came from.
+      placeholder: "hegemony-steps-http X.Y.Z"
+    validations:
+      required: true
+  - type: input
+    id: hegemony-version
+    attributes:
+      label: Hegemony version
+      placeholder: "X.Y.Z"
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.12"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps, including the relevant configuration. Never paste secrets, tokens or key material.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behaviour
+      description: Include the error and traceback from the API or worker log if there is one.
+    validations:
+      required: true
