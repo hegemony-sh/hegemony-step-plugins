@@ -182,8 +182,9 @@ runs the tests; the commands CI runs are in
 ## Contributing, security and licence
 
 - Read [Contributing](CONTRIBUTING.md) first. Every commit needs a DCO sign-off
-  (`git commit -s`) and follows Conventional Commits, because a merge to `main`
-  is a release.
+  (`git commit -s`) and follows Conventional Commits, because merges to `main`
+  drive releases: `feat`, `fix`, `perf` and `revert` commits publish a new
+  version.
 - Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes
   ([security@hegemony.sh](mailto:security@hegemony.sh)), and do not open
   public issues for them.

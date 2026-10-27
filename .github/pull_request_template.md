@@ -13,7 +13,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 - [ ] Tests added or updated; test credentials and endpoints are synthetic
 - [ ] Documentation updated: one page per new handler id, `title=` and `description=` on every config field, and the plugin README names every handler id
-- [ ] Commit messages follow Conventional Commits, and a breaking change is marked (`!` or a `BREAKING CHANGE:` footer); a merge to `main` is a release
+- [ ] Commit messages follow Conventional Commits, and a breaking change is marked (`!` or a `BREAKING CHANGE:` footer); merges to `main` drive releases (`feat`, `fix`, `perf` and `revert` publish a new version)
 - [ ] No secret, token or resolved credential reaches a log line or an error message
 - [ ] New files carry an SPDX header (`reuse lint` is clean)
 - [ ] Every commit is signed off (`git commit -s`)
