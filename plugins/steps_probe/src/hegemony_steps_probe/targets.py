@@ -15,6 +15,7 @@ The handlers check their targets concurrently (``for_each_target_device``)
 and merge one :class:`TargetOutcome` per target afterwards, in target order.
 """
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -81,14 +82,32 @@ def chain_output(outcomes: list[TargetOutcome]) -> dict[str, Any]:
     the facts its evidence records (resolved answers, an HTTP status, the
     check type), so a later step reads
     ``{{ steps.ID.output.targets['r1'].ok }}`` instead of opening artifacts.
+    Inventory names are unique per site only, and an IP target is named by
+    its address, so a name two targets share is keyed as ``name (device id)``
+    (or ``name #2`` without an id) and every result is kept.
     """
-    targets: dict[str, Any] = {}
+    facts_by_target = []
     for outcome in outcomes:
         facts = dict((outcome.evidence or {}).get("content_json") or {})
+        device_id = facts.get("device_id")
         for key in _IDENTITY_FIELDS:
             facts.pop(key, None)
+        facts_by_target.append((outcome, facts, device_id))
+    names = Counter(outcome.name for outcome in outcomes)
+    taken: set[str] = set()
+    targets: dict[str, Any] = {}
+    for outcome, facts, device_id in facts_by_target:
+        key = base = (
+            outcome.name
+            if names[outcome.name] == 1 or not device_id
+            else f"{outcome.name} ({device_id})"
+        )
+        number = 2
+        while key in taken:
+            key, number = f"{base} #{number}", number + 1
+        taken.add(key)
         # The outcome's own fields win over evidence keys of the same name.
-        targets[outcome.name] = {
+        targets[key] = {
             **facts,
             "ok": outcome.ok,
             "error": outcome.error,

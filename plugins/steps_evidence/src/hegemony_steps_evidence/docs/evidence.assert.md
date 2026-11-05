@@ -53,13 +53,14 @@ Later steps read the outcome from `steps.NODE_ID.output`: `passed`,
 `checked` (the artifact names it looked at, as `<device name>:<command>` for
 a target role) and `failed` (those that did not pass, including any it could
 not fetch). The step records no metrics; the details are evidence. Each
-checked artifact produces one `assertion_result` evidence record — named
+fetched artifact produces one `assertion_result` evidence record — named
 `assertion` for a single artifact, or `assertion:<artifact name>` when
 several devices were checked — capturing the operator, the expected and
 actual values (actual truncated to 500 characters), whether it passed, and
 in line scope the line filter, how many lines were selected and passed, and
 the first failing line. For a failed capture it records the capture's error
-instead of the line details.
+instead of the line details. An artifact it could not fetch has no record; the
+step's error names it.
 
 ## When It Fails
 

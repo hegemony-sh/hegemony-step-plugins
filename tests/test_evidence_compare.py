@@ -191,6 +191,11 @@ async def test_execute_pattern_no_postcheck_match_errors(monkeypatch: pytest.Mon
     )
     assert result.success is False
     assert "postcheck" in (result.error or "") and "pattern" in (result.error or "")
+    # Later steps still read the outcome, with the precheck's artifacts missing.
+    assert result.output is not None
+    assert result.output["passed"] is False
+    assert result.output["compared"] == []
+    assert result.output["missing_in_postcheck"] == ["dc1:show running-config"]
 
 
 async def test_execute_artifact_name_takes_precedence_over_pattern(

@@ -60,6 +60,18 @@ def _preview(labels: list[str]) -> str:
     return f"{shown} and {rest} more" if rest > 0 else shown
 
 
+def _nothing_compared(comparison_type: str, missing_in_postcheck: list[str] | None = None) -> dict:
+    """The step's output when evidence is missing before anything is compared."""
+    return {
+        "passed": False,
+        "comparison_type": comparison_type,
+        "compared": [],
+        "failed": [],
+        "missing_in_postcheck": missing_in_postcheck or [],
+        "only_in_postcheck": [],
+    }
+
+
 class CompareEvidenceConfig(BaseModel):
     """Config for ``evidence.compare``."""
 
@@ -225,6 +237,7 @@ class CompareEvidenceHandler(BaseHandler):
                         f"pattern '{artifact_name_pattern}'"
                     ),
                     summary="No artifacts matched pattern",
+                    output=_nothing_compared(comparison_type),
                 )
             if not postcheck_artifacts:
                 return HandlerResult(
@@ -234,6 +247,10 @@ class CompareEvidenceHandler(BaseHandler):
                         f"pattern '{artifact_name_pattern}'"
                     ),
                     summary="No artifacts matched pattern",
+                    output=_nothing_compared(
+                        comparison_type,
+                        sorted({str(a["name"]) for a in precheck_artifacts}),
+                    ),
                 )
 
         if not precheck_artifacts:
@@ -241,6 +258,7 @@ class CompareEvidenceHandler(BaseHandler):
                 success=False,
                 error=f"No artifacts found for precheck step '{precheck_step_id}'",
                 summary="Missing precheck evidence",
+                output=_nothing_compared(comparison_type),
             )
 
         # If artifact_name is specified, filter to just that artifact.
@@ -254,6 +272,7 @@ class CompareEvidenceHandler(BaseHandler):
                     success=False,
                     error=f"No artifact '{artifact_name}' found in precheck step '{precheck_step_id}'",
                     summary="Missing precheck artifact",
+                    output=_nothing_compared(comparison_type),
                 )
 
             if not postcheck_filtered:
@@ -261,6 +280,7 @@ class CompareEvidenceHandler(BaseHandler):
                     success=False,
                     error=f"No artifact '{artifact_name}' found in postcheck step",
                     summary="Missing postcheck artifact",
+                    output=_nothing_compared(comparison_type, [artifact_name]),
                 )
 
             # Compare the specific artifact — the NEWEST one on each side, in

@@ -62,7 +62,9 @@ Later steps read each target's result from
 it passed) and `latency_ms`, plus the facts its evidence records (the
 `host`, the `check_type` and the probe's `metrics`). A target that was never
 checked, for want of an address, still appears with `ok` false and its
-error.
+error. Inventory names are unique per site only, and an IP target is named
+by its address: a name two targets share is keyed as `name (device id)`, so
+every result is kept.
 
 ## When It Fails
 

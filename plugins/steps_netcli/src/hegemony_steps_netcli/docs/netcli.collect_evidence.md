@@ -44,9 +44,14 @@ Later steps read what each device returned from the step's output:
 none) and `commands`, each command's output keyed by the command as
 configured, for example
 `{{ steps.ID.output.devices['dlp1-edge-01'].commands['show running-config'] }}`.
-The output keeps at most 16 384 characters of one command and 49 152 of the
-whole step; a text cut short is named in `truncated` as `device:command`, and
-the evidence always holds the whole text.
+Inventory names are unique per site only: a name two targets share is keyed
+as `name (device id)` for each of them. The output keeps at most 16 384
+characters of one command and about 49 152 of the whole step, names
+included, and cuts a text only at the end of a line, so the platform's
+masking of secrets still sees each line whole. A text cut short is named in
+`truncated` as `device:command`; once the step's share is spent, the
+remaining devices keep `success` and `error` but no `commands`, and are named
+in `omitted`. The evidence always holds the whole text.
 
 Each command on each device also yields a `cli_output` artifact
 named `<device>:<command>`, holding the raw output plus the device, the
