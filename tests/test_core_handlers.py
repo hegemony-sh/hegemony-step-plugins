@@ -259,6 +259,32 @@ async def test_connectivity_probe_accepts_direct_ip_targets():
     assert result.metrics == {"192.0.2.7_ms": 2.5, "192.0.2.8_ms": 2.5}
 
 
+async def test_connectivity_probe_output_holds_every_targets_result():
+    from hegemony_step_sdk import ProbeResult
+    from hegemony_steps_probe.connectivity import ConnectivityCheckHandler
+
+    class _Services:
+        async def run_probe(self, check_type, address, options):
+            if address == "192.0.2.8":
+                return ProbeResult(ok=False, error_kind="timeout", error_detail="no reply")
+            return ProbeResult(ok=True, metrics={"rtt_ms": 2.5})
+
+    ctx = _ip_target_ctx(
+        {"check_type": "icmp_ping", "timeout_sec": 3},
+        ["192.0.2.7", "192.0.2.8"],
+        services=_Services(),
+    )
+    result = await ConnectivityCheckHandler().execute(ctx)
+
+    assert result.success is False
+    assert result.output is not None
+    targets = result.output["targets"]
+    assert targets["192.0.2.7"]["ok"] is True
+    assert targets["192.0.2.7"]["check_type"] == "icmp_ping"
+    assert targets["192.0.2.8"]["ok"] is False
+    assert targets["192.0.2.8"]["error"]
+
+
 async def test_connectivity_probe_unions_devices_and_ips():
     """Devices and direct IPs are one target list, devices first."""
     from hegemony_step_sdk import ProbeResult
@@ -366,6 +392,55 @@ async def test_dns_probe_refuses_a_bare_ip_target_without_a_query_name(monkeypat
         _ip_target_ctx({"query_name": "device.example.com"}, ["192.0.2.7"])
     )
     assert result.success is True, result.error
+    # Later steps read each target's answer from the step's output.
+    assert result.output is not None
+    target = result.output["targets"]["192.0.2.7"]
+    assert target["ok"] is True
+    assert target["error"] is None
+    assert "device_id" not in target
+    assert "device_name" not in target
+
+
+def test_probe_output_keeps_targets_that_share_a_name_apart():
+    from hegemony_steps_probe.targets import TargetOutcome, chain_output
+
+    def outcome(device_id):
+        return TargetOutcome(
+            name="edge", ok=True, evidence={"content_json": {"device_id": device_id}}
+        )
+
+    targets = chain_output([outcome("d1"), outcome("d2"), outcome(None)])["targets"]
+    assert sorted(targets) == ["edge", "edge (d1)", "edge (d2)"]
+
+
+async def test_probe_output_lists_failed_targets_too():
+    """A failed target keeps its own ok and error, whatever its evidence says."""
+    from hegemony_steps_probe.targets import TargetOutcome, chain_output
+
+    outcomes = [
+        TargetOutcome(
+            name="r1",
+            ok=True,
+            latency_ms=1.5,
+            # Evidence keys named like the outcome's own fields lose to them.
+            evidence={
+                "content_json": {
+                    "device_id": "d1",
+                    "success": True,
+                    "status": 200,
+                    "ok": False,
+                    "latency_ms": 99.0,
+                }
+            },
+        ),
+        TargetOutcome(name="r2", ok=False, error="no address"),
+    ]
+    assert chain_output(outcomes) == {
+        "targets": {
+            "r1": {"ok": True, "error": None, "latency_ms": 1.5, "status": 200},
+            "r2": {"ok": False, "error": "no address", "latency_ms": None},
+        }
+    }
 
 
 async def test_dns_probe_puts_a_chosen_resolver_through_the_egress_gate(monkeypatch):
@@ -837,6 +912,10 @@ async def test_http_probe_brackets_ipv6_literals_and_gates_every_hop(monkeypatch
     assert seen_urls == ["http://[2001:db8::7]:8080/health"]
     # The gate saw the unbracketed host with the effective port.
     assert gated == [("2001:db8::7", 8080)]
+    assert result.output is not None
+    target = result.output["targets"]["2001:db8::7"]
+    assert target["ok"] is True
+    assert target["url"] == "http://[2001:db8::7]:8080/health"
 
 
 async def test_http_probe_trusts_the_organization_cas_on_https(monkeypatch):
@@ -1272,3 +1351,141 @@ async def test_collect_evidence_names_a_device_without_a_management_host():
     )
 
     assert result.error == "Failed on: r1 (no mgmt_host configured)"
+
+
+class _AnsweringConnects:
+    """services.connect stand-in: each device answers each command with ``texts``."""
+
+    def __init__(self, texts: dict[str, dict[str, str]]) -> None:
+        self.texts = texts
+
+    def connect(self, device, **kwargs):
+        texts = self.texts[device["name"]]
+
+        class _Result:
+            def __init__(self, command: str) -> None:
+                self.command = command
+                self.output = texts[command]
+                self.exit_code = 0
+                self.error = None
+                self.latency_ms = 1.0
+
+        class _Transport:
+            async def execute_commands(self, commands):
+                return [_Result(command) for command in commands]
+
+        return _Transport()
+
+
+async def test_collect_evidence_hands_each_devices_output_to_later_steps():
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    services = _AnsweringConnects(
+        {
+            "r1": {"show ip ospf neighbor": "10.255.0.2 Full/DR"},
+            "r2": {"show ip ospf neighbor": "10.255.0.1 Full/BDR"},
+        }
+    )
+    result = await CollectEvidenceHandler().execute(_collect_ctx(services, "r1", "r2"))
+
+    assert result.success is True, result.error
+    assert result.output == {
+        "devices": {
+            "r1": {
+                "success": True,
+                "error": None,
+                "commands": {"show ip ospf neighbor": "10.255.0.2 Full/DR"},
+            },
+            "r2": {
+                "success": True,
+                "error": None,
+                "commands": {"show ip ospf neighbor": "10.255.0.1 Full/BDR"},
+            },
+        },
+        "truncated": [],
+        "omitted": [],
+    }
+
+
+async def test_collect_evidence_output_names_a_failed_device():
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    result = await CollectEvidenceHandler().execute(_collect_ctx(_FailingConnects({"r1": 2}), "r1"))
+
+    assert result.output is not None
+    device = result.output["devices"]["r1"]
+    assert device["success"] is False
+    assert device["error"] == "CLI command failed with exit code 2"
+
+
+async def test_collect_evidence_output_is_bounded_and_says_what_it_cut(monkeypatch):
+    from hegemony_steps_netcli import collect_evidence
+
+    monkeypatch.setattr(collect_evidence, "MAX_OUTPUT_TEXT_CHARS", 10)
+    monkeypatch.setattr(collect_evidence, "MAX_OUTPUT_TOTAL_CHARS", 50)
+    command = "show ip ospf neighbor"
+    services = _AnsweringConnects(
+        {
+            "r1": {command: "aaaa\naaaa\naaaa\n"},
+            "r2": {command: "bbbb\nbbbb\n"},
+            "r3": {command: "cccc\n"},
+        }
+    )
+    result = await collect_evidence.CollectEvidenceHandler().execute(
+        _collect_ctx(services, "r1", "r2", "r3")
+    )
+
+    assert result.output is not None
+    devices = result.output["devices"]
+    # The budget counts names as well as text (50 - "r1" - the command leaves
+    # 27): r1 keeps the whole lines within its 10-character cap, r2 gets no
+    # room for a whole line, and r3 comes after the budget is spent.
+    assert devices["r1"]["commands"] == {command: "aaaa\naaaa\n"}
+    assert devices["r2"]["commands"] == {command: ""}
+    assert devices["r3"] == {"success": True, "error": None, "commands": {}}
+    assert result.output["truncated"] == [f"r1:{command}", f"r2:{command}"]
+    assert result.output["omitted"] == ["r3"]
+    # The evidence keeps the whole text.
+    assert [item["content_text"] for item in result.evidence] == [
+        "aaaa\naaaa\naaaa\n",
+        "bbbb\nbbbb\n",
+        "cccc\n",
+    ]
+
+
+def test_collect_evidence_cuts_output_only_at_a_line_end():
+    """A cut inside a line could keep the start of a secret the host masks by
+    its whole value, so text is cut after the last whole line, or dropped."""
+    from hegemony_steps_netcli.collect_evidence import _whole_lines
+
+    assert _whole_lines("user admin\npassword s3cr3t-value\n", 25) == "user admin\n"
+    assert _whole_lines("password s3cr3t-value", 12) == ""
+    assert _whole_lines("short\n", 25) == "short\n"
+
+
+async def test_collect_evidence_keeps_devices_that_share_a_name_apart():
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    command = "show ip ospf neighbor"
+    devices = [
+        {"id": "d1", "name": "edge", "mgmt_host": "192.0.2.1"},
+        {"id": "d2", "name": "edge", "mgmt_host": "192.0.2.2"},
+        {"id": "d3", "name": "core", "mgmt_host": "192.0.2.3"},
+    ]
+    ctx = HandlerContext(
+        run_id="r",
+        flow_id="f",
+        step_run_id="sr",
+        step_id="s",
+        config={"commands": [command]},
+        target_roles=["primary"],
+        target_devices_by_role={"primary": devices},
+        services=cast(
+            HandlerServices,
+            _AnsweringConnects({"edge": {command: "x\n"}, "core": {command: "y\n"}}),
+        ),
+    )
+    result = await CollectEvidenceHandler().execute(ctx)
+
+    assert result.output is not None
+    assert sorted(result.output["devices"]) == ["core", "edge (d1)", "edge (d2)"]

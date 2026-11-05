@@ -39,8 +39,21 @@ it must leave time for every command on every device.
 
 ## Output
 
-The step adds no custom chainable output keys; what it produces lives in
-its evidence. Each command on each device yields a `cli_output` artifact
+Later steps read what each device returned from the step's output:
+`devices` maps every device name to `success`, `error` (why it failed, or
+none) and `commands`, each command's output keyed by the command as
+configured, for example
+`{{ steps.ID.output.devices['dlp1-edge-01'].commands['show running-config'] }}`.
+Inventory names are unique per site only: a name two targets share is keyed
+as `name (device id)` for each of them. The output keeps at most 16 384
+characters of one command and about 49 152 of the whole step, names
+included, and cuts a text only at the end of a line, so the platform's
+masking of secrets still sees each line whole. A text cut short is named in
+`truncated` as `device:command`; once the step's share is spent, the
+remaining devices keep `success` and `error` but no `commands`, and are named
+in `omitted`. The evidence always holds the whole text.
+
+Each command on each device also yields a `cli_output` artifact
 named `<device>:<command>`, holding the raw output plus the device, the
 command, the exit code, and any error text. A device without a management
 host or one that fails to connect contributes an error artifact with the

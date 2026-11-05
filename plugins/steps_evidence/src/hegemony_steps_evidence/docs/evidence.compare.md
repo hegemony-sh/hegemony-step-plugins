@@ -58,17 +58,23 @@ output in the JSON mode.
 
 ## Output
 
-The step returns no custom chainable output keys and no metrics; it records
-one `comparison_result` evidence record named
-`compare_evidence_<precheck step>_vs_<postcheck step>`. The record captures
-which artifacts were compared, which were missing in the postcheck and
-which were found only there, the comparison mode, the overall pass flag,
-and per-artifact diff details — for text artifacts a unified diff plus the
-full before and after text for side-by-side display in the run view. The
-subset and superset modes also list the removed and added lines, the JSON
-mode records whether both sides parsed as JSON, and a failed capture
-records its error as `precheck_error` or `postcheck_error`. The summary
-counts the failed captures and the missing and postcheck-only artifacts.
+Later steps read the outcome from `steps.NODE_ID.output`: `passed`,
+`comparison_type`, `compared` (the artifacts found on both sides), `failed`
+(those that did not meet the comparison or whose capture failed),
+`missing_in_postcheck` and `only_in_postcheck`, also when evidence is
+missing before anything is compared (`passed` false, `compared` empty). The
+diff text stays in the evidence, so a large diff never crowds out other
+steps' output. The step records no metrics and one `comparison_result`
+evidence record named `compare_evidence_<precheck step>_vs_<postcheck
+step>`. The record captures which artifacts were compared, which were
+missing in the postcheck and which were found only there, the comparison
+mode, the overall pass flag, and per-artifact diff details — for text
+artifacts a unified diff plus the full before and after text for
+side-by-side display in the run view. The subset and superset modes also
+list the removed and added lines, the JSON mode records whether both sides
+parsed as JSON, and a failed capture records its error as `precheck_error`
+or `postcheck_error`. The summary counts the failed captures and the missing
+and postcheck-only artifacts.
 
 ## When It Fails
 

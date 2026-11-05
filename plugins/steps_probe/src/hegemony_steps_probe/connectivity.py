@@ -33,6 +33,7 @@ from .targets import (
     DEFAULT_MAX_PARALLEL_TARGETS,
     TargetOutcome,
     all_probe_targets,
+    chain_output,
     merge_outcomes,
 )
 
@@ -295,6 +296,7 @@ class ConnectivityCheckHandler(BaseHandler):
                 summary=f"{check_type}: {success_count}/{total} targets OK",
                 metrics=all_metrics,
                 evidence=all_evidence,
+                output=chain_output(outcomes),
             )
 
         return HandlerResult(
@@ -302,4 +304,5 @@ class ConnectivityCheckHandler(BaseHandler):
             summary=f"{check_type}: {success_count}/{total} targets OK",
             metrics=all_metrics,
             evidence=all_evidence,
+            output=chain_output(outcomes),
         )

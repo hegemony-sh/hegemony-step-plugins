@@ -6,7 +6,9 @@
 """CollectEvidenceHandler: collect CLI command outputs as evidence."""
 
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,6 +27,15 @@ from hegemony_step_sdk import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 30
+
+#: Characters of one command's output kept in the step's chainable output.
+#: The full text always stays in the command's evidence artifact.
+MAX_OUTPUT_TEXT_CHARS = 16_384
+
+#: Characters of command output the whole step hands to later steps. Step
+#: outputs share one response budget per run (the host trims the largest
+#: when they exceed it), so a step keeps well inside it.
+MAX_OUTPUT_TOTAL_CHARS = 49_152
 
 
 class CollectEvidenceConfig(BaseModel):
@@ -99,7 +110,10 @@ class _DeviceOutcome:
     """
 
     device_name: str = ""
+    device_id: str = ""
     evidence: list[dict] = field(default_factory=list)
+    #: Each command's output, keyed by the command as configured.
+    texts: dict[str, str] = field(default_factory=dict)
     succeeded: int = 0
     failed: int = 0
     #: Why the device failed: its first failure.
@@ -148,6 +162,7 @@ class CollectEvidenceHandler(BaseHandler):
                 success=True,
                 summary="No commands configured",
                 evidence=[],
+                output={"devices": {}, "truncated": [], "omitted": []},
             )
 
         services = ctx.require_services()
@@ -158,7 +173,7 @@ class CollectEvidenceHandler(BaseHandler):
         async def _process_device(device: dict) -> _DeviceOutcome:
             device_id = device.get("id", "unknown")
             device_name = device.get("name", device_id)
-            outcome = _DeviceOutcome(device_name=device_name)
+            outcome = _DeviceOutcome(device_name=device_name, device_id=str(device_id))
             host = device.get("mgmt_host")
             if not host:
                 outcome.failed += 1
@@ -185,6 +200,7 @@ class CollectEvidenceHandler(BaseHandler):
                 # Execute all commands together for efficiency
                 results = await ssh.execute_commands(commands)
                 for result in results:
+                    outcome.texts[result.command] = result.output or ""
                     if result.output:
                         # Live view: per-command output into the Logs tab
                         await ctx.emit_output(result.output, device=device, command=result.command)
@@ -247,6 +263,7 @@ class CollectEvidenceHandler(BaseHandler):
             if outcome.failure is not None
         ]
 
+        output = _chain_output(outcomes)
         metrics = {
             "device_count": len(target_devices),
             "command_count": len(commands),
@@ -262,6 +279,7 @@ class CollectEvidenceHandler(BaseHandler):
                 summary=f"Evidence collected from {len(target_devices) - len(failed_devices)}/{len(target_devices)} devices",
                 metrics=metrics,
                 evidence=all_evidence,
+                output=output,
             )
 
         return HandlerResult(
@@ -269,4 +287,77 @@ class CollectEvidenceHandler(BaseHandler):
             summary=f"Collected evidence from {len(target_devices)} device(s), {total_success} commands OK",
             metrics=metrics,
             evidence=all_evidence,
+            output=output,
         )
+
+
+def _whole_lines(text: str, limit: int) -> str:
+    """``text`` cut to at most ``limit`` characters at the end of a line.
+
+    The host masks registered secrets by their whole value after the step
+    returns; a cut inside a line could keep the start of one, which no longer
+    matches. Text with no line end within the limit is left out entirely.
+    """
+    if len(text) <= limit:
+        return text
+    end = text.rfind("\n", 0, limit)
+    return text[: end + 1] if end >= 0 else ""
+
+
+def _device_keys(outcomes: list[_DeviceOutcome]) -> list[str]:
+    """One key per device: its name, or ``name (id)`` for a name used twice.
+
+    Inventory names are unique per site only, so two targets can share one;
+    a key still taken (a device named like that) gets a counter.
+    """
+    names = Counter(outcome.device_name for outcome in outcomes)
+    keys: list[str] = []
+    taken: set[str] = set()
+    for outcome in outcomes:
+        name = outcome.device_name
+        key = base = name if names[name] == 1 else f"{name} ({outcome.device_id})"
+        number = 2
+        while key in taken:
+            key, number = f"{base} #{number}", number + 1
+        taken.add(key)
+        keys.append(key)
+    return keys
+
+
+def _chain_output(outcomes: list[_DeviceOutcome]) -> dict[str, Any]:
+    """The step's chainable output: every device's command outputs, bounded.
+
+    ``devices`` maps each device (see :func:`_device_keys`) to whether it
+    succeeded, why it failed, and its outputs by command, so a later step
+    reads ``{{ steps.ID.output.devices['r1'].commands['show version'] }}``.
+    One command's text keeps at most :data:`MAX_OUTPUT_TEXT_CHARS` and the
+    whole output about :data:`MAX_OUTPUT_TOTAL_CHARS`, names included, cut at
+    line ends. A shortened text is named in ``truncated`` as
+    ``device:command``; once the budget is spent, later devices keep their
+    status but no commands and are named in ``omitted``. The artifacts keep
+    the whole text either way.
+    """
+    budget = MAX_OUTPUT_TOTAL_CHARS
+    truncated: list[str] = []
+    omitted: list[str] = []
+    devices: dict[str, Any] = {}
+    for key, outcome in zip(_device_keys(outcomes), outcomes, strict=True):
+        budget -= len(key) + len(outcome.failure or "")
+        commands: dict[str, str] = {}
+        if budget <= 0:
+            if outcome.texts:
+                omitted.append(key)
+        else:
+            for command, text in outcome.texts.items():
+                budget -= len(command)
+                kept = _whole_lines(text, max(0, min(MAX_OUTPUT_TEXT_CHARS, budget)))
+                if len(kept) < len(text):
+                    truncated.append(f"{key}:{command}")
+                budget -= len(kept)
+                commands[command] = kept
+        devices[key] = {
+            "success": outcome.failure is None,
+            "error": outcome.failure,
+            "commands": commands,
+        }
+    return {"devices": devices, "truncated": truncated, "omitted": omitted}
