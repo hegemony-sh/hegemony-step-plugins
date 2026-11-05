@@ -1,3 +1,10 @@
+## [0.33.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.33.0...v0.33.1) (2026-11-05)
+
+### Bug Fixes
+
+* **steps:** give evidence and probe steps an output later steps can read ([e0f5838](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e0f58386630efc26b242c6c1394bdc1d73f934a9))
+* **steps:** keep step outputs whole-line, collision-safe and bounded ([41b57b6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/41b57b6a6e5e73b8087d8bbd6d2c1f9ed364f843))
+
 ## [0.33.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.32.5...v0.33.0) (2026-10-24)
 
 ### ⚠ BREAKING CHANGES
