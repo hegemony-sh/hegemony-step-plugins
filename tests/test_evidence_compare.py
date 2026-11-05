@@ -342,6 +342,15 @@ async def test_a_device_missing_after_the_change_fails(monkeypatch: pytest.Monke
     assert content["only_in_postcheck"] == ["dc1-02:connection_error"]
     assert "1 missing in postcheck" in (result.summary or "")
     assert "1 only in postcheck" in (result.summary or "")
+    # Later steps read the same outcome from the step's output.
+    assert result.output == {
+        "passed": False,
+        "comparison_type": "exact",
+        "compared": ["dc1-01:show ip route"],
+        "failed": [],
+        "missing_in_postcheck": ["dc1-02:show ip route"],
+        "only_in_postcheck": ["dc1-02:connection_error"],
+    }
 
 
 @pytest.mark.parametrize("mode", ["exact", "changed"])
@@ -451,6 +460,10 @@ async def test_items_only_in_the_postcheck_do_not_fail(monkeypatch: pytest.Monke
     assert result.success is True
     assert result.evidence[0]["content_json"]["only_in_postcheck"] == ["r1:show clock"]
     assert "1 only in postcheck" in (result.summary or "")
+    assert result.output is not None
+    assert result.output["passed"] is True
+    assert result.output["compared"] == ["r1:show ip route"]
+    assert result.output["only_in_postcheck"] == ["r1:show clock"]
 
 
 async def test_nothing_in_common_still_records_both_sides(monkeypatch: pytest.MonkeyPatch) -> None:

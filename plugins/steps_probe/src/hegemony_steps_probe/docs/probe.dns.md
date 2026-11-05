@@ -49,6 +49,13 @@ capturing the queried name, record type, resolver (`system` when none was
 set), the normalized answers, any missing expected values, and the error
 text when resolution failed.
 
+Later steps read each target's result from
+`steps.NODE_ID.output.targets['<device name>']`: `ok`, `error` (empty when
+it passed) and `latency_ms`, plus the facts its evidence records
+(`query_name`, `record_type`, `resolver`, `answers`, `missing_expected`). A
+target that was never checked, for want of an address, still appears with
+`ok` false and its error.
+
 ## When It Fails
 
 The step fails when no target devices or IPs are configured, when Resolver

@@ -52,6 +52,12 @@ evidence record named `http_<device name>` capturing the full URL, the
 method, the response status and latency, and the error text when the check
 failed.
 
+Later steps read each target's result from
+`steps.NODE_ID.output.targets['<device name>']`: `ok`, `error` (empty when
+it passed) and `latency_ms`, plus the facts its evidence records (the `url`,
+`method` and response `status`). A target that was never checked, for want
+of an address, still appears with `ok` false and its error.
+
 ## When It Fails
 
 The step fails before any request when Expected Status cannot be parsed, or

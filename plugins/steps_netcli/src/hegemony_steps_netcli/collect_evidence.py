@@ -7,6 +7,7 @@
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,6 +26,15 @@ from hegemony_step_sdk import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 30
+
+#: Characters of one command's output kept in the step's chainable output.
+#: The full text always stays in the command's evidence artifact.
+MAX_OUTPUT_TEXT_CHARS = 16_384
+
+#: Characters of command output the whole step hands to later steps. Step
+#: outputs share one response budget per run (the host trims the largest
+#: when they exceed it), so a step keeps well inside it.
+MAX_OUTPUT_TOTAL_CHARS = 49_152
 
 
 class CollectEvidenceConfig(BaseModel):
@@ -100,6 +110,8 @@ class _DeviceOutcome:
 
     device_name: str = ""
     evidence: list[dict] = field(default_factory=list)
+    #: Each command's output, keyed by the command as configured.
+    texts: dict[str, str] = field(default_factory=dict)
     succeeded: int = 0
     failed: int = 0
     #: Why the device failed: its first failure.
@@ -148,6 +160,7 @@ class CollectEvidenceHandler(BaseHandler):
                 success=True,
                 summary="No commands configured",
                 evidence=[],
+                output={"devices": {}, "truncated": []},
             )
 
         services = ctx.require_services()
@@ -185,6 +198,7 @@ class CollectEvidenceHandler(BaseHandler):
                 # Execute all commands together for efficiency
                 results = await ssh.execute_commands(commands)
                 for result in results:
+                    outcome.texts[result.command] = result.output or ""
                     if result.output:
                         # Live view: per-command output into the Logs tab
                         await ctx.emit_output(result.output, device=device, command=result.command)
@@ -247,6 +261,7 @@ class CollectEvidenceHandler(BaseHandler):
             if outcome.failure is not None
         ]
 
+        output = _chain_output(outcomes)
         metrics = {
             "device_count": len(target_devices),
             "command_count": len(commands),
@@ -262,6 +277,7 @@ class CollectEvidenceHandler(BaseHandler):
                 summary=f"Evidence collected from {len(target_devices) - len(failed_devices)}/{len(target_devices)} devices",
                 metrics=metrics,
                 evidence=all_evidence,
+                output=output,
             )
 
         return HandlerResult(
@@ -269,4 +285,35 @@ class CollectEvidenceHandler(BaseHandler):
             summary=f"Collected evidence from {len(target_devices)} device(s), {total_success} commands OK",
             metrics=metrics,
             evidence=all_evidence,
+            output=output,
         )
+
+
+def _chain_output(outcomes: list[_DeviceOutcome]) -> dict[str, Any]:
+    """The step's chainable output: every device's command outputs, bounded.
+
+    ``devices`` maps each device name to whether it succeeded, why it failed,
+    and its outputs by command, so a later step reads
+    ``{{ steps.ID.output.devices['r1'].commands['show version'] }}``. One
+    command's text is cut at :data:`MAX_OUTPUT_TEXT_CHARS` and the step's at
+    :data:`MAX_OUTPUT_TOTAL_CHARS` (texts past it are left empty); each cut is
+    named in ``truncated`` as ``device:command``, and the artifacts keep the
+    whole text either way.
+    """
+    budget = MAX_OUTPUT_TOTAL_CHARS
+    truncated: list[str] = []
+    devices: dict[str, Any] = {}
+    for outcome in outcomes:
+        commands: dict[str, str] = {}
+        for command, text in outcome.texts.items():
+            kept = text[: min(MAX_OUTPUT_TEXT_CHARS, budget)]
+            if len(kept) < len(text):
+                truncated.append(f"{outcome.device_name}:{command}")
+            budget -= len(kept)
+            commands[command] = kept
+        devices[outcome.device_name] = {
+            "success": outcome.failure is None,
+            "error": outcome.failure,
+            "commands": commands,
+        }
+    return {"devices": devices, "truncated": truncated}

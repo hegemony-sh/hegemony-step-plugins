@@ -67,3 +67,31 @@ def merge_outcomes(
     }
     failures = [f"{outcome.name} ({outcome.error})" for outcome in outcomes if not outcome.ok]
     return evidence, metrics, failures
+
+
+#: Evidence fields a probe's chainable output leaves out: the target is the key,
+#: and these are its identity, not what the check found.
+_IDENTITY_FIELDS = frozenset({"device_id", "device_name", "success", "error"})
+
+
+def chain_output(outcomes: list[TargetOutcome]) -> dict[str, Any]:
+    """A probe step's chainable output: what each target's check found.
+
+    ``targets`` maps each target name to ``ok``, ``error``, ``latency_ms`` and
+    the facts its evidence records (resolved answers, an HTTP status, the
+    check type), so a later step reads
+    ``{{ steps.ID.output.targets['r1'].ok }}`` instead of opening artifacts.
+    """
+    targets: dict[str, Any] = {}
+    for outcome in outcomes:
+        facts = dict((outcome.evidence or {}).get("content_json") or {})
+        for key in _IDENTITY_FIELDS:
+            facts.pop(key, None)
+        # The outcome's own fields win over evidence keys of the same name.
+        targets[outcome.name] = {
+            **facts,
+            "ok": outcome.ok,
+            "error": outcome.error,
+            "latency_ms": outcome.latency_ms,
+        }
+    return {"targets": targets}

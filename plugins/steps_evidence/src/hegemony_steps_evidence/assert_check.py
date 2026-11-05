@@ -284,6 +284,9 @@ class AssertHandler(BaseHandler):
 
         assertion_evidence = []
         failed_messages = []
+        # Artifact names by outcome, for later steps' templates and conditions.
+        checked: list[str] = []
+        failed: list[str] = []
 
         # One fetch of the run's artifacts serves every lookup.
         artifacts = await self._fetch_run_artifacts(ctx) if artifact_step_id else None
@@ -306,6 +309,8 @@ class AssertHandler(BaseHandler):
                     },
                 )
                 failed_messages.append(f"{name}: could not fetch artifact content")
+                checked.append(name)
+                failed.append(name)
                 continue
 
             # The actual value is the artifact text content
@@ -320,8 +325,10 @@ class AssertHandler(BaseHandler):
                 # its empty output would pass not_contains, not_matches and ne.
                 passed, comparison_msg = False, f"capture failed: {error}"
                 scope_detail = {"capture_error": error}
+            checked.append(name)
             if not passed:
                 failed_messages.append(f"{name}: {comparison_msg}")
+                failed.append(name)
 
             assertion_evidence.append(
                 {
@@ -339,18 +346,21 @@ class AssertHandler(BaseHandler):
                 }
             )
 
+        output = {"passed": not failed_messages, "checked": checked, "failed": failed}
         if not failed_messages:
             return HandlerResult(
                 success=True,
                 summary=message
                 or f"Assertion passed for {len(lookups)} artifact(s): {operator} '{expected}'",
                 evidence=assertion_evidence,
+                output=output,
             )
         return HandlerResult(
             success=False,
             error=message or "; ".join(failed_messages),
             summary=f"Assertion failed for {len(failed_messages)}/{len(lookups)} artifact(s)",
             evidence=assertion_evidence,
+            output=output,
         )
 
     def _get_artifact(

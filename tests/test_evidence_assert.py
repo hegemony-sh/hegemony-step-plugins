@@ -585,6 +585,12 @@ async def test_assert_fails_on_an_unreachable_device(operator: str, expected: st
     records = [e["content_json"] for e in result.evidence]
     assert [record["passed"] for record in records] == [True, False]
     assert records[1]["capture_error"] == _TIMEOUT
+    # Later steps read which artifacts failed from the step's output.
+    assert result.output == {
+        "passed": False,
+        "checked": [f"r1:{command}", f"r2:{command}"],
+        "failed": [f"r2:{command}"],
+    }
 
 
 async def test_assert_fails_on_a_command_that_returned_an_error() -> None:
@@ -644,6 +650,10 @@ async def test_assert_fetches_the_run_artifacts_once_for_all_devices() -> None:
     result = await _run_assert(api, _SHORT, "bgp", _DEVICES)
     assert result.success is True, result.error
     assert [e["content_json"]["actual"] for e in result.evidence] == ["r1 bgp", "r2 bgp", "r3 bgp"]
+    assert result.output is not None
+    assert result.output["passed"] is True
+    assert result.output["failed"] == []
+    assert len(result.output["checked"]) == 3
     assert api.fetches == 1
 
 

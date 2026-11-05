@@ -349,6 +349,19 @@ class CompareEvidenceHandler(BaseHandler):
             }
         ]
 
+        # What later steps can branch on, without the diff text (the
+        # comparison_result artifact holds that). "failed" names the artifacts
+        # that did not meet the comparison: differences in "unchanged" mode,
+        # no change in "changed" mode, or a capture that failed on a side.
+        output = {
+            "passed": passed,
+            "comparison_type": comparison_type,
+            "compared": artifacts_compared,
+            "failed": failed_labels,
+            "missing_in_postcheck": missing_in_postcheck,
+            "only_in_postcheck": only_in_postcheck,
+        }
+
         # Phrase the outcome for the comparison mode: in "changed" mode a
         # difference is the SUCCESS signal, so "matched"/"differences found"
         # would read backwards.
@@ -368,6 +381,7 @@ class CompareEvidenceHandler(BaseHandler):
                     [f"Evidence comparison passed: {n} artifact(s) {outcome}", *one_sided]
                 ),
                 evidence=evidence,
+                output=output,
             )
 
         # An item whose capture failed on either side was not compared.
@@ -398,6 +412,7 @@ class CompareEvidenceHandler(BaseHandler):
             error="Evidence comparison failed: " + "; ".join(reasons),
             summary="; ".join(summary_parts) or "No artifacts to compare",
             evidence=evidence,
+            output=output,
         )
 
     def _compare_captures(

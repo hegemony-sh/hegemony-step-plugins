@@ -366,6 +366,34 @@ async def test_dns_probe_refuses_a_bare_ip_target_without_a_query_name(monkeypat
         _ip_target_ctx({"query_name": "device.example.com"}, ["192.0.2.7"])
     )
     assert result.success is True, result.error
+    # Later steps read each target's answer from the step's output.
+    assert result.output is not None
+    target = result.output["targets"]["192.0.2.7"]
+    assert target["ok"] is True
+    assert target["error"] is None
+    assert "device_id" not in target
+    assert "device_name" not in target
+
+
+async def test_probe_output_lists_failed_targets_too():
+    """A failed target keeps its own ok and error, whatever its evidence says."""
+    from hegemony_steps_probe.targets import TargetOutcome, chain_output
+
+    outcomes = [
+        TargetOutcome(
+            name="r1",
+            ok=True,
+            latency_ms=1.5,
+            evidence={"content_json": {"device_id": "d1", "success": True, "status": 200}},
+        ),
+        TargetOutcome(name="r2", ok=False, error="no address"),
+    ]
+    assert chain_output(outcomes) == {
+        "targets": {
+            "r1": {"ok": True, "error": None, "latency_ms": 1.5, "status": 200},
+            "r2": {"ok": False, "error": "no address", "latency_ms": None},
+        }
+    }
 
 
 async def test_dns_probe_puts_a_chosen_resolver_through_the_egress_gate(monkeypatch):
@@ -1272,3 +1300,94 @@ async def test_collect_evidence_names_a_device_without_a_management_host():
     )
 
     assert result.error == "Failed on: r1 (no mgmt_host configured)"
+
+
+class _AnsweringConnects:
+    """services.connect stand-in: each device answers each command with ``texts``."""
+
+    def __init__(self, texts: dict[str, dict[str, str]]) -> None:
+        self.texts = texts
+
+    def connect(self, device, **kwargs):
+        texts = self.texts[device["name"]]
+
+        class _Result:
+            def __init__(self, command: str) -> None:
+                self.command = command
+                self.output = texts[command]
+                self.exit_code = 0
+                self.error = None
+                self.latency_ms = 1.0
+
+        class _Transport:
+            async def execute_commands(self, commands):
+                return [_Result(command) for command in commands]
+
+        return _Transport()
+
+
+async def test_collect_evidence_hands_each_devices_output_to_later_steps():
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    services = _AnsweringConnects(
+        {
+            "r1": {"show ip ospf neighbor": "10.255.0.2 Full/DR"},
+            "r2": {"show ip ospf neighbor": "10.255.0.1 Full/BDR"},
+        }
+    )
+    result = await CollectEvidenceHandler().execute(_collect_ctx(services, "r1", "r2"))
+
+    assert result.success is True, result.error
+    assert result.output == {
+        "devices": {
+            "r1": {
+                "success": True,
+                "error": None,
+                "commands": {"show ip ospf neighbor": "10.255.0.2 Full/DR"},
+            },
+            "r2": {
+                "success": True,
+                "error": None,
+                "commands": {"show ip ospf neighbor": "10.255.0.1 Full/BDR"},
+            },
+        },
+        "truncated": [],
+    }
+
+
+async def test_collect_evidence_output_names_a_failed_device():
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    result = await CollectEvidenceHandler().execute(_collect_ctx(_FailingConnects({"r1": 2}), "r1"))
+
+    assert result.output is not None
+    device = result.output["devices"]["r1"]
+    assert device["success"] is False
+    assert device["error"] == "CLI command failed with exit code 2"
+
+
+async def test_collect_evidence_output_is_bounded_and_says_what_it_cut(monkeypatch):
+    from hegemony_steps_netcli import collect_evidence
+
+    monkeypatch.setattr(collect_evidence, "MAX_OUTPUT_TEXT_CHARS", 10)
+    monkeypatch.setattr(collect_evidence, "MAX_OUTPUT_TOTAL_CHARS", 15)
+    services = _AnsweringConnects(
+        {
+            "r1": {"show ip ospf neighbor": "a" * 12},
+            "r2": {"show ip ospf neighbor": "b" * 12},
+        }
+    )
+    result = await collect_evidence.CollectEvidenceHandler().execute(
+        _collect_ctx(services, "r1", "r2")
+    )
+
+    assert result.output is not None
+    commands = {
+        name: device["commands"]["show ip ospf neighbor"]
+        for name, device in result.output["devices"].items()
+    }
+    # r1 is cut at the per-command cap, r2 at what is left of the step's budget.
+    assert commands == {"r1": "a" * 10, "r2": "b" * 5}
+    assert result.output["truncated"] == ["r1:show ip ospf neighbor", "r2:show ip ospf neighbor"]
+    # The evidence keeps the whole text.
+    assert [item["content_text"] for item in result.evidence] == ["a" * 12, "b" * 12]

@@ -30,6 +30,7 @@ from .targets import (
     DEFAULT_MAX_PARALLEL_TARGETS,
     TargetOutcome,
     all_probe_targets,
+    chain_output,
     merge_outcomes,
 )
 
@@ -345,9 +346,14 @@ class HttpProbeHandler(BaseHandler):
                 summary=summary,
                 metrics=all_metrics,
                 evidence=all_evidence,
+                output=chain_output(outcomes),
             )
         return HandlerResult(
-            success=True, summary=summary, metrics=all_metrics, evidence=all_evidence
+            success=True,
+            summary=summary,
+            metrics=all_metrics,
+            evidence=all_evidence,
+            output=chain_output(outcomes),
         )
 
     @staticmethod
