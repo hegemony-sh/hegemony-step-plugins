@@ -1,3 +1,9 @@
+## [0.33.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.33.1...v0.33.2) (2026-11-06)
+
+### Bug Fixes
+
+* **images:** raise go-jose in opentofu-runner so the release image publishes ([cbe3010](https://github.com/hegemony-sh/hegemony-step-plugins/commit/cbe3010bce5c7eb10b4f1c2cbf63f624465190c6))
+
 ## [0.33.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.33.0...v0.33.1) (2026-11-05)
 
 ### Bug Fixes
