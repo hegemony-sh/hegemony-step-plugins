@@ -72,10 +72,10 @@ repos:
       - id: ruff
         name: "Python: Ruff lint (auto-fix)"
         args: ["--fix"]
-        files: ^(packages|plugins|tests|scripts)/
+        files: ^(packages|plugins|tests|scripts|fuzz)/
       - id: ruff-format
         name: "Python: Ruff format"
-        files: ^(packages|plugins|tests|scripts)/
+        files: ^(packages|plugins|tests|scripts|fuzz)/
 
   # Python: ty type checking and plugin tests
   - repo: local

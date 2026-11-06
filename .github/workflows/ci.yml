@@ -75,10 +75,10 @@ jobs:
         run: uv sync --frozen --all-packages
 
       - name: Run linter
-        run: uv run ruff check packages plugins probes transports tests scripts
+        run: uv run ruff check packages plugins probes transports tests scripts fuzz
 
       - name: Check formatting
-        run: uv run ruff format --check packages plugins probes transports tests scripts
+        run: uv run ruff format --check packages plugins probes transports tests scripts fuzz
 
       - name: REUSE compliance
         run: uv run reuse lint
@@ -88,6 +88,9 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -v --tb=short
+
+      - name: Replay fuzz regression corpus
+        run: uv run --frozen --group fuzz python fuzz/run_campaign.py --seconds 0
 
       - name: Check plugin docs contract
         run: uv run python scripts/check_docs.py

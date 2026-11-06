@@ -63,8 +63,8 @@ You need Python 3.11 or newer and [uv](https://docs.astral.sh/uv/);
 
 ```bash
 uv sync --frozen --all-packages
-uv run ruff check packages plugins probes transports tests scripts
-uv run ruff format --check packages plugins probes transports tests scripts
+uv run ruff check packages plugins probes transports tests scripts fuzz
+uv run ruff format --check packages plugins probes transports tests scripts fuzz
 uv run reuse lint
 uv run ty check
 uv run pytest
@@ -95,15 +95,40 @@ holder and Jakub Trávník as the author, in the file's own comment syntax:
 
 ### Fuzzing
 
-`fuzz/*_fuzzer.py` are [Atheris](https://github.com/google/atheris) fuzz
-targets for code that reads what a flow author or a remote system supplies:
-the `http.request` path language and status spec, and the `container.build`
-Dockerfile reader. On every pull request, the ClusterFuzzLite workflow
-(`.github/workflows/cflite_pr.yml`) builds them with `.clusterfuzzlite/` and
-runs them for a few minutes; a crash fails the check, and the run keeps the
-input that caused it. Each target asserts the function's documented contract
-(only its own error, never another exception), so a new target is a short
-file beside the others. To run one locally, build the image and the fuzzers:
+The Atheris targets in `fuzz/*_fuzzer.py` exercise HTTP JSON paths, status
+specifications and Dockerfile image discovery. Each input tests both raw
+malformed text and generated valid structures with correctness assertions.
+`fuzz/seed_corpus.py` supplies reproducible seeds, including oversized numbers,
+Unicode digits, overlapping status ranges and multi-stage Dockerfiles.
+Dockerfile and status seeds are plain UTF-8; JSON-path seeds contain a path,
+a newline, then JSON. When a bug is found, add a unit regression and a seed.
+
+PRs replay every seed in ordinary CI and run ClusterFuzzLite for a 300-second
+budget. The build includes seeds and any restored nightly corpus. PRs only
+read the shared cache. `.github/workflows/fuzz_nightly.yml` runs on the default
+branch daily, spends ten minutes on each target, minimizes the corpus with
+libFuzzer's merge mode, and caches successful results for later runs. Cache
+entries can be evicted; seeds remain available even on a cold start. A crash
+fails the job and its reproducer is uploaded with the Python branch coverage
+report as `fuzz-results`. The scheduled workflow starts after it is merged.
+It requires no storage repository or additional credentials.
+
+To run a short campaign, including corpus pruning and coverage:
+
+```bash
+uv sync --frozen --all-packages --group fuzz
+uv run --frozen --group fuzz python fuzz/run_campaign.py --seconds 60
+```
+
+Use `--seconds 0` to replay the corpus without mutation. Read
+`build/fuzz-coverage/html/index.html` to see which branches remain unvisited;
+the report includes the whole HTTP request module, so it is not a project-wide
+coverage target. Keep generators bounded and deterministic, and strengthen
+properties before adding targets just to increase their count. Replay a saved
+crash with `uv run --group fuzz python fuzz/<target>_fuzzer.py <crash-file>`.
+Changing the input encoding requires bumping the workflow corpus cache prefix.
+
+To test the same packaged targets as ClusterFuzzLite:
 
 ```bash
 docker build -t cflite -f .clusterfuzzlite/Dockerfile .

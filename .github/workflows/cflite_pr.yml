@@ -27,12 +27,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Restore nightly corpus (read only)
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/fuzz-corpus
+          key: fuzz-corpus-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-v1-${{ runner.os }}-
       - name: Build fuzzers
         uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
           language: python
           github-token: ${{ secrets.GITHUB_TOKEN }}
           sanitizer: address
+
+      # ClusterFuzzLite clones its own checkout, so attach cached inputs to
+      # its built seed archives after building, rather than to that checkout.
+      - name: Add nightly corpus to seed archives
+        run: |
+          for corpus in build/fuzz-corpus/*_fuzzer; do
+            [ -d "$corpus" ] || continue
+            archive="$GITHUB_WORKSPACE/build-out/$(basename "$corpus")_seed_corpus.zip"
+            [ -f "$archive" ] || continue
+            sudo zip -q -j "$archive" "$corpus"/*
+          done
 
       - name: Run fuzzers
         uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1

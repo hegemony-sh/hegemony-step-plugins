@@ -14,10 +14,16 @@ pip3 install --no-cache-dir \
   ./plugins/steps_http \
   ./plugins/steps_container
 
+python3 fuzz/seed_corpus.py build/fuzz-corpus
+
 for fuzzer in fuzz/*_fuzzer.py; do
   name=$(basename -s .py "$fuzzer")
   package="$name.pkg"
-  pyinstaller --distpath "$OUT" --onefile --name "$package" "$fuzzer"
+  # Include both checked-in seed recipes and any restored nightly corpus.
+  (cd "build/fuzz-corpus/$name" && zip -q -r "$OUT/${name}_seed_corpus.zip" .)
+  printf '[libfuzzer]\nmax_len = 16384\n' > "$OUT/$name.options"
+  mkdir -p /tmp/fuzz-build
+  pyinstaller --specpath /tmp/fuzz-build --workpath "/tmp/fuzz-build/$name" --distpath "$OUT" --onefile --name "$package" "$fuzzer"
   # Pure-Python targets: no sanitizer library to preload.
   cat > "$OUT/$name" <<WRAPPER
 #!/bin/sh
