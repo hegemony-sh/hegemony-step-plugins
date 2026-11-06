@@ -1,3 +1,16 @@
+## [0.34.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.33.4...v0.34.0) (2026-11-06)
+
+### ⚠ BREAKING CHANGES
+
+* **transports:** Legacy-only peers require an explicit allow_legacy_ssh setting.
+Algorithms removed by the installed SSH library remain unavailable.
+
+### Bug Fixes
+
+* **deps:** require paramiko 5.1.0 or later in the netmiko transport ([53fde24](https://github.com/hegemony-sh/hegemony-step-plugins/commit/53fde24b0ca6d77a09bd4975a5e6a0346ce69c96))
+* **transports:** preserve secure SSH authentication and diagnostics ([824b7f2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/824b7f2e5dbf5f9985d6b43a037c4bfc9b6f518c))
+* **transports:** secure SSH defaults with per-step legacy opt-in ([52408ee](https://github.com/hegemony-sh/hegemony-step-plugins/commit/52408eed5ce7b0c2a194389ca8b5e2e026637966))
+
 ## [0.33.4](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.33.3...v0.33.4) (2026-11-06)
 
 ### Bug Fixes
