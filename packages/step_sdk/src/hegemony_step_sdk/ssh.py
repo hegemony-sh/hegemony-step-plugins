@@ -67,7 +67,7 @@ class SshSecurityConfig(BaseModel):
         default=False,
         title="Allow legacy SSH algorithms",
         description=(
-            "Enable weak SSH algorithms and small host keys for older devices, "
+            "Enable weak SSH algorithms and small host or login keys for older devices, "
             "including the jump host. Host-key verification remains enabled. "
             "Use only on trusted networks while upgrading the device."
         ),
@@ -84,7 +84,7 @@ def configure_ssh_security(transport: Any, value: Any = False) -> None:
         raise ValueError("this transport does not support the allow_legacy_ssh step setting")
 
 
-def validate_ssh_public_key(line: str) -> None:
+def validate_ssh_public_key(line: str, *, allow_security_keys: bool = False) -> None:
     """Reject weak/malformed OpenSSH host keys without depending on an SSH library."""
     try:
         fields = line.split()
@@ -108,6 +108,13 @@ def validate_ssh_public_key(line: str) -> None:
         kind = part().decode("ascii")
         if kind != fields[0]:
             raise ValueError("key type mismatch")
+        security_key = kind in {"sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"}
+        if security_key:
+            if not allow_security_keys:
+                raise ValueError(
+                    "security-key identities are only allowed for client authentication"
+                )
+            kind = kind.removeprefix("sk-").removesuffix("@openssh.com")
         if kind == "ssh-rsa":
             exponent = part()
             modulus = part()
@@ -138,6 +145,8 @@ def validate_ssh_public_key(line: str) -> None:
                 raise ValueError("invalid uncompressed ECDSA point")
         else:
             raise ValueError("host-key type is not in the secure SSH policy")
+        if security_key and not part():
+            raise ValueError("security-key application is empty")
         if offset != len(data):
             raise ValueError("trailing key data")
     except (ValueError, IndexError, UnicodeError) as exc:
@@ -145,6 +154,23 @@ def validate_ssh_public_key(line: str) -> None:
             f"SSH key rejected by secure policy: {exc}. "
             "Upgrade the key or explicitly enable allow_legacy_ssh for this step."
         ) from None
+
+
+def validate_asyncssh_client_key(library: Any, keypair: Any) -> None:
+    """Validate the underlying client key, including agent-backed certificates."""
+    data = keypair.public_data
+    size = int.from_bytes(data[:4], "big")
+    algorithm = data[4 : 4 + size].decode("ascii")
+    line = algorithm + " " + base64.b64encode(data).decode("ascii")
+    if algorithm.endswith("-cert-v01@openssh.com"):
+        certificate = library.import_certificate(line)
+        keys = (certificate.key, certificate.signing_key)
+    else:
+        keys = (library.import_public_key(line),)
+    for key in keys:
+        validate_ssh_public_key(
+            key.export_public_key("openssh").decode("ascii"), allow_security_keys=True
+        )
 
 
 def asyncssh_algorithms(library: Any, allow_legacy: bool = False) -> dict[str, Any]:
@@ -186,6 +212,32 @@ def asyncssh_security_options(
             raise ValueError("trusted SSH keys require allow_legacy_ssh or a host-key upgrade")
 
     class PolicyClient(library.SSHClient):
+        def connection_made(self, connection: Any) -> None:
+            """Filter each selected identity before AsyncSSH can send a key offer.
+
+            AsyncSSH's owner callback runs only after agent/default identities.
+            Wrap the per-connection selection method to cover those identities,
+            PKCS#11 keys, and certificate retries without changing global state.
+            Integration tests cover the supported AsyncSSH versions and both hops.
+            """
+            if allow_legacy:
+                return
+            select_key = getattr(connection, "public_key_auth_requested", None)
+            if not callable(select_key):
+                raise RuntimeError("this AsyncSSH version cannot enforce client-key strength")
+
+            async def select_secure_key() -> Any:
+                """Skip rejected identities and let other keys or passwords proceed."""
+                while (keypair := await select_key()) is not None:
+                    try:
+                        validate_asyncssh_client_key(library, keypair)
+                    except ValueError:
+                        continue
+                    return keypair
+                return None
+
+            connection.public_key_auth_requested = select_secure_key
+
         def validate_host_public_key(self, host: str, addr: str, port: int, key: Any) -> bool:
             """Check key strength before matching the host's trusted identities."""
             if not allow_legacy:
