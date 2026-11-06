@@ -36,6 +36,7 @@ async def test_discovered_key_strength_before_offer(
     strong = asyncssh.generate_private_key("ssh-ed25519")
     test_identities = [weak, strong] if fallback == "strong_key" else [weak]
     offered = []
+    affected = JUMP_PASSWORD if hop == "jump" else PASSWORD
 
     def validate_key(server, username, key):
         offered.append((server._password, key_line(key)))
@@ -44,7 +45,12 @@ async def test_discovered_key_strength_before_offer(
     monkeypatch.setattr(ssh_fakes._Device, "public_key_auth_supported", lambda self: True)
     monkeypatch.setattr(ssh_fakes._Device, "validate_public_key", validate_key)
     if fallback == "none":
-        monkeypatch.setattr(ssh_fakes._Device, "password_auth_supported", lambda self: False)
+        # Only remove fallback on the hop under test; the other hop may need it.
+        monkeypatch.setattr(
+            ssh_fakes._Device,
+            "password_auth_supported",
+            lambda self: self._password != affected,
+        )
     monkeypatch.setattr(
         asyncssh.connection,
         "load_default_keypairs",
@@ -91,7 +97,6 @@ async def test_discovered_key_strength_before_offer(
         [result] = await transport.execute_commands(["show version"])
         expected_success = legacy or fallback != "none"
         assert (result.exit_code == 0) is expected_success, result.error
-        affected = JUMP_PASSWORD if hop == "jump" else PASSWORD
         affected_keys = [key for password, key in offered if password == affected]
         if legacy:
             assert key_line(weak) in affected_keys
