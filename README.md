@@ -120,6 +120,14 @@ for wheel in hegemony_step_sdk hegemony_steps_http hegemony_steps_netbox; do
   curl -fsSLO "${base}/${wheel}-${version}-py3-none-any.whl"
 done
 sha256sum -c --ignore-missing SHA256SUMS
+(
+  set -e
+  for wheel in ./hegemony_*-"${version}"-py3-none-any.whl; do
+    gh attestation verify "$wheel" \
+      --repo hegemony-sh/hegemony-step-plugins \
+      --signer-workflow hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml
+  done
+) &&
 uv pip install ./hegemony_step_sdk-*.whl ./hegemony_steps_http-*.whl ./hegemony_steps_netbox-*.whl
 ```
 
@@ -129,27 +137,24 @@ Replace `X.Y.Z` with the release your Hegemony version pins (see
 (`hegemony_steps_http-X.Y.Z-py3-none-any.whl`), the package names dashes
 (`hegemony-steps-http`). `SHA256SUMS` is published beside the wheels in the
 same release, so it detects a damaged download, not a replaced release.
-To check that a wheel was built by this repository's release workflow, verify
-its signed provenance, which each release also attaches as
-`hegemony-step-plugins-X.Y.Z.intoto.jsonl`:
-
-```bash
-gh attestation verify hegemony_steps_http-X.Y.Z-py3-none-any.whl \
-  --repo hegemony-sh/hegemony-step-plugins \
-  --signer-workflow hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml
-```
+`gh attestation verify` (the GitHub CLI) checks each wheel's signed
+provenance, which proves this repository's release workflow built it; the
+install runs only if every wheel passes. Newer releases also attach that
+provenance as `hegemony-step-plugins-X.Y.Z.intoto.jsonl`; for older ones the
+command fetches it from GitHub.
 
 The runner images (`ghcr.io/hegemony-sh/ansible-runner` and
 `ghcr.io/hegemony-sh/opentofu-runner`) are signed by the Images workflow
-and carry the same kind of provenance, so a pulled image can be checked the
-same way:
+from the release tag, and carry the same kind of provenance. Both checks
+below accept only that workflow run at a release tag:
 
 ```bash
 cosign verify ghcr.io/hegemony-sh/ansible-runner:X.Y.Z \
-  --certificate-identity-regexp '^https://github.com/hegemony-sh/hegemony-step-plugins/\.github/workflows/images\.yml@' \
+  --certificate-identity-regexp '^https://github.com/hegemony-sh/hegemony-step-plugins/\.github/workflows/images\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 gh attestation verify oci://ghcr.io/hegemony-sh/ansible-runner:X.Y.Z \
-  --repo hegemony-sh/hegemony-step-plugins
+  --repo hegemony-sh/hegemony-step-plugins \
+  --cert-identity-regex '^https://github.com/hegemony-sh/hegemony-step-plugins/\.github/workflows/images\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
 ```
 
 ## Compatibility
