@@ -16,8 +16,11 @@
 # tag. A pull request that changes an image builds, smoke-tests and scans
 # both the same way, without pushing. Each image's smoke-test.sh runs inside
 # it. workflow_dispatch publishes an existing release tag again, after a
-# failed run or to pick up base-image fixes under the same tags (X.Y only
-# while that tag is the newest X.Y release).
+# failed run or to pick up OS package fixes under the same tags (X.Y only
+# while that tag is the newest X.Y release): the base images are pinned by
+# digest, and the Dockerfiles upgrade their packages at build time. A newer
+# base image itself arrives through a Renovate digest pull request and the
+# next release.
 #
 # The image is built once and pushed by digest only; Trivy scans that digest
 # and the smoke test runs it before any tag points at it, so what the tags

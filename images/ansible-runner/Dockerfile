@@ -20,10 +20,12 @@
 # ghcr.io/hegemony-sh/ansible-runner:0.33. To customise it, build and push it
 # under your own tag and set the step's Execution image:
 #
-#   docker build -t registry.example.com/ansible-runner:custom images/ansible-runner
+#   docker build --no-cache -t registry.example.com/ansible-runner:custom images/ansible-runner
 #   docker push registry.example.com/ansible-runner:custom
 
-FROM python:3.12-slim-bookworm
+# Pinned by digest, so a build uses exactly the reviewed image; Renovate
+# proposes the new digest when the tag moves (.github/renovate.json).
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
 
 ARG ANSIBLE_CORE_VERSION=2.19.13
 
