@@ -128,7 +128,10 @@ sha256sum -c --ignore-missing SHA256SUMS
       || exit 1
   done
 ) &&
-uv pip install ./hegemony_step_sdk-*.whl ./hegemony_steps_http-*.whl ./hegemony_steps_netbox-*.whl
+uv pip install \
+  ./hegemony_step_sdk-"${version}"-py3-none-any.whl \
+  ./hegemony_steps_http-"${version}"-py3-none-any.whl \
+  ./hegemony_steps_netbox-"${version}"-py3-none-any.whl
 ```
 
 Replace `X.Y.Z` with the release your Hegemony version pins (see
