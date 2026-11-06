@@ -93,6 +93,25 @@ holder and Jakub Trávník as the author, in the file's own comment syntax:
 
 <!-- REUSE-IgnoreEnd -->
 
+### Fuzzing
+
+`fuzz/*_fuzzer.py` are [Atheris](https://github.com/google/atheris) fuzz
+targets for code that reads what a flow author or a remote system supplies:
+the `http.request` path language and status spec, and the `container.build`
+Dockerfile reader. On every pull request, the ClusterFuzzLite workflow
+(`.github/workflows/cflite_pr.yml`) builds them with `.clusterfuzzlite/` and
+runs them for a few minutes; a crash fails the check, and the run keeps the
+input that caused it. Each target asserts the function's documented contract
+(only its own error, never another exception), so a new target is a short
+file beside the others. To run one locally, build the image and the fuzzers:
+
+```bash
+docker build -t cflite -f .clusterfuzzlite/Dockerfile .
+docker run --rm -e SANITIZER=address -e FUZZING_LANGUAGE=python \
+  -v "$PWD/build/fuzz:/out" cflite compile
+docker run --rm -v "$PWD/build/fuzz:/out" cflite /out/jsonpath_fuzzer -max_total_time=60
+```
+
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/);
 `commitlint.config.mjs` holds the rules, and the pull request's commits are
 linted. The type decides whether a merge releases (see [Releasing](#releasing)).
