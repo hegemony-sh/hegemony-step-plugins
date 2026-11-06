@@ -1,3 +1,10 @@
+## [0.33.4](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.33.3...v0.33.4) (2026-11-06)
+
+### Bug Fixes
+
+* **images:** raise golang.org/x/crypto and x/text with x/net v0.62.0 ([c7ebfbf](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c7ebfbf9fd3f42ef68553fc2b7789a07b6af315d))
+* **images:** raise golang.org/x/net to v0.62.0 in the OpenTofu runner ([cdb556d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/cdb556de1297a381f04e901bfc1532e78902d4eb))
+
 ## [0.33.3](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.33.2...v0.33.3) (2026-11-06)
 
 ### Bug Fixes
