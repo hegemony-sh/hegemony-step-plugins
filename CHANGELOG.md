@@ -1,3 +1,11 @@
+## [0.33.3](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.33.2...v0.33.3) (2026-11-06)
+
+### Bug Fixes
+
+* **container:** handle malformed Dockerfile stage indexes ([c266d49](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c266d497f461973e7f6a186bc5063e232e43e3be))
+* **fuzz:** skip documents nested deeper than json.loads handles ([4b437a7](https://github.com/hegemony-sh/hegemony-step-plugins/commit/4b437a760c186f93c169c8b3fd35abf1d3662f9f))
+* **http:** reject an over-long list index as a malformed path ([a774a3a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a774a3af28fdf6a78442929182dddb25ca462ecf))
+
 ## [0.33.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.33.1...v0.33.2) (2026-11-06)
 
 ### Bug Fixes
