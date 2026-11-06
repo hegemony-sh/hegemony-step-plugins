@@ -767,12 +767,14 @@ source = { editable = "transports/transport_netmiko" }
 dependencies = [
     { name = "hegemony-step-sdk" },
     { name = "netmiko" },
+    { name = "paramiko" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
     { name = "netmiko", specifier = ">=4.3.0" },
+    { name = "paramiko", specifier = ">=5.1.0" },
 ]
 
 [[package]]

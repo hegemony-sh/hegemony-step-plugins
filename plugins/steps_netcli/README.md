@@ -16,3 +16,33 @@ Handlers: `netcli.execute`, `netcli.collect_evidence`.
 
 Namespace prefix (= entry-point name): `netcli.` — see the repo-level
 `CONVENTIONS.md` for the naming rules.
+
+## SSH security
+
+The built-in AsyncSSH, Scrapli and Netmiko device transports default to modern
+key exchange, AES-GCM/CTR or ChaCha20 encryption, SHA-2 authentication and
+Ed25519/ECDSA or RSA-SHA2 host signatures. RSA host keys must be at least
+2048 bits. The policy applies to the device and its jump host, including
+first-contact key discovery. A failed secure negotiation never retries with
+weaker settings.
+
+For an older device, enable **Allow legacy SSH algorithms**
+(`allow_legacy_ssh: true`) in the `netcli.execute` or
+`netcli.collect_evidence` step. This permits CBC/3DES, SHA-1/MD5 MACs,
+SHA-1 key exchange/signatures and smaller host keys where the installed SSH
+library still implements them. Use it only on trusted networks while upgrading
+the device; these choices weaken confidentiality or authentication.
+The override affects both hops of that step and leaves host-key identity
+verification in place. It does not change other steps or organizations.
+
+Libraries cannot negotiate algorithms they have removed. Current Paramiko
+does not implement SHA-1 key exchange or SHA-1 RSA host signatures; use the AsyncSSH or Scrapli transport
+for a legacy peer which requires it. A transport without policy-setting
+support rejects a requested legacy override rather than silently ignoring it.
+
+This setting governs the built-in device transports used by the netcli steps.
+It does not configure the host's `shell.execute` implementation or external
+Ansible/OpenSSH clients. Login private keys and agent keys should also meet
+the minimum key size; explicit jump-host keys and Netmiko authentication
+keys are validated, while AsyncSSH's automatically loaded login/agent keys
+remain subject to the host's credential policy.

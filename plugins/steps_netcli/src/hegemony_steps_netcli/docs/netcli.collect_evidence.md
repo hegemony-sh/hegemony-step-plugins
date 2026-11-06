@@ -37,6 +37,15 @@ command may run on a device; a command that runs longer fails. Raise it for
 slow commands. The step's own timeout still applies to the whole step, so
 it must leave time for every command on every device.
 
+## SSH Compatibility
+
+Allow legacy SSH algorithms defaults to off. Enable `allow_legacy_ssh` only
+for older devices which require weak algorithms or small host keys; it applies
+to the device and jump host for this step. Host-key verification still applies,
+and a failed secure connection never retries weakly. Prefer upgrading the
+device; use legacy mode only on a trusted network. The override enables only
+algorithms the selected transport library still supports.
+
 ## Output
 
 Later steps read what each device returned from the step's output:

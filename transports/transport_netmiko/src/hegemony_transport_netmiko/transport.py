@@ -14,7 +14,6 @@ settings.
 
 import asyncio
 import contextlib
-import inspect
 import logging
 import os
 import re
@@ -35,6 +34,7 @@ from hegemony_step_sdk import (
     SshAlgorithms,
     TransportOutputSink,
 )
+from hegemony_step_sdk.ssh import configure_paramiko, validate_ssh_public_key
 
 try:
     from netmiko import ConnectHandler
@@ -126,10 +126,10 @@ def _bad_host_key(exc: BaseException | None) -> Any | None:
     return None
 
 
-def _presented_key(sock: Any, timeout: float) -> str:
+def _presented_key(sock: Any, timeout: float, *, allow_legacy: bool = False) -> str:
     """The key the host at the end of ``sock`` presents: a key exchange, no login."""
     try:
-        transport = paramiko.Transport(sock)
+        transport = _KexinitKeepingTransport(sock, allow_legacy=allow_legacy)
         try:
             transport.start_client(timeout=timeout)
             return _key_line(transport.get_remote_server_key())
@@ -150,6 +150,45 @@ if paramiko is not None:
         them (:meth:`SshAlgorithms.from_kexinit`). paramiko sets them as plain
         attributes, so these properties see each assignment.
         """
+
+        def __init__(
+            self,
+            *args: Any,
+            allow_legacy: bool = False,
+            skip_rejected_keys: bool = False,
+            **kwargs: Any,
+        ) -> None:
+            if not allow_legacy:
+                disabled = dict(kwargs.get("disabled_algorithms") or {})
+                for kind in ("pubkeys", "keys"):
+                    disabled[kind] = list(disabled.get(kind, [])) + ["ssh-rsa", "ssh-dss"]
+                kwargs["disabled_algorithms"] = disabled
+            super().__init__(*args, **kwargs)
+            self._allow_legacy = allow_legacy
+            self._skip_rejected_keys = skip_rejected_keys
+            configure_paramiko(self, allow_legacy)
+
+        def start_client(self, *args: Any, **kwargs: Any) -> None:
+            """Complete key exchange and close the connection if its key is rejected."""
+            super().start_client(*args, **kwargs)
+            if not self._allow_legacy:
+                try:
+                    validate_ssh_public_key(_key_line(self.get_remote_server_key()))
+                except ValueError:
+                    self.close()
+                    raise
+
+        def auth_publickey(self, username: str, key: Any, *args: Any, **kwargs: Any) -> Any:
+            """Validate identities before offering them; skip only discovered weak keys."""
+            if not self._allow_legacy:
+                try:
+                    validate_ssh_public_key(_key_line(key))
+                except ValueError as exc:
+                    if self._skip_rejected_keys:
+                        # SSHClient catches SSHException and tries the next credential.
+                        raise paramiko.AuthenticationException(str(exc)) from exc
+                    raise
+            return super().auth_publickey(username, key, *args, **kwargs)
 
         client_kexinit = b""
         server_kexinit = b""
@@ -174,31 +213,25 @@ if paramiko is not None:
             if message is not None and not self.server_kexinit:
                 self.server_kexinit = message
 
-    #: Passed to ``SSHClient.connect`` so the transport keeps both KEXINIT
-    #: messages. ``transport_factory`` arrived in paramiko 3.2; an older one
-    #: connects as before and no algorithms are recorded.
-    _KEEP_KEXINIT: dict[str, Any] = (
-        {"transport_factory": _KexinitKeepingTransport}
-        if "transport_factory" in inspect.signature(paramiko.SSHClient.connect).parameters
-        else {}
-    )
 
-
-def _keep_kexinit(connection: Any) -> None:
+def _keep_kexinit(connection: Any, *, allow_legacy: bool = False) -> None:
     """Have netmiko ``connection``, not yet open, keep both KEXINIT messages.
 
     netmiko builds its paramiko client in ``_build_ssh_client`` and connects
     it straight after; the client built here connects through a
-    :class:`_KexinitKeepingTransport`. A netmiko without that method connects
-    as before, and no algorithms are recorded.
+    :class:`_KexinitKeepingTransport` which also enforces the SSH policy.
+    Refuse unsupported versions rather than connecting without that policy.
     """
     build = getattr(connection, "_build_ssh_client", None)
-    if build is None:
-        return
+    if not callable(build):
+        raise RuntimeError("this Netmiko version cannot install the SSH security policy")
 
     def build_keeping_kexinit() -> Any:
         client = build()
-        client.connect = partial(client.connect, **_KEEP_KEXINIT)
+        client.connect = partial(
+            client.connect,
+            transport_factory=partial(_KexinitKeepingTransport, allow_legacy=allow_legacy),
+        )
         return client
 
     connection._build_ssh_client = build_keeping_kexinit
@@ -478,6 +511,13 @@ class SSHTransport:
     #: Feature flag the host checks before passing ``host_key_verifier``, as
     #: for the output sink.
     supports_host_key_verifier = True
+    _allow_legacy_ssh = False
+
+    def configure_ssh_security(self, *, allow_legacy: bool = False) -> None:
+        """Set the policy before executing commands; applies to both SSH hops."""
+        if not isinstance(allow_legacy, bool):
+            raise ValueError("allow_legacy must be a boolean")
+        self._allow_legacy_ssh = allow_legacy
 
     #: Feature flag the host checks before passing ``ssh_algorithm_recorder``.
     supports_ssh_algorithm_recorder = True
@@ -603,7 +643,7 @@ class SSHTransport:
         keys = self._from_loop(verifier.trusted_keys(host, port))
         if keys is None or keys:
             return keys
-        presented = _presented_key(dial(timeout), timeout)
+        presented = _presented_key(dial(timeout), timeout, allow_legacy=self._allow_legacy_ssh)
         self._from_loop(verifier.learn(host, port, presented))
         return (presented,)
 
@@ -718,7 +758,11 @@ class SSHTransport:
                     allow_agent=explicit_key is None,
                     look_for_keys=explicit_key is None,
                     timeout=self.connect_timeout,
-                    **_KEEP_KEXINIT,
+                    transport_factory=partial(
+                        _KexinitKeepingTransport,
+                        allow_legacy=self._allow_legacy_ssh,
+                        skip_rejected_keys=explicit_key is None,
+                    ),
                 )
             except Exception as exc:
                 refusal = self._refusal(exc, jump.host, jump.port, keys)
@@ -790,7 +834,7 @@ class SSHTransport:
                 # Opened in two steps, so the paramiko client netmiko builds
                 # keeps what the key exchange agreed on.
                 connection: Any = ConnectHandler(**params, auto_connect=False)
-                _keep_kexinit(connection)
+                _keep_kexinit(connection, allow_legacy=self._allow_legacy_ssh)
                 connection._open()
             except Exception as exc:
                 refusal = self._refusal(exc, self.host, self.port, keys)

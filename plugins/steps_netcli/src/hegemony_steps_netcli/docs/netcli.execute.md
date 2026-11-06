@@ -63,6 +63,15 @@ transport, a configuration block that holds a `banner`, `macro name` or
 `crypto pki certificate chain` line takes about two seconds a line: free
 text gets no prompt back, so each line waits for the device to go quiet.
 
+## SSH Compatibility
+
+Allow legacy SSH algorithms defaults to off. Enable `allow_legacy_ssh` only
+for older devices which require weak algorithms or small host keys; it applies
+to the device and jump host for this step. Host-key verification still applies,
+and a failed secure connection never retries weakly. Prefer upgrading the
+device; use legacy mode only on a trusted network. The override enables only
+algorithms the selected transport library still supports.
+
 ## Output
 
 Later steps can read `steps.NODE_ID.stdout` — the combined output of all
