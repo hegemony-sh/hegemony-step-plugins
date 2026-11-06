@@ -32,7 +32,7 @@ jobs:
     # reviewed code. The comment names the branch the pin was taken from; bump
     # the SHA in a pull request to pick up a change merged there (the
     # workflow's own release-tools lockfile moves with it).
-    uses: hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml@74c3f480d208109f26dbbbf0993f279a2b14b8d5 # main
+    uses: hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml@246e5ea38d929ee2bfd7dd8052356e878b0bf413 # main
     # The union of what the called workflow's jobs need; it narrows per job
     # (contents: write for the release; id-token, attestations and
     # artifact-metadata for the provenance attestation of public releases).
