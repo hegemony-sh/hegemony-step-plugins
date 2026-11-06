@@ -121,11 +121,11 @@ for wheel in hegemony_step_sdk hegemony_steps_http hegemony_steps_netbox; do
 done
 sha256sum -c --ignore-missing SHA256SUMS
 (
-  set -e
   for wheel in ./hegemony_*-"${version}"-py3-none-any.whl; do
     gh attestation verify "$wheel" \
       --repo hegemony-sh/hegemony-step-plugins \
-      --signer-workflow hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml
+      --signer-workflow hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml \
+      || exit 1
   done
 ) &&
 uv pip install ./hegemony_step_sdk-*.whl ./hegemony_steps_http-*.whl ./hegemony_steps_netbox-*.whl
