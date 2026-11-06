@@ -246,3 +246,16 @@ def test_any_whitespace_separates_an_instruction_from_its_arguments(separator: s
     assert base_image_references(mixed, {}) == []
     args = f"ARG{separator}V=3.20\nFROM{separator}alpine:${{V}}\n"
     assert base_image_references(args, {}) == ["alpine:3.20"]
+
+
+@pytest.mark.parametrize("reference", ["²", "١", "9" * 5000])
+@pytest.mark.parametrize("instruction", ["COPY --from={ref} /x /y", "RUN --mount=from={ref} true"])
+def test_malformed_stage_numbers_do_not_crash(reference, instruction):
+    dockerfile = "FROM alpine\n" + instruction.format(ref=reference) + "\n"
+    assert base_image_references(dockerfile, {}) == ["alpine"]
+
+
+@pytest.mark.parametrize("reference", ["0", "0" * 5000])
+def test_zero_padded_stage_index_still_selects_dependency(reference):
+    dockerfile = f"FROM alpine AS base\nFROM busybox\nCOPY --from={reference} /x /y\n"
+    assert base_image_references(dockerfile, {}) == ["alpine", "busybox"]

@@ -261,7 +261,15 @@ def base_image_references(
 
     def stage_named(value: str) -> _Stage | None:
         if value.isdigit():
-            index = int(value)
+            # isdigit() includes characters int() cannot read (e.g. ²).
+            # Strip leading zeroes before bounding conversion so a padded
+            # small index remains valid, without Python's integer-size limit.
+            if not value.isascii():
+                return None
+            digits = value.lstrip("0") or "0"
+            if len(digits) > len(str(len(stages))):
+                return None
+            index = int(digits)
             return stages[index] if index < len(stages) else None
         return by_name.get(value.lower())
 
