@@ -178,7 +178,9 @@ async def test_empty_key_selection_preserves_password_fallback():
     ("cls", "platform"), [(AsyncSSHTransport, "linux"), (ScrapliTransport, "ios-xe")]
 )
 @pytest.mark.parametrize("legacy", [False, True])
-async def test_real_default_identity_file_is_checked(tmp_path, monkeypatch, cls, platform, legacy):
+async def test_real_default_identity_file_is_checked(
+    tmp_path, monkeypatch, caplog, cls, platform, legacy
+):
     """Exercise the unmocked default-file loader with a weak ~/.ssh/id_rsa."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
@@ -201,5 +203,82 @@ async def test_real_default_identity_file_is_checked(tmp_path, monkeypatch, cls,
         [result] = await transport.execute_commands(["show version"])
         assert result.exit_code == 0, result.error
         assert (key_line(weak) in offered) is legacy
-        if not legacy:
+        skipped = [r.getMessage() for r in caplog.records if "Skipping SSH login" in r.getMessage()]
+        if legacy:
+            assert skipped == []
+        else:
             assert PASSWORD in servers.seen.passwords
+            # The operator can see which identity was skipped and why.
+            assert any("ssh-rsa" in message and "2048" in message for message in skipped)
+
+
+@pytest.mark.parametrize(
+    ("cls", "platform"), [(AsyncSSHTransport, "linux"), (ScrapliTransport, "ios-xe")]
+)
+async def test_default_ed448_identity_is_offered(tmp_path, monkeypatch, cls, platform):
+    """A strong ~/.ssh/id_ed448 is offered in secure mode, not skipped."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    directory = tmp_path / ".ssh"
+    directory.mkdir()
+    key = asyncssh.generate_private_key("ssh-ed448")
+    key.write_private_key(directory / "id_ed448")
+    offered = []
+
+    def validate_key(server, username, key):
+        offered.append(key_line(key))
+        return True
+
+    monkeypatch.setattr(ssh_fakes._Device, "public_key_auth_supported", lambda self: True)
+    monkeypatch.setattr(ssh_fakes._Device, "validate_public_key", validate_key)
+    monkeypatch.setattr(ssh_fakes._Device, "password_auth_supported", lambda self: False)
+    async with ssh_servers() as servers:
+        port = await servers.device(asyncssh.generate_private_key("ssh-ed25519"))
+        transport = build(cls, platform, port, FakeVerifier())
+        [result] = await transport.execute_commands(["show version"])
+        assert result.exit_code == 0, result.error
+        assert key_line(key) in offered
+
+
+@pytest.mark.parametrize("subject", ["weak_rsa", "strong_rsa", "ed25519"])
+def test_x509_identity_subject_key_strength(subject):
+    """X.509 identities are checked through their subject key, not skipped by type."""
+    from types import SimpleNamespace
+
+    key = (
+        asyncssh.generate_private_key("ssh-rsa", key_size=1024)
+        if subject == "weak_rsa"
+        else asyncssh.generate_private_key("ssh-rsa", key_size=2048)
+        if subject == "strong_rsa"
+        else asyncssh.generate_private_key("ssh-ed25519")
+    )
+    algorithm = b"x509v3-" + key.algorithm
+    pair = SimpleNamespace(public_data=len(algorithm).to_bytes(4, "big") + algorithm + b"chain")
+    imported = []
+
+    def import_certificate(line):
+        imported.append(line.split()[0])
+        # An X.509 chain exposes its subject key and has no OpenSSH signing key.
+        return SimpleNamespace(key=key)
+
+    library = SimpleNamespace(import_certificate=import_certificate)
+    if subject == "weak_rsa":
+        with pytest.raises(ValueError, match="2048"):
+            validate_asyncssh_client_key(library, pair)
+    else:
+        validate_asyncssh_client_key(library, pair)
+    assert imported == [algorithm.decode()]
+
+
+@pytest.mark.parametrize("bits", [1024, 2048])
+def test_real_x509_identity_subject_key_strength(bits):
+    """With PyOpenSSL installed, a real X.509 identity is validated by its subject key."""
+    pytest.importorskip("OpenSSL")
+    key = asyncssh.generate_private_key("ssh-rsa", key_size=bits)
+    cert = key.generate_x509_user_certificate(key, "OU=test", "OU=test")
+    pair = asyncssh.load_keypairs([(key, cert)])[0]
+    if bits < 2048:
+        with pytest.raises(ValueError, match="2048"):
+            validate_asyncssh_client_key(asyncssh, pair)
+    else:
+        validate_asyncssh_client_key(asyncssh, pair)

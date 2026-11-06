@@ -185,6 +185,12 @@ if paramiko is not None:
                     validate_ssh_public_key(_key_line(key))
                 except ValueError as exc:
                     if self._skip_rejected_keys:
+                        logger.warning(
+                            "Skipping SSH login identity %s %s: %s",
+                            key.get_name(),
+                            key.fingerprint,
+                            exc,
+                        )
                         # SSHClient catches SSHException and tries the next credential.
                         raise paramiko.AuthenticationException(str(exc)) from exc
                     raise

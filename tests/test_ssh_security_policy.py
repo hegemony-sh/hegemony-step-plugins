@@ -322,7 +322,7 @@ async def test_legacy_mismatch_report_keeps_presented_identity(cls, platform):
 
 @pytest.mark.parametrize("explicit", [False, True])
 async def test_weak_bastion_identity_is_never_offered_and_only_discovered_keys_are_skipped(
-    monkeypatch, explicit
+    monkeypatch, caplog, explicit
 ):
     """Skip weak discovered identities but reject weak explicit credentials."""
     import io
@@ -359,6 +359,12 @@ async def test_weak_bastion_identity_is_never_offered_and_only_discovered_keys_a
         else:
             assert result.exit_code == 0, result.error
             assert JUMP_PASSWORD in servers.seen.passwords
+            # The skipped agent key is named in the log, with the reason.
+            assert any(
+                "Skipping SSH login identity ssh-rsa SHA256:" in r.getMessage()
+                and "2048" in r.getMessage()
+                for r in caplog.records
+            )
 
 
 @pytest.mark.parametrize(("cls", "platform"), TRANSPORTS)

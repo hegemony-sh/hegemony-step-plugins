@@ -7,57 +7,79 @@
 
 No SSH library is imported by the SDK. Adapters supply their library objects.
 Legacy negotiation is explicit; a failed secure handshake never retries weakly.
+
+The policy names only what is weak. Secure mode starts from the installed
+library's own default algorithms and removes the weak ones, so algorithms a
+library adds later are used without a policy change. The explicit legacy
+override offers every algorithm the library still implements, weak included.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
+import logging
+import re
+from collections.abc import Iterable
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-KEX = (
-    "mlkem768x25519-sha256",
-    "curve25519-sha256",
-    "curve25519-sha256@libssh.org",
-    "ecdh-sha2-nistp256",
-    "ecdh-sha2-nistp384",
-    "ecdh-sha2-nistp521",
-    "diffie-hellman-group14-sha256",
-    "diffie-hellman-group16-sha512",
-    "diffie-hellman-group18-sha512",
-)
-CIPHERS = (
-    "chacha20-poly1305@openssh.com",
-    "aes256-gcm@openssh.com",
-    "aes128-gcm@openssh.com",
-    "aes256-ctr",
-    "aes192-ctr",
-    "aes128-ctr",
-)
-MACS = (
-    "hmac-sha2-512-etm@openssh.com",
-    "hmac-sha2-256-etm@openssh.com",
-    "hmac-sha2-512",
-    "hmac-sha2-256",
-)
-HOST_KEYS = (
-    "ssh-ed25519",
-    "ecdsa-sha2-nistp256",
-    "ecdsa-sha2-nistp384",
-    "ecdsa-sha2-nistp521",
-    "rsa-sha2-512",
-    "rsa-sha2-256",
-)
-CLIENT_SIGNATURES = HOST_KEYS + (
-    "sk-ssh-ed25519@openssh.com",
-    "sk-ecdsa-sha2-nistp256@openssh.com",
-    "webauthn-sk-ecdsa-sha2-nistp256@openssh.com",
-)
-LEGACY_KEX = ("diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1")
-LEGACY_CIPHERS = ("aes256-cbc", "aes192-cbc", "aes128-cbc", "3des-cbc")
-LEGACY_MACS = ("hmac-sha1", "hmac-sha1-96", "hmac-md5", "hmac-md5-96")
-LEGACY_HOST_KEYS = ("ssh-rsa",)
+logger = logging.getLogger(__name__)
+
+#: Name parts (split on ``-`` and ``@``) that make an algorithm weak, per kind.
+#: ``kex`` key exchange, ``cipher`` encryption, ``mac`` integrity,
+#: ``signature`` host-key and login signatures.
+WEAK_ALGORITHM_PARTS: dict[str, frozenset[str]] = {
+    # SHA-1 exchange hashes and 1024-bit RSA key exchange.
+    "kex": frozenset({"sha1", "rsa1024"}),
+    # CBC mode, 64-bit block ciphers, RC4, and no encryption.
+    "cipher": frozenset(
+        {"cbc", "3des", "des", "blowfish", "cast128", "arcfour", "arcfour128", "arcfour256", "none"}
+    ),
+    # SHA-1 and MD5 MACs, truncated (96-bit) MACs, and no integrity.
+    "mac": frozenset({"sha1", "md5", "96", "none"}),
+    # DSA and SHA-1 signatures.
+    "signature": frozenset({"dss", "sha1"}),
+}
+#: Whole names that are weak although none of their parts is: the RSA
+#: signatures that use SHA-1.
+WEAK_ALGORITHM_NAMES: dict[str, frozenset[str]] = {
+    "signature": frozenset({"ssh-rsa", "x509v3-ssh-rsa", "x509v3-sign-rsa"}),
+}
+
+#: Smallest RSA modulus, in bits, accepted for host and login keys.
+MIN_RSA_BITS = 2048
+
+
+def is_weak_algorithm(kind: str, name: str) -> bool:
+    """True when ``name`` is a weak ``kind`` algorithm (see ``WEAK_ALGORITHM_PARTS``)."""
+    if name in WEAK_ALGORITHM_NAMES.get(kind, frozenset()):
+        return True
+    return not WEAK_ALGORITHM_PARTS[kind].isdisjoint(re.split(r"[-@]", name))
+
+
+def algorithm_policy(
+    kind: str, defaults: Iterable[str], implemented: Iterable[str], allow_legacy: bool = False
+) -> tuple[str, ...]:
+    """The library's defaults without weak names, or with legacy, everything it implements.
+
+    Order is the library's: its defaults first, then (legacy only) the
+    algorithms it implements but does not enable by default. A default the
+    library does not implement is dropped.
+    """
+    implemented = tuple(implemented)
+    defaults = [name for name in defaults if name in implemented]
+    if allow_legacy:
+        return tuple(dict.fromkeys([*defaults, *implemented]))
+    return tuple(dict.fromkeys(name for name in defaults if not is_weak_algorithm(kind, name)))
+
+
+def _plain_host_key_algorithm(name: str) -> bool:
+    """Host trust stores plain keys: no certificates, X.509 or security-key types."""
+    return not (
+        name.endswith("-cert-v01@openssh.com") or name.startswith(("x509v3-", "sk-", "webauthn-"))
+    )
 
 
 class SshSecurityConfig(BaseModel):
@@ -84,8 +106,19 @@ def configure_ssh_security(transport: Any, value: Any = False) -> None:
         raise ValueError("this transport does not support the allow_legacy_ssh step setting")
 
 
+#: Uncompressed point coordinate size, in bytes, for the ECDSA curves SSH names.
+_ECDSA_COORDINATE_BYTES = {"nistp256": 32, "nistp384": 48, "nistp521": 66, "1.3.132.0.10": 32}
+
+
 def validate_ssh_public_key(line: str, *, allow_security_keys: bool = False) -> None:
-    """Reject weak/malformed OpenSSH host keys without depending on an SSH library."""
+    """Reject weak or malformed OpenSSH host or login keys without an SSH library.
+
+    Only weak keys are refused: DSA and RSA under ``MIN_RSA_BITS``. Known key
+    types are also checked for a well-formed encoding. A type this function
+    does not know is accepted, so stronger key types the SSH library adds
+    later keep working. Certificates are not plain keys: validate their
+    keys separately (``validate_asyncssh_client_key``).
+    """
     try:
         fields = line.split()
         data = base64.b64decode(fields[1], validate=True)
@@ -108,7 +141,9 @@ def validate_ssh_public_key(line: str, *, allow_security_keys: bool = False) -> 
         kind = part().decode("ascii")
         if kind != fields[0]:
             raise ValueError("key type mismatch")
-        security_key = kind in {"sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"}
+        if kind.endswith("-cert-v01@openssh.com") or kind.startswith("x509v3-"):
+            raise ValueError("certificates must be validated through their keys")
+        security_key = kind.startswith("sk-")
         if security_key:
             if not allow_security_keys:
                 raise ValueError(
@@ -127,24 +162,26 @@ def validate_ssh_public_key(line: str, *, allow_security_keys: bool = False) -> 
             n = int.from_bytes(modulus, "big")
             if e < 3 or e % 2 == 0 or e >= n or n % 2 == 0:
                 raise ValueError("invalid RSA exponent or modulus")
-            if n.bit_length() < 2048:
-                raise ValueError("RSA key is smaller than 2048 bits")
-        elif kind == "ssh-ed25519":
-            if len(part()) != 32:
-                raise ValueError("invalid Ed25519 key")
-        elif kind in {"ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"}:
-            if part().decode("ascii") != kind.removeprefix("ecdsa-sha2-"):
+            if n.bit_length() < MIN_RSA_BITS:
+                raise ValueError(f"RSA key is smaller than {MIN_RSA_BITS} bits")
+        elif kind == "ssh-dss":
+            raise ValueError("DSA keys are weak")
+        elif kind in {"ssh-ed25519", "ssh-ed448"}:
+            if len(part()) != (32 if kind == "ssh-ed25519" else 57):
+                raise ValueError(f"invalid {kind.removeprefix('ssh-').capitalize()} key")
+        elif kind.startswith("ecdsa-sha2-"):
+            curve = kind.removeprefix("ecdsa-sha2-")
+            if part().decode("ascii") != curve:
                 raise ValueError("curve mismatch")
             point = part()
-            size = {
-                "ecdsa-sha2-nistp256": 32,
-                "ecdsa-sha2-nistp384": 48,
-                "ecdsa-sha2-nistp521": 66,
-            }[kind]
-            if len(point) != 1 + 2 * size or point[0] != 4:
+            size = _ECDSA_COORDINATE_BYTES.get(curve)
+            valid = len(point) == 1 + 2 * size if size else len(point) > 1 and len(point) % 2
+            if not valid or point[0] != 4:
                 raise ValueError("invalid uncompressed ECDSA point")
         else:
-            raise ValueError("host-key type is not in the secure SSH policy")
+            # A type the library negotiated but this policy does not know: no
+            # weakness is known, and its layout cannot be checked here.
+            return
         if security_key and not part():
             raise ValueError("security-key application is empty")
         if offset != len(data):
@@ -157,42 +194,63 @@ def validate_ssh_public_key(line: str, *, allow_security_keys: bool = False) -> 
 
 
 def validate_asyncssh_client_key(library: Any, keypair: Any) -> None:
-    """Validate the underlying client key, including agent-backed certificates."""
+    """Validate a login identity's keys, including certificate subject and signing keys.
+
+    OpenSSH certificates are checked for both the user key and the signing
+    (certificate authority) key; X.509 identities for their subject key.
+    """
     data = keypair.public_data
     size = int.from_bytes(data[:4], "big")
     algorithm = data[4 : 4 + size].decode("ascii")
     line = algorithm + " " + base64.b64encode(data).decode("ascii")
-    if algorithm.endswith("-cert-v01@openssh.com"):
+    if algorithm.endswith("-cert-v01@openssh.com") or algorithm.startswith("x509v3-"):
         certificate = library.import_certificate(line)
-        keys = (certificate.key, certificate.signing_key)
+        keys = (certificate.key, getattr(certificate, "signing_key", None))
     else:
         keys = (library.import_public_key(line),)
     for key in keys:
-        validate_ssh_public_key(
-            key.export_public_key("openssh").decode("ascii"), allow_security_keys=True
-        )
+        if key is not None:
+            validate_ssh_public_key(
+                key.export_public_key("openssh").decode("ascii"), allow_security_keys=True
+            )
+
+
+def _identity_label(keypair: Any) -> str:
+    """Algorithm, SHA-256 fingerprint and comment of a login identity, for logs."""
+    data = keypair.public_data
+    kind = data[4 : 4 + int.from_bytes(data[:4], "big")].decode("ascii", "replace")
+    digest = base64.b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
+    label = f"{kind} SHA256:{digest}"
+    get_comment = getattr(keypair, "get_comment", None)
+    comment = get_comment() if callable(get_comment) else None
+    return f"{label} ({comment})" if comment else label
 
 
 def asyncssh_algorithms(library: Any, allow_legacy: bool = False) -> dict[str, Any]:
-    """Explicit algorithm lists, with weak choices only after an opt-in."""
-    policy = {
-        "kex_algs": KEX + (LEGACY_KEX if allow_legacy else ()),
-        "encryption_algs": CIPHERS + (LEGACY_CIPHERS if allow_legacy else ()),
-        "mac_algs": MACS + (LEGACY_MACS if allow_legacy else ()),
-        "server_host_key_algs": HOST_KEYS + (LEGACY_HOST_KEYS if allow_legacy else ()),
-        "signature_algs": CLIENT_SIGNATURES + (LEGACY_HOST_KEYS if allow_legacy else ()),
-    }
-
-    # Wildcards enumerate installed capabilities without requiring newer algorithms.
-    # This options object is only used for discovery, never for a connection.
-    available = library.SSHClientConnectionOptions(
+    """AsyncSSH's own algorithm lists, without weak ones unless legacy is allowed."""
+    # These options objects only enumerate the library's lists; they never connect.
+    defaults = library.SSHClientConnectionOptions(config=None)
+    implemented = library.SSHClientConnectionOptions(
         config=None, kex_algs="*", encryption_algs="*", mac_algs="*", signature_algs="*"
     )
+    policy: dict[str, Any] = {}
+    for name, kind in (
+        ("kex_algs", "kex"),
+        ("encryption_algs", "cipher"),
+        ("mac_algs", "mac"),
+        ("signature_algs", "signature"),
+    ):
+        policy[name] = algorithm_policy(
+            kind,
+            (alg.decode("ascii") for alg in getattr(defaults, name)),
+            (alg.decode("ascii") for alg in getattr(implemented, name)),
+            allow_legacy,
+        )
+    policy["server_host_key_algs"] = tuple(
+        alg for alg in policy["signature_algs"] if _plain_host_key_algorithm(alg)
+    )
     for name, algorithms in policy.items():
-        attribute = "signature_algs" if name == "server_host_key_algs" else name
-        supported = {alg.decode("ascii") for alg in getattr(available, attribute)}
-        policy[name] = tuple(alg for alg in algorithms if alg in supported)
-        if not policy[name]:
+        if not algorithms:
             raise ValueError(f"the SSH library has no supported {name} for this policy")
     return policy
 
@@ -231,7 +289,10 @@ def asyncssh_security_options(
                 while (keypair := await select_key()) is not None:
                     try:
                         validate_asyncssh_client_key(library, keypair)
-                    except ValueError:
+                    except ValueError as exc:
+                        logger.warning(
+                            "Skipping SSH login identity %s: %s", _identity_label(keypair), exc
+                        )
                         continue
                     return keypair
                 return None
@@ -250,21 +311,22 @@ def asyncssh_security_options(
 
 
 def configure_paramiko(transport: Any, allow_legacy: bool = False) -> None:
-    """Set per-connection lists via Paramiko's public SecurityOptions interface."""
+    """Apply the policy to Paramiko's per-connection ``SecurityOptions`` lists.
+
+    Paramiko's defaults are the starting point. With legacy, every algorithm
+    in its registries (``Transport._kex_info`` and so on) is offered too.
+    """
     options = transport.get_security_options()
-    for name, secure, legacy in (
-        ("kex", KEX, LEGACY_KEX),
-        ("ciphers", CIPHERS, LEGACY_CIPHERS),
-        ("digests", MACS, LEGACY_MACS),
-        ("key_types", HOST_KEYS, LEGACY_HOST_KEYS),
+    for name, kind, registry in (
+        ("kex", "kex", "_kex_info"),
+        ("ciphers", "cipher", "_cipher_info"),
+        ("digests", "mac", "_mac_info"),
+        ("key_types", "signature", "_key_info"),
     ):
-        supported = []
-        for algorithm in secure + (legacy if allow_legacy else ()):
-            try:
-                setattr(options, name, (algorithm,))
-            except ValueError:  # This installed library does not implement the algorithm.
-                continue
-            supported.append(algorithm)
-        if not supported:
+        implemented = tuple(getattr(transport, registry, None) or ())
+        algorithms = algorithm_policy(kind, getattr(options, name), implemented, allow_legacy)
+        if name == "key_types":
+            algorithms = tuple(alg for alg in algorithms if _plain_host_key_algorithm(alg))
+        if not algorithms:
             raise ValueError(f"the SSH library has no supported {name} for this policy")
-        setattr(options, name, tuple(supported))
+        setattr(options, name, algorithms)
