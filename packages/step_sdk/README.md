@@ -142,3 +142,59 @@ it: `org_trusted_ca_pem(services)` returns None on a host without the
 service, and `add_trusted_cas(context, pem)` adds the certificates to an
 `ssl` context. A `ca_bundle` a step sets still replaces both (it pins those
 CAs).
+
+## API reference
+
+Import public handler contracts from `hegemony_step_sdk`. The SDK exposes
+Python interfaces; individual step configuration and output contracts are
+documented by each plugin's README and packaged handler documentation.
+
+| Interface | Inputs | Result and calling convention |
+| --- | --- | --- |
+| `StepHandlerRegistry.register_handler_type` | Handler class | Synchronous registration; returns `None` |
+| `BaseHandler.execute` | `HandlerContext` | Async; await for a `HandlerResult` |
+| `BaseHandler.validate_config` | Configuration dictionary | Synchronous; list of validation errors (empty when valid) |
+| `BaseHandler.parse_config` | Configuration mapping and Pydantic model class | Synchronous; parsed model or `InvalidConfigError` |
+| `BaseHandler.template_errors` | Configuration dictionary | Synchronous; list of template-validation errors |
+| `HandlerContext.require_services` | No arguments | Synchronous; `HandlerServices` or an exception if absent |
+| `HandlerContext.get_target_devices` | No arguments | Synchronous; selected device dictionaries |
+| `HandlerContext.get_target_ips` | No arguments | Synchronous; selected IP strings |
+| `HandlerContext.emit_progress` / `emit_output` | Progress/output arguments described in the signatures | Async; await delivery to the host callback |
+
+`HandlerContext` carries run/flow/step identifiers, target selections, config,
+parameters, previous outputs, timeout, attempt number, tags and optional host
+services. `HandlerResult` carries success, summary, metrics, evidence, error and
+output. `InvalidConfigError.result()` turns invalid configuration into a failed
+result. Keep resolved credentials out of results and logs.
+
+Host services include secret resolution and storage, transport access, internal
+API access, child runs, notifications, probes, containers and artifacts.
+Methods declared `async` must be awaited, for example
+`await ctx.require_services().render_template(template)`.
+Some methods return resources synchronously: `connect(...)` returns a
+`Transport`; `open_state_backend(...)` returns an async context manager
+to use with `async with`. `open_api_client(...)` returns an `httpx.AsyncClient` which
+also needs to be closed, normally with `async with`.
+`validate_secret_ref`, `contains_template`, `container_runtime` and
+`is_check_registered` are synchronous. See the service reference for each
+method's exact arguments and result.
+
+From the repository root, render the complete signatures, fields and docstrings:
+
+```bash
+uv sync --frozen --all-packages
+uv run python -m pydoc hegemony_step_sdk
+uv run python -m pydoc hegemony_step_sdk.contract
+uv run python -m pydoc hegemony_step_sdk.registry
+uv run python -m pydoc hegemony_step_sdk.services
+uv run python -m pydoc hegemony_step_sdk.transports
+uv run python -m pydoc hegemony_step_sdk.probes
+uv run python -m pydoc hegemony_step_sdk.trust
+uv run python -m pydoc hegemony_step_sdk.docs
+uv run python -m pydoc hegemony_step_sdk.concurrency
+uv run python -m pydoc hegemony_step_sdk.enums
+```
+
+For local HTML browsing, run `uv run python -m pydoc -b`, open the SDK module,
+and follow its class/module links; stop the server when finished. With an
+installed SDK, omit `uv run`.
