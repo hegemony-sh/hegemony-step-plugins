@@ -1427,10 +1427,18 @@ def test_parse_path(path, parts):
     assert parse_path(path) == parts
 
 
-@pytest.mark.parametrize("path", ["", "a..b", "a[", "a[x]", "$a", "a.b c", "a[0]b"])
+@pytest.mark.parametrize(
+    "path", ["", "a..b", "a[", "a[x]", "$a", "a.b c", "a[0]b", "a[" + "9" * 5000 + "]"]
+)
 def test_parse_path_rejects_malformed_paths(path):
+    # The last is an index too long for int() (more than 4,300 digits): it
+    # must fail as a malformed path, not with int()'s own ValueError.
     with pytest.raises(PathError):
         parse_path(path)
+
+
+def test_get_path_treats_a_huge_numeric_key_as_missing_on_a_list():
+    assert get_path([1, 2], ("9" * 5000,)) is None
 
 
 def test_get_path_returns_none_for_anything_missing():
