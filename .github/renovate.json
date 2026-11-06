@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Renovate maintains only the GitHub Actions pins here: every `uses:` is pinned to a commit SHA, and without something bumping the SHAs they rot silently. Python dependencies are deliberately out of Renovate's scope. Its commits are chore(deps), which the release rules in .releaserc.json do not release.",
+  "description": "Renovate maintains the GitHub Actions pins and the base images of images/: every `uses:` is pinned to a commit SHA and every `FROM` to a digest, and without something bumping them they rot silently. Base images get digest and patch updates only; a minor or major tag change also changes THIRD-PARTY-NOTICES.md and images/.images-allowed.txt, so it is made by hand. Python dependencies are deliberately out of Renovate's scope. Its commits are chore(deps), which the release rules in .releaserc.json do not release.",
   "extends": ["config:recommended", ":semanticCommits", ":semanticCommitTypeAll(chore)"],
   "timezone": "Etc/UTC",
   "schedule": ["before 05:00 on monday"],
@@ -8,8 +8,19 @@
   "labels": ["dependencies"],
   "prConcurrentLimit": 3,
   "prHourlyLimit": 2,
-  "enabledManagers": ["github-actions"],
+  "enabledManagers": ["github-actions", "dockerfile"],
   "github-actions": {
     "pinDigests": true
-  }
+  },
+  "dockerfile": {
+    "pinDigests": true
+  },
+  "packageRules": [
+    {
+      "description": "Base images: digest and patch updates only.",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["minor", "major"],
+      "enabled": false
+    }
+  ]
 }
