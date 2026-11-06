@@ -29,7 +29,9 @@ def test_one_input(data: bytes) -> None:
     assert all(isinstance(part, (str, int)) for part in parts)
     try:
         document = json.loads(fdp.ConsumeUnicodeNoSurrogates(4096))
-    except ValueError:
+    except (ValueError, RecursionError):
+        # Not a document, or nested deeper than json.loads itself handles: the
+        # standard library's limit, not the path language's.
         return
     found = get_path(document, parts)
     try:
