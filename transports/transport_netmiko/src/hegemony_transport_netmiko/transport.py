@@ -151,7 +151,13 @@ if paramiko is not None:
         attributes, so these properties see each assignment.
         """
 
-        def __init__(self, *args: Any, allow_legacy: bool = False, **kwargs: Any) -> None:
+        def __init__(
+            self,
+            *args: Any,
+            allow_legacy: bool = False,
+            skip_rejected_keys: bool = False,
+            **kwargs: Any,
+        ) -> None:
             if not allow_legacy:
                 disabled = dict(kwargs.get("disabled_algorithms") or {})
                 for kind in ("pubkeys", "keys"):
@@ -159,9 +165,11 @@ if paramiko is not None:
                 kwargs["disabled_algorithms"] = disabled
             super().__init__(*args, **kwargs)
             self._allow_legacy = allow_legacy
+            self._skip_rejected_keys = skip_rejected_keys
             configure_paramiko(self, allow_legacy)
 
         def start_client(self, *args: Any, **kwargs: Any) -> None:
+            """Complete key exchange and close the connection if its key is rejected."""
             super().start_client(*args, **kwargs)
             if not self._allow_legacy:
                 try:
@@ -171,8 +179,15 @@ if paramiko is not None:
                     raise
 
         def auth_publickey(self, username: str, key: Any, *args: Any, **kwargs: Any) -> Any:
+            """Validate identities before offering them; skip only discovered weak keys."""
             if not self._allow_legacy:
-                validate_ssh_public_key(_key_line(key))
+                try:
+                    validate_ssh_public_key(_key_line(key))
+                except ValueError as exc:
+                    if self._skip_rejected_keys:
+                        # SSHClient catches SSHException and tries the next credential.
+                        raise paramiko.AuthenticationException(str(exc)) from exc
+                    raise
             return super().auth_publickey(username, key, *args, **kwargs)
 
         client_kexinit = b""
@@ -744,7 +759,9 @@ class SSHTransport:
                     look_for_keys=explicit_key is None,
                     timeout=self.connect_timeout,
                     transport_factory=partial(
-                        _KexinitKeepingTransport, allow_legacy=self._allow_legacy_ssh
+                        _KexinitKeepingTransport,
+                        allow_legacy=self._allow_legacy_ssh,
+                        skip_rejected_keys=explicit_key is None,
                     ),
                 )
             except Exception as exc:

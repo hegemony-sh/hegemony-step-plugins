@@ -49,6 +49,11 @@ HOST_KEYS = (
     "rsa-sha2-512",
     "rsa-sha2-256",
 )
+CLIENT_SIGNATURES = HOST_KEYS + (
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+    "webauthn-sk-ecdsa-sha2-nistp256@openssh.com",
+)
 LEGACY_KEX = ("diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1")
 LEGACY_CIPHERS = ("aes256-cbc", "aes192-cbc", "aes128-cbc", "3des-cbc")
 LEGACY_MACS = ("hmac-sha1", "hmac-sha1-96", "hmac-md5", "hmac-md5-96")
@@ -87,6 +92,7 @@ def validate_ssh_public_key(line: str) -> None:
         offset = 0
 
         def part() -> bytes:
+            """Consume one complete SSH length-prefixed field."""
             nonlocal offset
             if offset + 4 > len(data):
                 raise ValueError("truncated key")
@@ -103,8 +109,18 @@ def validate_ssh_public_key(line: str) -> None:
         if kind != fields[0]:
             raise ValueError("key type mismatch")
         if kind == "ssh-rsa":
-            part()  # exponent
-            if int.from_bytes(part(), "big").bit_length() < 2048:
+            exponent = part()
+            modulus = part()
+            for component in (exponent, modulus):
+                if not component or component[0] & 0x80:
+                    raise ValueError("invalid positive RSA integer")
+                if len(component) > 1 and component[0] == 0 and not component[1] & 0x80:
+                    raise ValueError("non-canonical RSA integer")
+            e = int.from_bytes(exponent, "big")
+            n = int.from_bytes(modulus, "big")
+            if e < 3 or e % 2 == 0 or e >= n or n % 2 == 0:
+                raise ValueError("invalid RSA exponent or modulus")
+            if n.bit_length() < 2048:
                 raise ValueError("RSA key is smaller than 2048 bits")
         elif kind == "ssh-ed25519":
             if len(part()) != 32:
@@ -112,7 +128,14 @@ def validate_ssh_public_key(line: str) -> None:
         elif kind in {"ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521"}:
             if part().decode("ascii") != kind.removeprefix("ecdsa-sha2-"):
                 raise ValueError("curve mismatch")
-            part()
+            point = part()
+            size = {
+                "ecdsa-sha2-nistp256": 32,
+                "ecdsa-sha2-nistp384": 48,
+                "ecdsa-sha2-nistp521": 66,
+            }[kind]
+            if len(point) != 1 + 2 * size or point[0] != 4:
+                raise ValueError("invalid uncompressed ECDSA point")
         else:
             raise ValueError("host-key type is not in the secure SSH policy")
         if offset != len(data):
@@ -131,7 +154,7 @@ def asyncssh_algorithms(library: Any, allow_legacy: bool = False) -> dict[str, A
         "encryption_algs": CIPHERS + (LEGACY_CIPHERS if allow_legacy else ()),
         "mac_algs": MACS + (LEGACY_MACS if allow_legacy else ()),
         "server_host_key_algs": HOST_KEYS + (LEGACY_HOST_KEYS if allow_legacy else ()),
-        "signature_algs": HOST_KEYS + (LEGACY_HOST_KEYS if allow_legacy else ()),
+        "signature_algs": CLIENT_SIGNATURES + (LEGACY_HOST_KEYS if allow_legacy else ()),
     }
 
     # Wildcards enumerate installed capabilities without requiring newer algorithms.
@@ -164,6 +187,7 @@ def asyncssh_security_options(
 
     class PolicyClient(library.SSHClient):
         def validate_host_public_key(self, host: str, addr: str, port: int, key: Any) -> bool:
+            """Check key strength before matching the host's trusted identities."""
             if not allow_legacy:
                 validate_ssh_public_key(key.export_public_key("openssh").decode("ascii"))
             return parsed is None or key in parsed

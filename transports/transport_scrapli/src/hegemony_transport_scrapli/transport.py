@@ -565,9 +565,8 @@ class ScrapliTransport:
             return None
         return await verifier.rejected(host, port, presented)
 
-    @staticmethod
     async def _presented_key_or_none(
-        host: str, port: int, *, tunnel: Any, algorithms: list[str] | None = None
+        self, host: str, port: int, *, tunnel: Any, algorithms: list[str] | None = None
     ) -> str | None:
         """The key ``host:port`` presents now, or None when it cannot be fetched."""
         try:
@@ -577,6 +576,7 @@ class ScrapliTransport:
                 tunnel=tunnel,
                 timeout=_PRESENTED_KEY_TIMEOUT_SECONDS,
                 algorithms=algorithms,
+                allow_legacy=self._allow_legacy_ssh,
             )
         except Exception:  # noqa: BLE001 - the report is best effort
             logger.debug("could not fetch the SSH host key of %s:%d", host, port, exc_info=True)
