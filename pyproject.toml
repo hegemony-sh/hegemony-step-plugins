@@ -24,6 +24,8 @@ dev = [
     "ty>=0.0.14",
 ]
 
+fuzz = ["atheris==3.0.0", "coverage==7.13.1"]
+
 [tool.uv]
 package = false
 

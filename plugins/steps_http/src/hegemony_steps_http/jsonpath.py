@@ -20,7 +20,9 @@ from typing import Any
 #: One path segment after the first: ``.key``, ``[3]``, ``[-1]``, ``["a.b"]``.
 _SEGMENT_RE = re.compile(
     r"""\.(?P<key>[^.\[\]'"\s]+)"""
-    r"""|\[(?P<index>-?\d+)\]"""
+    # At most 18 digits: Python refuses to read a 4,301-digit int (ValueError,
+    # not PathError), and no list is longer than 10**18 anyway.
+    r"""|\[(?P<index>-?\d{1,18})\]"""
     r"""|\[(?P<quote>["'])(?P<quoted>.*?)(?P=quote)\]"""
 )
 
@@ -74,7 +76,7 @@ def _step(current: Any, part: PathPart) -> tuple[bool, Any]:
         index: int | None = None
         if isinstance(part, int):
             index = part
-        elif re.fullmatch(r"-?\d+", part):
+        elif re.fullmatch(r"-?\d{1,18}", part):
             index = int(part)
         if index is not None and -len(current) <= index < len(current):
             return True, current[index]
