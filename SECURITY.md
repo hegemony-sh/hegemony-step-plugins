@@ -9,7 +9,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 Security reports are handled privately. Please do not open a public GitHub issue for vulnerabilities, suspected vulnerabilities, leaked secrets, or exploit details.
 
-This policy covers what this repository publishes: the step-handler SDK, the step-handler, device-transport and probe wheels, the `ansible-runner` and `opentofu-runner` images, and the build and release workflows. A vulnerability in the Hegemony platform itself is reported the same way; its own policy is in the [platform's SECURITY.md](https://github.com/hegemony-sh/hegemony/blob/develop/SECURITY.md).
+This policy covers what this repository publishes: the step-handler SDK, the step-handler, device-transport and probe wheels, the `ansible-runner` and `opentofu-runner` images, and the build and release workflows. For a vulnerability in the Hegemony platform itself, follow the reporting instructions in the [platform's SECURITY.md](https://github.com/hegemony-sh/hegemony/blob/develop/SECURITY.md).
 
 ## Supported versions
 
@@ -19,7 +19,15 @@ Which Hegemony platform versions are supported, and for how long, is set by the 
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately by emailing [security@hegemony.sh](mailto:security@hegemony.sh).
+Use [GitHub private vulnerability reporting](https://github.com/hegemony-sh/hegemony-step-plugins/security/advisories/new)
+to report a vulnerability in this repository. The HTTPS form keeps the report
+private to the reporter and authorized advisory collaborators until publication.
+You can also open **Security → Advisories → Report a vulnerability** in this
+repository. A GitHub account is required.
+
+If you cannot use GitHub, email [security@hegemony.sh](mailto:security@hegemony.sh)
+for initial contact and to arrange a confidential way to share sensitive details.
+Do not send sensitive exploit details in unencrypted email or public issues.
 
 Please include as much detail as you can safely share:
 
