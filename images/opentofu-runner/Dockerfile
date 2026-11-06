@@ -35,7 +35,7 @@
 # ghcr.io/hegemony-sh/opentofu-runner:0.33. For another OpenTofu version, build
 # and push it under your own tag and set the plan step's Image:
 #
-#   docker build --build-arg OPENTOFU_VERSION=<version> \
+#   docker build --no-cache --build-arg OPENTOFU_VERSION=<version> \
 #       --build-arg OPENTOFU_COMMIT=<commit the v<version> tag names> \
 #       --build-arg GO_MODULE_RAISES= \
 #       -t registry.example.com/opentofu-runner:custom images/opentofu-runner
@@ -97,7 +97,10 @@ RUN if [ -n "${GO_MODULE_RAISES}" ]; then \
 
 FROM alpine:3.22@sha256:bfe7ceb9f09ec0566c48fb93356e45a47a00be5a1dd14fa5b909e7709c66b034
 
-RUN apk add --no-cache ca-certificates git openssh-client
+# The pinned base carries Alpine's fixes only up to its digest; upgrade so a
+# rebuild of the same tag still picks up the fixed packages.
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates git openssh-client
 
 COPY --from=tofu /out/tofu /usr/local/bin/tofu
 

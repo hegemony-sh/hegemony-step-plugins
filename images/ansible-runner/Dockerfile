@@ -20,7 +20,7 @@
 # ghcr.io/hegemony-sh/ansible-runner:0.33. To customise it, build and push it
 # under your own tag and set the step's Execution image:
 #
-#   docker build -t registry.example.com/ansible-runner:custom images/ansible-runner
+#   docker build --no-cache -t registry.example.com/ansible-runner:custom images/ansible-runner
 #   docker push registry.example.com/ansible-runner:custom
 
 # Pinned by digest, so a build uses exactly the reviewed image; Renovate
