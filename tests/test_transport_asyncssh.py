@@ -490,7 +490,7 @@ async def test_jump_host_private_key_is_used_for_the_bastion():
     device = _connection()
     device.run.return_value = _completed(stdout="ok\n")
     connect = AsyncMock(side_effect=[bastion, device])
-    imported = object()
+    imported = asyncssh.generate_private_key("ssh-ed25519")
 
     with (
         patch.object(asyncssh, "connect", connect),

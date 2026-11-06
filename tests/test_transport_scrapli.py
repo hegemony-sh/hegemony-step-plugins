@@ -702,6 +702,7 @@ async def test_open_connection_rides_the_bastion_tunnel():
     connection = _connection()
     scrapli_cls = MagicMock(return_value=connection)
     asyncssh_mock = MagicMock()
+    asyncssh_mock.SSHClientConnectionOptions = transport_module.asyncssh.SSHClientConnectionOptions
     asyncssh_mock.connect = AsyncMock(return_value=bastion)
 
     with (
@@ -724,7 +725,10 @@ async def test_open_connection_rides_the_bastion_tunnel():
     assert "client_keys" not in bastion_kwargs
 
     scrapli_kwargs = scrapli_cls.call_args.kwargs
-    assert scrapli_kwargs["transport_options"] == {"asyncssh": {"tunnel": bastion}}
+    options = scrapli_kwargs["transport_options"]["asyncssh"]
+    assert options["tunnel"] is bastion
+    assert "aes128-cbc" not in options["encryption_algs"]
+    assert "diffie-hellman-group14-sha1" not in options["kex_algs"]
     assert scrapli_kwargs["auth_password"] == "device-pw"
     assert "bastion-pw" not in repr(scrapli_kwargs)
 
@@ -737,7 +741,7 @@ async def test_open_connection_rides_the_bastion_tunnel():
     bastion.wait_closed.assert_awaited()
 
 
-async def test_open_connection_without_jump_sets_no_transport_options():
+async def test_open_connection_without_jump_sets_secure_policy():
     import hegemony_transport_scrapli.transport as transport_module
 
     transport = _make_transport()
@@ -747,7 +751,10 @@ async def test_open_connection_without_jump_sets_no_transport_options():
     with patch.object(transport_module, "AsyncScrapli", scrapli_cls):
         await transport._open_connection()
 
-    assert "transport_options" not in scrapli_cls.call_args.kwargs
+    options = scrapli_cls.call_args.kwargs["transport_options"]["asyncssh"]
+    assert "tunnel" not in options
+    assert "aes128-cbc" not in options["encryption_algs"]
+    assert callable(options["client_factory"])
 
 
 async def test_open_connection_closes_bastion_when_device_open_fails():
@@ -763,6 +770,7 @@ async def test_open_connection_closes_bastion_when_device_open_fails():
     connection.open = AsyncMock(side_effect=OSError("connection refused"))
     scrapli_cls = MagicMock(return_value=connection)
     asyncssh_mock = MagicMock()
+    asyncssh_mock.SSHClientConnectionOptions = transport_module.asyncssh.SSHClientConnectionOptions
     asyncssh_mock.connect = AsyncMock(return_value=bastion)
 
     import pytest
@@ -791,6 +799,7 @@ async def test_connect_budget_is_shared_across_both_hops():
     connection = _connection()
     scrapli_cls = MagicMock(return_value=connection)
     asyncssh_mock = MagicMock()
+    asyncssh_mock.SSHClientConnectionOptions = transport_module.asyncssh.SSHClientConnectionOptions
     asyncssh_mock.connect = AsyncMock(return_value=bastion)
     clock = iter([100.0, 120.0, 120.0, 120.0])  # the bastion login eats 20 s
 
@@ -814,6 +823,7 @@ async def test_connect_budget_floors_rather_than_going_to_zero():
     connection = _connection()
     scrapli_cls = MagicMock(return_value=connection)
     asyncssh_mock = MagicMock()
+    asyncssh_mock.SSHClientConnectionOptions = transport_module.asyncssh.SSHClientConnectionOptions
     asyncssh_mock.connect = AsyncMock(return_value=bastion)
     clock = iter([100.0, 400.0, 400.0, 400.0])
 

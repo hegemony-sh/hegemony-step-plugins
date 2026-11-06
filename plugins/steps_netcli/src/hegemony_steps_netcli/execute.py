@@ -8,7 +8,7 @@
 import logging
 from dataclasses import dataclass, field
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
 
 from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
@@ -22,13 +22,14 @@ from hegemony_step_sdk import (
     for_each_target_device,
     max_parallel_from_config,
 )
+from hegemony_step_sdk.ssh import SshSecurityConfig, configure_ssh_security
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 30
 
 
-class ExecuteCliConfig(BaseModel):
+class ExecuteCliConfig(SshSecurityConfig):
     """Config for ``netcli.execute``."""
 
     model_config = ConfigDict(extra="allow")
@@ -142,6 +143,7 @@ class ExecuteCLIActionHandler(BaseHandler):
                     command_timeout=command_timeout,
                     step_run_id=ctx.step_run_id,
                 )
+                configure_ssh_security(ssh, ctx.config.get("allow_legacy_ssh", False))
                 # Execute all commands together so config mode detection works
                 results = await ssh.execute_commands(commands)
 

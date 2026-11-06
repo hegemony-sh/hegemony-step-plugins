@@ -48,3 +48,15 @@ the device, reports the key exchange, host key, cipher and MAC it agreed on
 once it is logged in. scrapli runs over asyncssh, which keeps both sides'
 KEXINIT messages, and the agreement is worked out from them. A failure to
 record is logged and never fails the connection.
+
+## SSH algorithm policy
+
+Connections use the SDK's secure SSH policy by default. Both the device and
+jump host follow that policy. The netcli steps expose an explicit
+`allow_legacy_ssh` override; see the
+[netcli security reference](../../plugins/steps_netcli/README.md#ssh-security)
+for algorithms, key sizes, risks and library limitations.
+
+Hosts constructing the transport directly can call
+`configure_ssh_security(allow_legacy=True)` before any I/O. The setting belongs
+to that transport instance and never changes library-wide defaults.

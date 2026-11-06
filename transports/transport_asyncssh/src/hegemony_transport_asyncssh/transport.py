@@ -37,6 +37,11 @@ from hegemony_step_sdk import (
     SshAlgorithms,
     TransportOutputSink,
 )
+from hegemony_step_sdk.ssh import (
+    asyncssh_algorithms,
+    asyncssh_security_options,
+    validate_ssh_public_key,
+)
 
 try:
     import asyncssh
@@ -140,15 +145,30 @@ def _known_hosts(
 
 
 async def _presented_key(
-    host: str, port: int, *, tunnel: Any, timeout: float, algorithms: list[str] | None = None
+    host: str,
+    port: int,
+    *,
+    tunnel: Any,
+    timeout: float,
+    algorithms: list[str] | None = None,
+    allow_legacy: bool = False,
 ) -> str | None:
     """The key ``host:port`` presents, fetched by a key exchange alone (no login)."""
+    policy = asyncssh_algorithms(asyncssh, allow_legacy)
+    if algorithms is not None:
+        policy["server_host_key_algs"] = tuple(
+            alg for alg in policy["server_host_key_algs"] if alg in algorithms
+        )
+        if not policy["server_host_key_algs"]:
+            raise ValueError("requested host signatures are excluded by the SSH policy")
     key = await asyncio.wait_for(
         asyncssh.get_server_host_key(
             host,
             port,
             tunnel=tunnel if tunnel is not None else (),
-            server_host_key_algs=algorithms or (),
+            kex_algs=policy["kex_algs"],
+            server_host_key_algs=policy["server_host_key_algs"],
+            options=asyncssh.SSHClientConnectionOptions(**policy),
         ),
         timeout=timeout,
     )
@@ -229,6 +249,13 @@ class AsyncSSHTransport:
     #: Feature flag the host checks before passing ``host_key_verifier``, as
     #: for the output sink.
     supports_host_key_verifier = True
+    _allow_legacy_ssh = False
+
+    def configure_ssh_security(self, *, allow_legacy: bool = False) -> None:
+        """Set the policy before executing commands; applies to both SSH hops."""
+        if not isinstance(allow_legacy, bool):
+            raise ValueError("allow_legacy must be a boolean")
+        self._allow_legacy_ssh = allow_legacy
 
     #: Feature flag the host checks before passing ``ssh_algorithm_recorder``.
     supports_ssh_algorithm_recorder = True
@@ -333,12 +360,16 @@ class AsyncSSHTransport:
         keys = await verifier.trusted_keys(host, port)
         if keys is None or keys:
             return keys
-        presented = await _presented_key(host, port, tunnel=tunnel, timeout=timeout)
+        presented = await _presented_key(
+            host, port, tunnel=tunnel, timeout=timeout, allow_legacy=self._allow_legacy_ssh
+        )
         if presented is None:
             raise HostKeyRejectedError(
                 f"{host}:{port} completed its key exchange without a host key, "
                 "so there is no key to trust"
             )
+        if not self._allow_legacy_ssh:
+            validate_ssh_public_key(presented)
         await verifier.learn(host, port, presented)
         return (presented,)
 
@@ -425,6 +456,10 @@ class AsyncSSHTransport:
             if jump.private_key
             else {}
         )
+        if jump.private_key and not self._allow_legacy_ssh:
+            validate_ssh_public_key(
+                key_options["client_keys"][0].export_public_key("openssh").decode("ascii")
+            )
         try:
             tunnel = await asyncssh.connect(
                 jump.host,
@@ -432,7 +467,7 @@ class AsyncSSHTransport:
                 username=jump.username or None,
                 password=jump.password or None,
                 **key_options,
-                known_hosts=_known_hosts(jump.host, jump.port, keys),
+                **asyncssh_security_options(asyncssh, keys, self._allow_legacy_ssh),
                 connect_timeout=self.connect_timeout,
             )
         except Exception as exc:
@@ -467,7 +502,7 @@ class AsyncSSHTransport:
                     username=self.username,
                     # Empty password falls back to key/agent auth.
                     password=self.password or None,
-                    known_hosts=_known_hosts(self.host, self.port, keys),
+                    **asyncssh_security_options(asyncssh, keys, self._allow_legacy_ssh),
                     connect_timeout=device_timeout,
                     # SSH session #2 runs inside a direct-tcpip channel of
                     # session #1: end-to-end encrypted, the bastion never sees

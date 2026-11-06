@@ -10,7 +10,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
 
 from hegemony_step_sdk import (
     MAX_PARALLEL_DEVICES_LIMIT,
@@ -23,6 +23,7 @@ from hegemony_step_sdk import (
     for_each_target_device,
     max_parallel_from_config,
 )
+from hegemony_step_sdk.ssh import SshSecurityConfig, configure_ssh_security
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ MAX_OUTPUT_TEXT_CHARS = 16_384
 MAX_OUTPUT_TOTAL_CHARS = 49_152
 
 
-class CollectEvidenceConfig(BaseModel):
+class CollectEvidenceConfig(SshSecurityConfig):
     """Config for ``netcli.collect_evidence``."""
 
     model_config = ConfigDict(extra="allow")
@@ -197,6 +198,7 @@ class CollectEvidenceHandler(BaseHandler):
                     command_timeout=command_timeout,
                     step_run_id=ctx.step_run_id,
                 )
+                configure_ssh_security(ssh, ctx.config.get("allow_legacy_ssh", False))
                 # Execute all commands together for efficiency
                 results = await ssh.execute_commands(commands)
                 for result in results:
