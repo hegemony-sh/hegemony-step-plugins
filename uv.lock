@@ -774,7 +774,7 @@ dependencies = [
 requires-dist = [
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
     { name = "netmiko", specifier = ">=4.3.0" },
-    { name = "paramiko", specifier = ">=2.12" },
+    { name = "paramiko", specifier = ">=5.1.0" },
 ]
 
 [[package]]
