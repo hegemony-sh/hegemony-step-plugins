@@ -16,9 +16,7 @@ and how it relates to the platform.
 By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 Report vulnerabilities privately through the process in
-[SECURITY.md](SECURITY.md), by email to
-[security@hegemony.sh](mailto:security@hegemony.sh). Do **not** open public
-issues for vulnerabilities, leaked secrets, exploit details, or suspected
+[SECURITY.md](SECURITY.md). Do **not** open public issues for vulnerabilities, leaked secrets, exploit details, or suspected
 compromise.
 
 ## Licensing and DCO
