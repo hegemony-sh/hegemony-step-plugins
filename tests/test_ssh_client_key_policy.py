@@ -240,34 +240,55 @@ async def test_default_ed448_identity_is_offered(tmp_path, monkeypatch, cls, pla
         assert key_line(key) in offered
 
 
-@pytest.mark.parametrize("subject", ["weak_rsa", "strong_rsa", "ed25519"])
-def test_x509_identity_subject_key_strength(subject):
-    """X.509 identities are checked through their subject key, not skipped by type."""
+@pytest.mark.parametrize("weak", [None, "subject", "issuer"])
+def test_x509_identity_chain_key_strength(weak):
+    """X.509 identities are checked through every certificate key in their chain."""
     from types import SimpleNamespace
 
-    key = (
-        asyncssh.generate_private_key("ssh-rsa", key_size=1024)
-        if subject == "weak_rsa"
-        else asyncssh.generate_private_key("ssh-rsa", key_size=2048)
-        if subject == "strong_rsa"
-        else asyncssh.generate_private_key("ssh-ed25519")
+    def rsa(bits):
+        return asyncssh.generate_private_key("ssh-rsa", key_size=bits)
+
+    keys = {
+        b"subject-der": rsa(1024)
+        if weak == "subject"
+        else asyncssh.generate_private_key("ssh-ed25519"),
+        b"issuer-der": rsa(1024) if weak == "issuer" else rsa(2048),
+    }
+
+    def string(value):
+        return len(value).to_bytes(4, "big") + value
+
+    data = (
+        string(b"x509v3-ssh-ed25519")
+        + len(keys).to_bytes(4, "big")
+        + b"".join(string(der) for der in keys)
+        + bytes(4)
     )
-    algorithm = b"x509v3-" + key.algorithm
-    pair = SimpleNamespace(public_data=len(algorithm).to_bytes(4, "big") + algorithm + b"chain")
     imported = []
 
-    def import_certificate(line):
-        imported.append(line.split()[0])
-        # An X.509 chain exposes its subject key and has no OpenSSH signing key.
-        return SimpleNamespace(key=key)
+    def import_certificate(der):
+        imported.append(der)
+        return SimpleNamespace(key=keys[der])
 
     library = SimpleNamespace(import_certificate=import_certificate)
-    if subject == "weak_rsa":
+    pair = SimpleNamespace(public_data=data)
+    if weak:
         with pytest.raises(ValueError, match="2048"):
             validate_asyncssh_client_key(library, pair)
     else:
         validate_asyncssh_client_key(library, pair)
-    assert imported == [algorithm.decode()]
+    assert imported == list(keys)
+
+
+@pytest.mark.parametrize("data", [b"", bytes(4), b"\x00\x00\x00\x01\x00\x00\x00\x09short"])
+def test_malformed_x509_chain_is_rejected(data):
+    """An empty or truncated chain is rejected, so the identity is skipped."""
+    from types import SimpleNamespace
+
+    algorithm = b"x509v3-ssh-ed25519"
+    pair = SimpleNamespace(public_data=len(algorithm).to_bytes(4, "big") + algorithm + data)
+    with pytest.raises(ValueError, match="X.509"):
+        validate_asyncssh_client_key(SimpleNamespace(), pair)
 
 
 @pytest.mark.parametrize("bits", [1024, 2048])

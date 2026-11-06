@@ -43,9 +43,11 @@ WEAK_ALGORITHM_PARTS: dict[str, frozenset[str]] = {
     "signature": frozenset({"dss", "sha1"}),
 }
 #: Whole names that are weak although none of their parts is: the RSA
-#: signatures that use SHA-1.
+#: signatures (plain, OpenSSH-certificate and X.509) that use SHA-1.
 WEAK_ALGORITHM_NAMES: dict[str, frozenset[str]] = {
-    "signature": frozenset({"ssh-rsa", "x509v3-ssh-rsa", "x509v3-sign-rsa"}),
+    "signature": frozenset(
+        {"ssh-rsa", "ssh-rsa-cert-v01@openssh.com", "x509v3-ssh-rsa", "x509v3-sign-rsa"}
+    ),
 }
 
 #: Smallest RSA modulus, in bits, accepted for host and login keys.
@@ -197,22 +199,44 @@ def validate_asyncssh_client_key(library: Any, keypair: Any) -> None:
     """Validate a login identity's keys, including certificate subject and signing keys.
 
     OpenSSH certificates are checked for both the user key and the signing
-    (certificate authority) key; X.509 identities for their subject key.
+    (certificate authority) key; X.509 identities for the key of every
+    certificate in the chain they present.
     """
     data = keypair.public_data
     size = int.from_bytes(data[:4], "big")
     algorithm = data[4 : 4 + size].decode("ascii")
-    line = algorithm + " " + base64.b64encode(data).decode("ascii")
-    if algorithm.endswith("-cert-v01@openssh.com") or algorithm.startswith("x509v3-"):
-        certificate = library.import_certificate(line)
-        keys = (certificate.key, getattr(certificate, "signing_key", None))
+    if algorithm.startswith("x509v3-"):
+        keys = [library.import_certificate(der).key for der in _x509_chain(data, 4 + size)]
+    elif algorithm.endswith("-cert-v01@openssh.com"):
+        certificate = library.import_certificate(
+            algorithm + " " + base64.b64encode(data).decode("ascii")
+        )
+        keys = [certificate.key, certificate.signing_key]
     else:
-        keys = (library.import_public_key(line),)
+        keys = [library.import_public_key(algorithm + " " + base64.b64encode(data).decode())]
     for key in keys:
-        if key is not None:
-            validate_ssh_public_key(
-                key.export_public_key("openssh").decode("ascii"), allow_security_keys=True
-            )
+        validate_ssh_public_key(
+            key.export_public_key("openssh").decode("ascii"), allow_security_keys=True
+        )
+
+
+def _x509_chain(data: bytes, offset: int) -> list[bytes]:
+    """DER certificates of an X.509 public key blob (RFC 6187), after its algorithm name."""
+    if offset + 4 > len(data):
+        raise ValueError("truncated X.509 certificate chain")
+    count = int.from_bytes(data[offset : offset + 4], "big")
+    offset += 4
+    certificates = []
+    for _ in range(count):
+        size = int.from_bytes(data[offset : offset + 4], "big")
+        certificate = data[offset + 4 : offset + 4 + size]
+        if offset + 4 > len(data) or len(certificate) != size:
+            raise ValueError("truncated X.509 certificate chain")
+        certificates.append(certificate)
+        offset += 4 + size
+    if not certificates:
+        raise ValueError("empty X.509 certificate chain")
+    return certificates
 
 
 def _identity_label(keypair: Any) -> str:
@@ -246,6 +270,12 @@ def asyncssh_algorithms(library: Any, allow_legacy: bool = False) -> dict[str, A
             (alg.decode("ascii") for alg in getattr(implemented, name)),
             allow_legacy,
         )
+    # AsyncSSH accepts X.509 signatures only with X.509 trust anchors, which
+    # these transports never configure (host trust uses plain keys). With
+    # PyOpenSSL installed its defaults still list them, so drop them here.
+    policy["signature_algs"] = tuple(
+        alg for alg in policy["signature_algs"] if not alg.startswith("x509v3-")
+    )
     policy["server_host_key_algs"] = tuple(
         alg for alg in policy["signature_algs"] if _plain_host_key_algorithm(alg)
     )

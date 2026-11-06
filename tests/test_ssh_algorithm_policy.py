@@ -25,6 +25,12 @@ from hegemony_transport_scrapli.transport import ScrapliTransport
 from tests.ssh_fakes import PASSWORD, FakeVerifier, key_line, ssh_servers
 from tests.test_ssh_security_policy import build
 
+#: AsyncSSH implements UMAC only when the nettle library is installed.
+UMAC_AVAILABLE = (
+    b"umac-128-etm@openssh.com"
+    in asyncssh.SSHClientConnectionOptions(config=None, mac_algs="*").mac_algs
+)
+
 ASYNCSSH_KINDS = {
     "kex_algs": "kex",
     "encryption_algs": "cipher",
@@ -54,6 +60,7 @@ ASYNCSSH_KINDS = {
         ("mac", "hmac-md5-96"),
         ("mac", "hmac-sha2-256-96"),
         ("signature", "ssh-rsa"),
+        ("signature", "ssh-rsa-cert-v01@openssh.com"),
         ("signature", "ssh-dss"),
         ("signature", "x509v3-ssh-rsa"),
         ("signature", "x509v3-sign-dss"),
@@ -76,6 +83,7 @@ def test_weak_algorithms_are_recognised(kind, name):
         ("mac", "umac-128-etm@openssh.com"),
         ("mac", "hmac-sha2-512-etm@openssh.com"),
         ("signature", "rsa-sha2-512"),
+        ("signature", "rsa-sha2-512-cert-v01@openssh.com"),
         ("signature", "ssh-ed448"),
         ("signature", "sk-ssh-ed25519@openssh.com"),
     ],
@@ -108,13 +116,18 @@ def test_asyncssh_policy_follows_the_library(legacy):
         weak = [alg for alg in policy[name] if is_weak_algorithm(kind, alg)]
         assert bool(weak) is legacy, (name, weak)
     for name in ("kex_algs", "encryption_algs", "mac_algs", "signature_algs"):
-        every = {alg.decode() for alg in getattr(implemented, name)}
+        # X.509 signatures need X.509 trust anchors, which the transports never set.
+        every = {
+            alg.decode() for alg in getattr(implemented, name) if not alg.startswith(b"x509v3-")
+        }
         assert (set(policy[name]) == every) is legacy
     # Strong algorithms the earlier fixed lists left out are now offered.
     assert "curve448-sha512" in policy["kex_algs"]
-    assert "umac-128-etm@openssh.com" in policy["mac_algs"]
+    if UMAC_AVAILABLE:
+        assert "umac-128-etm@openssh.com" in policy["mac_algs"]
     assert "ssh-ed448" in policy["server_host_key_algs"]
     assert not any(alg.startswith(("sk-", "webauthn-")) for alg in policy["server_host_key_algs"])
+    assert not any(alg.startswith("x509v3-") for alg in policy["signature_algs"])
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -149,7 +162,11 @@ def test_paramiko_policy_follows_the_library(legacy):
     ("option", "value"),
     [
         ("kex_algs", "curve448-sha512"),
-        ("mac_algs", "umac-128-etm@openssh.com"),
+        pytest.param(
+            "mac_algs",
+            "umac-128-etm@openssh.com",
+            marks=pytest.mark.skipif(not UMAC_AVAILABLE, reason="AsyncSSH UMAC needs nettle"),
+        ),
     ],
 )
 async def test_strong_algorithm_outside_old_lists_connects_securely(cls, platform, option, value):

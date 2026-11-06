@@ -54,6 +54,7 @@ before offering them to the server. Weak discovered identities are skipped, with
 a logged warning naming the key and the reason, so a later strong key
 or password can still authenticate; an explicitly configured weak jump-host key
 is rejected. RSA user keys and OpenSSH certificate signing keys must be at
-least 2048 bits, and X.509 identities are checked by their subject key.
+least 2048 bits. X.509 certificate identities are not used for login: the
+transports configure no X.509 trust anchors, which AsyncSSH requires for them.
 Ed25519, Ed448, ECDSA and hardware-backed Ed25519/P-256 identities remain
 supported. The explicit legacy override also permits smaller login keys.
