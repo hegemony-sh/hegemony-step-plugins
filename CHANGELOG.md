@@ -1,3 +1,11 @@
+## [0.34.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.34.0...v0.34.1) (2026-11-07)
+
+### Bug Fixes
+
+* **ssh:** derive algorithms from the library and name only weak ones ([05bd386](https://github.com/hegemony-sh/hegemony-step-plugins/commit/05bd3860110c2aa19b79e17a821136a3bff86659))
+* **ssh:** enforce strength of discovered client identities ([102a819](https://github.com/hegemony-sh/hegemony-step-plugins/commit/102a819381e6e2419f89f6058a67cd47b314a72e))
+* **ssh:** keep X.509 signatures out of AsyncSSH lists ([b46f4a5](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b46f4a55268261ea617ac607e32eea36d7b9e94c))
+
 ## [0.34.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.33.4...v0.34.0) (2026-11-06)
 
 ### ⚠ BREAKING CHANGES
