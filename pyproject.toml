@@ -16,6 +16,7 @@ dependencies = []
 dev = [
     "httpx>=0.27.0",
     "pre-commit>=3.8.0",
+    "pyopenssl>=26.4.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=0.23.0",
     "pyyaml>=6.0.0",
