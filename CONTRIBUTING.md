@@ -91,6 +91,22 @@ holder and Jakub Trávník as the author, in the file's own comment syntax:
 
 <!-- REUSE-IgnoreEnd -->
 
+### Tests
+
+Every change that adds or changes behaviour comes with tests in the same pull
+request, and a pull request is not merged while CI is red:
+
+- A new step handler, transport, probe or config field gets tests of its normal
+  use and of how it fails (invalid input, an unreachable device, a refused
+  credential).
+- A bug fix adds a regression test that fails without the fix.
+- Tests use synthetic credentials, hosts and keys only, and run offline: a test
+  that needs a server starts a local one, as the SSH and HTTP tests do.
+- Tests live under `tests/`, one module per handler or transport
+  (`test_<area>.py`); `uv run pytest` runs them all, and CI runs the same
+  command on every pull request to `main` or `develop` and on every push to
+  them.
+
 ### Fuzzing
 
 The Atheris targets in `fuzz/*_fuzzer.py` exercise HTTP JSON paths, status
