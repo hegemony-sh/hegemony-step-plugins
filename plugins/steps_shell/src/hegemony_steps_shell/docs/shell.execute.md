@@ -79,6 +79,16 @@ that many hosts concurrently (capped at 32). Results are always aggregated in
 device order, and command output streams into the step's live log as it
 arrives.
 
+## SSH Compatibility
+
+Allow legacy SSH algorithms defaults to off. Enable `allow_legacy_ssh` only
+for older hosts which require weak algorithms or small host keys; it applies
+to the host and jump host for this step. Host-key verification still applies,
+and a failed secure connection never retries weakly. Prefer upgrading the
+host; use legacy mode only on a trusted network. The setting needs a Hegemony
+version that supports it for shell steps; an older one refuses the step rather
+than connecting securely in its place.
+
 ## Output
 
 Later steps can read `steps.NODE_ID.stdout` — the combined standard output

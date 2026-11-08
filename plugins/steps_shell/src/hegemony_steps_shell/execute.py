@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, ConfigDict, Field, field_validator
 
 from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
@@ -33,6 +33,7 @@ from hegemony_step_sdk import (
     command_label,
     for_each_target_device,
 )
+from hegemony_step_sdk.ssh import SshSecurityConfig
 
 from .templates import DYNAMIC_SHELL, PWSH_VALUES, command_template_problem, inserts_values
 
@@ -146,7 +147,26 @@ def build_command(
     raise ValueError(f"unsupported shell interpreter: {shell}")
 
 
-class ShellExecuteConfig(BaseModel):
+async def _open_shell(services: Any, device: dict[str, Any], allow_legacy_ssh: bool) -> Any:
+    """Open the host's shell transport; never silently drop a legacy request.
+
+    The setting is passed only when it is on, so a platform from before it
+    still opens secure connections, and refuses a legacy request plainly.
+    """
+    if not allow_legacy_ssh:
+        return await services.open_shell(device)
+    try:
+        return await services.open_shell(device, allow_legacy_ssh=True)
+    except TypeError as exc:
+        if "allow_legacy_ssh" not in str(exc):
+            raise
+        raise ValueError(
+            "this Hegemony version does not support the allow_legacy_ssh setting "
+            "for shell steps; upgrade the platform or turn the setting off"
+        ) from exc
+
+
+class ShellExecuteConfig(SshSecurityConfig):
     """Config for ``shell.execute``."""
 
     # A number written as an environment value (PORT: 8080) is its text.
@@ -314,7 +334,7 @@ class ShellExecuteHandler(BaseHandler):
                 return outcome
 
             try:
-                transport = await services.open_shell(device)
+                transport = await _open_shell(services, device, config.allow_legacy_ssh)
             except Exception as exc:
                 outcome.success = False
                 outcome.errors.append(f"{device_name}: {exc}")
