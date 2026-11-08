@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-step-sdk"
-version = "0.34.1"
+version = "0.35.0"
 description = "Public SDK for Hegemony step-handler plugins"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

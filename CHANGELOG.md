@@ -1,3 +1,14 @@
+## [0.35.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.34.1...v0.35.0) (2026-11-08)
+
+### ⚠ BREAKING CHANGES
+
+* **ssh:** Peers offering only DH group exchange require allow_legacy_ssh.
+This opt-in can permit groups below 2048 bits; prefer a fixed safe exchange.
+
+### Bug Fixes
+
+* **ssh:** disable unbounded DH group exchange by default ([aee53fb](https://github.com/hegemony-sh/hegemony-step-plugins/commit/aee53fbd3f212d080c64f16c986288fbc4966a72))
+
 ## [0.34.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.34.0...v0.34.1) (2026-11-07)
 
 ### Bug Fixes
