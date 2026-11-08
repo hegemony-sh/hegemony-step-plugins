@@ -104,7 +104,8 @@ request, and a pull request is not merged while CI is red:
   that needs a server starts a local one, as the SSH and HTTP tests do.
 - Tests live under `tests/`, one module per handler or transport
   (`test_<area>.py`); `uv run pytest` runs them all, and CI runs the same
-  command on every pull request.
+  command on every pull request to `main` or `develop` and on every push to
+  them.
 
 ### Fuzzing
 
