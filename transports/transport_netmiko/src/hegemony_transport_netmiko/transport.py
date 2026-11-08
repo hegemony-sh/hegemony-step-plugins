@@ -34,7 +34,11 @@ from hegemony_step_sdk import (
     SshAlgorithms,
     TransportOutputSink,
 )
-from hegemony_step_sdk.ssh import configure_paramiko, validate_ssh_public_key
+from hegemony_step_sdk.ssh import (
+    MIN_DH_GROUP_BITS,
+    configure_paramiko,
+    validate_ssh_public_key,
+)
 
 try:
     from netmiko import ConnectHandler
@@ -141,6 +145,28 @@ def _presented_key(sock: Any, timeout: float, *, allow_legacy: bool = False) -> 
 
 
 if paramiko is not None:
+    from paramiko.kex_gex import KexGexSHA256
+
+    class _BoundedKexGexSHA256(KexGexSHA256):
+        """Group exchange that refuses a server group below ``MIN_DH_GROUP_BITS``.
+
+        Paramiko asks for 2048 bits but accepts any group from 1024 bits up.
+        The check runs on the server's group, before the client computes its
+        share, so a small group ends the connection before any credential.
+        """
+
+        def _parse_kexdh_gex_group(self, m: Any) -> None:
+            bits = m.get_mpint().bit_length()
+            if bits < MIN_DH_GROUP_BITS:
+                raise paramiko.SSHException(
+                    f"server offered a {bits}-bit Diffie-Hellman group; "
+                    f"at least {MIN_DH_GROUP_BITS} bits are required"
+                )
+            m.rewind()
+            super()._parse_kexdh_gex_group(m)
+
+    #: Paramiko's group exchanges with the minimum enforced, by name.
+    _BOUNDED_GROUP_EXCHANGE = {KexGexSHA256.name: _BoundedKexGexSHA256}
 
     class _KexinitKeepingTransport(paramiko.Transport):
         """A paramiko transport that keeps both KEXINIT messages of its first key exchange.
@@ -166,7 +192,7 @@ if paramiko is not None:
             super().__init__(*args, **kwargs)
             self._allow_legacy = allow_legacy
             self._skip_rejected_keys = skip_rejected_keys
-            configure_paramiko(self, allow_legacy)
+            configure_paramiko(self, allow_legacy, _BOUNDED_GROUP_EXCHANGE)
 
         def start_client(self, *args: Any, **kwargs: Any) -> None:
             """Complete key exchange and close the connection if its key is rejected."""

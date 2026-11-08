@@ -21,7 +21,7 @@ import base64
 import hashlib
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Mapping
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -52,10 +52,14 @@ WEAK_ALGORITHM_NAMES: dict[str, frozenset[str]] = {
 }
 
 #: These exchanges let the server choose a DH group. Supported libraries can
-#: accept a group below 2048 bits even with a SHA-256 exchange hash. Until a
-#: per-connection minimum can be enforced before key exchange, keep these
-#: families behind the explicit legacy opt-in, including GSS variants.
+#: accept a group below 2048 bits even with a SHA-256 exchange hash. They stay
+#: behind the explicit legacy opt-in, GSS variants included, unless the adapter
+#: enforces ``MIN_DH_GROUP_BITS`` on the server's group for that connection
+#: (``algorithm_policy``'s ``bounded``; Paramiko does, see ``configure_paramiko``).
 UNBOUNDED_DH_EXCHANGE_PREFIXES = ("diffie-hellman-group-exchange-", "gss-gex-")
+
+#: Smallest Diffie-Hellman group, in bits, a bounded group exchange accepts.
+MIN_DH_GROUP_BITS = 2048
 
 #: Smallest RSA modulus, in bits, accepted for host and login keys.
 MIN_RSA_BITS = 2048
@@ -69,13 +73,19 @@ def is_weak_algorithm(kind: str, name: str) -> bool:
 
 
 def algorithm_policy(
-    kind: str, defaults: Iterable[str], implemented: Iterable[str], allow_legacy: bool = False
+    kind: str,
+    defaults: Iterable[str],
+    implemented: Iterable[str],
+    allow_legacy: bool = False,
+    bounded: Collection[str] = (),
 ) -> tuple[str, ...]:
     """Filter weak or unbounded exchanges; legacy offers everything implemented.
 
     Order is the library's: its defaults first, then (legacy only) the
     algorithms it implements but does not enable by default. A default the
-    library does not implement is dropped.
+    library does not implement is dropped. ``bounded`` names group exchanges
+    for which the adapter refuses a server group below ``MIN_DH_GROUP_BITS``;
+    those stay in secure mode unless their exchange hash is weak.
     """
     implemented = tuple(implemented)
     defaults = [name for name in defaults if name in implemented]
@@ -86,7 +96,11 @@ def algorithm_policy(
             name
             for name in defaults
             if not is_weak_algorithm(kind, name)
-            and not (kind == "kex" and name.startswith(UNBOUNDED_DH_EXCHANGE_PREFIXES))
+            and not (
+                kind == "kex"
+                and name.startswith(UNBOUNDED_DH_EXCHANGE_PREFIXES)
+                and name not in bounded
+            )
         )
     )
 
@@ -354,12 +368,25 @@ def asyncssh_security_options(
     return options
 
 
-def configure_paramiko(transport: Any, allow_legacy: bool = False) -> None:
+def configure_paramiko(
+    transport: Any,
+    allow_legacy: bool = False,
+    group_exchange: Mapping[str, Any] | None = None,
+) -> None:
     """Apply the policy to Paramiko's per-connection ``SecurityOptions`` lists.
 
     Paramiko's defaults are the starting point. With legacy, every algorithm
     in its registries (``Transport._kex_info`` and so on) is offered too.
+
+    ``group_exchange`` maps group-exchange names to the adapter's handlers that
+    refuse a server group below ``MIN_DH_GROUP_BITS``. In secure mode they
+    replace Paramiko's handlers on this connection only (an instance attribute
+    over the class registry), and those exchanges are offered again.
     """
+    bounded: tuple[str, ...] = ()
+    if group_exchange and not allow_legacy:
+        transport._kex_info = {**transport._kex_info, **group_exchange}
+        bounded = tuple(group_exchange)
     options = transport.get_security_options()
     for name, kind, registry in (
         ("kex", "kex", "_kex_info"),
@@ -368,7 +395,13 @@ def configure_paramiko(transport: Any, allow_legacy: bool = False) -> None:
         ("key_types", "signature", "_key_info"),
     ):
         implemented = tuple(getattr(transport, registry, None) or ())
-        algorithms = algorithm_policy(kind, getattr(options, name), implemented, allow_legacy)
+        algorithms = algorithm_policy(
+            kind,
+            getattr(options, name),
+            implemented,
+            allow_legacy,
+            bounded if kind == "kex" else (),
+        )
         if name == "key_types":
             algorithms = tuple(alg for alg in algorithms if _plain_host_key_algorithm(alg))
         if not algorithms:

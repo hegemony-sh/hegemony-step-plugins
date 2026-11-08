@@ -11,6 +11,7 @@ from typing import Any
 
 import asyncssh
 import paramiko
+import paramiko.kex_gex
 import pytest
 
 from hegemony_step_sdk.ssh import (
@@ -253,3 +254,37 @@ def test_unbounded_group_exchange_requires_legacy(name):
     defaults = [name, "diffie-hellman-group14-sha256", "curve25519-sha256"]
     assert algorithm_policy("kex", defaults, defaults) == tuple(defaults[1:])
     assert algorithm_policy("kex", defaults, defaults, allow_legacy=True) == tuple(defaults)
+
+
+def test_bounded_group_exchange_stays_in_secure_mode():
+    """An exchange whose group size the adapter enforces is kept; a weak hash is not."""
+    gex = "diffie-hellman-group-exchange-sha256"
+    defaults = [gex, "diffie-hellman-group-exchange-sha1", "gss-gex-sha256", "curve25519-sha256"]
+    assert algorithm_policy("kex", defaults, defaults, bounded=[gex]) == (gex, "curve25519-sha256")
+    assert algorithm_policy("kex", defaults, defaults) == ("curve25519-sha256",)
+
+
+def test_paramiko_bounded_group_exchange_is_per_connection():
+    """The bounded handler replaces Paramiko's on this connection only, in secure mode only."""
+
+    class Bounded(paramiko.kex_gex.KexGexSHA256):
+        pass
+
+    gex = paramiko.kex_gex.KexGexSHA256.name
+    sockets = [socket.socketpair() for _ in range(3)]
+    secure, legacy, other = (paramiko.Transport(left) for left, _ in sockets)
+    try:
+        configure_paramiko(secure, False, {gex: Bounded})
+        configure_paramiko(legacy, True, {gex: Bounded})
+        configure_paramiko(other, False)
+        assert secure._kex_info[gex] is Bounded
+        assert gex in secure.get_security_options().kex
+        assert legacy._kex_info[gex] is paramiko.kex_gex.KexGexSHA256
+        assert gex in legacy.get_security_options().kex
+        assert gex not in other.get_security_options().kex
+        assert paramiko.Transport._kex_info[gex] is paramiko.kex_gex.KexGexSHA256
+    finally:
+        for transport in (secure, legacy, other):
+            transport.close()
+        for _, right in sockets:
+            right.close()
