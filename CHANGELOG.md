@@ -1,3 +1,9 @@
+## [0.36.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.35.0...v0.36.0) (2026-11-08)
+
+### Features
+
+* **netmiko:** keep DH group exchange with a 2048-bit group minimum ([01c2851](https://github.com/hegemony-sh/hegemony-step-plugins/commit/01c2851e004537d1e50a4d43b4a1959f2e2cc19f))
+
 ## [0.35.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.34.1...v0.35.0) (2026-11-08)
 
 ### ⚠ BREAKING CHANGES
