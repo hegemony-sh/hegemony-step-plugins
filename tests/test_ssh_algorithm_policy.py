@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""The SSH policy names only weak algorithms; everything else comes from the library."""
+"""Library defaults are filtered for weak algorithms and unbounded group exchanges."""
 
 import base64
 import socket
@@ -89,7 +89,7 @@ def test_weak_algorithms_are_recognised(kind, name):
     ],
 )
 def test_strong_algorithms_are_not_weak(kind, name):
-    """Strong algorithms are never filtered, including ones no list names."""
+    """Strong primitives are not mislabeled weak; exchange-size policy is separate."""
     assert not is_weak_algorithm(kind, name)
 
 
@@ -237,3 +237,19 @@ def test_certificates_are_not_validated_as_plain_keys(kind):
     blob = len(kind).to_bytes(4, "big") + kind.encode()
     with pytest.raises(ValueError, match="certificates"):
         validate_ssh_public_key(kind + " " + base64.b64encode(blob).decode())
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "diffie-hellman-group-exchange-sha256",
+        "diffie-hellman-group-exchange-sha256@vendor.example",
+        "gss-gex-sha256",
+        "gss-gex-sha256-example-mechanism",
+    ],
+)
+def test_unbounded_group_exchange_requires_legacy(name):
+    """A strong exchange hash does not establish the negotiated DH group's size."""
+    defaults = [name, "diffie-hellman-group14-sha256", "curve25519-sha256"]
+    assert algorithm_policy("kex", defaults, defaults) == tuple(defaults[1:])
+    assert algorithm_policy("kex", defaults, defaults, allow_legacy=True) == tuple(defaults)
