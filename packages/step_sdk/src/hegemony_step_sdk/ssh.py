@@ -8,9 +8,10 @@
 No SSH library is imported by the SDK. Adapters supply their library objects.
 Legacy negotiation is explicit; a failed secure handshake never retries weakly.
 
-The policy names only what is weak. Secure mode starts from the installed
-library's own default algorithms and removes the weak ones, so algorithms a
-library adds later are used without a policy change. The explicit legacy
+The policy names weak algorithms and exchanges whose minimum size cannot be
+enforced. Secure mode starts from the installed library's own defaults and
+removes those choices, so algorithms a library adds later are used without a
+policy change. The explicit legacy
 override offers every algorithm the library still implements, weak included.
 """
 
@@ -50,6 +51,12 @@ WEAK_ALGORITHM_NAMES: dict[str, frozenset[str]] = {
     ),
 }
 
+#: These exchanges let the server choose a DH group. Supported libraries can
+#: accept a group below 2048 bits even with a SHA-256 exchange hash. Until a
+#: per-connection minimum can be enforced before key exchange, keep these
+#: families behind the explicit legacy opt-in, including GSS variants.
+UNBOUNDED_DH_EXCHANGE_PREFIXES = ("diffie-hellman-group-exchange-", "gss-gex-")
+
 #: Smallest RSA modulus, in bits, accepted for host and login keys.
 MIN_RSA_BITS = 2048
 
@@ -64,7 +71,7 @@ def is_weak_algorithm(kind: str, name: str) -> bool:
 def algorithm_policy(
     kind: str, defaults: Iterable[str], implemented: Iterable[str], allow_legacy: bool = False
 ) -> tuple[str, ...]:
-    """The library's defaults without weak names, or with legacy, everything it implements.
+    """Filter weak or unbounded exchanges; legacy offers everything implemented.
 
     Order is the library's: its defaults first, then (legacy only) the
     algorithms it implements but does not enable by default. A default the
@@ -74,7 +81,14 @@ def algorithm_policy(
     defaults = [name for name in defaults if name in implemented]
     if allow_legacy:
         return tuple(dict.fromkeys([*defaults, *implemented]))
-    return tuple(dict.fromkeys(name for name in defaults if not is_weak_algorithm(kind, name)))
+    return tuple(
+        dict.fromkeys(
+            name
+            for name in defaults
+            if not is_weak_algorithm(kind, name)
+            and not (kind == "kex" and name.startswith(UNBOUNDED_DH_EXCHANGE_PREFIXES))
+        )
+    )
 
 
 def _plain_host_key_algorithm(name: str) -> bool:

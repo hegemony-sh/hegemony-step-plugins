@@ -23,11 +23,18 @@ The built-in AsyncSSH, Scrapli and Netmiko device transports use the SSH
 library's own default algorithms, minus the ones known to be weak: SHA-1 key
 exchange, CBC/3DES/Blowfish/CAST/RC4 encryption, SHA-1/MD5 and truncated
 (96-bit) MACs, and DSA or SHA-1 signatures (`ssh-rsa`). The policy lists only
-these weak families, so strong algorithms a library adds later, such as new
+these weak families and exchanges without an enforceable minimum size, so
+strong algorithms a library adds later, such as new
 post-quantum key exchanges or Ed448, are used without a policy change. RSA
 host keys must be at least 2048 bits and DSA host keys are refused. The policy
 applies to the device and its jump host, including first-contact key
-discovery. A failed secure negotiation never retries with weaker settings.
+discovery. Variable-size Diffie–Hellman group exchange (including GSS group
+exchange) is disabled in secure mode: the SSH libraries can accept a server's
+group smaller than 2048 bits, even with a SHA-256 exchange hash. Use fixed DH
+groups of at least 2048 bits, ECDH, Curve25519/448, or a supported post-quantum
+exchange instead. A peer offering only group exchange needs the explicit legacy
+setting below; that setting can permit undersized groups. A failed secure
+negotiation never retries with weaker settings.
 
 For an older device, enable **Allow legacy SSH algorithms**
 (`allow_legacy_ssh: true`) in the `netcli.execute` or
