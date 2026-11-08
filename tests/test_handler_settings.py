@@ -569,3 +569,48 @@ def test_an_empty_container_timeout_means_the_step_timeout(model_path, field):
     module_name, _, class_name = model_path.partition(":")
     model = getattr(__import__(module_name, fromlist=[class_name]), class_name)
     assert model.model_fields[field].default is None
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_shell_passes_legacy_ssh_only_when_on(legacy):
+    """A secure step calls the host exactly as before; a legacy one asks for it."""
+    from hegemony_steps_shell.execute import ShellExecuteHandler
+
+    calls: list[dict[str, Any]] = []
+    shell = _Shell()
+
+    class _Services:
+        async def open_shell(self, device, **kwargs):
+            calls.append(kwargs)
+            return shell
+
+    ctx = _ctx(
+        {"commands": ["uptime"], "allow_legacy_ssh": legacy},
+        target_roles=["hosts"],
+        target_devices_by_role={"hosts": [{"id": "d1", "name": "h1", "mgmt_host": "192.0.2.1"}]},
+        services=cast(HandlerServices, _Services()),
+    )
+    result = await ShellExecuteHandler().execute(ctx)
+
+    assert result.success, result.error
+    assert calls == ([{"allow_legacy_ssh": True}] if legacy else [{}])
+
+
+async def test_shell_legacy_ssh_on_an_older_host_is_refused_not_ignored():
+    """A host without the setting refuses a legacy step instead of connecting securely."""
+    from hegemony_steps_shell.execute import ShellExecuteHandler
+
+    class _OldServices:
+        async def open_shell(self, device, *, connect_timeout=None):
+            return _Shell()
+
+    ctx = _ctx(
+        {"commands": ["uptime"], "allow_legacy_ssh": True},
+        target_roles=["hosts"],
+        target_devices_by_role={"hosts": [{"id": "d1", "name": "h1", "mgmt_host": "192.0.2.1"}]},
+        services=cast(HandlerServices, _OldServices()),
+    )
+    result = await ShellExecuteHandler().execute(ctx)
+
+    assert not result.success
+    assert "does not support the allow_legacy_ssh setting" in (result.error or "")

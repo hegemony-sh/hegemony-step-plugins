@@ -609,12 +609,18 @@ class HandlerServices(Protocol):
         device: dict[str, Any],
         *,
         connect_timeout: float | None = None,
+        allow_legacy_ssh: bool = False,
     ) -> ShellTransport:
         """Open a remote shell-execution channel to ``device``.
 
         Credentials come from ``device.access_config`` (``ssh`` today; a
         ``winrm`` section selects the WinRM transport once the host implements
         it). Caller owns the transport lifecycle (``close()`` in a finally).
+
+        The host applies the SSH policy of :mod:`hegemony_step_sdk.ssh` to the
+        device and its jump host; ``allow_legacy_ssh`` is the step's explicit
+        opt-in to weak algorithms and small keys (:class:`SshSecurityConfig`).
+        Callers pass it only when it is on, so older hosts keep working.
         """
 
     async def run_probe(
