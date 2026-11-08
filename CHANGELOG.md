@@ -1,3 +1,9 @@
+## [0.37.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.36.0...v0.37.0) (2026-11-08)
+
+### Features
+
+* **shell:** add the allow_legacy_ssh setting to shell.execute ([41ce8d2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/41ce8d285a20b78203a614a5990bc36c37a32bd2))
+
 ## [0.36.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.35.0...v0.36.0) (2026-11-08)
 
 ### Features
