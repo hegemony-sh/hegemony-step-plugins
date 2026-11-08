@@ -11,6 +11,8 @@ import asyncssh
 import asyncssh.kex_dh
 import pytest
 
+from hegemony_step_sdk.ssh import MIN_DH_GROUP_BITS
+from hegemony_transport_netmiko.transport import SSHTransport
 from tests.ssh_fakes import JUMP_PASSWORD, PASSWORD, FakeVerifier, ssh_servers
 from tests.test_ssh_security_policy import TRANSPORTS, build
 
@@ -23,7 +25,7 @@ from tests.test_ssh_security_policy import TRANSPORTS, build
 async def test_group_exchange_needs_explicit_legacy(
     monkeypatch, cls, platform, hop, trust_mode, bits, legacy
 ):
-    """Reject variable groups before credentials on discovery and trusted-key logins."""
+    """Reject undersized or unbounded groups before credentials, on discovery and trust."""
     # Only alter the local server's group catalogue. Client policy and protocol
     # validation remain untouched; a 1024-bit group reproduces the original gap.
     groups = tuple(group for group in asyncssh.kex_dh._dh_gex_groups if group[0] == bits)
@@ -42,8 +44,11 @@ async def test_group_exchange_needs_explicit_legacy(
         transport = build(cls, platform, port, verifier, jump)
         transport.configure_ssh_security(allow_legacy=legacy)
         [result] = await transport.execute_commands(["show version"])
-        assert (result.exit_code == 0) is legacy, result.error
-        if legacy:
+        # netmiko (Paramiko) enforces the group minimum itself, so it keeps
+        # group exchange in secure mode and refuses only an undersized group.
+        connects = legacy or (cls is SSHTransport and bits >= MIN_DH_GROUP_BITS)
+        assert (result.exit_code == 0) is connects, result.error
+        if connects:
             assert PASSWORD in servers.seen.passwords
             if jump:
                 assert JUMP_PASSWORD in servers.seen.passwords
