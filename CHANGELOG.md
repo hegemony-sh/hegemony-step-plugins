@@ -1,3 +1,14 @@
+## [0.38.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.37.0...v0.38.0) (2026-11-09)
+
+### Features
+
+* **ssh:** publish what the legacy opt-in allows, and what it let through ([5f342a2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/5f342a27b38d701e19b1f75157d50d904e055454))
+
+### Bug Fixes
+
+* **ssh:** count a name as legacy only when the opt-in adds it ([50ee308](https://github.com/hegemony-sh/hegemony-step-plugins/commit/50ee308ac7675deb3c42b8c22e9b11a469f5a5ba))
+* **ssh:** name the help marker x_help, like the other field extras ([c9b3a8d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c9b3a8d98b9eba4fee4d51b5aa0b0af61d971a67))
+
 ## [0.37.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.36.0...v0.37.0) (2026-11-08)
 
 ### Features
