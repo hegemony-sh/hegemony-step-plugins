@@ -352,19 +352,25 @@ def paramiko_algorithm_lists(transport: Any) -> dict[str, tuple[str, ...]]:
     }
 
 
-def legacy_algorithms(agreed: Any, secure: Mapping[str, Collection[str]]) -> dict[str, str]:
-    """The algorithms a connection agreed on that its transport offers only with legacy allowed.
+def legacy_algorithms(
+    agreed: Any,
+    secure: Mapping[str, Collection[str]],
+    with_legacy: Mapping[str, Collection[str]],
+) -> dict[str, str]:
+    """The algorithms a connection agreed on that only the legacy opt-in allowed.
 
-    ``agreed`` is an ``SshAlgorithms``; ``secure`` is what the transport offers
-    without the opt-in (``asyncssh_algorithm_lists(library)`` and the like).
-    An unknown (empty) field is not reported. The result maps each kind to
-    the algorithm's name, so a step's evidence can say exactly what the
-    opt-in let through.
+    ``agreed`` is an ``SshAlgorithms``; ``secure`` and ``with_legacy`` are what
+    the transport offers without and with the opt-in
+    (``ssh_algorithm_lists(False)`` and ``(True)``). A name counts only when the
+    opt-in adds it, so an unknown (empty) field or a name the transport does
+    not offer at all is not reported. The result maps each kind to the
+    algorithm's name, so a step's evidence can say exactly what the opt-in let
+    through.
     """
     found: dict[str, str] = {}
     for kind in SSH_ALGORITHM_KINDS:
         name = getattr(agreed, kind, "")
-        if name and name not in secure.get(kind, ()):
+        if name and name in with_legacy.get(kind, ()) and name not in secure.get(kind, ()):
             found[kind] = name
     return found
 

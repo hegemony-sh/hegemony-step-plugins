@@ -73,29 +73,34 @@ def test_netmiko_keeps_the_bounded_group_exchange_in_secure_mode() -> None:
 
 def test_legacy_algorithms_names_what_only_the_opt_in_allows() -> None:
     secure = AsyncSSHTransport.ssh_algorithm_lists()
+    with_legacy = AsyncSSHTransport.ssh_algorithm_lists(allow_legacy=True)
     modern = SshAlgorithms(
         kex="mlkem768x25519-sha256",
         host_key="ssh-ed25519",
         cipher="chacha20-poly1305@openssh.com",
         mac="",
     )
-    assert legacy_algorithms(modern, secure) == {}
+    assert legacy_algorithms(modern, secure, with_legacy) == {}
     old = SshAlgorithms(
         kex="diffie-hellman-group14-sha1",
         host_key="ssh-rsa",
         cipher="aes128-cbc",
         mac="hmac-sha1",
     )
-    assert legacy_algorithms(old, secure) == {
+    assert legacy_algorithms(old, secure, with_legacy) == {
         "kex": "diffie-hellman-group14-sha1",
         "host_key": "ssh-rsa",
         "cipher": "aes128-cbc",
         "mac": "hmac-sha1",
     }
     # An unknown field is not reported as legacy.
-    assert legacy_algorithms(SshAlgorithms(kex="diffie-hellman-group1-sha1"), secure) == {
-        "kex": "diffie-hellman-group1-sha1"
-    }
+    assert legacy_algorithms(
+        SshAlgorithms(kex="diffie-hellman-group1-sha1"), secure, with_legacy
+    ) == {"kex": "diffie-hellman-group1-sha1"}
+    # Nor is a name the transport does not offer at all: it says nothing of the opt-in.
+    netmiko_secure = SSHTransport.ssh_algorithm_lists()
+    netmiko_legacy = SSHTransport.ssh_algorithm_lists(allow_legacy=True)
+    assert legacy_algorithms(modern, netmiko_secure, netmiko_legacy) == {}
 
 
 def test_the_opt_in_is_off_by_default_and_names_its_help_page() -> None:
