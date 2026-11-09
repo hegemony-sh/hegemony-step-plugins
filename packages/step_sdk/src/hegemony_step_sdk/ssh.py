@@ -88,19 +88,21 @@ def algorithm_policy(
     allow_legacy: bool = False,
     bounded: Collection[str] = (),
 ) -> tuple[str, ...]:
-    """Filter weak or unbounded exchanges; legacy offers everything implemented.
+    """Filter weak or unbounded exchanges; legacy adds everything implemented after them.
 
-    Order is the library's: its defaults first, then (legacy only) the
-    algorithms it implements but does not enable by default. A default the
-    library does not implement is dropped. ``bounded`` names group exchanges
-    for which the adapter refuses a server group below ``MIN_DH_GROUP_BITS``;
-    those stay in secure mode unless their exchange hash is weak.
+    Secure mode offers the library's defaults in its order, without weak
+    algorithms or unbounded group exchanges. Legacy offers exactly those first,
+    in the same order, then the rest: the library's other defaults, then what it
+    implements but does not enable by default. So a peer that supports a secure
+    algorithm agrees on one even with legacy allowed; only a peer that supports
+    none falls back. A default the library does not implement is dropped.
+    ``bounded`` names group exchanges for which the adapter refuses a server
+    group below ``MIN_DH_GROUP_BITS``; those stay in secure mode unless their
+    exchange hash is weak.
     """
     implemented = tuple(implemented)
     defaults = [name for name in defaults if name in implemented]
-    if allow_legacy:
-        return tuple(dict.fromkeys([*defaults, *implemented]))
-    return tuple(
+    secure = tuple(
         dict.fromkeys(
             name
             for name in defaults
@@ -112,6 +114,9 @@ def algorithm_policy(
             )
         )
     )
+    if allow_legacy:
+        return tuple(dict.fromkeys([*secure, *defaults, *implemented]))
+    return secure
 
 
 def _plain_host_key_algorithm(name: str) -> bool:

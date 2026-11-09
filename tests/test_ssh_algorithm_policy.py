@@ -102,6 +102,19 @@ def test_policy_keeps_library_order_and_adds_everything_for_legacy():
     assert algorithm_policy("cipher", defaults, implemented, allow_legacy=True) == tuple(
         implemented
     )
+
+
+def test_legacy_offers_every_secure_algorithm_before_any_weak_one():
+    """A library default order that puts a weak algorithm early does not lead with it."""
+    defaults = ["aes128-cbc", "chacha20-poly1305@openssh.com", "3des-cbc", "aes128-ctr"]
+    implemented = [*defaults, "arcfour"]
+    assert algorithm_policy("cipher", defaults, implemented, allow_legacy=True) == (
+        "chacha20-poly1305@openssh.com",
+        "aes128-ctr",
+        "aes128-cbc",
+        "3des-cbc",
+        "arcfour",
+    )
     # A default the library does not implement is never offered.
     assert algorithm_policy("cipher", ["missing"], implemented) == ()
 
@@ -253,7 +266,11 @@ def test_unbounded_group_exchange_requires_legacy(name):
     """A strong exchange hash does not establish the negotiated DH group's size."""
     defaults = [name, "diffie-hellman-group14-sha256", "curve25519-sha256"]
     assert algorithm_policy("kex", defaults, defaults) == tuple(defaults[1:])
-    assert algorithm_policy("kex", defaults, defaults, allow_legacy=True) == tuple(defaults)
+    # Legacy still offers it, after the exchanges whose group size is known.
+    assert algorithm_policy("kex", defaults, defaults, allow_legacy=True) == (
+        *defaults[1:],
+        name,
+    )
 
 
 def test_bounded_group_exchange_stays_in_secure_mode():
