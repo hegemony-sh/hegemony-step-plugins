@@ -105,6 +105,17 @@ the jump host first, it calls `record(host, port, algorithms)` with the
 messages by the rule both sides follow (RFC 4253 §7.1), so a transport only
 has to keep those messages. A failure to record never fails the connection.
 
+Legacy SSH algorithms are off by default; a step turns them on with the
+`allow_legacy_ssh` setting (`SshSecurityConfig`). A transport that honours it
+also has a static `ssh_algorithm_lists(allow_legacy=False)`, the exact
+algorithms its connections offer by kind (`kex`, `host_key`, `cipher`, `mac`),
+built with `hegemony_step_sdk.ssh.asyncssh_algorithm_lists` or
+`paramiko_algorithm_lists`. Comparing the two calls shows what the opt-in
+adds. `legacy_algorithms(agreed, secure, with_legacy)` names the algorithms a
+connection agreed on that only the opt-in allowed. The field's JSON schema carries
+`"x_help": "legacy-ssh-algorithms"`, the help topic a host links the
+setting to.
+
 The step's own `key=value` tags arrive as `ctx.tags` (`env=prod`,
 `risk=high`, `phase=VERIFY` ...), so a handler can vary its behaviour per
 tag. `phase` and `kind` are ordinary keys of that map, nothing more:
