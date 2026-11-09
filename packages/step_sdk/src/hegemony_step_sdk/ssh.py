@@ -92,30 +92,30 @@ def algorithm_policy(
 
     Secure mode offers the library's defaults in its order, without weak
     algorithms or unbounded group exchanges. Legacy offers exactly those first,
-    in the same order, then the rest: the library's other defaults, then what it
-    implements but does not enable by default. So a peer that supports a secure
-    algorithm agrees on one even with legacy allowed; only a peer that supports
-    none falls back. A default the library does not implement is dropped.
-    ``bounded`` names group exchanges for which the adapter refuses a server
-    group below ``MIN_DH_GROUP_BITS``; those stay in secure mode unless their
-    exchange hash is weak.
+    in the same order, then the other secure algorithms the library implements
+    but does not enable by default, and only then the weak ones and the
+    unbounded group exchanges: the library's other defaults, then the rest it
+    implements. So a peer that supports any secure algorithm agrees on one even
+    with legacy allowed; only a peer that supports none falls back. A default
+    the library does not implement is dropped. ``bounded`` names group
+    exchanges for which the adapter refuses a server group below
+    ``MIN_DH_GROUP_BITS``; those stay in secure mode unless their exchange hash
+    is weak.
     """
     implemented = tuple(implemented)
     defaults = [name for name in defaults if name in implemented]
-    secure = tuple(
-        dict.fromkeys(
-            name
-            for name in defaults
-            if not is_weak_algorithm(kind, name)
-            and not (
-                kind == "kex"
-                and name.startswith(UNBOUNDED_DH_EXCHANGE_PREFIXES)
-                and name not in bounded
-            )
+
+    def acceptable(name: str) -> bool:
+        return not is_weak_algorithm(kind, name) and not (
+            kind == "kex"
+            and name.startswith(UNBOUNDED_DH_EXCHANGE_PREFIXES)
+            and name not in bounded
         )
-    )
+
+    secure = tuple(dict.fromkeys(name for name in defaults if acceptable(name)))
     if allow_legacy:
-        return tuple(dict.fromkeys([*secure, *defaults, *implemented]))
+        other_secure = [name for name in implemented if acceptable(name)]
+        return tuple(dict.fromkeys([*secure, *other_secure, *defaults, *implemented]))
     return secure
 
 

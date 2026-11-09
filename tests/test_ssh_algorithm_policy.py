@@ -115,6 +115,19 @@ def test_legacy_offers_every_secure_algorithm_before_any_weak_one():
         "3des-cbc",
         "arcfour",
     )
+
+
+def test_legacy_offers_a_secure_non_default_before_a_weak_default():
+    """A secure algorithm the library leaves off by default still beats a weak default."""
+    defaults = ["aes128-ctr", "aes128-cbc"]
+    implemented = [*defaults, "aes256-gcm@openssh.com", "3des-cbc"]
+    assert algorithm_policy("cipher", defaults, implemented) == ("aes128-ctr",)
+    assert algorithm_policy("cipher", defaults, implemented, allow_legacy=True) == (
+        "aes128-ctr",
+        "aes256-gcm@openssh.com",
+        "aes128-cbc",
+        "3des-cbc",
+    )
     # A default the library does not implement is never offered.
     assert algorithm_policy("cipher", ["missing"], implemented) == ()
 
