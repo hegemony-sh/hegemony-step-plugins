@@ -88,30 +88,35 @@ def algorithm_policy(
     allow_legacy: bool = False,
     bounded: Collection[str] = (),
 ) -> tuple[str, ...]:
-    """Filter weak or unbounded exchanges; legacy offers everything implemented.
+    """Filter weak or unbounded exchanges; legacy adds everything implemented after them.
 
-    Order is the library's: its defaults first, then (legacy only) the
-    algorithms it implements but does not enable by default. A default the
-    library does not implement is dropped. ``bounded`` names group exchanges
-    for which the adapter refuses a server group below ``MIN_DH_GROUP_BITS``;
-    those stay in secure mode unless their exchange hash is weak.
+    Secure mode offers the library's defaults in its order, without weak
+    algorithms or unbounded group exchanges. Legacy offers exactly those first,
+    in the same order, then the other secure algorithms the library implements
+    but does not enable by default, and only then the weak ones and the
+    unbounded group exchanges: the library's other defaults, then the rest it
+    implements. So a peer that supports any secure algorithm agrees on one even
+    with legacy allowed; only a peer that supports none falls back. A default
+    the library does not implement is dropped. ``bounded`` names group
+    exchanges for which the adapter refuses a server group below
+    ``MIN_DH_GROUP_BITS``; those stay in secure mode unless their exchange hash
+    is weak.
     """
     implemented = tuple(implemented)
     defaults = [name for name in defaults if name in implemented]
-    if allow_legacy:
-        return tuple(dict.fromkeys([*defaults, *implemented]))
-    return tuple(
-        dict.fromkeys(
-            name
-            for name in defaults
-            if not is_weak_algorithm(kind, name)
-            and not (
-                kind == "kex"
-                and name.startswith(UNBOUNDED_DH_EXCHANGE_PREFIXES)
-                and name not in bounded
-            )
+
+    def acceptable(name: str) -> bool:
+        return not is_weak_algorithm(kind, name) and not (
+            kind == "kex"
+            and name.startswith(UNBOUNDED_DH_EXCHANGE_PREFIXES)
+            and name not in bounded
         )
-    )
+
+    secure = tuple(dict.fromkeys(name for name in defaults if acceptable(name)))
+    if allow_legacy:
+        other_secure = [name for name in implemented if acceptable(name)]
+        return tuple(dict.fromkeys([*secure, *other_secure, *defaults, *implemented]))
+    return secure
 
 
 def _plain_host_key_algorithm(name: str) -> bool:

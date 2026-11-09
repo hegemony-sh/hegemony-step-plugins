@@ -40,6 +40,15 @@ def test_legacy_only_adds_and_the_secure_lists_hold_nothing_weak(transport: Any)
     # The opt-in adds something weak: that is what the help page lists. What
     # it adds differs per library: Paramiko 5 no longer implements SHA-1 key
     # exchange or host keys at all, so for netmiko it adds ciphers and MACs only.
+    # Legacy offers every secure algorithm before any it adds, so a peer that
+    # supports a secure one agrees on it even with the opt-in on. (With the
+    # opt-in netmiko's group exchange no longer checks the group size, so it
+    # moves behind the exchanges that need no such check.)
+    for kind in SSH_ALGORITHM_KINDS:
+        order = list(legacy[kind])
+        added_at = [order.index(n) for n in order if n not in secure[kind]]
+        secure_at = [order.index(n) for n in secure[kind] if n in order]
+        assert not added_at or max(secure_at) < min(added_at), kind
     added = {k: set(legacy[k]) - set(secure[k]) for k in SSH_ALGORITHM_KINDS}
     assert any(is_weak_algorithm(KIND_FOR_WEAKNESS[k], n) for k in added for n in added[k])
 
@@ -101,6 +110,17 @@ def test_legacy_algorithms_names_what_only_the_opt_in_allows() -> None:
     netmiko_secure = SSHTransport.ssh_algorithm_lists()
     netmiko_legacy = SSHTransport.ssh_algorithm_lists(allow_legacy=True)
     assert legacy_algorithms(modern, netmiko_secure, netmiko_legacy) == {}
+    # And a cipher only netmiko's opt-in adds is reported.
+    cbc = SshAlgorithms(
+        kex="curve25519-sha256@libssh.org",
+        host_key="ssh-ed25519",
+        cipher="aes128-cbc",
+        mac="hmac-sha1",
+    )
+    assert legacy_algorithms(cbc, netmiko_secure, netmiko_legacy) == {
+        "cipher": "aes128-cbc",
+        "mac": "hmac-sha1",
+    }
 
 
 def test_the_opt_in_is_off_by_default_and_names_its_help_page() -> None:
