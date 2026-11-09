@@ -65,7 +65,7 @@ MIN_DH_GROUP_BITS = 2048
 MIN_RSA_BITS = 2048
 
 #: The help topic that explains, with the exact lists, what the legacy opt-in
-#: allows. Hosts read it from the ``x-hegemony-help`` key of the field's JSON
+#: allows. Hosts read it from the ``x_help`` key of the field's JSON
 #: schema and link the setting to that page.
 LEGACY_SSH_HELP_TOPIC = "legacy-ssh-algorithms"
 
@@ -132,7 +132,7 @@ class SshSecurityConfig(BaseModel):
             "including the jump host. Host-key verification remains enabled. "
             "Use only on trusted networks while upgrading the device."
         ),
-        json_schema_extra={"x-hegemony-help": LEGACY_SSH_HELP_TOPIC},
+        json_schema_extra={"x_help": LEGACY_SSH_HELP_TOPIC},
     )
 
 

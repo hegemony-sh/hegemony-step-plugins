@@ -102,4 +102,4 @@ def test_the_opt_in_is_off_by_default_and_names_its_help_page() -> None:
     assert SshSecurityConfig().allow_legacy_ssh is False
     field = SshSecurityConfig.model_json_schema()["properties"]["allow_legacy_ssh"]
     assert field["default"] is False
-    assert field["x-hegemony-help"] == LEGACY_SSH_HELP_TOPIC == "legacy-ssh-algorithms"
+    assert field["x_help"] == LEGACY_SSH_HELP_TOPIC == "legacy-ssh-algorithms"

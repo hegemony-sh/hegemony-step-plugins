@@ -113,7 +113,7 @@ built with `hegemony_step_sdk.ssh.asyncssh_algorithm_lists` or
 `paramiko_algorithm_lists`. Comparing the two calls shows what the opt-in
 adds. `legacy_algorithms(agreed, secure)` names the algorithms a connection
 agreed on that only the opt-in allowed. The field's JSON schema carries
-`"x-hegemony-help": "legacy-ssh-algorithms"`, the help topic a host links the
+`"x_help": "legacy-ssh-algorithms"`, the help topic a host links the
 setting to.
 
 The step's own `key=value` tags arrive as `ctx.tags` (`env=prod`,
