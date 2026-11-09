@@ -1,3 +1,10 @@
+## [0.38.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.38.0...v0.38.1) (2026-11-09)
+
+### Bug Fixes
+
+* **ssh:** offer every secure algorithm before any legacy one ([1375e15](https://github.com/hegemony-sh/hegemony-step-plugins/commit/1375e15be51246403d920f38b85dccb7a7b66198))
+* **ssh:** put secure non-default algorithms ahead of weak defaults too ([f71d5a7](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f71d5a753a258eacf99f4564ac48b89a952b1bed))
+
 ## [0.38.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.37.0...v0.38.0) (2026-11-09)
 
 ### Features
