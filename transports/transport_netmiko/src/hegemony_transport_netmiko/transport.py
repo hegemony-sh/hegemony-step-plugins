@@ -37,6 +37,7 @@ from hegemony_step_sdk import (
 from hegemony_step_sdk.ssh import (
     MIN_DH_GROUP_BITS,
     configure_paramiko,
+    paramiko_algorithm_lists,
     validate_ssh_public_key,
 )
 
@@ -553,6 +554,26 @@ class SSHTransport:
 
     #: Feature flag the host checks before passing ``ssh_algorithm_recorder``.
     supports_ssh_algorithm_recorder = True
+
+    @staticmethod
+    def ssh_algorithm_lists(allow_legacy: bool = False) -> dict[str, tuple[str, ...]]:
+        """What this transport offers, by kind, with or without ``allow_legacy_ssh``.
+
+        The exact lists its connections and its bastion hop use, read from a
+        Paramiko transport set up the same way on an unconnected socket.
+        """
+        if paramiko is None:
+            raise RuntimeError("paramiko is not installed")
+        ours, theirs = socket.socketpair()
+        try:
+            transport = _KexinitKeepingTransport(ours, allow_legacy=allow_legacy)
+            try:
+                return paramiko_algorithm_lists(transport)
+            finally:
+                transport.close()
+        finally:
+            theirs.close()
+            ours.close()
 
     def __init__(
         self,

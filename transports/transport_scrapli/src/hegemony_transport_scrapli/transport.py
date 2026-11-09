@@ -40,6 +40,7 @@ from hegemony_step_sdk import (
     TransportOutputSink,
 )
 from hegemony_step_sdk.ssh import (
+    asyncssh_algorithm_lists,
     asyncssh_algorithms,
     asyncssh_security_options,
     validate_ssh_public_key,
@@ -381,6 +382,17 @@ class ScrapliTransport:
 
     #: Feature flag the host checks before passing ``ssh_algorithm_recorder``.
     supports_ssh_algorithm_recorder = True
+
+    @staticmethod
+    def ssh_algorithm_lists(allow_legacy: bool = False) -> dict[str, tuple[str, ...]]:
+        """What this transport offers, by kind, with or without ``allow_legacy_ssh``.
+
+        The exact lists its connections use, from the installed asyncssh, so a
+        host can show what the legacy opt-in adds.
+        """
+        if asyncssh is None:
+            raise RuntimeError("asyncssh is not installed")
+        return asyncssh_algorithm_lists(asyncssh, allow_legacy)
 
     def __init__(
         self,

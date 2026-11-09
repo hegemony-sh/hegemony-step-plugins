@@ -64,6 +64,15 @@ MIN_DH_GROUP_BITS = 2048
 #: Smallest RSA modulus, in bits, accepted for host and login keys.
 MIN_RSA_BITS = 2048
 
+#: The help topic that explains, with the exact lists, what the legacy opt-in
+#: allows. Hosts read it from the ``x-hegemony-help`` key of the field's JSON
+#: schema and link the setting to that page.
+LEGACY_SSH_HELP_TOPIC = "legacy-ssh-algorithms"
+
+#: The algorithm kinds a policy list and an agreed connection are reported by,
+#: in the order of an SSH key exchange.
+SSH_ALGORITHM_KINDS = ("kex", "host_key", "cipher", "mac")
+
 
 def is_weak_algorithm(kind: str, name: str) -> bool:
     """True when ``name`` is a weak ``kind`` algorithm (see ``WEAK_ALGORITHM_PARTS``)."""
@@ -123,6 +132,7 @@ class SshSecurityConfig(BaseModel):
             "including the jump host. Host-key verification remains enabled. "
             "Use only on trusted networks while upgrading the device."
         ),
+        json_schema_extra={"x-hegemony-help": LEGACY_SSH_HELP_TOPIC},
     )
 
 
@@ -311,6 +321,52 @@ def asyncssh_algorithms(library: Any, allow_legacy: bool = False) -> dict[str, A
         if not algorithms:
             raise ValueError(f"the SSH library has no supported {name} for this policy")
     return policy
+
+
+def asyncssh_algorithm_lists(
+    library: Any, allow_legacy: bool = False
+) -> dict[str, tuple[str, ...]]:
+    """What an asyncssh connection offers, by kind (``SSH_ALGORITHM_KINDS``), in order.
+
+    The same lists ``asyncssh_algorithms`` gives a connection, named the way
+    ``SshAlgorithms`` names what a connection agreed on, so a host can show the
+    exact effect of the legacy opt-in.
+    """
+    policy = asyncssh_algorithms(library, allow_legacy)
+    return {
+        "kex": tuple(policy["kex_algs"]),
+        "host_key": tuple(policy["server_host_key_algs"]),
+        "cipher": tuple(policy["encryption_algs"]),
+        "mac": tuple(policy["mac_algs"]),
+    }
+
+
+def paramiko_algorithm_lists(transport: Any) -> dict[str, tuple[str, ...]]:
+    """What a Paramiko transport configured by ``configure_paramiko`` offers, by kind."""
+    options = transport.get_security_options()
+    return {
+        "kex": tuple(options.kex),
+        "host_key": tuple(options.key_types),
+        "cipher": tuple(options.ciphers),
+        "mac": tuple(options.digests),
+    }
+
+
+def legacy_algorithms(agreed: Any, secure: Mapping[str, Collection[str]]) -> dict[str, str]:
+    """The algorithms a connection agreed on that its transport offers only with legacy allowed.
+
+    ``agreed`` is an ``SshAlgorithms``; ``secure`` is what the transport offers
+    without the opt-in (``asyncssh_algorithm_lists(library)`` and the like).
+    An unknown (empty) field is not reported. The result maps each kind to
+    the algorithm's name, so a step's evidence can say exactly what the
+    opt-in let through.
+    """
+    found: dict[str, str] = {}
+    for kind in SSH_ALGORITHM_KINDS:
+        name = getattr(agreed, kind, "")
+        if name and name not in secure.get(kind, ()):
+            found[kind] = name
+    return found
 
 
 def asyncssh_security_options(
