@@ -46,6 +46,10 @@ and a failed secure connection never retries weakly. Prefer upgrading the
 device; use legacy mode only on a trusted network. The override enables only
 algorithms the selected transport library still supports.
 
+To allow them for one old device in every step, set `allow_legacy_ssh` in the
+device's SSH access configuration instead (the jump host has its own flag). It
+covers that hop only and needs a Hegemony version that reads it.
+
 ## Output
 
 Later steps read what each device returned from the step's output:

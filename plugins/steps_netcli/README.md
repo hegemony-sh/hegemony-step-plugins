@@ -50,6 +50,12 @@ choices weaken confidentiality or authentication. The override affects both
 hops of that step and leaves host-key identity verification in place. It does
 not change other steps or organizations.
 
+To allow them for one old device in every step, set `allow_legacy_ssh: true`
+in the device's SSH access configuration (`access_config.ssh`) instead; a jump
+host has its own flag (`access_config.jump_host`). Each flag covers that hop
+only, so an old device does not weaken its jump host. This needs a Hegemony
+version that reads the flag; an older one ignores it and connects securely.
+
 Libraries cannot negotiate algorithms they have removed. Current Paramiko
 does not implement SHA-1 key exchange or SHA-1 RSA host signatures; use the
 AsyncSSH or Scrapli transport for a legacy peer which requires it. A transport

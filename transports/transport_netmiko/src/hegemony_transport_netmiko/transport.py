@@ -21,9 +21,9 @@ import socket
 import tempfile
 import time
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from hegemony_step_sdk import (
     ConnectionCancellationRegistry,
@@ -37,6 +37,8 @@ from hegemony_step_sdk import (
 from hegemony_step_sdk.ssh import (
     MIN_DH_GROUP_BITS,
     configure_paramiko,
+    hop_allows_legacy,
+    is_weak_ssh_public_key,
     paramiko_algorithm_lists,
     validate_ssh_public_key,
 )
@@ -279,7 +281,13 @@ def _agreed_algorithms(client: Any) -> SshAlgorithms | None:
         return None
     if not client_kexinit or not server_kexinit:
         return None
-    return SshAlgorithms.from_kexinit(client_kexinit, server_kexinit)
+    agreed = SshAlgorithms.from_kexinit(client_kexinit, server_kexinit)
+    try:
+        line = _key_line(cast(Any, transport).get_remote_server_key())
+    except Exception:  # noqa: BLE001 - the key's strength is extra; keep what was agreed
+        logger.debug("could not read the SSH host key to classify it", exc_info=True)
+        return agreed
+    return replace(agreed, weak_host_key=is_weak_ssh_public_key(line))
 
 
 class _NullCancellationRegistry:
@@ -545,12 +553,23 @@ class SSHTransport:
     #: for the output sink.
     supports_host_key_verifier = True
     _allow_legacy_ssh = False
+    #: The connection spec, for each hop's inventory legacy flag.
+    _spec: DeviceConnectionSpec | None = None
 
     def configure_ssh_security(self, *, allow_legacy: bool = False) -> None:
-        """Set the policy before executing commands; applies to both SSH hops."""
+        """Set the step's policy before executing commands; applies to both SSH hops.
+
+        A hop the inventory allows legacy SSH for keeps that without it.
+        """
         if not isinstance(allow_legacy, bool):
             raise ValueError("allow_legacy must be a boolean")
         self._allow_legacy_ssh = allow_legacy
+
+    def _legacy(self, *, jump_host: bool) -> bool:
+        """Whether a hop may use legacy SSH: the step setting, or that hop's inventory flag."""
+        return hop_allows_legacy(
+            self._spec, jump_host=jump_host, step_setting=self._allow_legacy_ssh
+        )
 
     #: Feature flag the host checks before passing ``ssh_algorithm_recorder``.
     supports_ssh_algorithm_recorder = True
@@ -613,6 +632,7 @@ class SSHTransport:
                 "netmiko is required for the netmiko transport. Install with: pip install netmiko"
             )
 
+        self._spec = spec
         self.host = spec.host
         self.port = spec.port
         self.step_run_id = step_run_id
@@ -677,7 +697,13 @@ class SSHTransport:
             raise
 
     def _hop_keys(
-        self, host: str, port: int, *, dial: Callable[[float], Any], timeout: float
+        self,
+        host: str,
+        port: int,
+        *,
+        dial: Callable[[float], Any],
+        timeout: float,
+        allow_legacy: bool,
     ) -> tuple[str, ...] | None:
         """The keys hop ``host:port`` may present; None connects without a check.
 
@@ -696,7 +722,7 @@ class SSHTransport:
         keys = self._from_loop(verifier.trusted_keys(host, port))
         if keys is None or keys:
             return keys
-        presented = _presented_key(dial(timeout), timeout, allow_legacy=self._allow_legacy_ssh)
+        presented = _presented_key(dial(timeout), timeout, allow_legacy=allow_legacy)
         self._from_loop(verifier.learn(host, port, presented))
         return (presented,)
 
@@ -788,6 +814,7 @@ class SSHTransport:
             jump.port,
             dial=lambda timeout: socket.create_connection((jump.host, jump.port), timeout=timeout),
             timeout=self.connect_timeout,
+            allow_legacy=self._legacy(jump_host=True),
         )
         client = paramiko.SSHClient()
         _set_host_keys(client, jump.host, jump.port, keys)
@@ -813,7 +840,7 @@ class SSHTransport:
                     timeout=self.connect_timeout,
                     transport_factory=partial(
                         _KexinitKeepingTransport,
-                        allow_legacy=self._allow_legacy_ssh,
+                        allow_legacy=self._legacy(jump_host=True),
                         skip_rejected_keys=explicit_key is None,
                     ),
                 )
@@ -869,6 +896,7 @@ class SSHTransport:
                 self.port,
                 dial=partial(self._dial_device, bastion),
                 timeout=self.connect_timeout if device_timeout is None else device_timeout,
+                allow_legacy=self._legacy(jump_host=False),
             )
             params = self._get_connection_params(connect_timeout=device_timeout)
             if bastion is not None:
@@ -887,7 +915,7 @@ class SSHTransport:
                 # Opened in two steps, so the paramiko client netmiko builds
                 # keeps what the key exchange agreed on.
                 connection: Any = ConnectHandler(**params, auto_connect=False)
-                _keep_kexinit(connection, allow_legacy=self._allow_legacy_ssh)
+                _keep_kexinit(connection, allow_legacy=self._legacy(jump_host=False))
                 connection._open()
             except Exception as exc:
                 refusal = self._refusal(exc, self.host, self.port, keys)

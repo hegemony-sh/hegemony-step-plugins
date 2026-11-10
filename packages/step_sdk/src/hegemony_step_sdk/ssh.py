@@ -134,8 +134,10 @@ class SshSecurityConfig(BaseModel):
         title="Allow legacy SSH algorithms",
         description=(
             "Enable weak SSH algorithms and small host or login keys for older devices, "
-            "including the jump host. Host-key verification remains enabled. "
-            "Use only on trusted networks while upgrading the device."
+            "including the jump host, for every device this step connects to. "
+            "To allow them for one old device only, set allow_legacy_ssh in that "
+            "device's SSH access configuration instead. Host-key verification "
+            "remains enabled. Use only on trusted networks while upgrading the device."
         ),
         json_schema_extra={"x_help": LEGACY_SSH_HELP_TOPIC},
     )
@@ -234,8 +236,37 @@ def validate_ssh_public_key(line: str, *, allow_security_keys: bool = False) -> 
     except (ValueError, IndexError, UnicodeError) as exc:
         raise ValueError(
             f"SSH key rejected by secure policy: {exc}. "
-            "Upgrade the key or explicitly enable allow_legacy_ssh for this step."
+            "Upgrade the key or explicitly enable allow_legacy_ssh for this step "
+            "or for this host in the inventory."
         ) from None
+
+
+def is_weak_ssh_public_key(line: str) -> bool:
+    """True when the secure policy refuses OpenSSH key ``line`` (``validate_ssh_public_key``)."""
+    try:
+        validate_ssh_public_key(line)
+    except ValueError:
+        return True
+    return False
+
+
+def hop_allows_legacy(spec: Any, *, jump_host: bool, step_setting: bool = False) -> bool:
+    """Whether one hop of connection ``spec`` may use legacy SSH.
+
+    ``jump_host`` says which hop: the jump host, or the device. The caller
+    names it, because the two endpoints can be equal (``127.0.0.1:22`` is a
+    forwarded bastion on the first hop and the bastion's own loopback on the
+    second), so the address does not tell the hops apart.
+
+    The step's ``allow_legacy_ssh`` setting allows it on both hops. Otherwise
+    each hop follows its own inventory flag: ``spec.allow_legacy_ssh`` for the
+    device (a ``DeviceConnectionSpec``) and ``spec.jump_host.allow_legacy_ssh``
+    for the jump host, so an old device does not weaken its bastion.
+    """
+    if step_setting:
+        return True
+    hop = getattr(spec, "jump_host", None) if jump_host else spec
+    return bool(getattr(hop, "allow_legacy_ssh", False))
 
 
 def validate_asyncssh_client_key(library: Any, keypair: Any) -> None:
