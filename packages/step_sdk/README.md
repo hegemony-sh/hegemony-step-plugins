@@ -124,7 +124,9 @@ The inventory can allow legacy SSH for one host instead: the host sets
 which still covers both hops. The caller names the hop (`jump_host=True` or
 `False`), because the two endpoints can be equal. `SshAlgorithms.weak_host_key` reports a host key
 the secure policy refuses (`is_weak_ssh_public_key`), so a host can tell when
-a hop's flag was not needed: nothing legacy agreed on and no weak host key.
+a hop's flag was not needed: nothing legacy agreed on and a host key known to
+be strong (`False`). `None` means the key could not be classified, which is
+not a strong key.
 
 The step's own `key=value` tags arrive as `ctx.tags` (`env=prod`,
 `risk=high`, `phase=VERIFY` ...), so a handler can vary its behaviour per

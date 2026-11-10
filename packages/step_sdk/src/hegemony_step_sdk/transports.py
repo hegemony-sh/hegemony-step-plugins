@@ -247,17 +247,18 @@ class SshAlgorithms:
     those of the client-to-server direction; ``mac`` is empty for a cipher
     with integrity built in. An empty field is not known.
 
-    ``weak_host_key`` says the host presented a key the secure policy refuses
-    (DSA, or RSA under 2048 bits), which only a hop that allows legacy SSH
-    accepts. The agreed names alone do not show it: a small RSA key still
-    signs with ``rsa-sha2-256``.
+    ``weak_host_key`` says whether the host presented a key the secure policy
+    refuses (DSA, or RSA under 2048 bits), which only a hop that allows legacy
+    SSH accepts. The agreed names alone do not show it: a small RSA key still
+    signs with ``rsa-sha2-256``. ``None`` means the key could not be read or
+    classified, so a host must not take it for a strong key.
     """
 
     kex: str = ""
     host_key: str = ""
     cipher: str = ""
     mac: str = ""
-    weak_host_key: bool = False
+    weak_host_key: bool | None = None
 
     @classmethod
     def from_kexinit(cls, client_kexinit: bytes, server_kexinit: bytes) -> SshAlgorithms:

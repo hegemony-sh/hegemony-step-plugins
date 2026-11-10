@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from hegemony_step_sdk import (
     ConnectionCancellationRegistry,
@@ -282,10 +282,12 @@ def _agreed_algorithms(client: Any) -> SshAlgorithms | None:
     if not client_kexinit or not server_kexinit:
         return None
     agreed = SshAlgorithms.from_kexinit(client_kexinit, server_kexinit)
-    get_key = getattr(transport, "get_remote_server_key", None)
-    if not callable(get_key):
+    try:
+        line = _key_line(cast(Any, transport).get_remote_server_key())
+    except Exception:  # noqa: BLE001 - the key's strength is extra; keep what was agreed
+        logger.debug("could not read the SSH host key to classify it", exc_info=True)
         return agreed
-    return replace(agreed, weak_host_key=is_weak_ssh_public_key(_key_line(get_key())))
+    return replace(agreed, weak_host_key=is_weak_ssh_public_key(line))
 
 
 class _NullCancellationRegistry:

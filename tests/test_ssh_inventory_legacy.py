@@ -167,3 +167,29 @@ def test_transports_name_the_hop_they_ask_about(cls, flagged):
     assert transport._legacy(jump_host=True) is (flagged == "jump")
     transport.configure_ssh_security(allow_legacy=True)
     assert transport._legacy(jump_host=False) and transport._legacy(jump_host=True)
+
+
+@pytest.mark.parametrize("module", ["asyncssh", "scrapli", "netmiko"])
+def test_a_host_key_that_cannot_be_read_keeps_what_was_agreed(module, monkeypatch):
+    """A failed key lookup leaves the strength unknown; the agreed algorithms stay."""
+    import importlib
+
+    transport_module = importlib.import_module(f"hegemony_transport_{module}.transport")
+    agreed = SshAlgorithms(kex="curve25519-sha256", cipher="aes128-ctr")
+    monkeypatch.setattr(SshAlgorithms, "from_kexinit", classmethod(lambda cls, *_: agreed))
+
+    class Broken:
+        _client_kexinit = client_kexinit = b"client"
+        _server_kexinit = server_kexinit = b"server"
+
+        def get_transport(self):
+            return self
+
+        def get_server_host_key(self):
+            raise OSError("connection lost")
+
+        get_remote_server_key = get_server_host_key
+
+    recorded = transport_module._agreed_algorithms(Broken())
+    assert recorded == agreed
+    assert recorded.weak_host_key is None

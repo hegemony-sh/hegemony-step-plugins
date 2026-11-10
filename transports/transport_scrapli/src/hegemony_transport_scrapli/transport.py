@@ -82,11 +82,12 @@ def _agreed_algorithms(connection: Any) -> SshAlgorithms:
     them (:meth:`SshAlgorithms.from_kexinit`).
     """
     agreed = SshAlgorithms.from_kexinit(connection._client_kexinit, connection._server_kexinit)
-    get_key = getattr(connection, "get_server_host_key", None)
-    key = get_key() if callable(get_key) else None
-    if key is None:
+    try:
+        key = connection.get_server_host_key()
+        line = key.export_public_key("openssh").decode("ascii")
+    except Exception:  # noqa: BLE001 - the key's strength is extra; keep what was agreed
+        logger.debug("could not read the SSH host key to classify it", exc_info=True)
         return agreed
-    line = key.export_public_key("openssh").decode("ascii")
     return replace(agreed, weak_host_key=is_weak_ssh_public_key(line))
 
 
