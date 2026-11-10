@@ -1,3 +1,14 @@
+## [0.39.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.38.1...v0.39.0) (2026-11-10)
+
+### Features
+
+* **ssh:** allow legacy SSH per host from the inventory ([89d007e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/89d007ed85a756c4436beaa0d6f665fd90e5aae3))
+
+### Bug Fixes
+
+* **ssh:** keep the agreed algorithms when the host key cannot be classified ([50b013b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/50b013b4bd6e16e034f7de0832e82bb64b11954d))
+* **ssh:** name the hop instead of matching its address ([50c6256](https://github.com/hegemony-sh/hegemony-step-plugins/commit/50c62567a8319c6e16f6d58fb578220aa78985d1))
+
 ## [0.38.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.38.0...v0.38.1) (2026-11-09)
 
 ### Bug Fixes
