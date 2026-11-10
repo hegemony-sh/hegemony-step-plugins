@@ -116,6 +116,15 @@ connection agreed on that only the opt-in allowed. The field's JSON schema carri
 `"x_help": "legacy-ssh-algorithms"`, the help topic a host links the
 setting to.
 
+The inventory can allow legacy SSH for one host instead: the host sets
+`DeviceConnectionSpec.allow_legacy_ssh` from the device's
+`access_config.ssh.allow_legacy_ssh` and `JumpHostSpec.allow_legacy_ssh` from
+`access_config.jump_host.allow_legacy_ssh`. Each flag covers its own hop only;
+`hegemony_step_sdk.ssh.hop_allows_legacy` combines them with the step setting,
+which still covers both hops. `SshAlgorithms.weak_host_key` reports a host key
+the secure policy refuses (`is_weak_ssh_public_key`), so a host can tell when
+a hop's flag was not needed: nothing legacy agreed on and no weak host key.
+
 The step's own `key=value` tags arrive as `ctx.tags` (`env=prod`,
 `risk=high`, `phase=VERIFY` ...), so a handler can vary its behaviour per
 tag. `phase` and `kind` are ordinary keys of that map, nothing more:

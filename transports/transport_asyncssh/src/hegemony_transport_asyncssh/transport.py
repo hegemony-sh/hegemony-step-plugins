@@ -25,7 +25,7 @@ import os
 import posixpath
 import shlex
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from hegemony_step_sdk import (
@@ -41,6 +41,8 @@ from hegemony_step_sdk.ssh import (
     asyncssh_algorithm_lists,
     asyncssh_algorithms,
     asyncssh_security_options,
+    hop_allows_legacy,
+    is_weak_ssh_public_key,
     validate_ssh_public_key,
 )
 
@@ -60,7 +62,13 @@ def _agreed_algorithms(connection: Any) -> SshAlgorithms:
     sides' KEXINIT messages for the exchange hash; the agreement follows from
     them (:meth:`SshAlgorithms.from_kexinit`).
     """
-    return SshAlgorithms.from_kexinit(connection._client_kexinit, connection._server_kexinit)
+    agreed = SshAlgorithms.from_kexinit(connection._client_kexinit, connection._server_kexinit)
+    get_key = getattr(connection, "get_server_host_key", None)
+    key = get_key() if callable(get_key) else None
+    if key is None:
+        return agreed
+    line = key.export_public_key("openssh").decode("ascii")
+    return replace(agreed, weak_host_key=is_weak_ssh_public_key(line))
 
 
 class _NullCancellationRegistry:
@@ -251,12 +259,21 @@ class AsyncSSHTransport:
     #: for the output sink.
     supports_host_key_verifier = True
     _allow_legacy_ssh = False
+    #: The connection spec, for each hop's inventory legacy flag.
+    _spec: DeviceConnectionSpec | None = None
 
     def configure_ssh_security(self, *, allow_legacy: bool = False) -> None:
-        """Set the policy before executing commands; applies to both SSH hops."""
+        """Set the step's policy before executing commands; applies to both SSH hops.
+
+        A hop the inventory allows legacy SSH for keeps that without it.
+        """
         if not isinstance(allow_legacy, bool):
             raise ValueError("allow_legacy must be a boolean")
         self._allow_legacy_ssh = allow_legacy
+
+    def _legacy(self, host: str, port: int) -> bool:
+        """Whether hop ``host:port`` may use legacy SSH: the step setting, or its inventory flag."""
+        return hop_allows_legacy(self._spec, host, port, self._allow_legacy_ssh)
 
     #: Feature flag the host checks before passing ``ssh_algorithm_recorder``.
     supports_ssh_algorithm_recorder = True
@@ -310,6 +327,7 @@ class AsyncSSHTransport:
                 "Install with: pip install asyncssh"
             )
 
+        self._spec = spec
         self.host = spec.host
         self.port = spec.port
         self.step_run_id = step_run_id
@@ -373,14 +391,14 @@ class AsyncSSHTransport:
         if keys is None or keys:
             return keys
         presented = await _presented_key(
-            host, port, tunnel=tunnel, timeout=timeout, allow_legacy=self._allow_legacy_ssh
+            host, port, tunnel=tunnel, timeout=timeout, allow_legacy=self._legacy(host, port)
         )
         if presented is None:
             raise HostKeyRejectedError(
                 f"{host}:{port} completed its key exchange without a host key, "
                 "so there is no key to trust"
             )
-        if not self._allow_legacy_ssh:
+        if not self._legacy(host, port):
             validate_ssh_public_key(presented)
         await verifier.learn(host, port, presented)
         return (presented,)
@@ -432,7 +450,7 @@ class AsyncSSHTransport:
                 tunnel=tunnel,
                 timeout=_PRESENTED_KEY_TIMEOUT_SECONDS,
                 algorithms=algorithms,
-                allow_legacy=self._allow_legacy_ssh,
+                allow_legacy=self._legacy(host, port),
             )
         except Exception:  # noqa: BLE001 - the report is best effort
             logger.debug("could not fetch the SSH host key of %s:%d", host, port, exc_info=True)
@@ -468,7 +486,8 @@ class AsyncSSHTransport:
             if jump.private_key
             else {}
         )
-        if jump.private_key and not self._allow_legacy_ssh:
+        jump_legacy = self._legacy(jump.host, jump.port)
+        if jump.private_key and not jump_legacy:
             validate_ssh_public_key(
                 key_options["client_keys"][0].export_public_key("openssh").decode("ascii")
             )
@@ -479,7 +498,7 @@ class AsyncSSHTransport:
                 username=jump.username or None,
                 password=jump.password or None,
                 **key_options,
-                **asyncssh_security_options(asyncssh, keys, self._allow_legacy_ssh),
+                **asyncssh_security_options(asyncssh, keys, jump_legacy),
                 connect_timeout=self.connect_timeout,
             )
         except Exception as exc:
@@ -514,7 +533,7 @@ class AsyncSSHTransport:
                     username=self.username,
                     # Empty password falls back to key/agent auth.
                     password=self.password or None,
-                    **asyncssh_security_options(asyncssh, keys, self._allow_legacy_ssh),
+                    **asyncssh_security_options(asyncssh, keys, self._legacy(self.host, self.port)),
                     connect_timeout=device_timeout,
                     # SSH session #2 runs inside a direct-tcpip channel of
                     # session #1: end-to-end encrypted, the bastion never sees

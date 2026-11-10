@@ -89,6 +89,10 @@ host; use legacy mode only on a trusted network. The setting needs a Hegemony
 version that supports it for shell steps; an older one refuses the step rather
 than connecting securely in its place.
 
+To allow them for one old host in every step, set `allow_legacy_ssh` in the
+host's SSH access configuration instead (the jump host has its own flag). It
+covers that hop only and needs a Hegemony version that reads it.
+
 ## Output
 
 Later steps can read `steps.NODE_ID.stdout` — the combined standard output

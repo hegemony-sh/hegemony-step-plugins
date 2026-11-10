@@ -60,3 +60,9 @@ for algorithms, key sizes, risks and library limitations.
 Hosts constructing the transport directly can call
 `configure_ssh_security(allow_legacy=True)` before any I/O. The setting belongs
 to that transport instance and never changes library-wide defaults.
+
+The connection spec can also allow legacy SSH for one hop:
+`DeviceConnectionSpec.allow_legacy_ssh` for the device and
+`JumpHostSpec.allow_legacy_ssh` for the jump host. Neither flag reaches the
+other hop. Each recorded hop says whether the host key it presented is a weak
+one (`SshAlgorithms.weak_host_key`).

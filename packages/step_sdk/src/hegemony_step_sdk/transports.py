@@ -51,6 +51,11 @@ class JumpHostSpec:
     password: str = field(default="", repr=False)
     # Optional PEM private key for the bastion login (empty = password/agent).
     private_key: str = field(default="", repr=False)
+    # The inventory's ``access_config.jump_host.allow_legacy_ssh``: this hop
+    # may use weak SSH algorithms and small keys even when the step does not
+    # ask for them (see ``hegemony_step_sdk.ssh``). The device's own flag does
+    # not reach the bastion.
+    allow_legacy_ssh: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +77,10 @@ class DeviceConnectionSpec:
     command_timeout: float = 30.0
     # Optional bastion hop (design-dind-sandbox.md §11): None = direct.
     jump_host: JumpHostSpec | None = None
+    # The inventory's ``access_config.ssh.allow_legacy_ssh``: the device hop
+    # may use weak SSH algorithms and small keys even when the step does not
+    # ask for them (see ``hegemony_step_sdk.ssh``). The jump host has its own.
+    allow_legacy_ssh: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,12 +246,18 @@ class SshAlgorithms:
     ``host_key`` is the host key's signature algorithm, ``cipher`` and ``mac``
     those of the client-to-server direction; ``mac`` is empty for a cipher
     with integrity built in. An empty field is not known.
+
+    ``weak_host_key`` says the host presented a key the secure policy refuses
+    (DSA, or RSA under 2048 bits), which only a hop that allows legacy SSH
+    accepts. The agreed names alone do not show it: a small RSA key still
+    signs with ``rsa-sha2-256``.
     """
 
     kex: str = ""
     host_key: str = ""
     cipher: str = ""
     mac: str = ""
+    weak_host_key: bool = False
 
     @classmethod
     def from_kexinit(cls, client_kexinit: bytes, server_kexinit: bytes) -> SshAlgorithms:
