@@ -119,9 +119,51 @@ def test_step_setting_allows_legacy_on_both_hops():
         jump_host=JumpHostSpec("bastion", 2222),
         allow_legacy_ssh=True,
     )
-    assert hop_allows_legacy(spec, "device", 22)
-    assert not hop_allows_legacy(spec, "bastion", 2222)
-    assert hop_allows_legacy(spec, "bastion", 2222, step_setting=True)
+    assert hop_allows_legacy(spec, jump_host=False)
+    assert not hop_allows_legacy(spec, jump_host=True)
+    assert hop_allows_legacy(spec, jump_host=True, step_setting=True)
     plain = DeviceConnectionSpec(host="device", port=22)
-    assert not hop_allows_legacy(plain, "device", 22)
-    assert hop_allows_legacy(plain, "device", 22, step_setting=True)
+    assert not hop_allows_legacy(plain, jump_host=False)
+    assert not hop_allows_legacy(plain, jump_host=True)
+    assert hop_allows_legacy(plain, jump_host=False, step_setting=True)
+
+
+@pytest.mark.parametrize("flagged", ["device", "jump"])
+def test_hops_with_the_same_address_keep_their_own_flags(flagged):
+    """A hop is named by the caller, so equal endpoints cannot swap the two flags.
+
+    ``127.0.0.1:22`` can be a forwarded bastion on the first hop and the
+    bastion's own loopback service on the second.
+    """
+    spec = DeviceConnectionSpec(
+        host="127.0.0.1",
+        port=22,
+        jump_host=JumpHostSpec("127.0.0.1", 22, allow_legacy_ssh=flagged == "jump"),
+        allow_legacy_ssh=flagged == "device",
+    )
+    assert hop_allows_legacy(spec, jump_host=False) is (flagged == "device")
+    assert hop_allows_legacy(spec, jump_host=True) is (flagged == "jump")
+
+
+@pytest.mark.parametrize("cls", [AsyncSSHTransport, SSHTransport, ScrapliTransport])
+@pytest.mark.parametrize("flagged", ["device", "jump"])
+def test_transports_name_the_hop_they_ask_about(cls, flagged):
+    """Each transport asks for a hop by name, also when both endpoints are equal."""
+    transport = cls(
+        DeviceConnectionSpec(
+            host="127.0.0.1",
+            port=22,
+            username=USERNAME,
+            password=PASSWORD,
+            platform="linux" if cls is AsyncSSHTransport else "ios-xe",
+            jump_host=JumpHostSpec(
+                "127.0.0.1", 22, JUMP_USERNAME, JUMP_PASSWORD, allow_legacy_ssh=flagged == "jump"
+            ),
+            allow_legacy_ssh=flagged == "device",
+        ),
+        host_key_verifier=FakeVerifier(),
+    )
+    assert transport._legacy(jump_host=False) is (flagged == "device")
+    assert transport._legacy(jump_host=True) is (flagged == "jump")
+    transport.configure_ssh_security(allow_legacy=True)
+    assert transport._legacy(jump_host=False) and transport._legacy(jump_host=True)

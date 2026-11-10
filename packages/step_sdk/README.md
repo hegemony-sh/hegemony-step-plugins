@@ -121,7 +121,8 @@ The inventory can allow legacy SSH for one host instead: the host sets
 `access_config.ssh.allow_legacy_ssh` and `JumpHostSpec.allow_legacy_ssh` from
 `access_config.jump_host.allow_legacy_ssh`. Each flag covers its own hop only;
 `hegemony_step_sdk.ssh.hop_allows_legacy` combines them with the step setting,
-which still covers both hops. `SshAlgorithms.weak_host_key` reports a host key
+which still covers both hops. The caller names the hop (`jump_host=True` or
+`False`), because the two endpoints can be equal. `SshAlgorithms.weak_host_key` reports a host key
 the secure policy refuses (`is_weak_ssh_public_key`), so a host can tell when
 a hop's flag was not needed: nothing legacy agreed on and no weak host key.
 

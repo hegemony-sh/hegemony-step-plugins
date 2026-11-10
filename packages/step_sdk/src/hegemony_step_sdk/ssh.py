@@ -250,8 +250,13 @@ def is_weak_ssh_public_key(line: str) -> bool:
     return False
 
 
-def hop_allows_legacy(spec: Any, host: str, port: int, step_setting: bool = False) -> bool:
-    """Whether the hop ``host:port`` of connection ``spec`` may use legacy SSH.
+def hop_allows_legacy(spec: Any, *, jump_host: bool, step_setting: bool = False) -> bool:
+    """Whether one hop of connection ``spec`` may use legacy SSH.
+
+    ``jump_host`` says which hop: the jump host, or the device. The caller
+    names it, because the two endpoints can be equal (``127.0.0.1:22`` is a
+    forwarded bastion on the first hop and the bastion's own loopback on the
+    second), so the address does not tell the hops apart.
 
     The step's ``allow_legacy_ssh`` setting allows it on both hops. Otherwise
     each hop follows its own inventory flag: ``spec.allow_legacy_ssh`` for the
@@ -260,10 +265,8 @@ def hop_allows_legacy(spec: Any, host: str, port: int, step_setting: bool = Fals
     """
     if step_setting:
         return True
-    jump = getattr(spec, "jump_host", None)
-    if jump is not None and (host, port) == (jump.host, jump.port):
-        return bool(getattr(jump, "allow_legacy_ssh", False))
-    return bool(getattr(spec, "allow_legacy_ssh", False))
+    hop = getattr(spec, "jump_host", None) if jump_host else spec
+    return bool(getattr(hop, "allow_legacy_ssh", False))
 
 
 def validate_asyncssh_client_key(library: Any, keypair: Any) -> None:
