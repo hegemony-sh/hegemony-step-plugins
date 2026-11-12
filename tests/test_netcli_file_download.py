@@ -376,6 +376,65 @@ async def test_a_destination_name_with_spaces_is_passed_on_as_it_is():
     assert services.transfers[0]["dest_filename"] == "my image.bin"
 
 
+@pytest.mark.parametrize(
+    "name", ["/etc/hosts", "../image.bin", "sub/image.bin", "sub\\image.bin", "..", "."]
+)
+async def test_a_destination_file_name_with_a_directory_part_is_refused(name):
+    """On a server the transport joins Destination and the name as a path."""
+    services = FakeServices()
+
+    result, _ = await _run(
+        services, {"file_ids": [FILE_ID], "dest_fs": "/var/tmp", "dest_filename": name}
+    )
+
+    assert result.success is False
+    assert result.error == (
+        "Destination Filename must be a file name without a directory part (no slash); "
+        "put the directory in Destination"
+    )
+    assert services.opened == []
+    assert services.connects == []
+
+
+async def test_a_stored_file_name_with_a_directory_part_is_refused():
+    services = FakeServices(filename="../../etc/cron.d/job")
+
+    result, _ = await _run(services, {"file_ids": [FILE_ID], "dest_fs": "/var/tmp"})
+
+    assert result.success is False
+    assert "has a directory part; set Destination Filename" in (result.error or "")
+    assert services.connects == []
+    assert services.events == ["open:1", "close:1"]
+
+
+async def test_a_directory_belongs_in_the_destination():
+    services = FakeServices()
+
+    result, _ = await _run(
+        services, {"file_ids": [FILE_ID], "dest_fs": "flash:images/", "dest_filename": "new.bin"}
+    )
+
+    assert result.success is True
+    assert services.transfers[0]["dest_fs"] == "flash:images/"
+
+
+async def test_a_host_that_does_not_implement_links_is_not_blamed_on_the_transport():
+    """The SDK's default raises NotImplementedError before any device is contacted."""
+
+    class HostWithoutSupport(FakeServices):
+        def open_file_download(self, file_id: str, *, ttl_seconds: int = 600):
+            raise NotImplementedError
+
+    services = HostWithoutSupport()
+
+    result, _ = await _run(services, {"file_ids": [FILE_ID]})
+
+    assert result.success is False
+    assert "upgrade the platform" in (result.error or "")
+    assert "transport" not in (result.error or "")
+    assert services.connects == []
+
+
 async def test_no_target_devices_fails_before_anything_is_asked():
     services = FakeServices()
 

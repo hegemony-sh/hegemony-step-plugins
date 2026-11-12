@@ -23,9 +23,10 @@ one the shared organization publishes.
 **Destination** is where the file goes on the target: a device filesystem
 with its colon (`flash:`, the default, or `bootflash:`), or a directory on a
 server (`/var/tmp`). **Destination Filename** names it there; left empty, the
-file keeps the name it has in the repository. Neither may contain a line
-break or another control character, because both are typed into the target's
-command line. Targets are chosen with the role-based target picker.
+file keeps the name it has in the repository. It is a file name only, with no
+slash: a directory belongs in Destination (`flash:images/`, `/var/tmp`).
+Neither field may contain a line break or another control character, because
+both are typed into the target's command line. Targets are chosen with the role-based target picker.
 
 For each target, the step asks the platform for a download link, connects to
 the target and has it fetch the link:
@@ -79,7 +80,7 @@ Later steps can read:
 - `steps.NODE_ID.dest_fs` and `steps.NODE_ID.dest_filename`: where it went.
 - `steps.NODE_ID.size_bytes`, `steps.NODE_ID.sha256` and `steps.NODE_ID.md5`:
   the stored file's size and checksums, for a verification step. `md5` is
-  empty for a file stored without one.
+  null for a file stored without one, so check it before a step uses it.
 - `steps.NODE_ID.transferred_count`: how many targets completed the download.
 
 Each target contributes a "File download" evidence artifact with what it
@@ -92,10 +93,11 @@ contributes an "Error" artifact instead. Metrics record `device_count`,
 
 The step fails immediately when no target devices are configured, when no
 file or more than one is selected, when Destination or Destination Filename
-contains a line break or another control character, and on a platform too old
-to issue download links. Per target, it fails when the device has no management host,
+contains a line break or another control character, when Destination Filename
+has a directory part, and on a platform that cannot issue download links. Per target, it fails when the device has no management host,
 when the file is not one the run's organization may read, when the stored
-file's name contains a control character and no Destination Filename is set,
+file's name contains a control character or a directory part and no
+Destination Filename is set,
 when the platform
 has no `HEGEMONY_API_EXTERNAL_URL`, when the connection fails, when the
 target's transport cannot do the transfer, and when the target does not

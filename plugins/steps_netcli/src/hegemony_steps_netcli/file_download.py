@@ -127,6 +127,27 @@ def _has_control_characters(value: str) -> bool:
     return any(not character.isprintable() for character in value)
 
 
+def _is_plain_file_name(value: str) -> bool:
+    """Whether ``value`` names a file and nothing else: no directory part.
+
+    The file goes under Destination. A name with a separator would put it
+    elsewhere: on a server the transport joins the two as a path, so
+    ``/etc/hosts`` or ``../x`` would leave the destination directory while the
+    step reports the destination it was given. A directory belongs in
+    Destination.
+    """
+    return bool(value) and "/" not in value and "\\" not in value and value not in (".", "..")
+
+
+_NOT_A_PLAIN_NAME = (
+    "must be a file name without a directory part (no slash); put the directory in Destination"
+)
+_NO_DOWNLOAD_LINKS = (
+    "This Hegemony version cannot issue download links for file "
+    "repository files; upgrade the platform to use this step"
+)
+
+
 def _without_link(text: str, url: str) -> str:
     """``text`` with the download link taken out (a device echoes the copy command).
 
@@ -186,10 +207,7 @@ class FileDownloadHandler(BaseHandler):
         if open_file_download is None:
             return HandlerResult(
                 success=False,
-                error=(
-                    "This Hegemony version cannot issue download links for file "
-                    "repository files; upgrade the platform to use this step"
-                ),
+                error=_NO_DOWNLOAD_LINKS,
                 summary="Download links not supported",
             )
 
@@ -208,6 +226,12 @@ class FileDownloadHandler(BaseHandler):
                     error=f"{label} contains a line break or another control character",
                     summary="Invalid destination",
                 )
+        if dest_filename_config and not _is_plain_file_name(dest_filename_config):
+            return HandlerResult(
+                success=False,
+                error=f"Destination Filename {_NOT_A_PLAIN_NAME}",
+                summary="Invalid destination",
+            )
         many = len(target_devices) > 1
 
         async def _process_device(device: dict) -> _DeviceOutcome:
@@ -241,11 +265,13 @@ class FileDownloadHandler(BaseHandler):
                 return _fail("no mgmt_host configured")
 
             url = ""
+            link_opened = False
             try:
                 # A link of its own for each target, asked for right before its
                 # transfer: a slow target earlier in the list cannot use up the
                 # time a later one has to start.
                 async with open_file_download(file_id, ttl_seconds=_LINK_TTL_SECONDS) as download:
+                    link_opened = True
                     url = download.url
                     outcome.file = {
                         "file_id": download.file_id,
@@ -267,6 +293,10 @@ class FileDownloadHandler(BaseHandler):
                             "the stored file's name contains a line break or another "
                             "control character; set Destination Filename"
                         )
+                    if not _is_plain_file_name(dest_filename):
+                        return _fail(
+                            "the stored file's name has a directory part; set Destination Filename"
+                        )
                     # step_run_id registers the session, so cancelling the run
                     # closes it.
                     transport = services.connect(
@@ -282,6 +312,10 @@ class FileDownloadHandler(BaseHandler):
                         timeout_seconds=transfer_timeout,
                     )
             except NotImplementedError as exc:
+                if not link_opened:
+                    # The host has the service but does not implement it (the
+                    # SDK's default): no transport was asked anything yet.
+                    return _fail(_NO_DOWNLOAD_LINKS)
                 detail = str(exc) or "its transport cannot have the device download a file"
                 return _fail(_without_link(detail, url))
             except Exception as exc:  # noqa: BLE001 - one device's failure, reported
