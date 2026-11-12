@@ -12,7 +12,9 @@ test so the duck-typed platform registry and this SDK stay in lock-step.
 import asyncio
 import dataclasses
 import inspect
-from typing import Any
+from typing import Any, cast
+
+import pytest
 
 import hegemony_step_sdk as sdk
 
@@ -135,6 +137,34 @@ def test_handler_services_declares_sync_inventory():
     assert list(parameters) == ["self", "provider", "max_age_seconds"]
     assert parameters["max_age_seconds"].default is None
     assert parameters["max_age_seconds"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_handler_services_declares_open_file_download():
+    """Added after the first hosts shipped: handlers feature-detect it with getattr."""
+    # Not a coroutine: it returns an async context manager, like open_state_backend.
+    assert not inspect.iscoroutinefunction(sdk.HandlerServices.open_file_download)
+    parameters = inspect.signature(sdk.HandlerServices.open_file_download).parameters
+    assert list(parameters) == ["self", "file_id", "ttl_seconds"]
+    assert parameters["ttl_seconds"].default == 600
+    assert parameters["ttl_seconds"].kind is inspect.Parameter.KEYWORD_ONLY
+    with pytest.raises(NotImplementedError):
+        sdk.HandlerServices.open_file_download(
+            cast(sdk.HandlerServices, object()), "0c7f1ee3-d824-4dea-9c07-bd44e5fe188b"
+        )
+
+
+def test_a_file_download_keeps_its_links_out_of_its_repr():
+    download = sdk.FileDownload(
+        file_id="0c7f1ee3-d824-4dea-9c07-bd44e5fe188b",
+        filename="image.bin",
+        size_bytes=1,
+        sha256="ab" * 32,
+        url="https://hegemony.example.com/api/dl/hgm_run_secret/image.bin",
+        worker_url="http://api:8000/dl/hgm_run_secret/image.bin",
+        expires_at="2026-11-12T12:00:00+00:00",
+    )
+    assert "hgm_run_secret" not in repr(download)
+    assert download.md5 is None
 
 
 def test_the_secret_store_defaults_say_a_host_does_not_support_them():
