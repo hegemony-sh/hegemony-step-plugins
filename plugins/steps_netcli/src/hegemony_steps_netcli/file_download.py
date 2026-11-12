@@ -114,6 +114,19 @@ class _DeviceOutcome:
     file: dict[str, Any] | None = None
 
 
+def _has_control_characters(value: str) -> bool:
+    """Whether ``value`` holds a character a command line must not carry.
+
+    The destination goes into the command a target runs (``copy <link>
+    <fs><name>`` typed on a network device's CLI). A line break or another
+    control character in it would end that command and start another, so a
+    value from a run input or a stored file's name could run commands of its
+    own on the device. Printable characters only: no CR, LF, ESC or other
+    control character, and no Unicode line or paragraph separator.
+    """
+    return any(not character.isprintable() for character in value)
+
+
 def _without_link(text: str, url: str) -> str:
     """``text`` with the download link taken out (a device echoes the copy command).
 
@@ -185,6 +198,16 @@ class FileDownloadHandler(BaseHandler):
         transfer_timeout = int(
             ctx.config.get("transfer_timeout_seconds") or _DEFAULT_TRANSFER_TIMEOUT_SECONDS
         )
+        for label, value in (
+            ("Destination", dest_fs),
+            ("Destination Filename", dest_filename_config),
+        ):
+            if _has_control_characters(value):
+                return HandlerResult(
+                    success=False,
+                    error=f"{label} contains a line break or another control character",
+                    summary="Invalid destination",
+                )
         many = len(target_devices) > 1
 
         async def _process_device(device: dict) -> _DeviceOutcome:
@@ -237,6 +260,13 @@ class FileDownloadHandler(BaseHandler):
                             "administrator sets HEGEMONY_API_EXTERNAL_URL"
                         )
                     dest_filename = dest_filename_config or download.filename
+                    if _has_control_characters(dest_filename):
+                        # The stored file's own name, used as it is: refused
+                        # before any connection, as the configured one is.
+                        return _fail(
+                            "the stored file's name contains a line break or another "
+                            "control character; set Destination Filename"
+                        )
                     # step_run_id registers the session, so cancelling the run
                     # closes it.
                     transport = services.connect(

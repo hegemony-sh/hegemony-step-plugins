@@ -23,8 +23,9 @@ one the shared organization publishes.
 **Destination** is where the file goes on the target: a device filesystem
 with its colon (`flash:`, the default, or `bootflash:`), or a directory on a
 server (`/var/tmp`). **Destination Filename** names it there; left empty, the
-file keeps the name it has in the repository. Targets are chosen with the
-role-based target picker.
+file keeps the name it has in the repository. Neither may contain a line
+break or another control character, because both are typed into the target's
+command line. Targets are chosen with the role-based target picker.
 
 For each target, the step asks the platform for a download link, connects to
 the target and has it fetch the link:
@@ -90,9 +91,12 @@ contributes an "Error" artifact instead. Metrics record `device_count`,
 ## When It Fails
 
 The step fails immediately when no target devices are configured, when no
-file or more than one is selected, and on a platform too old to issue
-download links. Per target, it fails when the device has no management host,
-when the file is not one the run's organization may read, when the platform
+file or more than one is selected, when Destination or Destination Filename
+contains a line break or another control character, and on a platform too old
+to issue download links. Per target, it fails when the device has no management host,
+when the file is not one the run's organization may read, when the stored
+file's name contains a control character and no Destination Filename is set,
+when the platform
 has no `HEGEMONY_API_EXTERNAL_URL`, when the connection fails, when the
 target's transport cannot do the transfer, and when the target does not
 report a completed download (it could not reach the platform, the destination

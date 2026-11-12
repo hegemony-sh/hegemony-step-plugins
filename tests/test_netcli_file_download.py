@@ -67,7 +67,10 @@ class FakeTransport:
 class FakeServices:
     """A host that issues a numbered link per request and records the transfers."""
 
-    def __init__(self, *, url_base: str = BASE, md5: str | None = "cd" * 16) -> None:
+    def __init__(
+        self, *, url_base: str = BASE, md5: str | None = "cd" * 16, filename: str = FILENAME
+    ) -> None:
+        self.filename = filename
         self.url_base = url_base
         self.md5 = md5
         self.events: list[str] = []
@@ -89,7 +92,7 @@ class FakeServices:
         try:
             yield FileDownload(
                 file_id=file_id,
-                filename=FILENAME,
+                filename=self.filename,
                 size_bytes=1024,
                 sha256="ab" * 32,
                 md5=self.md5,
@@ -325,6 +328,52 @@ async def test_exactly_one_file_must_be_selected(file_ids, message):
     assert result.success is False
     assert result.error == message
     assert services.opened == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "label"),
+    [
+        ("dest_fs", "flash:\nreload", "Destination"),
+        ("dest_fs", "flash:\rreload\r", "Destination"),
+        ("dest_filename", "image.bin\nerase startup-config", "Destination Filename"),
+        ("dest_filename", "image\x1b[2J.bin", "Destination Filename"),
+        ("dest_filename", "image\u2028.bin", "Destination Filename"),
+    ],
+)
+async def test_a_destination_that_could_start_another_command_is_refused(field, value, label):
+    """The destination is typed into the device's command line."""
+    services = FakeServices()
+
+    result, _ = await _run(services, {"file_ids": [FILE_ID], field: value})
+
+    assert result.success is False
+    assert result.error == f"{label} contains a line break or another control character"
+    assert services.opened == []
+    assert services.connects == []
+
+
+async def test_a_stored_file_name_that_could_start_another_command_is_refused():
+    services = FakeServices(filename="image.bin\nreload")
+
+    result, _ = await _run(services, {"file_ids": [FILE_ID]})
+
+    assert result.success is False
+    assert "set Destination Filename" in (result.error or "")
+    assert services.connects == []
+    assert services.transfers == []
+    # The link opened to learn the name is closed again.
+    assert services.events == ["open:1", "close:1"]
+
+
+async def test_a_destination_name_with_spaces_is_passed_on_as_it_is():
+    services = FakeServices()
+
+    result, _ = await _run(
+        services, {"file_ids": [FILE_ID], "dest_fs": "/var/tmp", "dest_filename": "my image.bin"}
+    )
+
+    assert result.success is True
+    assert services.transfers[0]["dest_filename"] == "my image.bin"
 
 
 async def test_no_target_devices_fails_before_anything_is_asked():
