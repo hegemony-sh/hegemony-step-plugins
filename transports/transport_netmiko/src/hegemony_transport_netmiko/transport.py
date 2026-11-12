@@ -1390,13 +1390,15 @@ class SSHTransport:
             # Build the copy command
             # Format: copy http://url flash:filename
             #
-            # NOTE: For Cisco IOS, URLs with '?' characters trigger help mode.
-            # We avoid this by using redirect URLs from the API (no query params).
-            # The API returns HTTP 302 redirect to presigned S3 URLs.
+            # NOTE: On Cisco IOS a '?' in the command line opens the help, so a
+            # URL with a query string (a presigned object-store URL) cannot be
+            # typed as it is. Callers pass a URL without one: the platform's
+            # download links (HandlerServices.open_file_download) carry their
+            # token in the path and answer with the file, not with a redirect.
             copy_cmd = f"copy {url} {dest_fs}{dest_filename}"
 
-            # Use write_channel directly to send the escaped command
-            # (send_command_timing might not handle Ctrl+V properly)
+            # Written to the channel directly: the copy asks questions before
+            # it starts, which the loop below answers.
             connection.write_channel(copy_cmd + "\n")
             time.sleep(1)  # Give device time to process
 
