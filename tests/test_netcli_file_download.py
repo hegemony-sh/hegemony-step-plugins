@@ -435,6 +435,45 @@ async def test_a_host_that_does_not_implement_links_is_not_blamed_on_the_transpo
     assert services.connects == []
 
 
+@pytest.mark.parametrize(
+    ("field", "label"), [("dest_fs", "Destination"), ("dest_filename", "Destination Filename")]
+)
+async def test_a_question_mark_in_the_destination_is_refused(field, label):
+    """On a network device's command line it opens the help instead of being typed."""
+    services = FakeServices()
+
+    result, _ = await _run(services, {"file_ids": [FILE_ID], field: "image?.bin"})
+
+    assert result.success is False
+    assert (result.error or "").startswith(f"{label} contains a question mark")
+    assert services.opened == []
+
+
+async def test_a_stored_file_name_with_a_question_mark_is_refused():
+    services = FakeServices(filename="image?.bin")
+
+    result, _ = await _run(services, {"file_ids": [FILE_ID]})
+
+    assert result.success is False
+    assert "question mark" in (result.error or "")
+    assert "set Destination Filename" in (result.error or "")
+    assert services.connects == []
+
+
+async def test_parallel_targets_get_links_that_outlast_a_wait_for_a_free_thread():
+    """A transfer may queue behind others after its link was issued."""
+    services = FakeServices()
+
+    result, _ = await _run(
+        services,
+        {"file_ids": [FILE_ID], "max_parallel_devices": 2},
+        [_device("sw1"), _device("sw2", "192.0.2.2")],
+    )
+
+    assert result.success is True
+    assert {opened["ttl_seconds"] for opened in services.opened} == {3600}
+
+
 async def test_no_target_devices_fails_before_anything_is_asked():
     services = FakeServices()
 

@@ -25,8 +25,9 @@ with its colon (`flash:`, the default, or `bootflash:`), or a directory on a
 server (`/var/tmp`). **Destination Filename** names it there; left empty, the
 file keeps the name it has in the repository. It is a file name only, with no
 slash: a directory belongs in Destination (`flash:images/`, `/var/tmp`).
-Neither field may contain a line break or another control character, because
-both are typed into the target's command line. Targets are chosen with the role-based target picker.
+Neither field may contain a line break or another control character, or a
+question mark, because both are typed into the target's command line (where a
+question mark asks for help). Targets are chosen with the role-based target picker.
 
 For each target, the step asks the platform for a download link, connects to
 the target and has it fetch the link:
@@ -34,7 +35,9 @@ the target and has it fetch the link:
 - With the netmiko transport (network devices), it runs
   `copy <link> <destination><filename>` and answers the questions the device
   asks before it starts (the destination file name, a confirmation to
-  overwrite).
+  overwrite). This is the Cisco IOS and IOS XE form of the command. A platform
+  that copies files with another command (Junos uses `file copy`) is not
+  supported: such a device fails, possibly only when Transfer timeout ends.
 - With the asyncssh transport (servers), it runs `curl` on the server, which
   must have it installed.
 - The scrapli transport cannot do this; the step fails such a device and says
@@ -44,7 +47,9 @@ The link looks like `<platform address>/dl/<token>/<filename>`. It has no
 query string and is not a redirect, because the HTTP clients of network
 devices often handle neither. The token in it opens that one file and nothing
 else. Each target gets a link of its own, issued right before its download and
-ended right after it; an unused link expires after ten minutes. The platform
+ended right after it; an unused link expires after ten minutes (after an hour
+when targets download in parallel, because a target may wait its turn after
+its link was issued). The platform
 records each issued link in the audit log, with the run, the step and the file.
 
 Targets must be able to reach the platform at the address an administrator set
@@ -93,10 +98,12 @@ contributes an "Error" artifact instead. Metrics record `device_count`,
 
 The step fails immediately when no target devices are configured, when no
 file or more than one is selected, when Destination or Destination Filename
-contains a line break or another control character, when Destination Filename
+contains a line break, another control character or a question mark, when
+Destination Filename
 has a directory part, and on a platform that cannot issue download links. Per target, it fails when the device has no management host,
 when the file is not one the run's organization may read, when the stored
-file's name contains a control character or a directory part and no
+file's name contains a control character, a question mark or a directory part
+and no
 Destination Filename is set,
 when the platform
 has no `HEGEMONY_API_EXTERNAL_URL`, when the connection fails, when the

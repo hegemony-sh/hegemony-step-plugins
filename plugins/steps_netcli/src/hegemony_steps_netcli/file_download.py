@@ -40,6 +40,12 @@ _DEFAULT_TRANSFER_TIMEOUT_SECONDS = 3600
 #: is asked for right before the transfer, so this only has to cover the
 #: connection to the target; a transfer under way is not cut off at its end.
 _LINK_TTL_SECONDS = 600
+#: The same, when targets download in parallel. A transport may run its
+#: blocking work on a shared thread pool, so a target's transfer can wait
+#: behind others after its link was issued: the wait counts against the link.
+#: An hour is the most a host grants; the link is still ended right after the
+#: target's transfer.
+_PARALLEL_LINK_TTL_SECONDS = 3600
 #: What a link is replaced with wherever the step reports text a target echoed.
 _LINK_PLACEHOLDER = "<download link>"
 
@@ -139,6 +145,7 @@ def _is_plain_file_name(value: str) -> bool:
     return bool(value) and "/" not in value and "\\" not in value and value not in (".", "..")
 
 
+_QUESTION_MARK_REASON = "which a network device's command line reads as a request for help"
 _NOT_A_PLAIN_NAME = (
     "must be a file name without a directory part (no slash); put the directory in Destination"
 )
@@ -226,6 +233,12 @@ class FileDownloadHandler(BaseHandler):
                     error=f"{label} contains a line break or another control character",
                     summary="Invalid destination",
                 )
+            if "?" in value:
+                return HandlerResult(
+                    success=False,
+                    error=f"{label} contains a question mark, {_QUESTION_MARK_REASON}",
+                    summary="Invalid destination",
+                )
         if dest_filename_config and not _is_plain_file_name(dest_filename_config):
             return HandlerResult(
                 success=False,
@@ -233,6 +246,8 @@ class FileDownloadHandler(BaseHandler):
                 summary="Invalid destination",
             )
         many = len(target_devices) > 1
+        max_parallel = max_parallel_from_config(ctx.config)
+        link_ttl = _PARALLEL_LINK_TTL_SECONDS if max_parallel > 1 else _LINK_TTL_SECONDS
 
         async def _process_device(device: dict) -> _DeviceOutcome:
             outcome = _DeviceOutcome()
@@ -270,7 +285,7 @@ class FileDownloadHandler(BaseHandler):
                 # A link of its own for each target, asked for right before its
                 # transfer: a slow target earlier in the list cannot use up the
                 # time a later one has to start.
-                async with open_file_download(file_id, ttl_seconds=_LINK_TTL_SECONDS) as download:
+                async with open_file_download(file_id, ttl_seconds=link_ttl) as download:
                     link_opened = True
                     url = download.url
                     outcome.file = {
@@ -292,6 +307,11 @@ class FileDownloadHandler(BaseHandler):
                         return _fail(
                             "the stored file's name contains a line break or another "
                             "control character; set Destination Filename"
+                        )
+                    if "?" in dest_filename:
+                        return _fail(
+                            "the stored file's name contains a question mark, "
+                            f"{_QUESTION_MARK_REASON}; set Destination Filename"
                         )
                     if not _is_plain_file_name(dest_filename):
                         return _fail(
@@ -351,7 +371,7 @@ class FileDownloadHandler(BaseHandler):
         outcomes = await for_each_target_device(
             target_devices,
             _process_device,
-            max_parallel=max_parallel_from_config(ctx.config),
+            max_parallel=max_parallel,
         )
 
         errors = [error for outcome in outcomes for error in outcome.errors]
