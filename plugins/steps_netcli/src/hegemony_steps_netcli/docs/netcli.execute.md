@@ -78,7 +78,7 @@ covers that hop only and needs a Hegemony version that reads it.
 
 ## Output
 
-Later steps can read `steps.NODE_ID.stdout` — the combined output of all
+Later steps can read `steps.NODE_ID.output.stdout` — the combined output of all
 commands across all devices, capped at 4096 characters. Full outputs are
 preserved in the `cli_output` evidence artifacts described above, which also
 record the device, the command(s), the exit code, and any error text. A

@@ -46,11 +46,11 @@ off.
 
 ## Output
 
-Later steps can read `steps.NODE_ID.child_run_id`,
-`steps.NODE_ID.child_workflow_id`, `steps.NODE_ID.child_status`, and
-`steps.NODE_ID.waited`. Without waiting, the reported status is
+Later steps can read `steps.NODE_ID.output.child_run_id`,
+`steps.NODE_ID.output.child_workflow_id`, `steps.NODE_ID.output.child_status`, and
+`steps.NODE_ID.output.waited`. Without waiting, the reported status is
 `PENDING`. When the step waited and the child succeeded, the child flow's
-evaluated outputs land under `steps.NODE_ID.outputs`, one key per child
+evaluated outputs land under `steps.NODE_ID.output.outputs`, one key per child
 flow output. Metrics record `child_run_count` (always 1) and, when the step
 waited, `wait_seconds`; a polling error that fails the step records no
 metrics. Progress events carry the child run id while the

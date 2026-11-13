@@ -743,6 +743,36 @@ def test_http_transfer_url_is_not_logged(caplog):
     assert _SECRET not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "% Unknown command: copy http://a/b flash:image.bin\nr1# ",
+        "                 ^\nunknown command.\nuser@r1> ",
+    ],
+)
+def test_http_transfer_stops_at_once_when_the_device_does_not_know_the_command(answer):
+    """A platform without the copy command fails now, not when the timeout ends."""
+    connection = MagicMock()
+    connection.read_channel.return_value = answer
+    transport = _make_transport()
+
+    with (
+        patch.object(
+            hegemony_transport_netmiko.transport, "ConnectHandler", return_value=connection
+        ),
+        patch.object(hegemony_transport_netmiko.transport, "_safe_disconnect"),
+        patch.object(hegemony_transport_netmiko.transport.time, "sleep") as sleep,
+    ):
+        result = transport._http_transfer_sync(
+            url="http://a/b", dest_fs="flash:", dest_filename="image.bin", timeout_seconds=3600
+        )
+
+    assert result["transferred"] is False
+    # The first answer was enough: one pause after the command, no polling.
+    assert sleep.call_count == 1
+    assert connection.read_channel.call_count == 1
+
+
 # ── Jump host (bastion) hop ──────────────────────────────────────────────────
 
 

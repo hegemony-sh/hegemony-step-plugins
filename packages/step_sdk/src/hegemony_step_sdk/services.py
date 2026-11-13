@@ -265,6 +265,38 @@ class StateBackendAccess:
 
 
 @dataclass(frozen=True, slots=True)
+class FileDownload:
+    """A short-lived download link to one file-repository file.
+
+    Served by :meth:`HandlerServices.open_file_download` so a step can have a
+    target (a network device, a server) fetch the file by itself. The link is
+    a plain ``GET`` with no query string and no redirect, and the file name is
+    its last path segment: the token in its path is the only credential. The
+    host registers that token for redaction and revokes it when the context
+    exits; it expires on its own at ``expires_at`` and stops working soon
+    after the run ends. A transfer that started before then runs to its end.
+
+    ``url`` is the link on the address targets reach the platform at, or
+    ``""`` when the deployment names none (``HEGEMONY_API_EXTERNAL_URL``): a
+    step that hands the link to a target fails with a clear message then.
+    ``worker_url`` is the same link as the worker process itself reaches it,
+    for a handler that fetches the file onto the worker.
+    """
+
+    file_id: str
+    filename: str
+    size_bytes: int
+    # Lowercase hex digests of the stored file. ``md5`` is None for a file
+    # stored without one.
+    sha256: str
+    url: str = field(repr=False)
+    worker_url: str = field(repr=False)
+    # ISO 8601, with a UTC offset.
+    expires_at: str
+    md5: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SecretWriteResult:
     """What :meth:`HandlerServices.write_secret` stored, never the values themselves.
 
@@ -512,6 +544,36 @@ class HandlerServices(Protocol):
         than this method has no such attribute at all, so look it up with
         ``getattr``. A platform older than ``taken_by`` raises ``TypeError``
         when it is passed.
+        """
+        raise NotImplementedError
+
+    def open_file_download(
+        self, file_id: str, *, ttl_seconds: int = 600
+    ) -> AbstractAsyncContextManager[FileDownload]:
+        """Open a short-lived download link to the file-repository file ``file_id``.
+
+        For a step that stages a file on a target: the step hands
+        :attr:`FileDownload.url` to the target, which downloads the file from
+        the platform by itself (``Transport.http_transfer``, a ``curl`` on a
+        server). ``file_id`` is the stored file's id, as a step field marked
+        ``x_widget: repository-file-select`` stores it (name such a field
+        ``file_ids``: the platform refuses to delete a file a flow lists
+        there).
+
+        The host finds only files the run's organization may read: its own
+        and those the platform's shared organization publishes. The link
+        opens that one file, may be used to start a download for
+        ``ttl_seconds`` (the host caps it; ask again for each target rather
+        than for longer), and is revoked when the context exits. The host
+        registers the link's token for redaction and records an audit event
+        naming the run, the step and the file.
+
+        Raises ``LookupError`` for a file the organization does not have,
+        ``ValueError`` for a malformed ``file_id`` or ``ttl_seconds``, and
+        ``RuntimeError`` when the host cannot be reached or the step or run
+        has ended. Hosts without support raise ``NotImplementedError``; a
+        platform older than this method has no such attribute at all, so
+        look it up with ``getattr``.
         """
         raise NotImplementedError
 
