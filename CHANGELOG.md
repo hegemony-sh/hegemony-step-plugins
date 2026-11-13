@@ -1,3 +1,17 @@
+## [0.40.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.39.0...v0.40.0) (2026-11-13)
+
+### Features
+
+* **netcli:** file_download, a device downloads a file-repository file ([08ed62f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/08ed62f714d475249ec751339c21757637eafb4e))
+* **sdk:** open_file_download, a download link to a file-repository file ([2dd9e90](https://github.com/hegemony-sh/hegemony-step-plugins/commit/2dd9e9097e04e64c63efee794518e54b3d3113b1))
+
+### Bug Fixes
+
+* **netcli:** fail at once on an unknown copy command and correct output references ([2b97265](https://github.com/hegemony-sh/hegemony-step-plugins/commit/2b9726569a1b06cf07bceb135e893fee708ab8a4))
+* **netcli:** keep a downloaded file under its destination ([dc4506c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/dc4506c036a8d52007d74b6aba2ccae02745d35b))
+* **netcli:** refuse a question mark in the destination; longer links in parallel ([0cd2a46](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0cd2a46ba1e9033227701e1e11ab3ed30cf5ae71))
+* **netcli:** refuse a transfer destination that holds a control character ([f52817b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f52817b9b9798b0644ef6c78361621fd314847cd))
+
 ## [0.39.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.38.1...v0.39.0) (2026-11-10)
 
 ### Features
