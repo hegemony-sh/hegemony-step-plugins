@@ -37,7 +37,8 @@ the target and has it fetch the link:
   asks before it starts (the destination file name, a confirmation to
   overwrite). This is the Cisco IOS and IOS XE form of the command. A platform
   that copies files with another command (Junos uses `file copy`) is not
-  supported: such a device fails, possibly only when Transfer timeout ends.
+  supported: such a device fails. It fails at once when the device answers
+  that it does not know the command, otherwise when Transfer timeout ends.
 - With the asyncssh transport (servers), it runs `curl` on the server, which
   must have it installed.
 - The scrapli transport cannot do this; the step fails such a device and says
@@ -81,12 +82,12 @@ device; use legacy mode only on a trusted network.
 
 Later steps can read:
 
-- `steps.NODE_ID.filename` and `steps.NODE_ID.file_id`: the stored file.
-- `steps.NODE_ID.dest_fs` and `steps.NODE_ID.dest_filename`: where it went.
-- `steps.NODE_ID.size_bytes`, `steps.NODE_ID.sha256` and `steps.NODE_ID.md5`:
+- `steps.NODE_ID.output.filename` and `steps.NODE_ID.output.file_id`: the stored file.
+- `steps.NODE_ID.output.dest_fs` and `steps.NODE_ID.output.dest_filename`: where it went.
+- `steps.NODE_ID.output.size_bytes`, `steps.NODE_ID.output.sha256` and `steps.NODE_ID.output.md5`:
   the stored file's size and checksums, for a verification step. `md5` is
   null for a file stored without one, so check it before a step uses it.
-- `steps.NODE_ID.transferred_count`: how many targets completed the download.
+- `steps.NODE_ID.output.transferred_count`: how many targets completed the download.
 
 Each target contributes a "File download" evidence artifact with what it
 printed during the transfer, the file's details and the time taken; the

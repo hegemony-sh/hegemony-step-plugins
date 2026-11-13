@@ -1441,6 +1441,10 @@ class SSHTransport:
                         "refused",
                         "Could not",
                         "Incomplete command",
+                        # A platform without this copy command ("% Unknown
+                        # command" on FRR, "unknown command." on Junos): the
+                        # answer is final, so do not wait out the timeout.
+                        "nknown command",
                         "Broken pipe",
                     ]
                 ):
