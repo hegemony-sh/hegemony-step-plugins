@@ -412,6 +412,17 @@ class ShellFileDownloadHandler(BaseHandler):
                         "the downloaded file could not be moved into place"
                         + (f" ({reason})" if reason else "")
                     )
+                # A directory that appeared under the name since the check above
+                # takes the file inside it, and mv still succeeds. Asked again,
+                # so that case is reported as the failure it is.
+                in_place = await transport.run(
+                    f"test -f {shlex.quote(dest_path)}", timeout=_FINISH_TIMEOUT_SECONDS
+                )
+                if in_place.exit_code != 0:
+                    return _fail(
+                        f"{dest_path} is not a regular file after the move; a directory "
+                        "of that name may have appeared during the download"
+                    )
             except NotImplementedError as exc:
                 await _discard()
                 if not link_opened:

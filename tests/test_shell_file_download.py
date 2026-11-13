@@ -58,8 +58,9 @@ class FakeShell:
         if program == "sha256sum":
             return ShellResult(command, 0, f"{SHA256}  -\n", "")
         if program == "test":
-            # ``test -d``: the destination is not a directory.
-            return ShellResult(command, 1, "", "")
+            # ``test -d`` before the download: not a directory.
+            # ``test -f`` after the move: a regular file.
+            return ShellResult(command, 0 if " -f " in command else 1, "", "")
         return ShellResult(command, 0, "", "")
 
     async def close(self) -> None:
@@ -166,6 +167,7 @@ async def test_the_host_downloads_verifies_and_moves_the_file_into_place():
         f"curl -fsS --max-time 3600 -o {part} {link}",
         f"sha256sum < {part}",
         f"mv -f {part} /var/tmp/{FILENAME}",
+        f"test -f /var/tmp/{FILENAME}",
     ]
     assert services.commands[1]["timeout"] == 3615
     assert result.output == {
@@ -202,6 +204,7 @@ async def test_the_link_is_opened_after_the_connection_and_closed_before_the_che
         "close:1",
         "sha256sum:a",
         "mv:a",
+        "test:a",
         "close-shell:a",
         "shell:b",
         "open:2",
@@ -210,6 +213,7 @@ async def test_the_link_is_opened_after_the_connection_and_closed_before_the_che
         "close:2",
         "sha256sum:b",
         "mv:b",
+        "test:b",
         "close-shell:b",
     ]
     assert [entry["ttl_seconds"] for entry in services.opened] == [600, 600]
@@ -247,7 +251,7 @@ async def test_destination_name_and_timeout_come_from_the_config():
     assert _commands(services)[1].startswith(
         "curl -fsS --max-time 120 -o /opt/releases/current.tar.gz.0a1b2c3d.part "
     )
-    assert _commands(services)[-1] == (
+    assert _commands(services)[-2] == (
         "mv -f /opt/releases/current.tar.gz.0a1b2c3d.part /opt/releases/current.tar.gz"
     )
     assert result.output["dest_path"] == "/opt/releases/current.tar.gz"
@@ -277,7 +281,7 @@ async def test_without_the_check_the_file_is_moved_right_after_the_download():
     result, _ = await _run(services, {"file_ids": [FILE_ID], "verify_checksum": False})
 
     assert result.success is True, result.error
-    assert [command.split()[0] for command in _commands(services)] == ["test", "curl", "mv"]
+    assert [command.split()[0] for command in _commands(services)] == ["test", "curl", "mv", "test"]
     assert result.output["verified"] is False
 
 
@@ -418,6 +422,32 @@ async def test_a_destination_that_is_a_directory_is_refused_before_the_download(
     assert result.success is False
     assert "/var/tmp/releases is a directory on the host" in (result.error or "")
     assert _commands(services) == ["test -d /var/tmp/releases"]
+
+
+@pytest.mark.asyncio
+async def test_a_directory_that_appears_during_the_download_is_not_reported_as_success():
+    services = FakeServices()
+
+    class Shell(FakeShell):
+        async def run(self, command: str, *, timeout: float | None = None) -> ShellResult:
+            if command.startswith("test -f "):
+                self.services.commands.append(
+                    {"device": self.device["name"], "command": command, "timeout": timeout}
+                )
+                return ShellResult(command, 1, "", "")
+            return await super().run(command, timeout=timeout)
+
+    async def open_shell(device: dict[str, Any], **kwargs: Any) -> FakeShell:
+        return Shell(services, device)
+
+    services.open_shell = open_shell  # type: ignore[method-assign]
+
+    result, _ = await _run(services, {"file_ids": [FILE_ID]})
+
+    assert result.success is False
+    assert "is not a regular file after the move" in (result.error or "")
+    assert result.output["transferred_count"] == 0
+    assert result.output["verified"] is False
 
 
 @pytest.mark.asyncio

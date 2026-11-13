@@ -40,6 +40,7 @@ does), asks the platform for a download link, and runs on the host:
 3. `sha256sum < <destination>.<random>.part`, when **Verify checksum** is on
    (the default): the result must equal the stored file's SHA-256.
 4. `mv -f <destination>.<random>.part <destination>`
+5. `test -f <destination>`: the file must be there as a regular file.
 
 So the file appears under its name only once it is complete and, with the
 check on, verified. A download that fails or does not match leaves nothing
@@ -48,6 +49,16 @@ transfer has a `.part` file of its own, so two runs staging the same file on
 one host do not disturb each other; the one that finishes last provides the
 file. An existing file of that name is replaced. The host needs `curl`, and
 `sha256sum` for the check; turn **Verify checksum** off on a host without it.
+
+Two limits follow from doing this with plain commands on the host:
+
+- Use a destination directory that accounts you do not trust cannot write
+  to, or one with the sticky bit (as `/tmp` and `/var/tmp` have). An account
+  that can replace files in the directory could swap the download before it
+  is moved into place, as it could swap the finished file afterwards; the
+  checksum check cannot rule that out.
+- A run that is cancelled while a host downloads can leave that host's
+  `<destination>.<random>.part` file behind. It is safe to delete.
 
 The link looks like `<platform address>/dl/<token>/<filename>`. The token in
 it opens that one file and nothing else. Each host gets a link of its own,
@@ -113,6 +124,7 @@ Destination Filename is set, when the platform has no
 cannot reach the platform, the directory does not exist or is not writable,
 the disk is full, the transfer timed out), when the destination is a
 directory, when the checksum cannot be
-computed or does not match, and when the file cannot be moved into place. One
+computed or does not match, when the file cannot be moved into place, and
+when the destination is not a regular file after the move. One
 failing host does not stop the others, but all must succeed for the step to
 succeed.
