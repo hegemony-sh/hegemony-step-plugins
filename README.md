@@ -67,7 +67,7 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_evidence` | `evidence.` | assert, compare |
   | `plugins/steps_container` | `container.` | run |
   | `plugins/steps_flow` | `flow.` | run, notify |
-  | `plugins/steps_shell` | `shell.` | execute — commands on Linux/Unix hosts over SSH |
+  | `plugins/steps_shell` | `shell.` | execute, file_download — commands and file downloads on Linux/Unix hosts over SSH |
   | `plugins/steps_monitor` | `monitor.` | connectivity — start a background monitor that probes targets on a schedule (the platform runs the monitor itself) |
   | `plugins/steps_ansible` | `ansible.` | playbook (built on `container.run`'s runner) |
   | `plugins/steps_tf` | `tf.` | plan, apply — OpenTofu or Terraform (built on `container.run`'s runner) |

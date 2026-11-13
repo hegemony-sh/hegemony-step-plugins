@@ -173,7 +173,7 @@ class FileDownloadHandler(BaseHandler):
     supported_kinds = [StepKind.ACTION]
     display_name = "Download File to Device"
     description = (
-        "Have each target device or server download a file-repository file "
+        "Have each target network device download a file-repository file "
         "over HTTP(S), through a short-lived link."
     )
     category = "Actions"

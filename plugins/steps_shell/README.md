@@ -11,11 +11,13 @@ Remote shell execution for Hegemony flows — the `shell.` namespace.
 
 Handlers: `shell.execute` — run commands on Linux/Unix hosts with exec-channel
 semantics (meaningful exit codes, separate stdout/stderr), optionally wrapped
-in `sh`/`bash`/`pwsh`. The transport (SSH today, WinRM planned) is resolved
+in `sh`/`bash`/`pwsh`; `shell.file_download` — have each host download a
+file-repository file with `curl` through a short-lived link, and verify its
+SHA-256. The transport (SSH today, WinRM planned) is resolved
 from `device.access_config` via the platform's `open_shell` service; per
 CONVENTIONS.md, neither transport nor interpreter ever appears in handler ids.
 
-**In the platform's images**: the handler is in every instance's flow editor,
+**In the platform's images**: the handlers are in every instance's flow editor,
 and a deployment that must not run commands on hosts builds its api and worker
 images without the wheel (`uv pip uninstall hegemony-steps-shell` in a derived
 image). It reaches only devices whose access config holds SSH credentials. This wheel
