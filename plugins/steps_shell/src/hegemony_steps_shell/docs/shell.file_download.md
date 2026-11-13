@@ -53,10 +53,14 @@ file. An existing file of that name is replaced. The host needs `curl`, and
 Two limits follow from doing this with plain commands on the host:
 
 - Use a destination directory that accounts you do not trust cannot write
-  to, or one with the sticky bit (as `/tmp` and `/var/tmp` have). An account
-  that can replace files in the directory could swap the download before it
-  is moved into place, as it could swap the finished file afterwards; the
-  checksum check cannot rule that out.
+  to. An account that can replace files in the directory could swap the
+  download before it is moved into place, as it could swap the finished file
+  afterwards; the checksum check cannot rule that out. A shared directory
+  with the sticky bit (as `/tmp` and `/var/tmp` have, the default included)
+  stops other accounts from renaming or deleting the file, which is weaker:
+  it does not stop them from writing to a file whose permissions allow it.
+  For a file that matters, name a directory only the login account can write
+  to.
 - A run that is cancelled while a host downloads can leave that host's
   `<destination>.<random>.part` file behind. It is safe to delete.
 
