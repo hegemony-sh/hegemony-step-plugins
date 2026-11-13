@@ -16,6 +16,7 @@ before its download and ended right after it.
 from __future__ import annotations
 
 import logging
+import secrets
 import shlex
 from dataclasses import dataclass, field
 from typing import Any
@@ -50,8 +51,10 @@ _FINISH_TIMEOUT_SECONDS = 600
 _RUN_MARGIN_SECONDS = 15
 #: What a link is replaced with wherever the step reports text a host printed.
 _LINK_PLACEHOLDER = "<download link>"
-#: Suffix of the file while it downloads. It becomes the destination file only
-#: once it is complete (and verified), so a broken download never looks done.
+#: Suffix of the file while it downloads (after a few random characters, so
+#: every transfer has a staging file of its own). It becomes the destination
+#: file only once it is complete (and verified), so a broken download never
+#: looks done.
 _PARTIAL_SUFFIX = ".part"
 
 _NO_DOWNLOAD_LINKS = (
@@ -307,6 +310,18 @@ class ShellFileDownloadHandler(BaseHandler):
             url = ""
             link_opened = False
             dest_path = ""
+            #: The staging file, quoted for the command line, once curl may have made it.
+            staged: str | None = None
+
+            async def _discard() -> None:
+                """Remove the staging file; never hides the failure that led here."""
+                if staged is None:
+                    return
+                try:
+                    await transport.run(f"rm -f {staged}", timeout=_FINISH_TIMEOUT_SECONDS)
+                except Exception:  # noqa: BLE001 - cleanup is best-effort
+                    logger.debug("staging file cleanup failed", exc_info=True)
+
             try:
                 async with open_file_download(file_id, ttl_seconds=_LINK_TTL_SECONDS) as download:
                     link_opened = True
@@ -334,30 +349,46 @@ class ShellFileDownloadHandler(BaseHandler):
                             "the stored file's name has a directory part; set Destination Filename"
                         )
                     dest_path = f"{directory}/{dest_filename}"
-                    partial = shlex.quote(dest_path + _PARTIAL_SUFFIX)
+                    # mv would put the file inside a directory of that name and
+                    # still succeed, so the step would report a file that is
+                    # not there. Asked before anything is downloaded.
+                    is_directory = await transport.run(
+                        f"test -d {shlex.quote(dest_path)}", timeout=_FINISH_TIMEOUT_SECONDS
+                    )
+                    if is_directory.exit_code == 0:
+                        return _fail(
+                            f"{dest_path} is a directory on the host; set Destination "
+                            "Filename, or name the directory in Destination Directory"
+                        )
+                    # A name of its own for every transfer: two runs staging the
+                    # same file on one host then never write to, verify or
+                    # remove each other's download.
+                    staging_path = f"{dest_path}.{secrets.token_hex(4)}{_PARTIAL_SUFFIX}"
+                    staged = shlex.quote(staging_path)
                     fetched = await transport.run(
-                        download_command(
-                            url, dest_path + _PARTIAL_SUFFIX, config.transfer_timeout_seconds
-                        ),
+                        download_command(url, staging_path, config.transfer_timeout_seconds),
                         timeout=config.transfer_timeout_seconds + _RUN_MARGIN_SECONDS,
                     )
                 # The link is ended here: what follows needs the host only.
                 if fetched.exit_code != 0:
-                    await transport.run(f"rm -f {partial}", timeout=_FINISH_TIMEOUT_SECONDS)
+                    await _discard()
                     detail = _without_link(_first_line(fetched.stderr or fetched.stdout), url)
                     return _fail(
                         f"curl exited {fetched.exit_code}" + (f" ({detail})" if detail else ""),
                         exit_code=fetched.exit_code,
                     )
                 if config.verify_checksum:
+                    # Read from standard input: given a file name with a
+                    # backslash, sha256sum escapes the name and marks the line
+                    # with a leading backslash, which is not part of the digest.
                     summed = await transport.run(
-                        f"sha256sum {partial}", timeout=_FINISH_TIMEOUT_SECONDS
+                        f"sha256sum < {staged}", timeout=_FINISH_TIMEOUT_SECONDS
                     )
                     words = summed.stdout.split()
                     actual = words[0].lower() if summed.exit_code == 0 and words else ""
                     expected = str(download.sha256 or "").lower()
                     if not actual or actual != expected:
-                        await transport.run(f"rm -f {partial}", timeout=_FINISH_TIMEOUT_SECONDS)
+                        await _discard()
                         if not actual:
                             reason = _first_line(summed.stderr or summed.stdout)
                             return _fail(
@@ -372,22 +403,26 @@ class ShellFileDownloadHandler(BaseHandler):
                         )
                     outcome.verified = True
                 moved = await transport.run(
-                    f"mv -f {partial} {shlex.quote(dest_path)}", timeout=_FINISH_TIMEOUT_SECONDS
+                    f"mv -f {staged} {shlex.quote(dest_path)}", timeout=_FINISH_TIMEOUT_SECONDS
                 )
                 if moved.exit_code != 0:
-                    await transport.run(f"rm -f {partial}", timeout=_FINISH_TIMEOUT_SECONDS)
+                    await _discard()
                     reason = _first_line(moved.stderr or moved.stdout)
                     return _fail(
                         "the downloaded file could not be moved into place"
                         + (f" ({reason})" if reason else "")
                     )
             except NotImplementedError as exc:
+                await _discard()
                 if not link_opened:
                     # The host platform has the service but does not implement
                     # it (the SDK's default).
                     return _fail(_NO_DOWNLOAD_LINKS)
                 return _fail(_without_link(str(exc) or type(exc).__name__, url))
             except Exception as exc:  # noqa: BLE001 - one host's failure, reported
+                # A command that raised (a timeout, a dropped session) may have
+                # left the staging file: it is removed if the host still answers.
+                await _discard()
                 return _fail(_without_link(str(exc) or type(exc).__name__, url))
             finally:
                 try:

@@ -34,16 +34,20 @@ For each host, the step connects over the device's remote-shell transport
 (SSH, resolved from the device's access configuration, as `shell.execute`
 does), asks the platform for a download link, and runs on the host:
 
-1. `curl -fsS --max-time <timeout> -o <destination>.part <link>`
-2. `sha256sum <destination>.part`, when **Verify checksum** is on (the
-   default): the result must equal the stored file's SHA-256.
-3. `mv -f <destination>.part <destination>`
+1. `test -d <destination>`: a directory of that name is refused, before
+   anything is downloaded.
+2. `curl -fsS --max-time <timeout> -o <destination>.<random>.part <link>`
+3. `sha256sum < <destination>.<random>.part`, when **Verify checksum** is on
+   (the default): the result must equal the stored file's SHA-256.
+4. `mv -f <destination>.<random>.part <destination>`
 
 So the file appears under its name only once it is complete and, with the
 check on, verified. A download that fails or does not match leaves nothing
-behind: the `.part` file is removed. An existing file of that name is
-replaced. The host needs `curl`, and `sha256sum` for the check; turn **Verify
-checksum** off on a host without it.
+behind: the `.part` file is removed, as far as the host still answers. Every
+transfer has a `.part` file of its own, so two runs staging the same file on
+one host do not disturb each other; the one that finishes last provides the
+file. An existing file of that name is replaced. The host needs `curl`, and
+`sha256sum` for the check; turn **Verify checksum** off on a host without it.
 
 The link looks like `<platform address>/dl/<token>/<filename>`. The token in
 it opens that one file and nothing else. Each host gets a link of its own,
@@ -107,7 +111,8 @@ file's name contains a control character or a directory part and no
 Destination Filename is set, when the platform has no
 `HEGEMONY_API_EXTERNAL_URL`, when `curl` fails (it is not installed, the host
 cannot reach the platform, the directory does not exist or is not writable,
-the disk is full, the transfer timed out), when the checksum cannot be
+the disk is full, the transfer timed out), when the destination is a
+directory, when the checksum cannot be
 computed or does not match, and when the file cannot be moved into place. One
 failing host does not stop the others, but all must succeed for the step to
 succeed.

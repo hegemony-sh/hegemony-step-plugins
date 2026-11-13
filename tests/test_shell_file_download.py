@@ -26,6 +26,7 @@ from hegemony_step_sdk import (
     ShellResult,
 )
 from hegemony_step_sdk.docs import check_page, load_docs_bundle
+from hegemony_steps_shell import file_download
 from hegemony_steps_shell.file_download import (
     ShellFileDownloadConfig,
     ShellFileDownloadHandler,
@@ -55,7 +56,10 @@ class FakeShell:
         if answer is not None:
             return ShellResult(command, *answer)
         if program == "sha256sum":
-            return ShellResult(command, 0, f"{SHA256}  {shlex.split(command)[1]}\n", "")
+            return ShellResult(command, 0, f"{SHA256}  -\n", "")
+        if program == "test":
+            # ``test -d``: the destination is not a directory.
+            return ShellResult(command, 1, "", "")
         return ShellResult(command, 0, "", "")
 
     async def close(self) -> None:
@@ -108,6 +112,12 @@ class FakeServices:
         return FakeShell(self, device)
 
 
+@pytest.fixture(autouse=True)
+def _fixed_staging_name(monkeypatch):
+    """Staging files get the same "random" part in every test."""
+    monkeypatch.setattr(file_download.secrets, "token_hex", lambda size: "0a1b2c3d")
+
+
 def _device(name: str, host: str | None = "192.0.2.1") -> dict:
     device: dict[str, Any] = {"id": f"id-{name}", "name": name, "platform": "linux"}
     if host:
@@ -150,13 +160,14 @@ async def test_the_host_downloads_verifies_and_moves_the_file_into_place():
 
     assert result.success is True, result.error
     link = f"{BASE}/dl/hgm_run_token1/{FILENAME}"
-    part = f"/var/tmp/{FILENAME}.part"
+    part = f"/var/tmp/{FILENAME}.0a1b2c3d.part"
     assert _commands(services) == [
+        f"test -d /var/tmp/{FILENAME}",
         f"curl -fsS --max-time 3600 -o {part} {link}",
-        f"sha256sum {part}",
+        f"sha256sum < {part}",
         f"mv -f {part} /var/tmp/{FILENAME}",
     ]
-    assert services.commands[0]["timeout"] == 3615
+    assert services.commands[1]["timeout"] == 3615
     assert result.output == {
         "file_id": FILE_ID,
         "filename": FILENAME,
@@ -186,6 +197,7 @@ async def test_the_link_is_opened_after_the_connection_and_closed_before_the_che
     assert services.events == [
         "shell:a",
         "open:1",
+        "test:a",
         "curl:a",
         "close:1",
         "sha256sum:a",
@@ -193,6 +205,7 @@ async def test_the_link_is_opened_after_the_connection_and_closed_before_the_che
         "close-shell:a",
         "shell:b",
         "open:2",
+        "test:b",
         "curl:b",
         "close:2",
         "sha256sum:b",
@@ -231,11 +244,11 @@ async def test_destination_name_and_timeout_come_from_the_config():
     )
 
     assert result.success is True, result.error
-    assert _commands(services)[0].startswith(
-        "curl -fsS --max-time 120 -o /opt/releases/current.tar.gz.part "
+    assert _commands(services)[1].startswith(
+        "curl -fsS --max-time 120 -o /opt/releases/current.tar.gz.0a1b2c3d.part "
     )
     assert _commands(services)[-1] == (
-        "mv -f /opt/releases/current.tar.gz.part /opt/releases/current.tar.gz"
+        "mv -f /opt/releases/current.tar.gz.0a1b2c3d.part /opt/releases/current.tar.gz"
     )
     assert result.output["dest_path"] == "/opt/releases/current.tar.gz"
     assert result.output["dest_dir"] == "/opt/releases/"
@@ -264,7 +277,7 @@ async def test_without_the_check_the_file_is_moved_right_after_the_download():
     result, _ = await _run(services, {"file_ids": [FILE_ID], "verify_checksum": False})
 
     assert result.success is True, result.error
-    assert [command.split()[0] for command in _commands(services)] == ["curl", "mv"]
+    assert [command.split()[0] for command in _commands(services)] == ["test", "curl", "mv"]
     assert result.output["verified"] is False
 
 
@@ -277,8 +290,8 @@ async def test_a_failed_download_is_removed_and_reported_with_curls_message():
 
     assert result.success is False
     assert "curl exited 23 (curl: (23) Failure writing output)" in (result.error or "")
-    assert [command.split()[0] for command in _commands(services)] == ["curl", "rm"]
-    assert _commands(services)[1] == f"rm -f /var/tmp/{FILENAME}.part"
+    assert [command.split()[0] for command in _commands(services)] == ["test", "curl", "rm"]
+    assert _commands(services)[2] == f"rm -f /var/tmp/{FILENAME}.0a1b2c3d.part"
     assert result.output["transferred_count"] == 0
     assert result.output["verified"] is False
 
@@ -292,7 +305,12 @@ async def test_a_checksum_that_does_not_match_removes_the_file_and_fails_the_hos
 
     assert result.success is False
     assert "does not match" in (result.error or "")
-    assert [command.split()[0] for command in _commands(services)] == ["curl", "sha256sum", "rm"]
+    assert [command.split()[0] for command in _commands(services)] == [
+        "test",
+        "curl",
+        "sha256sum",
+        "rm",
+    ]
     [artifact] = result.evidence
     assert artifact["content_json"]["expected_sha256"] == SHA256
     assert artifact["content_json"]["actual_sha256"] == "00" * 32
@@ -362,7 +380,71 @@ async def test_a_command_error_is_reported_without_the_link_and_the_session_is_c
 
     assert result.success is False
     assert "hgm_run_token" not in (result.error or "")
-    assert services.events[-2:] == ["close:1", "close-shell:srv1"]
+    # The download that may have started is removed before the session closes.
+    assert services.events[-3:] == ["close:1", "rm:srv1", "close-shell:srv1"]
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_that_fails_does_not_hide_why_the_download_failed():
+    services = FakeServices()
+    services.answers[("srv1", "curl")] = TimeoutError("timed out")
+    services.answers[("srv1", "rm")] = ConnectionError("session lost")
+
+    result, _ = await _run(services, {"file_ids": [FILE_ID]})
+
+    assert result.success is False
+    assert "timed out" in (result.error or "")
+    assert "session lost" not in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_a_checksum_command_that_raises_removes_the_download():
+    services = FakeServices()
+    services.answers[("srv1", "sha256sum")] = TimeoutError("timed out")
+
+    result, _ = await _run(services, {"file_ids": [FILE_ID]})
+
+    assert result.success is False
+    assert _commands(services)[-1] == f"rm -f /var/tmp/{FILENAME}.0a1b2c3d.part"
+
+
+@pytest.mark.asyncio
+async def test_a_destination_that_is_a_directory_is_refused_before_the_download():
+    services = FakeServices()
+    services.answers[("srv1", "test")] = (0, "", "")
+
+    result, _ = await _run(services, {"file_ids": [FILE_ID], "dest_filename": "releases"})
+
+    assert result.success is False
+    assert "/var/tmp/releases is a directory on the host" in (result.error or "")
+    assert _commands(services) == ["test -d /var/tmp/releases"]
+
+
+@pytest.mark.asyncio
+async def test_each_transfer_stages_under_a_name_of_its_own(monkeypatch):
+    names = iter(["aaaa1111", "bbbb2222"])
+    monkeypatch.setattr(file_download.secrets, "token_hex", lambda size: next(names))
+    services = FakeServices()
+
+    await _run(services, {"file_ids": [FILE_ID]})
+    await _run(services, {"file_ids": [FILE_ID]})
+
+    staged = [c.split(" -o ")[1].split()[0] for c in _commands(services) if c.startswith("curl")]
+    assert staged == [
+        f"/var/tmp/{FILENAME}.aaaa1111.part",
+        f"/var/tmp/{FILENAME}.bbbb2222.part",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_checksum_is_read_from_standard_input_so_a_backslash_changes_nothing():
+    services = FakeServices()
+
+    result, _ = await _run(services, {"file_ids": [FILE_ID], "dest_filename": "a\\b.bin"})
+
+    assert result.success is True, result.error
+    [checksum] = [c for c in _commands(services) if c.startswith("sha256sum")]
+    assert checksum.startswith("sha256sum < ")
 
 
 @pytest.mark.asyncio
