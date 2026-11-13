@@ -426,21 +426,17 @@ async def test_a_destination_that_is_a_directory_is_refused_before_the_download(
 
 @pytest.mark.asyncio
 async def test_a_directory_that_appears_during_the_download_is_not_reported_as_success():
-    services = FakeServices()
-
     class Shell(FakeShell):
         async def run(self, command: str, *, timeout: float | None = None) -> ShellResult:
             if command.startswith("test -f "):
-                self.services.commands.append(
-                    {"device": self.device["name"], "command": command, "timeout": timeout}
-                )
                 return ShellResult(command, 1, "", "")
             return await super().run(command, timeout=timeout)
 
-    async def open_shell(device: dict[str, Any], **kwargs: Any) -> FakeShell:
-        return Shell(services, device)
+    class Services(FakeServices):
+        async def open_shell(self, device: dict[str, Any], **kwargs: Any) -> FakeShell:
+            return Shell(self, device)
 
-    services.open_shell = open_shell  # type: ignore[method-assign]
+    services = Services()
 
     result, _ = await _run(services, {"file_ids": [FILE_ID]})
 
