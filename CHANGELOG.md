@@ -1,3 +1,14 @@
+## [0.41.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.40.0...v0.41.0) (2026-11-13)
+
+### Features
+
+* **shell:** add shell.file_download for Linux and Unix hosts ([ebbe3fc](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ebbe3fc86d848c848dabcee3ab13d16435475edd))
+
+### Bug Fixes
+
+* **shell:** confirm the downloaded file is in place and state the limits ([e49db2f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e49db2fe861d8244ea3847e8d242b6a443a9f523))
+* **shell:** make the staged download safe against other runs and odd names ([f28bfba](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f28bfba25ce7f2257b94cec243ca49aaaa691e86))
+
 ## [0.40.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.39.0...v0.40.0) (2026-11-13)
 
 ### Features
