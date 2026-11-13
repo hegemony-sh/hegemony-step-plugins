@@ -21,8 +21,9 @@ from __future__ import annotations
 from hegemony_step_sdk import BaseHandler, StepHandlerRegistry
 
 from .execute import ShellExecuteHandler
+from .file_download import ShellFileDownloadHandler
 
-ALL_HANDLERS: tuple[type[BaseHandler], ...] = (ShellExecuteHandler,)
+ALL_HANDLERS: tuple[type[BaseHandler], ...] = (ShellExecuteHandler, ShellFileDownloadHandler)
 
 
 def register(registry: StepHandlerRegistry) -> None:

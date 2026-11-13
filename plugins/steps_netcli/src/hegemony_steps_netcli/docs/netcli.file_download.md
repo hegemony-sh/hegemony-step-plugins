@@ -9,7 +9,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 `netcli.file_download` has each target download one file from a file
 repository by itself, over HTTP or HTTPS: a software image onto a network
-device, an archive onto a server. The file does not pass through the worker.
+device. The file does not pass through the worker.
+
+For a Linux or Unix server, use `shell.file_download` (Download File to Host)
+instead: it needs no transport setting on the device and verifies the file's
+checksum on the host.
 
 ## Using It
 
