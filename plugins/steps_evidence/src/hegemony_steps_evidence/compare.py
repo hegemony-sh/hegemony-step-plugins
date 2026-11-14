@@ -358,11 +358,9 @@ class CompareEvidenceHandler(BaseHandler):
                     "missing_in_postcheck": missing_in_postcheck,
                     "only_in_postcheck": only_in_postcheck,
                     "comparison_type": comparison_type,
-                    # "match" is the pass flag under its older name, kept for
-                    # stored artifacts and older UIs; it does NOT mean the two
-                    # sides are equal (in "changed" mode a difference passes).
-                    # The platform UI reads "passed" first.
-                    "match": passed,
+                    # Whether the comparison's expectation held. In "changed"
+                    # mode a difference is what passes, so this does not mean
+                    # the two sides are equal.
                     "passed": passed,
                     "diff": diff_details,
                     "before_step": precheck_step_id,
