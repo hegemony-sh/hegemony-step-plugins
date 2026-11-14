@@ -6,7 +6,8 @@
 """Network-device CLI step handlers for Hegemony.
 
 Network-device CLI paradigm: execute command lines, collect outputs as
-evidence, and have a device download a file. Vendor-neutral by design — platform
+evidence, and get a file onto a device (it downloads the file, or the
+worker copies it there). Vendor-neutral by design — platform
 dialects and transports (netmiko/scrapli, ssh) are resolved beneath the
 handler layer from device access config.
 
@@ -22,11 +23,13 @@ from hegemony_step_sdk import BaseHandler, StepHandlerRegistry
 from .collect_evidence import CollectEvidenceHandler
 from .execute import ExecuteCLIActionHandler
 from .file_download import FileDownloadHandler
+from .file_push import FilePushHandler
 
 ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
     CollectEvidenceHandler,
     ExecuteCLIActionHandler,
     FileDownloadHandler,
+    FilePushHandler,
 )
 
 

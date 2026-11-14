@@ -8,11 +8,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 # hegemony-steps-netcli
 
 Network-device CLI paradigm: execute command lines, collect outputs as
-evidence, and have a device download a file. Vendor-neutral by design — platform
+evidence, and get a file onto a device (it downloads the file, or the worker
+copies it there). Vendor-neutral by design — platform
 dialects and transports (netmiko/scrapli, ssh) are resolved beneath the
 handler layer from device access config.
 
-Handlers: `netcli.execute`, `netcli.collect_evidence`, `netcli.file_download`.
+Handlers: `netcli.execute`, `netcli.collect_evidence`, `netcli.file_download`,
+`netcli.file_push`.
 
 Namespace prefix (= entry-point name): `netcli.` — see the repo-level
 `CONVENTIONS.md` for the naming rules.
@@ -42,7 +44,8 @@ failed secure negotiation never retries with weaker settings.
 
 For an older device, enable **Allow legacy SSH algorithms**
 (`allow_legacy_ssh: true`) in the `netcli.execute`,
-`netcli.collect_evidence` or `netcli.file_download` step. This offers every algorithm the installed SSH
+`netcli.collect_evidence`, `netcli.file_download` or `netcli.file_push` step.
+This offers every algorithm the installed SSH
 library still implements, weak ones included (for example CBC/3DES, SHA-1/MD5
 MACs and SHA-1 key exchange/signatures), and permits smaller host or login
 keys. Use it only on trusted networks while upgrading the device; these

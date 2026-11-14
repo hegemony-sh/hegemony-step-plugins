@@ -15,6 +15,9 @@ For a Linux or Unix server, use `shell.file_download` (Download File to Host)
 instead: it needs no transport setting on the device and verifies the file's
 checksum on the host.
 
+When the targets cannot reach the platform, use `netcli.file_push` (Push File
+to Device): the worker copies the file to them over SCP/SFTP.
+
 ## Using It
 
 Pick the file with **File Repository File**; the step takes exactly one.

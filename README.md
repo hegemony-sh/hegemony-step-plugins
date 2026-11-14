@@ -63,7 +63,7 @@ entry-point group and the platform discovers them at startup.
   | --- | --- | --- |
   | `plugins/steps_general` | `general.` | noop (hidden), sleep |
   | `plugins/steps_probe` | `probe.` | connectivity, http, dns, tls, wait_reachable |
-  | `plugins/steps_netcli` | `netcli.` | execute, collect_evidence, file_download |
+  | `plugins/steps_netcli` | `netcli.` | execute, collect_evidence, file_download, file_push |
   | `plugins/steps_evidence` | `evidence.` | assert, compare |
   | `plugins/steps_container` | `container.` | run |
   | `plugins/steps_flow` | `flow.` | run, notify |
