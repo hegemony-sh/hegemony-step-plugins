@@ -199,14 +199,18 @@ step any more: do not bump versions or push `v*` tags by hand.
 |---|---|
 | `fix`, `perf`, `revert` | patch |
 | `feat` | minor |
-| breaking change (`feat!:`, `fix!:` or a `BREAKING CHANGE:` footer) | **minor, while the major is 0** |
+| breaking change (any type with `!`, such as `feat!:` or `refactor!:`, or a `BREAKING CHANGE:` footer) | **minor, while the major is 0** |
 | `chore`, `docs`, `ci`, `test`, `refactor`, `build`, `style` | none |
 
 The 0.x rule is the `"breaking": true` entry in `.releaserc.json`'s
 `releaseRules`; once the packages reach 1.0, change its `release` to
-`major`. Deleting it is not enough: the rules are tried in order and the
-first match wins, so a breaking `feat` would still match the `feat` rule and
-release a minor.
+`major`. Deleting it is not enough: the analyzer applies every rule that
+matches and keeps the largest release, so a breaking `feat` would still get
+the `feat` rule's minor and a breaking `fix` the `fix` rule's patch.
+
+Do not add a `"release": false` rule for a type. Such a rule overrides every
+other match, the breaking one included, so a breaking `refactor!:` would
+release nothing. Types that no rule names already release nothing.
 
 Releases are immutable. The pipeline refuses to run when a GitHub Release for
 the next tag already exists and never replaces published assets: fix forward

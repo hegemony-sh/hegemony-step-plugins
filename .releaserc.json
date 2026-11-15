@@ -1,5 +1,5 @@
 {
-  "$comment": "0.x mode: while the major version is 0, the releaseRules below release a MINOR for a breaking change (feat!/fix! or a BREAKING CHANGE footer) instead of a major, so the line can evolve without a 1.0 promise. Once the packages reach 1.0, change that rule's release to \"major\" and drop this comment. Deleting the rule would not do: releaseRules are tried in order and the first match wins, so a breaking feat would still match the feat rule below and release a minor. CONTRIBUTING.md states the same rule for contributors. The conventionalcommits preset (installed by the shared workflow) is what makes a bare feat!:/fix!: count as breaking; the default angular preset does not parse the marker at all.",
+  "$comment": "0.x mode: while the major version is 0, the releaseRules below release a MINOR for a breaking change (any type with !, or a BREAKING CHANGE footer) instead of a major, so the line can evolve without a 1.0 promise. Once the packages reach 1.0, change that rule's release to \"major\" and drop this comment. The commit analyzer applies every rule that matches a commit and keeps the largest release, except that a matching rule with \"release\": false wins over all of them; so the list has no such rules (a type no rule names releases nothing), or a breaking refactor!/chore!/docs! releases nothing (the refactor! merged after v0.41.1 did not release). Deleting the breaking rule would not do either: the feat/fix rules would then give feat! a minor and fix! a patch, and the analyzer's built-in rules would give other breaking types a major. CONTRIBUTING.md states the same rule for contributors. The conventionalcommits preset (installed by the shared workflow) is what makes a bare feat!:/fix!: count as breaking; the default angular preset does not parse the marker at all.",
   "branches": [
     "main"
   ],
@@ -28,34 +28,6 @@
           {
             "type": "perf",
             "release": "patch"
-          },
-          {
-            "type": "chore",
-            "release": false
-          },
-          {
-            "type": "docs",
-            "release": false
-          },
-          {
-            "type": "ci",
-            "release": false
-          },
-          {
-            "type": "test",
-            "release": false
-          },
-          {
-            "type": "refactor",
-            "release": false
-          },
-          {
-            "type": "build",
-            "release": false
-          },
-          {
-            "type": "style",
-            "release": false
           }
         ]
       }

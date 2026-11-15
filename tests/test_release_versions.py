@@ -207,3 +207,20 @@ def test_the_images_are_published_when_the_release_is_published():
 
     assert triggers["release"] == {"types": ["published"]}
     assert "push" not in triggers
+
+
+def test_a_breaking_change_of_any_type_releases():
+    """The commit analyzer keeps the largest release of every matching rule, but a
+    matching ``"release": false`` rule overrides them all: the breaking
+    ``refactor(evidence)!:`` merged after v0.41.1 released nothing while a
+    ``refactor`` rule said false. Types no rule names release nothing anyway."""
+    paths = _script("package_paths")
+    releaserc = json.loads((paths.ROOT / ".releaserc.json").read_text(encoding="utf-8"))
+    (rules,) = [
+        plugin[1]["releaseRules"]
+        for plugin in releaserc["plugins"]
+        if isinstance(plugin, list) and plugin[0] == "@semantic-release/commit-analyzer"
+    ]
+
+    assert {"breaking": True, "release": "minor"} in rules
+    assert [rule for rule in rules if rule.get("release") is False] == []
