@@ -1,3 +1,19 @@
+## [0.42.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.41.1...v0.42.0) (2026-11-15)
+
+### ⚠ BREAKING CHANGES
+
+* **evidence:** the evidence.compare comparison_result artifact no
+longer has a "match" field. Read "passed" instead; it has the same
+value.
+
+### Bug Fixes
+
+* **release:** release a breaking change of any commit type ([f9ce608](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f9ce608fee0a205b4c3f65b377a8e99d4cc5925b))
+
+### Code Refactoring
+
+* **evidence:** drop the compare artifact's legacy match field ([a89b7ff](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a89b7ff0f5ab86c1cb1da0545b7f3392a24752db)), closes [hegemony-sh/hegemony#817](https://github.com/hegemony-sh/hegemony/issues/817)
+
 ## [0.41.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.41.0...v0.41.1) (2026-11-15)
 
 ### Bug Fixes
