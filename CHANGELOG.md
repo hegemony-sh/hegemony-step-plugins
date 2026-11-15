@@ -1,3 +1,9 @@
+## [0.41.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.41.0...v0.41.1) (2026-11-15)
+
+### Bug Fixes
+
+* **deps:** require dnspython 2.9.2 for CVE-2026-128089 ([f349649](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f3496493c5680ebc43964a99726b2bbdd6fd5349))
+
 ## [0.41.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.40.0...v0.41.0) (2026-11-13)
 
 ### Features
