@@ -298,6 +298,32 @@ async def test_commands_sharing_an_artifact_name_are_compared_separately(
     assert sorted(entry["passed"] for entry in content["diff"].values()) == [False, True]
 
 
+@pytest.mark.parametrize(
+    ("mode", "post_output", "passed"),
+    [
+        ("changed", "neighbor down", True),
+        ("changed", "neighbor up", False),
+        ("exact", "neighbor up", True),
+    ],
+)
+async def test_the_result_artifact_carries_passed_and_no_match_field(
+    monkeypatch: pytest.MonkeyPatch, mode: str, post_output: str, passed: bool
+) -> None:
+    # "passed" is the verdict; the legacy "match" alias, which read as
+    # "the sides are equal", is gone.
+    pre = _collected({"show bgp summary": "neighbor up"})
+    post = _collected({"show bgp summary": post_output})
+    handler = _handler_with(pre, post, monkeypatch)
+    result = await handler.execute(
+        _ctx(precheck_step_id="precheck", postcheck_step_id="postcheck", comparison_type=mode)
+    )
+    content = result.evidence[0]["content_json"]
+    assert result.success is passed
+    assert content["passed"] is passed
+    assert content["comparison_type"] == mode
+    assert "match" not in content
+
+
 def test_capture_labels_read_like_artifact_names_and_stay_unique() -> None:
     from hegemony_steps_evidence.artifacts import capture_key, capture_labels
 
