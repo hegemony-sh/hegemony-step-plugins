@@ -285,6 +285,20 @@ _COPY_ERROR_MARKERS = (
     "timed out",
 )
 
+
+def _copy_answer(output: str, url: str, dest_filename: str) -> str:
+    """The device's own words in a copy dialogue: ``output`` without the inputs it echoes.
+
+    The device repeats the URL and the file name (the command echo,
+    "Destination filename [<name>]?", "Accessing <url>..."), so a name like
+    ``Invalid-image.bin`` must not read as the device's "Invalid".
+    """
+    for echoed in (url, dest_filename):
+        if echoed:
+            output = output.replace(echoed, "")
+    return output
+
+
 #: Lines that open a config block. Only ``end`` closes one: ``exit`` inside a
 #: block leaves a sub-mode on the device and is sent like any config line.
 _CONFIG_ENTER_COMMANDS = ("configure terminal", "conf t", "config t")
@@ -1285,7 +1299,8 @@ class ScrapliTransport:
                     break
                 output += chunk
 
-                if any(marker in output for marker in _COPY_DONE_MARKERS):
+                answer = _copy_answer(output, url, dest_filename)
+                if any(marker in answer for marker in _COPY_DONE_MARKERS):
                     break
                 if "Destination filename" in output and not dest_filename_handled:
                     connection.channel.write("\n")
@@ -1299,12 +1314,13 @@ class ScrapliTransport:
                     overwrite_handled = True
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            if any(marker in output for marker in _COPY_ERROR_MARKERS):
+            answer = _copy_answer(output, url, dest_filename)
+            if any(marker in answer for marker in _COPY_ERROR_MARKERS):
                 # Not the output: the device echoes the copy command and its URL.
                 logger.error(f"HTTP transfer to {self.host} failed")
                 return {"transferred": False, "output": output, "elapsed_ms": elapsed_ms}
             return {
-                "transferred": "bytes copied" in output.lower(),
+                "transferred": "bytes copied" in answer.lower(),
                 "output": output,
                 "elapsed_ms": elapsed_ms,
             }
