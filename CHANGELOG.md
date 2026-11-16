@@ -1,3 +1,9 @@
+## [0.42.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.0...v0.42.1) (2026-11-16)
+
+### Bug Fixes
+
+* **transport-scrapli:** cap scrapli below the scrapli 2 rewrite ([6c57ae8](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6c57ae8b3ce6917ebf1a977c0b87fd003298d33e))
+
 ## [0.42.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.41.1...v0.42.0) (2026-11-15)
 
 ### ⚠ BREAKING CHANGES
