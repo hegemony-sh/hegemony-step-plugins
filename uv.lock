@@ -791,7 +791,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
-    { name = "scrapli", extras = ["asyncssh"], specifier = ">=2024.7.30" },
+    { name = "scrapli", extras = ["asyncssh"], specifier = ">=2024.7.30,<2026.10" },
 ]
 
 [[package]]
