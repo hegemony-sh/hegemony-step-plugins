@@ -180,6 +180,14 @@ transport_expected = {EXPECTED_TRANSPORT_ENTRY_POINTS!r}
 transport_missing = transport_expected - transport_names
 assert not transport_missing, transport_missing
 
+# The scrapli transport imports even without a usable scrapli (it stubs the
+# names out), so check that the installed release has the API it drives and
+# that the asyncssh transport plugin's dependency came along.
+from hegemony_transport_scrapli import transport as scrapli_transport
+assert scrapli_transport.AsyncScrapli is not None, "scrapli lacks AsyncScrapli"
+assert scrapli_transport.asyncssh is not None, "asyncssh is not installed"
+import_module("scrapli.transport.plugins.asyncssh.transport")
+
 # Plugin-owned docs: every step-handler wheel ships one page per registered
 # handler id, readable through the SDK loader from the installed package.
 from hegemony_step_sdk.docs import load_docs_bundle
