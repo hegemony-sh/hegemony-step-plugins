@@ -91,6 +91,8 @@ logger = logging.getLogger(__name__)
 # The image-size lookup is a caption, not a step operation: bounded well below
 # any step deadline so a wedged daemon costs a missing number, not the step.
 _IMAGE_INSPECT_TIMEOUT = 15.0
+# Longest a cache hit spends checking its copy against the image's registry.
+_VERIFY_MAX_SECONDS = 30.0
 # What `docker image inspect --format {{.Id}}` prints: the config's digest.
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 #: Saving a copy to the platform registry: keep this much of the step's deadline
@@ -2300,10 +2302,14 @@ class RunContainerHandler(BaseHandler):
             # (the fallback, for a pull that reported none) could name what a
             # concurrent pull of the same tag brought instead. A reference that
             # is already digest-qualified needs neither.
-            image_digest = digest_reference(
-                served, acquired.digest
-            ) or await self._image_repo_digest(
-                docker_bin=docker_bin, image=served, docker_env=docker_env, deadline=deadline
+            # A copy checked by image ID (its pull reported no digest) runs by
+            # that ID: looking a digest up by its tag now could name another image.
+            image_digest = digest_reference(served, acquired.digest) or (
+                ""
+                if acquired.image_id
+                else await self._image_repo_digest(
+                    docker_bin=docker_bin, image=served, docker_env=docker_env, deadline=deadline
+                )
             )
             if image_digest:
                 config = {**config, "image": image_digest}
@@ -2312,7 +2318,7 @@ class RunContainerHandler(BaseHandler):
             # copy is the image a job asked for (see ContainerJob.expected_image_id).
             image_id = await self._image_id(
                 docker_bin=docker_bin,
-                image=image_digest or served,
+                image=image_digest or acquired.image_id or served,
                 docker_env=docker_env,
                 deadline=deadline,
             )
@@ -3298,6 +3304,126 @@ class RunContainerHandler(BaseHandler):
         except TimeoutError:
             raise subprocess.TimeoutExpired([docker_bin, "pull", image], remaining) from None
 
+    async def _copy_matches_upstream(
+        self,
+        *,
+        upstream: RegistryClient,
+        repo: str,
+        upstream_digest: str,
+        copy: str,
+        pinned: str,
+        image: str,
+        docker_bin: str,
+        docker_env: dict[str, str],
+        deadline: float,
+        emit: Callable[..., Awaitable[None]],
+    ) -> tuple[bool, str]:
+        """Whether the pulled cache ``copy`` is the image ``upstream_digest`` names.
+
+        ``pinned`` is the reference the container will run by (the copy at the
+        digest its pull reported, or its tag when the pull reported none); the
+        check inspects that. Returns the verdict and the image ID read ("" when
+        the daemon did not say).
+
+        A copy is filed under a tag named after the upstream digest, and a tag
+        can be pushed over. The copy's own digest differs from the upstream one
+        (a copy keeps one platform, in the daemon's manifest format), but its
+        image ID is the config digest the upstream manifest names for that
+        platform. False only for a copy shown to be another image; a check
+        that cannot be made (upstream unreachable or refusing, the daemon not
+        saying) leaves a warning and trusts the copy, as the cache does
+        whenever upstream is down.
+        """
+        problem = ""
+        image_id = ""
+        expected: str | None = None
+        started = time.monotonic()
+        budget = min(deadline - started - _COPY_RESERVE_SECONDS, _VERIFY_MAX_SECONDS)
+        if budget <= 0:
+            problem = "no time left in the step"
+        else:
+            image_id, platform = await self._image_id_and_platform(
+                docker_bin=docker_bin, image=pinned, docker_env=docker_env, timeout=budget
+            )
+            if not image_id or not platform:
+                problem = "the sandbox daemon did not report the copy's image ID"
+            else:
+                try:
+                    expected = await asyncio.wait_for(
+                        upstream.config_digest(repo, upstream_digest, platform),
+                        timeout=max(budget - (time.monotonic() - started), 0.1),
+                    )
+                except (RegistryUnavailable, RegistryDenied) as exc:
+                    problem = str(exc)
+                except TimeoutError:
+                    problem = "the image's registry did not answer in time"
+                else:
+                    if expected is None:
+                        problem = f"its registry names no {platform} image for {upstream_digest}"
+        if problem:
+            await emit(
+                f"Could not check the cached copy of {image} against its registry "
+                f"({problem}); running the copy",
+                attrs={
+                    "milestone": "image_cache_unverified",
+                    "image": image,
+                    "copy": copy,
+                    "reason": problem,
+                },
+            )
+            return True, image_id
+        if image_id == expected:
+            await emit(
+                f"The cached copy of {image} is the image {upstream_digest} names "
+                f"(image ID {image_id})",
+                attrs={
+                    "milestone": "image_cache_verified",
+                    "image": image,
+                    "copy": copy,
+                    "image_id": image_id,
+                },
+            )
+            return True, image_id
+        await emit(
+            f"The cached copy {copy} is not the image {upstream_digest} names: its image ID "
+            f"is {image_id}, not {expected}. Not running it; pulling {image} from its "
+            "registry and saving a true copy over it",
+            attrs={
+                "milestone": "image_cache_mismatch",
+                "image": image,
+                "copy": copy,
+                "image_id": image_id,
+                "expected_image_id": expected,
+            },
+        )
+        return False, image_id
+
+    async def _image_id_and_platform(
+        self, *, docker_bin: str, image: str, docker_env: dict[str, str], timeout: float
+    ) -> tuple[str, str]:
+        """``image``'s ID and ``os/arch[/variant]`` from the daemon; empty when it does not say."""
+        try:
+            proc = await self._run_docker(
+                docker_bin,
+                [
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{.Id}} {{.Os}}/{{.Architecture}}{{with .Variant}}/{{.}}{{end}}",
+                    image,
+                ],
+                env=docker_env,
+                timeout=min(timeout, _IMAGE_INSPECT_TIMEOUT),
+            )
+        except (subprocess.SubprocessError, OSError):
+            return "", ""
+        if proc.returncode != 0:
+            return "", ""
+        image_id, _, platform = proc.stdout.strip().partition(" ")
+        if not _IMAGE_ID.fullmatch(image_id) or platform.count("/") not in (1, 2):
+            return "", ""
+        return image_id, platform
+
     async def _acquire_image(
         self,
         *,
@@ -3455,19 +3581,54 @@ class RunContainerHandler(BaseHandler):
                 deadline=deadline,
                 emit=emit,
             )
-            if not isinstance(pulled, HandlerResult):
+            if isinstance(pulled, HandlerResult):
+                # The copy was there a moment ago and cannot be pulled now: the
+                # image's own registry is the fallback, and saving a copy
+                # afterwards would ask the same registry again.
+                cache_problem = pulled.error or "the copy could not be pulled"
+                await emit(
+                    f"Could not pull the cached copy ({cache_problem}); pulling {image} from "
+                    "its registry",
+                    attrs={
+                        "milestone": "image_cache_miss",
+                        "image": image,
+                        "reason": cache_problem,
+                    },
+                )
+            elif upstream_problem is not None or not upstream_digest:
+                # Upstream is down: the copy under the tag stands in, as the
+                # warning above says; there is nothing to check it against.
                 return AcquiredImage(
                     served=copy, source="cache", cached=False, digest=pulled.digest
                 )
-            # The copy was there a moment ago and cannot be pulled now: the
-            # image's own registry is the fallback, and saving a copy afterwards
-            # would ask the same registry again.
-            cache_problem = pulled.error or "the copy could not be pulled"
-            await emit(
-                f"Could not pull the cached copy ({cache_problem}); pulling {image} from "
-                "its registry",
-                attrs={"milestone": "image_cache_miss", "image": image, "reason": cache_problem},
-            )
+            else:
+                # Check exactly what will run: the digest this pull reported
+                # (the container runs by it), not the copy's tag, which another
+                # step can pull or retag meanwhile. Without a digest, the image
+                # ID the check reads is what the container then runs by.
+                matches, verified_id = await self._copy_matches_upstream(
+                    upstream=upstream,
+                    repo=reference.repo,
+                    upstream_digest=upstream_digest,
+                    copy=copy,
+                    pinned=digest_reference(copy, pulled.digest) or copy,
+                    image=image,
+                    docker_bin=docker_bin,
+                    docker_env=docker_env,
+                    deadline=deadline,
+                    emit=emit,
+                )
+                if matches:
+                    return AcquiredImage(
+                        served=copy,
+                        source="cache",
+                        cached=False,
+                        digest=pulled.digest,
+                        image_id="" if pulled.digest else verified_id,
+                    )
+            # Otherwise the copy is not the image its key names (the tag was
+            # pushed over): it is not run, and the pull below saves a true copy
+            # over it.
         elif cache_problem:
             await emit(
                 f"Platform registry unavailable ({cache_problem}); pulling {image} from its "
