@@ -1,3 +1,15 @@
+## [0.43.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.4...v0.43.0) (2026-11-16)
+
+### Features
+
+* **transport-scrapli:** stage files over HTTP with the device's copy ([88c861d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/88c861d3c83d7f5db6de8856e5269d60574ed7a0))
+
+### Bug Fixes
+
+* **steps-evidence:** leave the platform's connection records out of a compare ([92519ee](https://github.com/hegemony-sh/hegemony-step-plugins/commit/92519ee6fa61687d17bcce08ae412cc4a00d9aba))
+* **transport-scrapli:** keep the session open while a device is quiet ([ca2e003](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ca2e003cc128edbc73d2429fe5799ea046df37f6))
+* **transport-scrapli:** read a copy's outcome without the inputs it echoes ([9b17e21](https://github.com/hegemony-sh/hegemony-step-plugins/commit/9b17e213e705186d02f5866ab4d9d30708aa71b5))
+
 ## [0.42.4](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.3...v0.42.4) (2026-11-16)
 
 ### Bug Fixes
