@@ -420,14 +420,15 @@ def _install(
     push_results: list[int] | None = None,
     pull_digests: dict[str, str] | None = None,
     image_id: str = "",
-    copy_identity: str = "",
+    copy_identity: str | dict[str, str] = "",
 ):
     """Script the registries, the Engine API pull and the docker CLI.
 
     ``pull_digests`` maps a pulled reference to the digest its pull reports
     (none by default, which leaves the digest to RepoDigests). ``image_id`` is
     what ``docker image inspect --format {{.Id}}`` prints (nothing by default),
-    ``copy_identity`` what the ID-and-platform inspect of a cached copy prints.
+    ``copy_identity`` what the ID-and-platform inspect of a cached copy prints,
+    or a map from the inspected reference to it.
 
     The Engine API pull succeeds for every image but those in ``pull_failures``,
     which raise and whose CLI fallback also fails, so the handler reports the
@@ -466,7 +467,12 @@ def _install(
             return SimpleNamespace(returncode=code, stdout="", stderr="denied: push")
         if argv[:3] == ["docker", "image", "inspect"]:
             if any("{{.Os}}" in arg for arg in argv):
-                return SimpleNamespace(returncode=0, stdout=f"{copy_identity}\n", stderr="")
+                identity = (
+                    copy_identity.get(argv[-1], "")
+                    if isinstance(copy_identity, dict)
+                    else copy_identity
+                )
+                return SimpleNamespace(returncode=0, stdout=f"{identity}\n", stderr="")
             if "{{.Id}}" in argv:
                 return SimpleNamespace(returncode=0, stdout=f"{image_id}\n", stderr="")
             if "RepoDigests" in " ".join(argv):
@@ -1109,6 +1115,57 @@ async def test_a_copy_pushed_over_by_another_image_is_not_run(monkeypatch) -> No
     assert ["docker", "push", f"{OWN_COPY}:{cache_key_tag(index)}"] in _docker(captured, "push")
     assert result.metrics["image_source"] == "upstream"
     assert f"{OWN_COPY}:{cache_key_tag(index)}" not in _create_argv(captured)
+
+
+async def test_the_check_inspects_the_digest_the_pull_brought_not_the_tag(monkeypatch) -> None:
+    """Another step can retag the copy between this pull and the check.
+
+    The container runs by the digest this pull reported, so that is what is
+    checked: a genuine image under the tag must not vouch for it.
+    """
+    pulled_digest = "sha256:" + "dd" * 32
+    registries, captured = _install(monkeypatch)
+    key = cache_key_tag(_upstream_index(registries))
+    copy_tag = f"{OWN_COPY}:{key}"
+    pinned = f"{OWN_COPY}@{pulled_digest}"
+    registries, captured = _install(
+        monkeypatch,
+        pull_digests={copy_tag: pulled_digest},
+        copy_identity={
+            copy_tag: f"{CONFIG_AMD64} linux/amd64",
+            pinned: f"{'sha256:' + 'ee' * 32} linux/amd64",
+        },
+    )
+    _upstream_index(registries)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    assert "image_cache_mismatch" in _milestones(events)
+    inspected = [cmd[-1] for cmd, _env in captured["run"] if any("{{.Os}}" in a for a in cmd)]
+    assert inspected == [pinned]
+    assert pinned not in _create_argv(captured)
+
+
+async def test_a_copy_pulled_without_a_digest_runs_by_the_checked_image_id(monkeypatch) -> None:
+    registries, captured = _install(monkeypatch)
+    key = cache_key_tag(_upstream_index(registries))
+    copy_tag = f"{OWN_COPY}:{key}"
+    registries, captured = _install(
+        monkeypatch,
+        image_id=CONFIG_AMD64,
+        copy_identity={copy_tag: f"{CONFIG_AMD64} linux/amd64"},
+    )
+    _upstream_index(registries)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    assert "image_cache_verified" in _milestones(events)
+    create = _create_argv(captured)
+    assert CONFIG_AMD64 in create and copy_tag not in create
+    # No digest is looked up by the tag after the check.
+    assert not any("RepoDigests" in " ".join(cmd) for cmd, _env in captured["run"])
 
 
 async def test_a_copy_that_cannot_be_checked_runs_with_a_warning(monkeypatch) -> None:

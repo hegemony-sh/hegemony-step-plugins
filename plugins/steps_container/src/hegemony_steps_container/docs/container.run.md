@@ -61,7 +61,10 @@ failing the step when the save cannot happen. A copy is filed under a tag
 named after the upstream digest, and a tag can be pushed over, so before a
 copy runs the step reads the image's manifest from its own registry (by that
 digest, the content checked against it) and compares the configuration digest
-it names for the sandbox's platform with the copy's image ID. A copy that is
+it names for the sandbox's platform with the image ID of the copy as this
+step pulled it (by the digest its pull reported, or the ID it read when the
+pull reported none, which the container then runs by; never the tag, which
+another step can move meanwhile). A copy that is
 another image is not run: the step pulls the image from its registry and
 saves a true copy over it (`image_cache_mismatch` in its events). When the
 check cannot be made (the registry is unreachable, refuses the login, or does

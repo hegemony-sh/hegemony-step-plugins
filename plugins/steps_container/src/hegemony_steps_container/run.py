@@ -2302,10 +2302,14 @@ class RunContainerHandler(BaseHandler):
             # (the fallback, for a pull that reported none) could name what a
             # concurrent pull of the same tag brought instead. A reference that
             # is already digest-qualified needs neither.
-            image_digest = digest_reference(
-                served, acquired.digest
-            ) or await self._image_repo_digest(
-                docker_bin=docker_bin, image=served, docker_env=docker_env, deadline=deadline
+            # A copy checked by image ID (its pull reported no digest) runs by
+            # that ID: looking a digest up by its tag now could name another image.
+            image_digest = digest_reference(served, acquired.digest) or (
+                ""
+                if acquired.image_id
+                else await self._image_repo_digest(
+                    docker_bin=docker_bin, image=served, docker_env=docker_env, deadline=deadline
+                )
             )
             if image_digest:
                 config = {**config, "image": image_digest}
@@ -2314,7 +2318,7 @@ class RunContainerHandler(BaseHandler):
             # copy is the image a job asked for (see ContainerJob.expected_image_id).
             image_id = await self._image_id(
                 docker_bin=docker_bin,
-                image=image_digest or served,
+                image=image_digest or acquired.image_id or served,
                 docker_env=docker_env,
                 deadline=deadline,
             )
@@ -3307,13 +3311,19 @@ class RunContainerHandler(BaseHandler):
         repo: str,
         upstream_digest: str,
         copy: str,
+        pinned: str,
         image: str,
         docker_bin: str,
         docker_env: dict[str, str],
         deadline: float,
         emit: Callable[..., Awaitable[None]],
-    ) -> bool:
+    ) -> tuple[bool, str]:
         """Whether the pulled cache ``copy`` is the image ``upstream_digest`` names.
+
+        ``pinned`` is the reference the container will run by (the copy at the
+        digest its pull reported, or its tag when the pull reported none); the
+        check inspects that. Returns the verdict and the image ID read ("" when
+        the daemon did not say).
 
         A copy is filed under a tag named after the upstream digest, and a tag
         can be pushed over. The copy's own digest differs from the upstream one
@@ -3333,7 +3343,7 @@ class RunContainerHandler(BaseHandler):
             problem = "no time left in the step"
         else:
             image_id, platform = await self._image_id_and_platform(
-                docker_bin=docker_bin, image=copy, docker_env=docker_env, timeout=budget
+                docker_bin=docker_bin, image=pinned, docker_env=docker_env, timeout=budget
             )
             if not image_id or not platform:
                 problem = "the sandbox daemon did not report the copy's image ID"
@@ -3361,7 +3371,7 @@ class RunContainerHandler(BaseHandler):
                     "reason": problem,
                 },
             )
-            return True
+            return True, image_id
         if image_id == expected:
             await emit(
                 f"The cached copy of {image} is the image {upstream_digest} names "
@@ -3373,7 +3383,7 @@ class RunContainerHandler(BaseHandler):
                     "image_id": image_id,
                 },
             )
-            return True
+            return True, image_id
         await emit(
             f"The cached copy {copy} is not the image {upstream_digest} names: its image ID "
             f"is {image_id}, not {expected}. Not running it; pulling {image} from its "
@@ -3386,7 +3396,7 @@ class RunContainerHandler(BaseHandler):
                 "expected_image_id": expected,
             },
         )
-        return False
+        return False, image_id
 
     async def _image_id_and_platform(
         self, *, docker_bin: str, image: str, docker_env: dict[str, str], timeout: float
@@ -3591,20 +3601,31 @@ class RunContainerHandler(BaseHandler):
                 return AcquiredImage(
                     served=copy, source="cache", cached=False, digest=pulled.digest
                 )
-            elif await self._copy_matches_upstream(
-                upstream=upstream,
-                repo=reference.repo,
-                upstream_digest=upstream_digest,
-                copy=copy,
-                image=image,
-                docker_bin=docker_bin,
-                docker_env=docker_env,
-                deadline=deadline,
-                emit=emit,
-            ):
-                return AcquiredImage(
-                    served=copy, source="cache", cached=False, digest=pulled.digest
+            else:
+                # Check exactly what will run: the digest this pull reported
+                # (the container runs by it), not the copy's tag, which another
+                # step can pull or retag meanwhile. Without a digest, the image
+                # ID the check reads is what the container then runs by.
+                matches, verified_id = await self._copy_matches_upstream(
+                    upstream=upstream,
+                    repo=reference.repo,
+                    upstream_digest=upstream_digest,
+                    copy=copy,
+                    pinned=digest_reference(copy, pulled.digest) or copy,
+                    image=image,
+                    docker_bin=docker_bin,
+                    docker_env=docker_env,
+                    deadline=deadline,
+                    emit=emit,
                 )
+                if matches:
+                    return AcquiredImage(
+                        served=copy,
+                        source="cache",
+                        cached=False,
+                        digest=pulled.digest,
+                        image_id="" if pulled.digest else verified_id,
+                    )
             # Otherwise the copy is not the image its key names (the tag was
             # pushed over): it is not run, and the pull below saves a true copy
             # over it.

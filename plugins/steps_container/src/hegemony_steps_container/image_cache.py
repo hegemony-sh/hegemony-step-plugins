@@ -176,6 +176,10 @@ class AcquiredImage:
     # none): the content this step's own pull brought, which the container
     # then runs by.
     digest: str = ""
+    # The image ID a cache check verified, when the pull reported no digest:
+    # the container then runs by this ID, so a retag of the copy's tag after
+    # the check cannot change what runs. "" otherwise.
+    image_id: str = ""
 
 
 def plan_cache(image: str, cache: ImageCache) -> CachePlan | None:
