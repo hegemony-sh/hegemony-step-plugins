@@ -99,19 +99,44 @@ The wheels that reach outside the worker are limited in different ways:
 - `hegemony-steps-inventory`: syncs nothing until an administrator ticks
   "Flows may sync this provider" on a provider.
 
-## Install the wheels
+## Install the packages
 
-The wheels are not on PyPI. Each release publishes them as assets of its
+Install by hand to add a wheel of your own to a derived platform image, or to
+use the SDK on its own; the platform's images already carry the rest. Name the
+release your Hegemony version pins (see [Compatibility](#compatibility)); the
+newest is on the
+[Releases page](https://github.com/hegemony-sh/hegemony-step-plugins/releases).
+Every other package pins `hegemony-step-sdk` to its own exact version, so the
+packages you install must all come from the same release.
+
+### From PyPI
+
+Each release uploads every package to [PyPI](https://pypi.org/) as a wheel
+and an sdist, under the package names (`hegemony-step-sdk`,
+`hegemony-steps-http`, ...):
+
+```bash
+uv pip install hegemony-steps-netbox==X.Y.Z   # or: pip install hegemony-steps-netbox==X.Y.Z
+```
+
+The installer pulls in the dependencies of the same release
+(`hegemony-step-sdk` and, here, `hegemony-steps-http`). The release workflow
+uploads the files with PyPI's trusted publishing, together with PEP 740
+attestations that PyPI shows on each file's page. They are the same files as
+the GitHub Release's, so `gh attestation verify` below works on a file
+downloaded from PyPI as well. Releases made before the PyPI upload was added
+are only on their GitHub Release.
+
+### From the GitHub Release
+
+Each release also attaches the same wheels and sdists to its
 [GitHub Release](https://github.com/hegemony-sh/hegemony-step-plugins/releases)
-`vX.Y.Z`, with a `SHA256SUMS` file listing every wheel. Install by hand to add
-a wheel of your own to a derived platform image, or to use the SDK on its
-own; the platform's images already carry the rest.
-
-A wheel pins `hegemony-step-sdk` to its own exact version, and the SDK is not
-on an index, so name the SDK wheel of the same release in the same command,
+`vX.Y.Z`, with a `SHA256SUMS` file listing every one of them. Installing from
+local files, name the SDK wheel of the same release in the same command,
 together with any wheel that the wheels you install depend on
 (`hegemony-steps-netbox` needs `hegemony-steps-http`; `hegemony-steps-ansible`
-and `hegemony-steps-tf` need `hegemony-steps-container`):
+and `hegemony-steps-tf` need `hegemony-steps-container`), so the installer
+does not look for them on an index:
 
 ```bash
 version=X.Y.Z   # a release tag without the leading v
@@ -135,17 +160,19 @@ uv pip install \
   ./hegemony_steps_netbox-"${version}"-py3-none-any.whl
 ```
 
-Replace `X.Y.Z` with the release your Hegemony version pins (see
-[Compatibility](#compatibility)); the newest is on the Releases page.
-`pip install` takes the same wheel files. The wheel file names use underscores
-(`hegemony_steps_http-X.Y.Z-py3-none-any.whl`), the package names dashes
-(`hegemony-steps-http`). `SHA256SUMS` is published beside the wheels in the
+`pip install` takes the same wheel files. The file names use underscores
+(`hegemony_steps_http-X.Y.Z-py3-none-any.whl`,
+`hegemony_steps_http-X.Y.Z.tar.gz` for the sdist), the package names dashes
+(`hegemony-steps-http`). `SHA256SUMS` is published beside the files in the
 same release, so it detects a damaged download, not a replaced release.
-`gh attestation verify` (the GitHub CLI) checks each wheel's signed
+`gh attestation verify` (the GitHub CLI) checks a wheel's or sdist's signed
 provenance, which proves this repository's release workflow built it; the
 install runs only if every wheel passes. Newer releases also attach that
 provenance as `hegemony-step-plugins-X.Y.Z.intoto.jsonl`; for older ones the
-command fetches it from GitHub.
+command fetches it from GitHub. The sdists, and their lines in `SHA256SUMS`
+and the provenance, start with the release that added the PyPI upload.
+
+### Runner images
 
 The runner images (`ghcr.io/hegemony-sh/ansible-runner` and
 `ghcr.io/hegemony-sh/opentofu-runner`) are signed by the Images workflow
