@@ -452,3 +452,66 @@ async def test_netmiko_and_scrapli_run_the_same_download_dialogue(servers, cli_t
     )
 
     assert result["transferred"] is True, result["output"]
+
+
+@pytest.mark.asyncio
+async def test_scrapli_waits_through_a_silent_copy(servers, monkeypatch):
+    """IOS prints nothing while it fetches; a quiet poll must not end the session."""
+    from hegemony_transport_scrapli import transport as scrapli_transport
+
+    # Polls much shorter than the router's silence, as in production (2.5 s
+    # polls against a fetch that takes as long as the file needs).
+    monkeypatch.setattr(scrapli_transport, "_TIMING_POLL_SECONDS", 0.2)
+    port = await servers.device(_ed25519())
+    transport = TRANSPORTS["scrapli"][0](
+        DeviceConnectionSpec(
+            host=HOST,
+            port=port,
+            username=USERNAME,
+            password=PASSWORD,
+            platform="ios-xe",
+            connect_timeout=5.0,
+            command_timeout=5.0,
+        ),
+        host_key_verifier=checks_off(),
+    )
+
+    result = await transport.http_transfer(
+        url="http://10.0.0.9:8080/api/dl/slow/image.bin",
+        dest_fs="flash:",
+        dest_filename="image.bin",
+        timeout_seconds=30,
+    )
+
+    assert result["transferred"] is True, result["output"]
+
+
+@pytest.mark.asyncio
+async def test_scrapli_timing_mode_waits_through_a_silent_command(servers, monkeypatch):
+    """A long command that goes quiet (an install, a copy) keeps its session in timing mode."""
+    from hegemony_transport_scrapli import transport as scrapli_transport
+
+    monkeypatch.setattr(scrapli_transport, "_TIMING_POLL_SECONDS", 0.2)
+    port = await servers.device(_ed25519())
+    transport = TRANSPORTS["scrapli"][0](
+        DeviceConnectionSpec(
+            host=HOST,
+            port=port,
+            username=USERNAME,
+            password=PASSWORD,
+            platform="ios-xe",
+            connect_timeout=5.0,
+            command_timeout=5.0,
+        ),
+        host_key_verifier=checks_off(),
+    )
+
+    result = await transport.execute_command_timing(
+        "copy http://10.0.0.9:8080/api/dl/slow/image.bin flash:image.bin",
+        read_timeout=30.0,
+        answers={"Destination filename": ""},
+        wait_for_patterns=["bytes copied"],
+    )
+
+    assert result.exit_code == 0, result.error
+    assert "4096 bytes copied" in result.output

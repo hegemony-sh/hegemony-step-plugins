@@ -490,7 +490,7 @@ async def test_timing_mode_answers_prompts_and_finds_pattern():
     connection.channel.read = AsyncMock(
         side_effect=[
             b"Proceed? [confirm]",
-            ScrapliTimeout("no data"),
+            TimeoutError(),
             b"Done: 1234 bytes copied in 1.0 secs",
         ]
     )
@@ -516,7 +516,7 @@ async def test_timing_mode_answers_a_prompt_split_across_reads():
     transport = _make_transport()
     connection = _connection()
     connection.channel.read = AsyncMock(
-        side_effect=[b"Proceed with reload? [y/", b"n]", ScrapliTimeout("no data"), b"SUCCESS"]
+        side_effect=[b"Proceed with reload? [y/", b"n]", TimeoutError(), b"SUCCESS"]
     )
 
     with patch.object(
@@ -540,9 +540,9 @@ async def test_timing_mode_settles_when_channel_goes_quiet():
     connection.channel.read = AsyncMock(
         side_effect=[
             b"Reload scheduled",
-            ScrapliTimeout("q1"),
-            ScrapliTimeout("q2"),
-            ScrapliTimeout("q3"),
+            TimeoutError(),
+            TimeoutError(),
+            TimeoutError(),
         ]
     )
 
@@ -555,6 +555,30 @@ async def test_timing_mode_settles_when_channel_goes_quiet():
     assert result.output == "Reload scheduled"
     # Settled after exactly three consecutive quiet reads — no further polling
     assert connection.channel.read.await_count == 4
+
+
+async def test_timing_mode_stops_when_scrapli_closed_the_connection_on_its_timeout():
+    """scrapli closes the connection when its own read timeout ends: nothing more comes."""
+    transport = _make_transport()
+    connection = _connection()
+    connection.channel.read = AsyncMock(
+        side_effect=[b"Installing", ScrapliTimeout("timed out"), b"never read"]
+    )
+
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        result = await transport.execute_command_timing(
+            "install add", read_timeout=30.0, wait_for_patterns=["SUCCESS"]
+        )
+
+    assert result.output == "Installing"
+    assert connection.channel.read.await_count == 2
+
+
+async def test_scrapli_connections_keep_their_default_transport_timeout():
+    """A short timeout_transport would make scrapli close a session that goes quiet."""
+    assert "timeout_transport" not in _make_transport()._get_connection_params()
 
 
 async def test_timing_mode_stops_on_hard_read_error():
@@ -683,7 +707,7 @@ def _copy_connection(*reads: str) -> MagicMock:
     async def read() -> bytes:
         if chunks:
             return chunks.pop(0)
-        raise ScrapliTimeout("quiet")
+        raise TimeoutError
 
     connection.channel.read = AsyncMock(side_effect=read)
     return connection

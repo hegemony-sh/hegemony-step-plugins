@@ -243,9 +243,10 @@ PLATFORM_TO_SCRAPLI = {
     "junos": "juniper_junos",
 }
 
-#: timeout_transport for timing-mode connections: each channel read returns (or
+#: Poll window of a timing-mode or copy read: each channel read returns (or
 #: times out) within this window, which sets the poll cadence for prompt answers,
-#: wait-for-pattern checks, and cancellation checks.
+#: wait-for-pattern checks, and cancellation checks. Applied around the read,
+#: not as scrapli's timeout_transport, which closes the connection when it ends.
 _TIMING_POLL_SECONDS = 2.5
 
 #: In timing mode without wait_for_patterns, the command is considered settled
@@ -527,14 +528,10 @@ class ScrapliTransport:
         except Exception:  # noqa: BLE001 - best-effort tail flush
             logger.debug("output sink flush failed", exc_info=True)
 
-    def _get_connection_params(
-        self, *, timeout_transport: float | None = None, connect_timeout: float | None = None
-    ) -> dict[str, Any]:
+    def _get_connection_params(self, *, connect_timeout: float | None = None) -> dict[str, Any]:
         """Get scrapli connection parameters.
 
         Args:
-            timeout_transport: Per-read transport timeout override; timing mode
-                uses a short value so channel polls return promptly.
             connect_timeout: Socket timeout for the device hop. Defaults to the
                 full budget; the bastion path passes what its own hop left.
         """
@@ -556,8 +553,6 @@ class ScrapliTransport:
         if self.secret:
             # Scrapli escalates to privilege-exec itself using auth_secondary.
             params["auth_secondary"] = self.secret
-        if timeout_transport is not None:
-            params["timeout_transport"] = timeout_transport
         return params
 
     async def _hop_keys(
@@ -718,7 +713,7 @@ class ScrapliTransport:
         self._record_algorithms(tunnel, jump.host, jump.port)
         return tunnel
 
-    async def _open_connection(self, *, timeout_transport: float | None = None):
+    async def _open_connection(self):
         """Construct and open a scrapli connection (via the bastion when set)."""
         assert AsyncScrapli is not None  # Validated in __init__
         tunnel = None
@@ -753,9 +748,7 @@ class ScrapliTransport:
                 with contextlib.suppress(Exception):
                     tunnel.close()
             raise
-        params = self._get_connection_params(
-            timeout_transport=timeout_transport, connect_timeout=device_timeout
-        )
+        params = self._get_connection_params(connect_timeout=device_timeout)
         if asyncssh_options:
             params["transport_options"] = {"asyncssh": asyncssh_options}
         connection = AsyncScrapli(**params)
@@ -1039,16 +1032,25 @@ class ScrapliTransport:
         )
 
     async def _read_channel_chunk(self, connection) -> str | None:
-        """One bounded channel read.
+        """One channel read, bounded by ``_TIMING_POLL_SECONDS``.
 
         Returns the decoded text (empty when nothing arrived within the poll
         window), or None on a hard read error (connection dropped, e.g. device
         reboot) so the caller can stop polling instead of spinning.
+
+        The poll is bounded here, not by scrapli's transport timeout: when
+        that runs out scrapli closes the connection, so a device that stays
+        quiet for one poll (IOS while a copy fetches) would lose its session.
+        Cancelling the read leaves unread data in asyncssh's buffer.
         """
         try:
-            chunk = await connection.channel.read()
-        except ScrapliTimeout:
+            chunk = await asyncio.wait_for(connection.channel.read(), _TIMING_POLL_SECONDS)
+        except TimeoutError:
             return ""
+        except ScrapliTimeout as read_err:
+            # scrapli's own timeout closed the connection: nothing more comes.
+            logger.warning(f"Channel read timed out and scrapli closed it: {read_err}")
+            return None
         except Exception as read_err:
             logger.warning(f"Error reading channel: {read_err}")
             return None
@@ -1094,8 +1096,7 @@ class ScrapliTransport:
 
         try:
             logger.info(f"Executing timing command on {self.host}")
-            # Short per-read transport timeout so the loop below polls promptly.
-            connection = await self._open_connection(timeout_transport=_TIMING_POLL_SECONDS)
+            connection = await self._open_connection()
 
             if self.step_run_id:
                 self._cancellation_registry.register(self.step_run_id, connection)
@@ -1260,9 +1261,8 @@ class ScrapliTransport:
 
         try:
             logger.info(f"HTTP transfer to {self.host}: {dest_fs}{dest_filename}")
-            # Short per-read transport timeout so the loop below polls promptly.
             # scrapli escalates to privilege-exec on open (auth_secondary).
-            connection = await self._open_connection(timeout_transport=_TIMING_POLL_SECONDS)
+            connection = await self._open_connection()
             if self.step_run_id:
                 self._cancellation_registry.register(self.step_run_id, connection)
 

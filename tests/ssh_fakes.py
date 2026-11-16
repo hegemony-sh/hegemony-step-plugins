@@ -27,6 +27,9 @@ USERNAME, PASSWORD = "admin", "device-pw"
 JUMP_USERNAME, JUMP_PASSWORD = "jump", "bastion-pw"
 PROMPT = "r1#"
 
+#: How long the fake router stays silent during a copy of a URL with /slow/ in it.
+COPY_SILENCE_SECONDS = 1.0
+
 
 def key_line(key: asyncssh.SSHKey) -> str:
     """``<type> <base64>`` of a key, as the verifier names keys."""
@@ -126,9 +129,11 @@ async def _copy_dialogue(process: asyncssh.SSHServerProcess, command: str) -> No
     name = command.rsplit(":", 1)[-1]
     process.stdout.write(f"Destination filename [{name}]? ")
     await process.stdin.readline()
-    process.stdout.write(
-        "Accessing ...\r\n!!!!\r\n4096 bytes copied in 0.1 secs (40960 bytes/sec)\r\n"
-    )
+    process.stdout.write("Accessing ...\r\n")
+    if "/slow/" in command:
+        # IOS prints nothing while it opens the connection and fetches.
+        await asyncio.sleep(COPY_SILENCE_SECONDS)
+    process.stdout.write("!!!!\r\n4096 bytes copied in 0.1 secs (40960 bytes/sec)\r\n")
 
 
 async def _session(process: asyncssh.SSHServerProcess) -> None:
