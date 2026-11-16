@@ -47,6 +47,16 @@ _PREVIEW_LABELS = 5
 _SIDES = ("precheck", "postcheck")
 
 
+#: Kinds of artifact the platform adds to a step about its connection, not
+#: evidence the step captured.
+_PLATFORM_RECORD_KINDS = frozenset({"transport_meta", "egress_report"})
+
+
+def _step_evidence(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The artifacts a step captured, without the platform's own records."""
+    return [a for a in artifacts if a.get("kind") not in _PLATFORM_RECORD_KINDS]
+
+
 def _content(artifact: dict[str, Any]) -> Any:
     """An artifact's content: its text (CLI output), else its JSON content."""
     text = artifact.get("content_text")
@@ -213,6 +223,16 @@ class CompareEvidenceHandler(BaseHandler):
         postcheck_step = postcheck_step_id or ctx.step_id
         precheck_artifacts = [a for a in run_artifacts if a.get("step_id") == precheck_step_id]
         postcheck_artifacts = [a for a in run_artifacts if a.get("step_id") == postcheck_step]
+
+        # The platform adds records of its own to a step: what each SSH hop
+        # agreed on (transport_meta) and what the step reached on the network
+        # (egress_report). They describe the connection, not the device, and
+        # are the same before and after an ordinary change, so "changed" mode
+        # would fail on them however the captured output changed. Only an
+        # explicit artifact_name compares one.
+        if not artifact_name:
+            precheck_artifacts = _step_evidence(precheck_artifacts)
+            postcheck_artifacts = _step_evidence(postcheck_artifacts)
 
         # Restrict to artifacts whose name matches the glob, so volatile outputs
         # (routing/neighbor tables with counters) can be excluded and only the
