@@ -2039,3 +2039,15 @@ async def test_apply_step_of_a_plan_without_an_image_id_does_not_check(monkeypat
     result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _Services(_plan_output())))
     assert result.success is True, result.error
     assert any(call[1] == "create" for call in state["calls"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recorded", ["", "sha256:short", None, 42])
+async def test_apply_step_refuses_a_plan_that_could_not_record_its_image_id(monkeypatch, recorded):
+    """A recorded but empty or malformed ID would turn the image check off."""
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"}, image_id=_IMAGE_ID)
+    services = _Services(_plan_output(image_id=recorded))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.success is False
+    assert "could not record its image's ID" in (result.error or "")
+    assert not any(call[1] == "create" for call in state["calls"])

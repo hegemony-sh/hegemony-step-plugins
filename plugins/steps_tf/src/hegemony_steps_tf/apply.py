@@ -35,6 +35,7 @@ from hegemony_steps_container.runner import (
 
 from .common import (
     BINARIES,
+    IMAGE_ID_RE,
     KEEP_DIR,
     PLAN_FILE,
     PLAN_TEXT_MISSING_NOTE,
@@ -211,9 +212,10 @@ class PlanHandoff(BaseModel):
     engine: Engine
     image: str = Field(min_length=1)
     image_digest: str = ""
-    # The plan's image ID; the apply runs only an image with it. Empty from a
-    # tf.plan that did not record it (older, or the daemon did not say).
-    image_id: str = ""
+    # The plan's image ID; the apply runs only an image with it. None from an
+    # older tf.plan, which did not record it; read_plan_handoff refuses one
+    # that is recorded but empty or malformed.
+    image_id: str | None = None
     # Whether the plan step kept a copy of its image in the platform registry;
     # the apply follows it (a plan from an older tf.plan reads as the default).
     cache_image: bool = True
@@ -246,6 +248,16 @@ def read_plan_handoff(plan_step: str, output: dict[str, Any]) -> PlanHandoff | s
         return (
             f"the plan of step {plan_step!r} was made by an older version of tf.plan, "
             "which did not record the saved plan's digest: plan again"
+        )
+    # A tf.plan that records the field but could not read the ID would turn
+    # the apply's image check off; only an older tf.plan, without the field,
+    # applies unchecked.
+    if "image_id" in output and not (
+        isinstance(output["image_id"], str) and IMAGE_ID_RE.fullmatch(output["image_id"])
+    ):
+        return (
+            f"the plan of step {plan_step!r} could not record its image's ID, so the "
+            "apply cannot check it runs the image that made the plan: plan again"
         )
     try:
         handoff = PlanHandoff.model_validate(output)
@@ -392,7 +404,7 @@ class TfApplyHandler(BaseHandler):
                     extra_hosts=dict(access.extra_hosts) if access else {},
                     stop_grace_seconds=config.stop_grace_seconds,
                     # The image the plan ran, whatever registry serves it now.
-                    expected_image_id=handoff.image_id.strip(),
+                    expected_image_id=handoff.image_id or "",
                 )
                 outcome = await run_container_job(ctx, job)
         except (ValueError, RuntimeError) as exc:

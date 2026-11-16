@@ -2347,12 +2347,22 @@ class RunContainerHandler(BaseHandler):
                         "expected_image_id": expected_image_id,
                     },
                 )
+            # Without a registry digest the tag is all that names the image, and
+            # a pull or retag can move it between this check and `docker create`:
+            # the container then runs by the image ID just read, so what runs is
+            # the image that was checked and recorded.
+            if not image_digest and image_id:
+                config = {**config, "image": image_id}
             # The step's log names what runs, digest included, as its evidence does.
             await _safe_emit_progress(
                 f"Running the image by digest: {image_digest}"
                 if image_digest
                 else (
-                    f"No registry digest for {served}: the container runs by tag "
+                    f"No registry digest for {served}: the container runs by its image "
+                    f"ID {image_id} (an image built on the sandbox daemon and never "
+                    "pushed has no digest)"
+                    if image_id
+                    else f"No registry digest for {served}: the container runs by tag "
                     "(an image built on the sandbox daemon and never pushed has none)"
                 ),
                 attrs={

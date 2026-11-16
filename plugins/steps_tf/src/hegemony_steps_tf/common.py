@@ -96,6 +96,8 @@ SECRET_VARS_FILE = f"{TF_ROOT}/secret-vars.tfvars.json"
 PLAN_FILE = "plan.tfplan"
 #: A saved plan's digest as tf.plan records it: ``sha256sum``'s 64 hex digits.
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+#: An image ID as `docker image inspect --format {{.Id}}` prints it.
+IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 #: Appended to a plan's summary when its readable plan could not be kept.
 PLAN_TEXT_MISSING_NOTE = " (the readable plan could not be collected)"
 #: Harvested as downloadable run artifacts after the container exits (the

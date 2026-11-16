@@ -91,13 +91,15 @@ digest: a saved plan is refused by any other tool version, and the tag may
 move between the plan and an approved apply. When the plan ran a copy from
 the platform registry, the digest names that copy, which the apply pulls
 from the platform registry too. An image built on the sandbox and never
-pushed has no digest, so the apply runs its tag.
+pushed has no digest, so the apply pulls its tag and runs it by the image
+ID the plan recorded.
 
 The plan also records the image's ID (`image_id`). A copy in the platform
 registry has another digest than the image it was copied from, so the digest
 alone cannot show the apply runs what the plan ran. The apply checks the ID
 and fails before it starts its container when the image it pulled has
-another one.
+another one. A plan that could not read its image's ID (the sandbox daemon
+did not answer) records it empty, and its apply refuses to run: plan again.
 
 ## Applying The Plan
 
