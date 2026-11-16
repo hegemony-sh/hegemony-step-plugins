@@ -497,10 +497,12 @@ def _install_docker(
     exit_code: int = 0,
     events: list[Any] | None = None,
     repo_digests: list[str] | None = None,
+    image_id: str = "",
 ) -> dict[str, Any]:
     """Fake docker. ``events`` (a _Services' log) records the staging of the
     container's files and the container start among the state access events.
-    ``repo_digests`` is the pulled image's RepoDigests (none by default).
+    ``repo_digests`` is the pulled image's RepoDigests (none by default),
+    ``image_id`` its ID (none by default).
     ``out`` gets the saved plan's digest unless it names ``plan.sha256``
     itself (None: not written)."""
     out = {"plan.sha256": _PLAN_SUM, **out}
@@ -513,6 +515,8 @@ def _install_docker(
 
     def fake_run(cmd, *args, **kwargs):
         state["calls"].append(list(cmd))
+        if cmd[1:3] == ["image", "inspect"] and "{{.Id}}" in cmd:
+            return SimpleNamespace(returncode=0, stdout=f"{image_id}\n", stderr="")
         if cmd[1:3] == ["image", "inspect"] and "{{json .RepoDigests}}" in cmd:
             return SimpleNamespace(returncode=0, stdout=json.dumps(repo_digests or []), stderr="")
         if len(cmd) >= 4 and cmd[1] == "cp":
@@ -1985,3 +1989,65 @@ def test_lock_timeout_blank_is_the_default_and_spaces_do_not_count(value, normal
 @pytest.mark.parametrize("value", ["s", "5 m", "300", "5h", "-5m"])
 def test_a_malformed_lock_timeout_is_refused(value):
     assert lock_timeout_errors(value) == ["'lock_timeout' must look like 300s or 5m"]
+
+
+_IMAGE_ID = "sha256:" + "4" * 64
+
+
+@pytest.mark.asyncio
+async def test_plan_step_hands_its_image_id_to_the_apply(monkeypatch):
+    _install_docker(
+        monkeypatch,
+        out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"},
+        image_id=_IMAGE_ID,
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+    assert result.success is True, result.error
+    assert result.output["image_id"] == _IMAGE_ID
+    assert result.metrics["image_id"] == _IMAGE_ID
+
+
+@pytest.mark.asyncio
+async def test_apply_step_runs_only_the_image_its_plan_ran(monkeypatch):
+    """A copy whose digest differs from the plan's still runs when it is the same image."""
+    pinned = f"ghcr.io/hegemony-sh/opentofu-runner@sha256:{'b' * 64}"
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"}, image_id=_IMAGE_ID)
+    services = _Services(_plan_output(image_digest=pinned, image_id=_IMAGE_ID))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.success is True, result.error
+    assert result.metrics["image_id"] == _IMAGE_ID
+    assert any(call[1] == "create" for call in state["calls"])
+
+
+@pytest.mark.asyncio
+async def test_apply_step_refuses_an_image_other_than_its_plans(monkeypatch):
+    pinned = f"ghcr.io/hegemony-sh/opentofu-runner@sha256:{'b' * 64}"
+    other = "sha256:" + "5" * 64
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"}, image_id=other)
+    services = _Services(_plan_output(image_digest=pinned, image_id=_IMAGE_ID))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.success is False
+    assert _IMAGE_ID in (result.error or "") and other in (result.error or "")
+    # Nothing ran: the saved plan was never applied.
+    assert not any(call[1] == "create" for call in state["calls"])
+
+
+@pytest.mark.asyncio
+async def test_apply_step_of_a_plan_without_an_image_id_does_not_check(monkeypatch):
+    """A plan from an older tf.plan recorded no ID: its apply runs as before."""
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"}, image_id="")
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _Services(_plan_output())))
+    assert result.success is True, result.error
+    assert any(call[1] == "create" for call in state["calls"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recorded", ["", "sha256:short", None, 42])
+async def test_apply_step_refuses_a_plan_that_could_not_record_its_image_id(monkeypatch, recorded):
+    """A recorded but empty or malformed ID would turn the image check off."""
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"}, image_id=_IMAGE_ID)
+    services = _Services(_plan_output(image_id=recorded))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.success is False
+    assert "could not record its image's ID" in (result.error or "")
+    assert not any(call[1] == "create" for call in state["calls"])

@@ -1,3 +1,17 @@
+## [0.42.4](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.3...v0.42.4) (2026-11-16)
+
+### Bug Fixes
+
+* **container:** check a cached copy against its registry before it runs ([3ef71fa](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3ef71fa4ccd370224950715faad76a24c248db7c))
+* **container:** check the cached copy the step runs, not its tag ([05ed11e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/05ed11e2df923feec92fca9580549d1110528afc))
+
+## [0.42.3](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.2...v0.42.3) (2026-11-16)
+
+### Bug Fixes
+
+* **container:** run an image without a digest by the ID that was checked ([bcb84fe](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bcb84fec40047528f28e55ddbdc955cb23bf6b42))
+* **tf:** apply only the image its plan ran, checked by image ID ([b52a6ac](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b52a6ac26094fff599f69173bea3e9cf3f6673f4))
+
 ## [0.42.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.1...v0.42.2) (2026-11-16)
 
 ### Bug Fixes

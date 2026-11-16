@@ -136,6 +136,14 @@ class ContainerJob:
     # registry digest and reports it as ``ContainerJobResult.image_digest``.
     # Kept so a tool wheel that still sets it goes on working.
     pin_image: bool = False
+    # The image ID (``sha256:...``, the digest of the image's config) the
+    # pulled image must have, or "" for no check. A digest names a manifest,
+    # and a copy of one image in another registry can carry another manifest
+    # (another format, one platform of an index), so a digest cannot show that
+    # two steps ran the same image; the image ID can. ``tf.apply`` sets it to
+    # what its ``tf.plan`` ran, and the step fails before its container is
+    # created when the pulled image differs.
+    expected_image_id: str = ""
 
 
 @dataclass
@@ -177,6 +185,10 @@ class ContainerJobResult:
     image_source: str = "upstream"
     # True when this step saved a copy of the image to the platform registry.
     image_cached: bool = False
+    # The image ID (``sha256:...``) of the image the container ran, the same
+    # whichever registry or manifest it was pulled by; "" when the daemon did
+    # not report it.
+    image_id: str = ""
 
 
 class ContainerExecutionConfig(BaseModel):

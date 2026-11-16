@@ -516,6 +516,48 @@ async def test_a_digest_the_daemon_cannot_give_leaves_the_job_on_its_tag(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_without_a_digest_the_job_runs_by_the_image_id_it_checked(monkeypatch):
+    """A tag can be pulled or retagged between the check and `docker create`.
+
+    With no registry digest, the container is created from the image ID read
+    after the pull, so the image that runs is the one checked and recorded.
+    """
+    state = _install_docker(monkeypatch)
+    fake_run = subprocess.run
+    image_id = "sha256:" + "7" * 64
+
+    def run(cmd, *args, **kwargs):
+        if cmd[1:3] == ["image", "inspect"] and "{{.Id}}" in cmd:
+            return SimpleNamespace(returncode=0, stdout=image_id + "\n", stderr="")
+        return fake_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", run)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    async def record(message: str, device_id: str | None, attrs: dict[str, Any] | None) -> bool:
+        events.append((message, dict(attrs or {})))
+        return True
+
+    ctx = _ctx({})
+    ctx._emit_progress = record
+    job = ContainerJob(
+        config=container_config_from({}, image="ghcr.io/x/tool:1", command=["true"]),
+        expected_image_id=image_id,
+    )
+    outcome = await run_container_job(ctx, job)
+
+    assert isinstance(outcome, ContainerJobResult)
+    assert outcome.image_digest == "" and outcome.image_id == image_id
+    create = _create_args(state)
+    assert image_id in create
+    assert "ghcr.io/x/tool:1" not in create
+    [(message, _attrs)] = [e for e in events if e[1].get("milestone") == "image_digest"]
+    assert message.startswith(
+        f"No registry digest for ghcr.io/x/tool:1: the container runs by its image ID {image_id}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_digest_reference_is_reported_without_a_lookup(monkeypatch):
     """`image@sha256:…` already names exact content: it is the digest, no inspect needed."""
     state = _install_docker(monkeypatch, repo_digests=["ghcr.io/x/tool@sha256:bbb"])

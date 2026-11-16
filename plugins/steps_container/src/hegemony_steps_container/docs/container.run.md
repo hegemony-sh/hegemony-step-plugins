@@ -38,8 +38,14 @@ that digest, so a tag that moves while the step runs, even through another
 step pulling it at the same moment, cannot change what runs, and the record
 names exactly the content that ran. The step's log says it too, right after the pull: "Running
 the image by digest: ghcr.io/…@sha256:…". An image built on the sandbox daemon
-and never pushed has no digest: it runs by its tag, `image_digest` is empty,
-and the log says so.
+and never pushed has no digest: `image_digest` is empty, the container runs by
+the image ID read right after the pull (so a retag in the meantime cannot
+change what runs; by its tag only when the daemon reports no ID), and the log
+says so. The evidence also records the image's ID (`image_id`,
+the digest of its configuration). A copy of an image in another registry can
+have another digest (the copy keeps one platform of a multi-platform image,
+or another manifest format), but always the same ID, so the ID is what shows
+two steps ran the same image.
 
 When the platform runs its own container registry, Cache image (on by
 default) keeps a copy of the pulled image there, under the organization's
@@ -51,7 +57,19 @@ the copy when it matches, or the newest copy under the tag when that registry
 is unreachable; the step's events say which. A new digest is pulled from the
 image's registry by that digest, so the copy holds exactly what was checked
 even if the tag moves meanwhile, and saved as a copy in turn, without ever
-failing the step when the save cannot happen. A registry that refuses the
+failing the step when the save cannot happen. A copy is filed under a tag
+named after the upstream digest, and a tag can be pushed over, so before a
+copy runs the step reads the image's manifest from its own registry (by that
+digest, the content checked against it) and compares the configuration digest
+it names for the sandbox's platform with the image ID of the copy as this
+step pulled it (by the digest its pull reported, or the ID it read when the
+pull reported none, which the container then runs by; never the tag, which
+another step can move meanwhile). A copy that is
+another image is not run: the step pulls the image from its registry and
+saves a true copy over it (`image_cache_mismatch` in its events). When the
+check cannot be made (the registry is unreachable, refuses the login, or does
+not answer within 30 seconds) the copy runs and the events say so
+(`image_cache_unverified`). A registry that refuses the
 check's login gets the plain pull instead, with no copy served or saved: a
 refusal may mean access was withdrawn. An image from a registry whose name
 has no dot and is not `localhost` (`myregistry:5000`) is pulled from it and
@@ -157,8 +175,8 @@ artifact - stdout and stderr each capped at 2.5 MB (half of a 5 MB budget),
 with a truncation marker beyond that - that also records the exit code, image and its digest, duration, and the separated
 stdout/stderr streams. Text files harvested from the new-artifacts folder are
 added as further evidence artifacts; binary files become downloadable run
-artifacts. Metrics record `exit_code`, `duration_seconds`, `image`, and
-`image_digest`.
+artifacts. Metrics record `exit_code`, `duration_seconds`, `image`,
+`image_digest` and `image_id`.
 While the container runs, its output streams into the step's live log, up to
 5 MB. Past that the live log says so and shows no more; the container goes on,
 and the evidence keeps stdout and stderr as above.
