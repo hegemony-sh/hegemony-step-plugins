@@ -394,3 +394,61 @@ async def test_an_old_ios_router_needs_legacy_ssh_and_a_transport_that_implement
         assert "choose another SSH transport for this device" in result.error
     else:
         assert result.exit_code == 0, result.error
+
+
+@pytest.mark.asyncio
+async def test_an_old_ios_router_takes_a_download_over_scrapli_with_legacy_ssh(servers, make):
+    """The device pulls a download link: the staging path an old router needs."""
+    port = await servers.device(asyncssh.generate_private_key("ssh-rsa", key_size=2048), **OLD_IOS)
+    transport = TRANSPORTS["scrapli"][0](
+        DeviceConnectionSpec(
+            host=HOST,
+            port=port,
+            username=USERNAME,
+            password=PASSWORD,
+            platform="ios-xe",
+            connect_timeout=5.0,
+            command_timeout=5.0,
+        ),
+        host_key_verifier=checks_off(),
+    )
+    transport.configure_ssh_security(allow_legacy=True)
+
+    result = await transport.http_transfer(
+        url="http://10.0.0.9:8080/api/dl/tok/image.bin",
+        dest_fs="flash:",
+        dest_filename="image.bin",
+        timeout_seconds=30,
+    )
+
+    assert result["transferred"] is True, result["output"]
+    assert "4096 bytes copied" in result["output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cli_transport", ["netmiko", "scrapli"])
+async def test_netmiko_and_scrapli_run_the_same_download_dialogue(servers, cli_transport):
+    """The asyncssh transport downloads with curl on a host instead, so it is not here."""
+    port = await servers.device(_ed25519())
+    transport_class, platform = TRANSPORTS[cli_transport]
+    transport = transport_class(
+        DeviceConnectionSpec(
+            host=HOST,
+            port=port,
+            username=USERNAME,
+            password=PASSWORD,
+            platform=platform,
+            connect_timeout=5.0,
+            command_timeout=5.0,
+        ),
+        host_key_verifier=checks_off(),
+    )
+
+    result = await transport.http_transfer(
+        url="http://10.0.0.9:8080/api/dl/tok/image.bin",
+        dest_fs="flash:",
+        dest_filename="image.bin",
+        timeout_seconds=30,
+    )
+
+    assert result["transferred"] is True, result["output"]

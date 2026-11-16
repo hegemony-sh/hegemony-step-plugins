@@ -15,6 +15,7 @@ answering, and the explicit NotImplementedError staging seam.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -665,12 +666,116 @@ async def test_failed_timing_commands_are_not_logged(caplog):
     assert _SECRET not in caplog.text
 
 
-async def test_staging_methods_are_an_explicit_seam():
+async def test_scp_staging_is_an_explicit_seam():
     transport = _make_transport()
     with pytest.raises(NotImplementedError, match="netmiko"):
         await transport.scp_put(local_path="/tmp/x", dest_fs="flash:", dest_filename="x")
-    with pytest.raises(NotImplementedError, match="netmiko"):
-        await transport.http_transfer(url="https://x", dest_fs="flash:", dest_filename="x")
+
+
+# ── HTTP staging: the device's copy <url> <fs> ───────────────────────────────
+
+
+def _copy_connection(*reads: str) -> MagicMock:
+    """A connection whose channel returns ``reads`` in turn, then nothing."""
+    connection = _connection()
+    chunks = [r.encode() for r in reads]
+
+    async def read() -> bytes:
+        if chunks:
+            return chunks.pop(0)
+        raise ScrapliTimeout("quiet")
+
+    connection.channel.read = AsyncMock(side_effect=read)
+    return connection
+
+
+async def _http_transfer(connection: MagicMock, url: str, **kwargs) -> dict:
+    transport = _make_transport()
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        return await transport.http_transfer(
+            url=url, dest_fs="flash:", dest_filename="image.bin", **kwargs
+        )
+
+
+def _written(connection: MagicMock) -> list[str]:
+    return [c.args[0] for c in connection.channel.write.call_args_list]
+
+
+async def test_http_transfer_answers_the_copy_questions_and_reports_the_copy():
+    url = "http://10.123.2.4:8080/api/dl/tok/image.bin"
+    connection = _copy_connection(
+        f"copy {url} flash:image.bin\r\nDestination filename [image.bin]? ",
+        "\r\n%Warning:There is a file already existing with this name\r\n"
+        "Do you want to over write? [confirm]",
+        "\r\nAccessing " + url + "...\r\n!!!!!!",
+        "\r\n123456 bytes copied in 1.234 secs (100045 bytes/sec)\r\nr1#",
+    )
+
+    result = await _http_transfer(connection, url, timeout_seconds=60)
+
+    assert result["transferred"] is True
+    assert "bytes copied" in result["output"]
+    assert _written(connection) == [f"copy {url} flash:image.bin\n", "\n", "\n"]
+    connection.close.assert_awaited()
+
+
+async def test_http_transfer_reports_a_device_error():
+    url = "http://10.123.2.4:8080/api/dl/tok/image.bin"
+    connection = _copy_connection(
+        f"copy {url} flash:image.bin\r\nDestination filename [image.bin]? ",
+        f"\r\n%Error opening {url} (Connection timed out)\r\nr1#",
+    )
+
+    result = await _http_transfer(connection, url, timeout_seconds=60)
+
+    assert result["transferred"] is False
+    assert "%Error opening" in result["output"]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "% Unknown command: copy http://a/b flash:image.bin\nr1# ",
+        "                 ^\nunknown command.\nuser@r1> ",
+    ],
+)
+async def test_http_transfer_stops_at_once_when_the_device_does_not_know_the_command(answer):
+    connection = _copy_connection(answer)
+
+    result = await _http_transfer(connection, "http://a/b", timeout_seconds=3600)
+
+    assert result["transferred"] is False
+    assert connection.channel.read.await_count == 1
+
+
+async def test_http_transfer_ends_at_its_timeout_without_a_copy():
+    connection = _copy_connection()
+
+    async def progress() -> bytes:
+        await asyncio.sleep(0.01)
+        return b"!"
+
+    connection.channel.read = AsyncMock(side_effect=progress)
+
+    result = await _http_transfer(connection, "http://a/b", timeout_seconds=0.1)
+
+    assert result["transferred"] is False
+    assert result["output"].startswith("!")
+    connection.close.assert_awaited()
+
+
+async def test_http_transfer_url_is_not_logged(caplog):
+    caplog.set_level(logging.DEBUG)
+    url = f"https://files.example.test/a/{_SECRET}/image.bin"
+    connection = _copy_connection(f"copy {url} flash:image.bin\n%Error opening {url}")
+
+    result = await _http_transfer(connection, url, timeout_seconds=10)
+
+    assert result["transferred"] is False
+    assert caplog.records
+    assert _SECRET not in caplog.text
 
 
 # ── Jump host (bastion) hop ──────────────────────────────────────────────────

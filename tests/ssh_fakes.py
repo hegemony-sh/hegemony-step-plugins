@@ -121,6 +121,16 @@ class _Bastion(_Device):
         return True
 
 
+async def _copy_dialogue(process: asyncssh.SSHServerProcess, command: str) -> None:
+    """IOS's ``copy <url> flash:<name>``: one question, then the file arrives."""
+    name = command.rsplit(":", 1)[-1]
+    process.stdout.write(f"Destination filename [{name}]? ")
+    await process.stdin.readline()
+    process.stdout.write(
+        "Accessing ...\r\n!!!!\r\n4096 bytes copied in 0.1 secs (40960 bytes/sec)\r\n"
+    )
+
+
 async def _session(process: asyncssh.SSHServerProcess) -> None:
     """An exec command answers once; a shell is a router-like prompt loop."""
     if process.command is not None:
@@ -140,7 +150,9 @@ async def _session(process: asyncssh.SSHServerProcess) -> None:
         command = line.strip()
         if command in ("exit", "logout", "quit"):
             break
-        if command and not command.startswith("terminal"):
+        if command.startswith("copy http"):
+            await _copy_dialogue(process, command)
+        elif command and not command.startswith("terminal"):
             process.stdout.write(f"output of {command}\r\n")
         process.stdout.write(PROMPT)
     with contextlib.suppress(Exception):

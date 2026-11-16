@@ -17,9 +17,10 @@ extra caps ``paramiko<4``, which would drag the whole install onto an old
 paramiko; asyncssh is already the platform's SSH library).
 
 Command execution (single, batch, config sets, timing mode) is implemented on
-scrapli's core network drivers; file staging (``scp_put``/``http_transfer``)
-is netmiko-only for now and raises :class:`NotImplementedError` — select the
-netmiko transport for staging steps.
+scrapli's core network drivers, and HTTP staging (``http_transfer``: the
+device's ``copy <url> <fs>``) on its raw channel. SCP staging (``scp_put``) is
+netmiko-only for now and raises :class:`NotImplementedError` — select the
+netmiko transport for it.
 """
 
 import asyncio
@@ -252,6 +253,36 @@ _TIMING_POLL_SECONDS = 2.5
 #: "read until quiet" semantics).
 _QUIET_READS_DONE = 3
 
+
+#: Output that ends a ``copy <url> <fs>`` dialogue, whether it worked or not.
+#: "nknown command" is a platform without this copy command ("% Unknown
+#: command" on FRR, "unknown command." on Junos): the answer is final.
+_COPY_DONE_MARKERS = (
+    "bytes copied",
+    "%Error",
+    "Error opening",
+    "Invalid",
+    "not found",
+    "timed out",
+    "refused",
+    "Could not",
+    "Incomplete command",
+    "nknown command",
+    "Broken pipe",
+)
+
+#: Output that means the copy failed.
+_COPY_ERROR_MARKERS = (
+    "%Error",
+    "Error opening",
+    "Error reading",
+    "Invalid",
+    "not found",
+    "refused",
+    "Could not",
+    "Broken pipe",
+    "timed out",
+)
 
 #: Lines that open a config block. Only ``end`` closes one: ``exit`` inside a
 #: block leaves a sub-mode on the device and is sent like any config line.
@@ -1198,7 +1229,7 @@ class ScrapliTransport:
         """
         raise NotImplementedError(
             "scp_put is not supported by the scrapli transport; "
-            "use the netmiko transport (device access_config.ssh.transport) for staging steps"
+            "use the netmiko transport (device access_config.ssh.transport) for SCP staging"
         )
 
     async def http_transfer(
@@ -1209,12 +1240,78 @@ class ScrapliTransport:
         dest_filename: str,
         timeout_seconds: int = 3600,
     ) -> dict:
-        """HTTP copy staging is not supported by the scrapli transport.
+        """Have the device pull a file: ``copy <url> <fs><filename>`` at privilege-exec.
 
-        The interactive ``copy <url> <fs>`` dialogue is implemented in the
-        netmiko transport only; staging steps should run over netmiko.
+        The same dialogue as the netmiko transport: the destination-filename
+        question and an overwrite confirmation are each answered once with
+        Enter, then the output is read until the copy reports its end or
+        ``timeout_seconds`` passes. "bytes copied" is the success.
+
+        On Cisco IOS a '?' on the command line opens the help, so a URL with a
+        query string cannot be typed as it is; the platform's download links
+        carry their token in the path.
+
+        Returns:
+            Dict with: transferred, output, elapsed_ms
         """
-        raise NotImplementedError(
-            "http_transfer is not supported by the scrapli transport; "
-            "use the netmiko transport (device access_config.ssh.transport) for staging steps"
-        )
+        connection = None
+        start_time = time.perf_counter()
+        output = ""
+
+        try:
+            logger.info(f"HTTP transfer to {self.host}: {dest_fs}{dest_filename}")
+            # Short per-read transport timeout so the loop below polls promptly.
+            # scrapli escalates to privilege-exec on open (auth_secondary).
+            connection = await self._open_connection(timeout_transport=_TIMING_POLL_SECONDS)
+            if self.step_run_id:
+                self._cancellation_registry.register(self.step_run_id, connection)
+
+            connection.channel.write(f"copy {url} {dest_fs}{dest_filename}\n")
+            dest_filename_handled = False
+            overwrite_handled = False
+
+            while (time.perf_counter() - start_time) < timeout_seconds:
+                if self._cancellation_registry.is_cancelled(self.step_run_id):
+                    logger.info(f"HTTP transfer cancelled for step {self.step_run_id}")
+                    return {
+                        "transferred": False,
+                        "output": output + "\n[CANCELLED]",
+                        "elapsed_ms": (time.perf_counter() - start_time) * 1000,
+                    }
+
+                chunk = await self._read_channel_chunk(connection)
+                if chunk is None:
+                    # The connection is gone: nothing more will arrive.
+                    break
+                output += chunk
+
+                if any(marker in output for marker in _COPY_DONE_MARKERS):
+                    break
+                if "Destination filename" in output and not dest_filename_handled:
+                    connection.channel.write("\n")
+                    dest_filename_handled = True
+                    continue
+                recent_output = output[-500:]
+                if not overwrite_handled and (
+                    "Overwrite?" in recent_output or "[confirm]" in recent_output.lower()
+                ):
+                    connection.channel.write("\n")
+                    overwrite_handled = True
+
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            if any(marker in output for marker in _COPY_ERROR_MARKERS):
+                # Not the output: the device echoes the copy command and its URL.
+                logger.error(f"HTTP transfer to {self.host} failed")
+                return {"transferred": False, "output": output, "elapsed_ms": elapsed_ms}
+            return {
+                "transferred": "bytes copied" in output.lower(),
+                "output": output,
+                "elapsed_ms": elapsed_ms,
+            }
+        except Exception as e:
+            logger.error(f"HTTP transfer to {self.host} failed: {type(e).__name__}")
+            raise
+        finally:
+            if self.step_run_id and connection:
+                self._cancellation_registry.unregister(self.step_run_id, connection)
+            await _safe_close(connection)
