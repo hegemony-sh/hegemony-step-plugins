@@ -428,6 +428,12 @@ _NEGOTIATED_LISTS: tuple[tuple[str, int, str], ...] = (
 _KEX_MARKER_PREFIXES = ("ext-info-", "kex-strict-")
 
 
+#: What a hop is told when no setting can make its transport agree with the device.
+_UNSUPPORTED = (
+    "this transport implements none of the device's; choose another SSH transport for this device"
+)
+
+
 def _name_list(names: list[str]) -> str:
     """Algorithm names for an error, without key-exchange extension markers."""
     shown = [name for name in names if not name.startswith(_KEX_MARKER_PREFIXES)]
@@ -476,7 +482,7 @@ def negotiation_failure_detail(
             f"{_name_list(theirs)}; this connection offers: {_name_list(ours)}"
         )
         if legacy_allowed:
-            text += "; legacy SSH is already allowed for this connection"
+            text += f"; legacy SSH is already allowed, so {_UNSUPPORTED}"
         elif with_legacy is not None:
             added = [
                 name for name in theirs if name in with_legacy.get(kind, ()) and name not in ours
@@ -484,10 +490,7 @@ def negotiation_failure_detail(
             if added:
                 text += f"; allowing legacy SSH (allow_legacy_ssh) would add: {', '.join(added)}"
             else:
-                text += (
-                    "; allowing legacy SSH (allow_legacy_ssh) would not help: "
-                    "this transport supports none of the device's"
-                )
+                text += f"; allowing legacy SSH (allow_legacy_ssh) would not help: {_UNSUPPORTED}"
         parts.append(text)
     return ". ".join(parts)
 

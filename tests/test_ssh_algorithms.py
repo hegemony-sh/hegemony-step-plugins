@@ -151,13 +151,25 @@ def test_the_detail_says_which_names_the_legacy_opt_in_would_add():
 
     assert "allowing legacy SSH (allow_legacy_ssh) would add: diffie-hellman-group14-sha1" in detail
     assert "would add: hmac-sha1" in detail
-    assert detail.count("would not help: this transport supports none of the device's") == 1
+    assert (
+        detail.count(
+            "would not help: this transport implements none of the device's; "
+            "choose another SSH transport for this device"
+        )
+        == 1
+    )
 
 
 def test_the_detail_says_when_legacy_ssh_is_already_allowed():
     detail = negotiation_failure_detail(CLIENT, OLD_DEVICE, legacy_allowed=True)
 
-    assert detail.count("legacy SSH is already allowed for this connection") == 3
+    assert (
+        detail.count(
+            "legacy SSH is already allowed, so this transport implements none of the device's; "
+            "choose another SSH transport for this device"
+        )
+        == 3
+    )
 
 
 def test_a_mac_is_not_needed_beside_a_cipher_with_integrity_built_in():
@@ -324,3 +336,32 @@ async def test_netmiko_names_the_algorithms_when_the_device_offers_none_it_accep
     assert "this connection offers: mlkem768x25519-sha256," in result.error
     assert "ext-info-c" not in result.error
     assert "allow_legacy_ssh" in result.error
+
+
+#: An old Cisco IOS router: only SHA-1 group 1 key exchange, ssh-rsa host-key
+#: signatures, CBC encryption and an SHA-1 MAC.
+OLD_IOS = {
+    "kex_algs": ["diffie-hellman-group1-sha1"],
+    "signature_algs": ["ssh-rsa"],
+    "encryption_algs": ["aes256-cbc"],
+    "mac_algs": ["hmac-sha1"],
+}
+
+
+@pytest.mark.asyncio
+async def test_an_old_ios_router_needs_legacy_ssh_and_a_transport_that_implements_it(
+    servers, make, transport_id
+):
+    port = await servers.device(asyncssh.generate_private_key("ssh-rsa", key_size=2048), **OLD_IOS)
+    transport = make(port, None)
+    transport.configure_ssh_security(allow_legacy=True)
+
+    [result] = await transport.execute_commands(["show version"])
+
+    if transport_id == "netmiko":
+        # paramiko 5 implements none of these key exchanges or signatures.
+        assert result.exit_code == -1
+        assert "the device offers: diffie-hellman-group1-sha1;" in result.error
+        assert "choose another SSH transport for this device" in result.error
+    else:
+        assert result.exit_code == 0, result.error
