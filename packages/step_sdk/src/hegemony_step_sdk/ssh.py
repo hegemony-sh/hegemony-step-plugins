@@ -411,6 +411,96 @@ def legacy_algorithms(
     return found
 
 
+#: Where each kind's name-list sits in a KEXINIT message (RFC 4253 §7.1), with
+#: the label an error names it by. Ciphers and MACs are listed per direction.
+_NEGOTIATED_LISTS: tuple[tuple[str, int, str], ...] = (
+    ("kex", 0, "key exchange (kex)"),
+    ("host_key", 1, "host key"),
+    ("cipher", 2, "cipher"),
+    ("cipher", 3, "cipher (device to client)"),
+    ("mac", 4, "MAC (message authentication code)"),
+    ("mac", 5, "MAC (message authentication code, device to client)"),
+)
+
+
+#: Names a KEXINIT lists among key exchanges that only signal an extension
+#: (RFC 8308 ext-info, OpenSSH strict key exchange); no exchange runs by them.
+_KEX_MARKER_PREFIXES = ("ext-info-", "kex-strict-")
+
+
+#: What a hop is told when no setting can make its transport agree with the device.
+_UNSUPPORTED = (
+    "this transport implements none of the device's; choose another SSH transport for this device"
+)
+
+
+def _name_list(names: list[str]) -> str:
+    """Algorithm names for an error, without key-exchange extension markers."""
+    shown = [name for name in names if not name.startswith(_KEX_MARKER_PREFIXES)]
+    return ", ".join(shown) or "(none)"
+
+
+def negotiation_failure_detail(
+    client_kexinit: bytes,
+    server_kexinit: bytes,
+    *,
+    with_legacy: Mapping[str, Collection[str]] | None = None,
+    legacy_allowed: bool = False,
+) -> str:
+    """Why two KEXINIT messages agree on nothing, naming both sides' algorithms.
+
+    For each kind the two lists share no name in, the text gives what the
+    device offers and what this connection offers. ``with_legacy`` is what the
+    transport would offer with the legacy opt-in (``ssh_algorithm_lists(True)``);
+    pass it only for a hop that does not already allow legacy SSH, and the text
+    says whether the opt-in would add a name the device offers;
+    ``legacy_allowed`` says the hop already allows it. Returns ``""``
+    when a message is missing or malformed, or every kind has a match, so a
+    caller keeps its library's own message then.
+    """
+    from .transports import _AEAD_CIPHERS, _first_match, _kexinit_lists
+
+    try:
+        client = _kexinit_lists(client_kexinit)
+        server = _kexinit_lists(server_kexinit)
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    ciphers = (_first_match(client[2], server[2]), _first_match(client[3], server[3]))
+    parts: list[str] = []
+    reported: set[int] = set()
+    for kind, index, label in _NEGOTIATED_LISTS:
+        ours, theirs = client[index], server[index]
+        if _first_match(ours, theirs):
+            continue
+        # A cipher with integrity built in uses no MAC, so no MAC match is needed.
+        if kind == "mac" and ciphers[index - 4] in _AEAD_CIPHERS:
+            continue
+        # The device-to-client list is reported only when it says something new.
+        if (
+            index in (3, 5)
+            and index - 1 in reported
+            and (ours, theirs) == (client[index - 1], server[index - 1])
+        ):
+            continue
+        reported.add(index)
+        text = (
+            f"no {label} algorithm in common; the device offers: "
+            f"{_name_list(theirs)}; this connection offers: {_name_list(ours)}"
+        )
+        if legacy_allowed:
+            text += f"; legacy SSH is already allowed, so {_UNSUPPORTED}"
+        elif with_legacy is not None:
+            added = [
+                name for name in theirs if name in with_legacy.get(kind, ()) and name not in ours
+            ]
+            if added:
+                text += f"; allowing legacy SSH (allow_legacy_ssh) would add: {', '.join(added)}"
+            else:
+                text += f"; allowing legacy SSH (allow_legacy_ssh) would not help: {_UNSUPPORTED}"
+        parts.append(text)
+    return ". ".join(parts)
+
+
 def asyncssh_security_options(
     library: Any, keys: tuple[str, ...] | None, allow_legacy: bool = False
 ) -> dict[str, Any]:
