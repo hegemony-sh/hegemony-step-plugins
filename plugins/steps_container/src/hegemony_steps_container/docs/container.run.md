@@ -57,7 +57,16 @@ the copy when it matches, or the newest copy under the tag when that registry
 is unreachable; the step's events say which. A new digest is pulled from the
 image's registry by that digest, so the copy holds exactly what was checked
 even if the tag moves meanwhile, and saved as a copy in turn, without ever
-failing the step when the save cannot happen. A registry that refuses the
+failing the step when the save cannot happen. A copy is filed under a tag
+named after the upstream digest, and a tag can be pushed over, so before a
+copy runs the step reads the image's manifest from its own registry (by that
+digest, the content checked against it) and compares the configuration digest
+it names for the sandbox's platform with the copy's image ID. A copy that is
+another image is not run: the step pulls the image from its registry and
+saves a true copy over it (`image_cache_mismatch` in its events). When the
+check cannot be made (the registry is unreachable, refuses the login, or does
+not answer within 30 seconds) the copy runs and the events say so
+(`image_cache_unverified`). A registry that refuses the
 check's login gets the plain pull instead, with no copy served or saved: a
 refusal may mean access was withdrawn. An image from a registry whose name
 has no dot and is not `localhost` (`myregistry:5000`) is pulled from it and

@@ -420,12 +420,14 @@ def _install(
     push_results: list[int] | None = None,
     pull_digests: dict[str, str] | None = None,
     image_id: str = "",
+    copy_identity: str = "",
 ):
     """Script the registries, the Engine API pull and the docker CLI.
 
     ``pull_digests`` maps a pulled reference to the digest its pull reports
     (none by default, which leaves the digest to RepoDigests). ``image_id`` is
-    what ``docker image inspect --format {{.Id}}`` prints (nothing by default).
+    what ``docker image inspect --format {{.Id}}`` prints (nothing by default),
+    ``copy_identity`` what the ID-and-platform inspect of a cached copy prints.
 
     The Engine API pull succeeds for every image but those in ``pull_failures``,
     which raise and whose CLI fallback also fails, so the handler reports the
@@ -463,6 +465,8 @@ def _install(
             code = remaining_push_results.pop(0) if remaining_push_results else push_returncode
             return SimpleNamespace(returncode=code, stdout="", stderr="denied: push")
         if argv[:3] == ["docker", "image", "inspect"]:
+            if any("{{.Os}}" in arg for arg in argv):
+                return SimpleNamespace(returncode=0, stdout=f"{copy_identity}\n", stderr="")
             if "{{.Id}}" in argv:
                 return SimpleNamespace(returncode=0, stdout=f"{image_id}\n", stderr="")
             if "RepoDigests" in " ".join(argv):
@@ -1018,3 +1022,142 @@ async def test_tool_configs_pass_the_option_through(monkeypatch) -> None:
     )
     assert job_config["cache_image"] is False
     assert "cache_image" not in container_config_from({}, image="ghcr.io/x/y:1", command=["true"])
+
+
+# ── A cache hit checks its copy against the image's registry ─────────────────
+
+from hegemony_steps_container.image_cache import _platform_entry  # noqa: E402
+
+CONFIG_AMD64 = "sha256:" + "a1" * 32
+CONFIG_ARM64 = "sha256:" + "a2" * 32
+HUB = "https://registry-1.docker.io"
+PLATFORM_REGISTRY = "http://registry.hegemony.internal"
+
+
+def _blob(document: dict[str, Any]) -> tuple[str, bytes]:
+    body = json.dumps(document).encode()
+    return "sha256:" + hashlib.sha256(body).hexdigest(), body
+
+
+def _upstream_index(registries: _Registries) -> str:
+    """Script an upstream index with amd64 and arm64 images; return its digest."""
+    manifests = {}
+    entries = []
+    for arch, config in (("amd64", CONFIG_AMD64), ("arm64", CONFIG_ARM64)):
+        digest, body = _blob(
+            {
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {"digest": config},
+                "layers": [],
+            }
+        )
+        manifests[digest] = body
+        entries.append({"digest": digest, "platform": {"os": "linux", "architecture": arch}})
+    entries.append(
+        {
+            "digest": "sha256:" + "a3" * 32,
+            "platform": {"os": "unknown", "architecture": "unknown"},
+            "annotations": {"vnd.docker.reference.type": "attestation-manifest"},
+        }
+    )
+    index_digest, index_body = _blob(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": entries,
+        }
+    )
+    manifests[index_digest] = index_body
+    for digest, body in manifests.items():
+        registries.manifests[(HUB, "library/alpine", digest)] = httpx.Response(200, content=body)
+    registries.manifests[(HUB, "library/alpine", "3.20")] = index_digest
+    registries.manifests[(PLATFORM_REGISTRY, OWN_REPO, cache_key_tag(index_digest))] = (
+        "sha256:" + "22" * 32
+    )
+    return index_digest
+
+
+async def test_a_copy_that_is_the_upstream_image_runs(monkeypatch) -> None:
+    registries, captured = _install(monkeypatch, copy_identity=f"{CONFIG_AMD64} linux/amd64")
+    index = _upstream_index(registries)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    assert result.metrics["image_source"] == "cache"
+    assert captured["pulled"] == [f"{OWN_COPY}:{cache_key_tag(index)}"]
+    assert "image_cache_verified" in _milestones(events)
+    # The index, then the amd64 manifest, were read from upstream by digest.
+    gets = [url for method, url in registries.requests if method == "GET"]
+    assert any(url.endswith(f"/manifests/{index}") for url in gets)
+
+
+async def test_a_copy_pushed_over_by_another_image_is_not_run(monkeypatch) -> None:
+    """The key tag names the upstream digest, but a tag can be pushed over."""
+    registries, captured = _install(
+        monkeypatch, copy_identity=f"{'sha256:' + 'ee' * 32} linux/amd64"
+    )
+    index = _upstream_index(registries)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    assert "image_cache_mismatch" in _milestones(events)
+    # Upstream is pulled by the digest, and a true copy is saved over the bad one.
+    assert captured["pulled"] == [f"{OWN_COPY}:{cache_key_tag(index)}", f"alpine@{index}"]
+    assert ["docker", "push", f"{OWN_COPY}:{cache_key_tag(index)}"] in _docker(captured, "push")
+    assert result.metrics["image_source"] == "upstream"
+    assert f"{OWN_COPY}:{cache_key_tag(index)}" not in _create_argv(captured)
+
+
+async def test_a_copy_that_cannot_be_checked_runs_with_a_warning(monkeypatch) -> None:
+    """A digest-pinned image whose registry is down at the check: the copy stands in."""
+    registries, captured = _install(monkeypatch, copy_identity=f"{CONFIG_AMD64} linux/amd64")
+    index = _upstream_index(registries)
+    registries.unreachable.add(HUB)
+    events: list = []
+
+    result = await RunContainerHandler().execute(
+        _handler_ctx(events, config={"image": f"alpine@{index}", "command": ["true"]})
+    )
+    assert result.success is True, result.error
+    assert result.metrics["image_source"] == "cache"
+    assert "image_cache_unverified" in _milestones(events)
+    [message] = [m for m, a in events if a.get("milestone") == "image_cache_unverified"]
+    assert "running the copy" in message
+
+
+async def test_an_upstream_manifest_that_does_not_match_its_digest_is_not_trusted() -> None:
+    digest = "sha256:" + "b4" * 32
+    body = json.dumps({"config": {"digest": CONFIG_AMD64}}).encode()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    client = _client(handler)
+    with pytest.raises(RegistryUnavailable, match="does not match"):
+        await client.config_digest("x/tool", digest, "linux/amd64")
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    [
+        ("linux/amd64", "sha256:" + "01" * 32),
+        ("linux/arm64/v8", "sha256:" + "03" * 32),
+        ("linux/arm/v7", "sha256:" + "02" * 32),
+        ("linux/arm/v6", None),
+        ("windows/amd64", None),
+    ],
+)
+def test_the_index_entry_is_picked_by_platform(platform: str, expected: str | None) -> None:
+    entries = [
+        {"digest": "sha256:" + "01" * 32, "platform": {"os": "linux", "architecture": "amd64"}},
+        {
+            "digest": "sha256:" + "02" * 32,
+            "platform": {"os": "linux", "architecture": "arm", "variant": "v7"},
+        },
+        {"digest": "sha256:" + "03" * 32, "platform": {"os": "linux", "architecture": "arm64"}},
+        {"digest": "sha256:" + "04" * 32, "platform": {"os": "unknown", "architecture": "unknown"}},
+    ]
+    assert _platform_entry(entries, platform) == expected

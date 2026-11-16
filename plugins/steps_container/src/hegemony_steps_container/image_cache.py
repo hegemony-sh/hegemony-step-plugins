@@ -291,6 +291,76 @@ class RegistryClient:
         except httpx.HTTPError as exc:
             raise RegistryUnavailable(f"{self._base_url}: {exc}"[:200]) from exc
 
+    async def config_digest(self, repo: str, digest: str, platform: str) -> str | None:
+        """The config digest of ``repo@digest`` for ``platform`` (``os/arch[/variant]``).
+
+        This is what ``docker image inspect --format {{.Id}}`` reports for the
+        image, whichever registry or manifest format serves it, so a copy can
+        be checked against the image its digest names. ``digest`` may name an
+        index (a multi-platform image): its entry for ``platform`` is read.
+        Every manifest is checked against the digest it was asked by. None when
+        the registry has no such manifest or the index has no entry for
+        ``platform``. Raises :class:`RegistryUnavailable` when the registry
+        cannot be used, or answers with content that does not match its digest,
+        and :class:`RegistryDenied` when it refuses the login.
+        """
+        headers: dict[str, str] = {"Accept": MANIFEST_ACCEPT}
+        try:
+            async with httpx.AsyncClient(
+                timeout=_HTTP_TIMEOUT, trust_env=self._trust_env, transport=self._transport
+            ) as client:
+                manifest = await self._manifest(client, repo, digest, headers)
+                if manifest is None:
+                    return None
+                if isinstance(manifest.get("manifests"), list):
+                    entry = _platform_entry(manifest["manifests"], platform)
+                    if entry is None:
+                        return None
+                    manifest = await self._manifest(client, repo, entry, headers)
+                    if manifest is None:
+                        return None
+                config = manifest.get("config")
+                found = config.get("digest") if isinstance(config, dict) else None
+                return found if isinstance(found, str) and _DIGEST.match(found) else None
+        except httpx.HTTPError as exc:
+            raise RegistryUnavailable(f"{self._base_url}: {exc}"[:200]) from exc
+
+    async def _manifest(
+        self, client: httpx.AsyncClient, repo: str, digest: str, headers: dict[str, str]
+    ) -> dict | None:
+        """``repo@digest``'s manifest, its content checked against ``digest``; None when absent.
+
+        Answering a Bearer challenge adds the token to ``headers``, so the next
+        request of the same lookup reuses it.
+        """
+        url = f"{self._base_url}/v2/{repo}/manifests/{digest}"
+        response = await client.get(url, headers=headers)
+        if response.status_code == 401 and "Authorization" not in headers:
+            authorization = await self._authorize(
+                client, response.headers.get("www-authenticate", ""), repo
+            )
+            if authorization is None:
+                raise RegistryDenied(f"{self._base_url} refused the login for {repo}")
+            headers["Authorization"] = authorization
+            response = await client.get(url, headers=headers)
+        if response.status_code == 404:
+            return None
+        if response.status_code in (401, 403):
+            raise RegistryDenied(f"{self._base_url} refused access to {repo}")
+        if response.status_code != 200:
+            raise RegistryUnavailable(
+                f"{self._base_url} answered HTTP {response.status_code} for {repo}"
+            )
+        if "sha256:" + hashlib.sha256(response.content).hexdigest() != digest:
+            raise RegistryUnavailable(
+                f"{self._base_url} served content for {repo}@{digest} that does not match it"
+            )
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise RegistryUnavailable(f"{self._base_url} served an unreadable manifest") from exc
+        return body if isinstance(body, dict) else None
+
     async def _authorize(self, client: httpx.AsyncClient, challenge: str, repo: str) -> str | None:
         """The ``Authorization`` value that answers ``challenge``, or None."""
         scheme, _, params_text = challenge.strip().partition(" ")
@@ -325,6 +395,33 @@ class RegistryClient:
             return None
         raw = f"{self._login.username}:{self._login.password}".encode()
         return "Basic " + base64.b64encode(raw).decode("ascii")
+
+
+def _platform_entry(entries: list, platform: str) -> str | None:
+    """The digest of the index entry for ``platform`` (``os/arch[/variant]``), or None.
+
+    Attestations and other entries without a real platform never match. An
+    entry without a variant matches a platform with one only when no entry
+    names that variant.
+    """
+    os_name, _, rest = platform.partition("/")
+    arch, _, variant = rest.partition("/")
+    loose: str | None = None
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("digest"), str):
+            continue
+        spec = entry.get("platform")
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("os") != os_name or spec.get("architecture") != arch:
+            continue
+        if not _DIGEST.match(entry["digest"]):
+            continue
+        if (spec.get("variant") or "") == variant:
+            return entry["digest"]
+        if not spec.get("variant") and loose is None:
+            loose = entry["digest"]
+    return loose
 
 
 __all__ = [
