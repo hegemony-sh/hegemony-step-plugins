@@ -1329,6 +1329,33 @@ async def test_the_image_store_is_asked_once_per_daemon(monkeypatch) -> None:
     )
     handler = RunContainerHandler()
     env = {"DOCKER_HOST": "tcp://dind:2375"}
-    assert await handler._image_store(docker_bin="docker", docker_env=env) == "containerd"
-    assert await handler._image_store(docker_bin="docker", docker_env=env) == "containerd"
+    assert (
+        await handler._image_store(docker_bin="docker", docker_env=env, timeout=60) == "containerd"
+    )
+    assert (
+        await handler._image_store(docker_bin="docker", docker_env=env, timeout=60) == "containerd"
+    )
+    assert len(_docker(captured, "info")) == 1
+
+
+async def test_the_image_store_question_keeps_to_the_steps_deadline(monkeypatch) -> None:
+    """A slow `docker info` must not carry a step past its timeout."""
+    _, captured = _install(
+        monkeypatch, image_store="containerd", copy_identity="sha256:" + "5d" * 32 + " linux/amd64"
+    )
+    handler = RunContainerHandler()
+    await handler._image_identity(
+        reference="tools/runner:dev",
+        repository="tools/runner:dev",
+        cache=None,
+        docker_bin="docker",
+        docker_env={"DOCKER_HOST": "tcp://dind:2375"},
+        deadline=time.monotonic() + 3,
+    )
+    [info_timeout] = [t for cmd, t in captured["timeouts"] if cmd[:2] == ["docker", "info"]]
+    assert info_timeout is not None and info_timeout <= 3
+    # Out of time, the daemon is not asked at all, and nothing is remembered.
+    fresh = RunContainerHandler()
+    env = {"DOCKER_HOST": "tcp://other:2375"}
+    assert await fresh._image_store(docker_bin="docker", docker_env=env, timeout=0) == "classic"
     assert len(_docker(captured, "info")) == 1

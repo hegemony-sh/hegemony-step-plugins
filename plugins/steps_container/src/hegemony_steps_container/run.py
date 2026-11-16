@@ -3885,25 +3885,32 @@ class RunContainerHandler(BaseHandler):
             logger.info("No registry digest for image %s; running it by tag", image)
         return digest
 
-    async def _image_store(self, *, docker_bin: str, docker_env: dict[str, str]) -> str:
+    async def _image_store(
+        self, *, docker_bin: str, docker_env: dict[str, str], timeout: float
+    ) -> str:
         """``containerd`` or ``classic``: the sandbox daemon's image store, asked once per daemon.
 
         The containerd image store (Docker 29's default for new installs)
         reports a pulled image's ID as the digest of the manifest or index it
         was pulled by, not of its configuration; the classic store reports the
-        configuration digest.
+        configuration digest. Bounded by ``timeout`` (the step's remaining
+        time); an answer that does not come is not remembered, and reads as
+        the classic store, whose IDs a containerd daemon's never match, so a
+        check that needs an ID refuses rather than passes.
         """
         host = docker_env.get("DOCKER_HOST", "")
         stores = self.__dict__.setdefault("_image_stores", {})
         if host in stores:
             return stores[host]
         store = "classic"
+        if timeout <= 0:
+            return store
         try:
             proc = await self._run_docker(
                 docker_bin,
                 ["info", "--format", "{{json .DriverStatus}}"],
                 env=docker_env,
-                timeout=_IMAGE_INSPECT_TIMEOUT,
+                timeout=min(timeout, _IMAGE_INSPECT_TIMEOUT),
             )
         except (subprocess.SubprocessError, OSError):
             return store
@@ -3945,7 +3952,12 @@ class RunContainerHandler(BaseHandler):
         )
         if not local_id:
             return _ImageIdentity()
-        if await self._image_store(docker_bin=docker_bin, docker_env=docker_env) == "classic":
+        store = await self._image_store(
+            docker_bin=docker_bin,
+            docker_env=docker_env,
+            timeout=deadline - time.monotonic(),
+        )
+        if store == "classic":
             return _ImageIdentity(local_id=local_id, image_id=local_id, platform=platform)
         name, at, pinned = reference.rpartition("@")
         registry_digest = pinned if at and _IMAGE_ID.fullmatch(pinned) else local_id
