@@ -3434,8 +3434,14 @@ class RunContainerHandler(BaseHandler):
 
     async def _image_id_and_platform(
         self, *, docker_bin: str, image: str, docker_env: dict[str, str], timeout: float
-    ) -> tuple[str, str]:
-        """``image``'s ID and ``os/arch[/variant]`` from the daemon; empty when it does not say."""
+    ) -> tuple[str, str, bool]:
+        """``image``'s ID, ``os/arch[/variant]`` and whether any registry knows it.
+
+        The last is False only for an image with no registry digest at all (built
+        on the daemon and never pushed); an answer without the count reads as
+        pulled, which never lets a daemon ID stand in for a configuration
+        digest. Empty values when the daemon does not say.
+        """
         try:
             proc = await self._run_docker(
                 docker_bin,
@@ -3443,20 +3449,25 @@ class RunContainerHandler(BaseHandler):
                     "image",
                     "inspect",
                     "--format",
-                    "{{.Id}} {{.Os}}/{{.Architecture}}{{with .Variant}}/{{.}}{{end}}",
+                    "{{.Id}} {{.Os}}/{{.Architecture}}{{with .Variant}}/{{.}}{{end}}"
+                    " {{len .RepoDigests}}",
                     image,
                 ],
                 env=docker_env,
                 timeout=min(timeout, _IMAGE_INSPECT_TIMEOUT),
             )
         except (subprocess.SubprocessError, OSError):
-            return "", ""
+            return "", "", True
         if proc.returncode != 0:
-            return "", ""
-        image_id, _, platform = proc.stdout.strip().partition(" ")
+            return "", "", True
+        parts = proc.stdout.split()
+        if len(parts) < 2:
+            return "", "", True
+        image_id, platform = parts[0], parts[1]
         if not _IMAGE_ID.fullmatch(image_id) or platform.count("/") not in (1, 2):
-            return "", ""
-        return image_id, platform
+            return "", "", True
+        pulled = parts[2:3] != ["0"]
+        return image_id, platform, pulled
 
     async def _acquire_image(
         self,
@@ -3888,23 +3899,23 @@ class RunContainerHandler(BaseHandler):
     async def _image_store(
         self, *, docker_bin: str, docker_env: dict[str, str], timeout: float
     ) -> str:
-        """``containerd`` or ``classic``: the sandbox daemon's image store, asked once per daemon.
+        """``containerd``, ``classic`` or ``unknown``: the sandbox daemon's image store.
+
+        Asked once per daemon; ``unknown`` (no time left, or no answer) is not
+        remembered, so the next step asks again.
 
         The containerd image store (Docker 29's default for new installs)
         reports a pulled image's ID as the digest of the manifest or index it
         was pulled by, not of its configuration; the classic store reports the
         configuration digest. Bounded by ``timeout`` (the step's remaining
-        time); an answer that does not come is not remembered, and reads as
-        the classic store, whose IDs a containerd daemon's never match, so a
-        check that needs an ID refuses rather than passes.
+        time).
         """
         host = docker_env.get("DOCKER_HOST", "")
         stores = self.__dict__.setdefault("_image_stores", {})
         if host in stores:
             return stores[host]
-        store = "classic"
         if timeout <= 0:
-            return store
+            return "unknown"
         try:
             proc = await self._run_docker(
                 docker_bin,
@@ -3913,11 +3924,10 @@ class RunContainerHandler(BaseHandler):
                 timeout=min(timeout, _IMAGE_INSPECT_TIMEOUT),
             )
         except (subprocess.SubprocessError, OSError):
-            return store
+            return "unknown"
         if proc.returncode != 0:
-            return store
-        if _CONTAINERD_SNAPSHOTTER in proc.stdout:
-            store = "containerd"
+            return "unknown"
+        store = "containerd" if _CONTAINERD_SNAPSHOTTER in proc.stdout else "classic"
         stores[host] = store
         return store
 
@@ -3947,7 +3957,7 @@ class RunContainerHandler(BaseHandler):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return _ImageIdentity()
-        local_id, platform = await self._image_id_and_platform(
+        local_id, platform, pulled = await self._image_id_and_platform(
             docker_bin=docker_bin, image=reference, docker_env=docker_env, timeout=remaining
         )
         if not local_id:
@@ -3959,8 +3969,20 @@ class RunContainerHandler(BaseHandler):
         )
         if store == "classic":
             return _ImageIdentity(local_id=local_id, image_id=local_id, platform=platform)
+        if store == "containerd" and not pulled:
+            # No registry digest at all: built on this daemon and never pushed.
+            # Plan and apply on this daemon see the same ID; no registry can say more.
+            return _ImageIdentity(local_id=local_id, image_id=local_id, platform=platform)
         name, at, pinned = reference.rpartition("@")
-        registry_digest = pinned if at and _IMAGE_ID.fullmatch(pinned) else local_id
+        if at and _IMAGE_ID.fullmatch(pinned):
+            registry_digest = pinned
+        elif store == "containerd":
+            # The containerd store's ID is the digest the image was pulled by.
+            registry_digest = local_id
+        else:
+            # The store is unknown and the image was not pulled by a digest:
+            # the daemon's ID may be either kind, so it is no configuration digest.
+            return _ImageIdentity(local_id=local_id, platform=platform)
         parsed = parse_reference(name if at else repository)
         if cache is not None and parsed.host == cache.registry:
             client = RegistryClient(
@@ -3988,10 +4010,9 @@ class RunContainerHandler(BaseHandler):
                 logger.info("Could not read the configuration digest of %s: %s", reference, exc)
         if config:
             return _ImageIdentity(local_id=local_id, image_id=config, platform=platform)
-        if not at:
-            # Pulled by no digest, and no registry knows it: an image built on
-            # this daemon, known here by the daemon's own ID.
-            return _ImageIdentity(local_id=local_id, image_id=local_id, platform=platform)
+        # A pulled image whose registry could not say: its configuration digest
+        # is unknown, and the daemon's ID (a manifest or index digest here) is
+        # not offered in its place.
         return _ImageIdentity(local_id=local_id, platform=platform)
 
     @staticmethod

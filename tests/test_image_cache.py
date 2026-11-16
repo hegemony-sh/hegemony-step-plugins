@@ -464,6 +464,8 @@ def _install(
             pulled.append(argv[2])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if argv[:2] == ["docker", "info"]:
+            if image_store == "broken":
+                return SimpleNamespace(returncode=1, stdout="", stderr="daemon busy")
             status = (
                 [["driver-type", "io.containerd.snapshotter.v1"]]
                 if image_store == "containerd"
@@ -702,7 +704,7 @@ async def test_a_hit_runs_by_the_digest_its_own_pull_reported(monkeypatch) -> No
     assert result.success is True
     assert f"{OWN_COPY}@{pulled_digest}" in _create_argv(captured)
     inspects = [cmd for cmd, _env in captured["run"] if cmd[:3] == ["docker", "image", "inspect"]]
-    assert not any("RepoDigests" in " ".join(cmd) for cmd in inspects)
+    assert not any("{{json .RepoDigests}}" in cmd for cmd in inspects)
     assert result.metrics["image_digest"] == f"{OWN_COPY}@{pulled_digest}"
 
 
@@ -1173,7 +1175,7 @@ async def test_a_copy_pulled_without_a_digest_runs_by_the_checked_image_id(monke
     create = _create_argv(captured)
     assert CONFIG_AMD64 in create and copy_tag not in create
     # No digest is looked up by the tag after the check.
-    assert not any("RepoDigests" in " ".join(cmd) for cmd, _env in captured["run"])
+    assert not any("{{json .RepoDigests}}" in cmd for cmd, _env in captured["run"])
 
 
 async def test_a_copy_that_cannot_be_checked_runs_with_a_warning(monkeypatch) -> None:
@@ -1291,7 +1293,8 @@ async def test_on_the_containerd_store_an_image_no_registry_knows_keeps_its_daem
 ) -> None:
     """An image built on the daemon: plan and apply on that daemon see the same ID."""
     local_id = "sha256:" + "5a" * 32
-    _install(monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64")
+    # No registry digest at all (the count is 0): built here, never pushed.
+    _install(monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64 0")
     identity = await RunContainerHandler()._image_identity(
         reference="tools/runner:dev",
         repository="tools/runner:dev",
@@ -1357,5 +1360,59 @@ async def test_the_image_store_question_keeps_to_the_steps_deadline(monkeypatch)
     # Out of time, the daemon is not asked at all, and nothing is remembered.
     fresh = RunContainerHandler()
     env = {"DOCKER_HOST": "tcp://other:2375"}
-    assert await fresh._image_store(docker_bin="docker", docker_env=env, timeout=0) == "classic"
+    assert await fresh._image_store(docker_bin="docker", docker_env=env, timeout=0) == "unknown"
     assert len(_docker(captured, "info")) == 1
+    assert await fresh._image_store(docker_bin="docker", docker_env=env, timeout=60) == "containerd"
+
+
+async def test_a_pulled_image_whose_registry_cannot_say_has_no_id_on_containerd(
+    monkeypatch,
+) -> None:
+    """Its daemon ID is a manifest digest there: never offered as the configuration digest."""
+    local_id = "sha256:" + "5e" * 32
+    registries, _ = _install(
+        monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64 1"
+    )
+    registries.unreachable.add("https://ghcr.io")
+    identity = await RunContainerHandler()._image_identity(
+        reference="ghcr.io/x/tool:1",
+        repository="ghcr.io/x/tool:1",
+        cache=None,
+        docker_bin="docker",
+        docker_env={"DOCKER_HOST": "tcp://dind:2375"},
+        deadline=time.monotonic() + 60,
+    )
+    assert (identity.local_id, identity.image_id) == (local_id, "")
+
+
+async def test_an_unknown_store_reads_a_pinned_image_from_its_registry(monkeypatch) -> None:
+    """`docker info` failed: the daemon's ID may be either kind, so the registry decides."""
+    registries, _ = _install(monkeypatch)
+    copy_digest = _copy_manifest(registries, CONFIG_AMD64)
+    pinned = f"{OWN_COPY}@{copy_digest}"
+    registries, captured = _install(
+        monkeypatch, image_store="broken", copy_identity=f"{copy_digest} linux/amd64 1"
+    )
+    _copy_manifest(registries, CONFIG_AMD64)
+    handler = RunContainerHandler()
+    env = {"DOCKER_HOST": "tcp://dind:2375"}
+    pinned_identity = await handler._image_identity(
+        reference=pinned,
+        repository=OWN_COPY,
+        cache=CACHE,
+        docker_bin="docker",
+        docker_env=env,
+        deadline=time.monotonic() + 60,
+    )
+    assert pinned_identity.image_id == CONFIG_AMD64
+    tag_identity = await handler._image_identity(
+        reference=f"{OWN_COPY}:x",
+        repository=f"{OWN_COPY}:x",
+        cache=CACHE,
+        docker_bin="docker",
+        docker_env=env,
+        deadline=time.monotonic() + 60,
+    )
+    assert (tag_identity.local_id, tag_identity.image_id) == (copy_digest, "")
+    # A failed answer is not remembered: each lookup asks again.
+    assert len(_docker(captured, "info")) == 2
