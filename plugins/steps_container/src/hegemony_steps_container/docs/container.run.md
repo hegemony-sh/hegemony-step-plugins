@@ -45,7 +45,14 @@ says so. The evidence also records the image's ID (`image_id`,
 the digest of its configuration). A copy of an image in another registry can
 have another digest (the copy keeps one platform of a multi-platform image,
 or another manifest format), but always the same ID, so the ID is what shows
-two steps ran the same image.
+two steps ran the same image. The sandbox daemon's image store does not
+change it. The classic store reports the configuration digest as the image's
+ID. The containerd image store (the default for new Docker 29 installs)
+reports the digest of the manifest or index the image was pulled by instead,
+so the step reads the configuration digest from the image's registry by that
+digest (its content checked against it). An image no registry knows (built on
+the sandbox and never pushed) is known by the daemon's own ID there; a
+pulled image whose registry cannot be asked has no recorded ID.
 
 When the platform runs its own container registry, Cache image (on by
 default) keeps a copy of the pulled image there, under the organization's

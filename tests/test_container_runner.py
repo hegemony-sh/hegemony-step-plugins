@@ -527,8 +527,8 @@ async def test_without_a_digest_the_job_runs_by_the_image_id_it_checked(monkeypa
     image_id = "sha256:" + "7" * 64
 
     def run(cmd, *args, **kwargs):
-        if cmd[1:3] == ["image", "inspect"] and "{{.Id}}" in cmd:
-            return SimpleNamespace(returncode=0, stdout=image_id + "\n", stderr="")
+        if cmd[1:3] == ["image", "inspect"] and any("{{.Id}}" in a for a in cmd):
+            return SimpleNamespace(returncode=0, stdout=f"{image_id} linux/amd64\n", stderr="")
         return fake_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr("subprocess.run", run)
