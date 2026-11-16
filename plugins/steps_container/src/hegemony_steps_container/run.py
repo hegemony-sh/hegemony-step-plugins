@@ -94,6 +94,11 @@ logger = logging.getLogger(__name__)
 _IMAGE_INSPECT_TIMEOUT = 15.0
 # Longest a cache hit spends checking its copy against the image's registry.
 _VERIFY_MAX_SECONDS = 30.0
+# The image inspect that names an image: its ID, its platform, and how many
+# registry digests it has (0 for an image built on the daemon and never pushed).
+_IDENTITY_FORMAT = (
+    "{{.Id}} {{.Os}}/{{.Architecture}}{{with .Variant}}/{{.}}{{end}} {{len .RepoDigests}}"
+)
 # What `docker info` names the containerd image store's snapshotter.
 _CONTAINERD_SNAPSHOTTER = "io.containerd.snapshotter"
 # What `docker image inspect --format {{.Id}}` prints: on the classic store the
@@ -3449,8 +3454,7 @@ class RunContainerHandler(BaseHandler):
                     "image",
                     "inspect",
                     "--format",
-                    "{{.Id}} {{.Os}}/{{.Architecture}}{{with .Variant}}/{{.}}{{end}}"
-                    " {{len .RepoDigests}}",
+                    _IDENTITY_FORMAT,
                     image,
                 ],
                 env=docker_env,
