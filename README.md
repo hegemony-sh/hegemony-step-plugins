@@ -124,8 +124,9 @@ The installer pulls in the dependencies of the same release
 uploads the files with PyPI's trusted publishing, together with PEP 740
 attestations that PyPI shows on each file's page. They are the same files as
 the GitHub Release's, so `gh attestation verify` below works on a file
-downloaded from PyPI as well. Releases made before the PyPI upload was added
-are only on their GitHub Release.
+downloaded from PyPI as well. 0.42.1 was uploaded to PyPI by hand from its
+GitHub Release, as wheels only and without PEP 740 attestations. Earlier
+releases are only on their GitHub Release.
 
 ### From the GitHub Release
 
