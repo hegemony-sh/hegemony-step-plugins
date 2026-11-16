@@ -18,7 +18,10 @@ engine and image, so the lock file, providers, backend settings, and
 variables are the ones that were planned. The image is run by the digest the
 plan recorded, so a tag moved since the plan does not change the tool; when
 the plan ran a copy from the platform registry, that copy is what the apply
-pulls, and the plan's Cache image choice applies to the apply too. Give both steps shared (or
+pulls, and the plan's Cache image choice applies to the apply too. The apply
+also checks the pulled image's ID against the one the plan recorded, and fails
+before it starts the tool when they differ: the saved plan is applied only by
+the image that made it. Give both steps shared (or
 explicit) execution affinity so they share the run's workspace and worker; the
 worker must have shared workspaces enabled. Every container step in the run
 can write that workspace, so the apply copies the saved plan out of it and
@@ -55,7 +58,10 @@ whether the plan step ran without one (its saved plan is gone, so give it
 shared affinity and plan again) or this step has none (shared affinity
 missing, or the worker has shared workspaces disabled). It also fails when
 the apply itself fails, and when the saved plan changed since the plan
-step made it, so it is not the plan that was reviewed: plan again. A plan
+step made it, so it is not the plan that was reviewed: plan again. It fails
+before the tool starts when the pulled image's ID is not the one the plan
+recorded (a copy in the platform registry was replaced, for example): the
+error names both IDs. A plan
 made by an older version of
 `tf.plan`, which recorded no digest, is refused too: plan again. The tool refuses
 a saved plan made stale by a state change since planning: plan again (a

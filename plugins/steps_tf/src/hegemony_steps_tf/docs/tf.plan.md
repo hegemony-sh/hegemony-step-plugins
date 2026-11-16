@@ -93,6 +93,12 @@ the platform registry, the digest names that copy, which the apply pulls
 from the platform registry too. An image built on the sandbox and never
 pushed has no digest, so the apply runs its tag.
 
+The plan also records the image's ID (`image_id`). A copy in the platform
+registry has another digest than the image it was copied from, so the digest
+alone cannot show the apply runs what the plan ran. The apply checks the ID
+and fails before it starts its container when the image it pulled has
+another one.
+
 ## Applying The Plan
 
 For a later `tf.apply`, give both steps shared (or explicit) execution
@@ -141,8 +147,9 @@ output for `tf.apply`, which refuses a step output without it. Branch on
 `steps.NODE_ID.output.has_changes`, or show the summary in an approval
 message. `plan_sha256` is the saved plan's digest, which also ends the
 readable plan artifact. `state_held` is true when the run still holds the managed state
-for the apply. `image` is the image the plan ran, and `image_digest`
-the same image by digest (empty when it has none).
+for the apply. `image` is the image the plan ran, `image_digest`
+the same image by digest (empty when it has none), and `image_id` its ID
+(empty when the sandbox daemon did not report it).
 
 ## When It Fails
 

@@ -211,6 +211,9 @@ class PlanHandoff(BaseModel):
     engine: Engine
     image: str = Field(min_length=1)
     image_digest: str = ""
+    # The plan's image ID; the apply runs only an image with it. Empty from a
+    # tf.plan that did not record it (older, or the daemon did not say).
+    image_id: str = ""
     # Whether the plan step kept a copy of its image in the platform registry;
     # the apply follows it (a plan from an older tf.plan reads as the default).
     cache_image: bool = True
@@ -388,6 +391,8 @@ class TfApplyHandler(BaseHandler):
                     handler_id=self.handler_id,
                     extra_hosts=dict(access.extra_hosts) if access else {},
                     stop_grace_seconds=config.stop_grace_seconds,
+                    # The image the plan ran, whatever registry serves it now.
+                    expected_image_id=handoff.image_id.strip(),
                 )
                 outcome = await run_container_job(ctx, job)
         except (ValueError, RuntimeError) as exc:
@@ -417,6 +422,7 @@ class TfApplyHandler(BaseHandler):
             "duration_seconds": outcome.duration_seconds,
             "image": image,
             "image_digest": outcome.image_digest,
+            "image_id": outcome.image_id,
             "image_served": outcome.image_served,
             "image_source": outcome.image_source,
             "image_cached": outcome.image_cached,

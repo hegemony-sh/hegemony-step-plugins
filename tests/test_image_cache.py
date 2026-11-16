@@ -309,7 +309,12 @@ from types import SimpleNamespace  # noqa: E402
 from typing import Any, cast  # noqa: E402
 from unittest.mock import AsyncMock  # noqa: E402
 
-from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerServices  # noqa: E402
+from hegemony_step_sdk import (  # noqa: E402
+    ContainerRuntime,
+    HandlerContext,
+    HandlerResult,
+    HandlerServices,
+)
 from hegemony_steps_container.pull_progress import EnginePullError, PullOutcome  # noqa: E402
 from hegemony_steps_container.run import RunContainerHandler  # noqa: E402
 from hegemony_steps_container.runner import ContainerJob, run_container_job  # noqa: E402
@@ -414,11 +419,13 @@ def _install(
     push_returncode: int = 0,
     push_results: list[int] | None = None,
     pull_digests: dict[str, str] | None = None,
+    image_id: str = "",
 ):
     """Script the registries, the Engine API pull and the docker CLI.
 
     ``pull_digests`` maps a pulled reference to the digest its pull reports
-    (none by default, which leaves the digest to RepoDigests).
+    (none by default, which leaves the digest to RepoDigests). ``image_id`` is
+    what ``docker image inspect --format {{.Id}}`` prints (nothing by default).
 
     The Engine API pull succeeds for every image but those in ``pull_failures``,
     which raise and whose CLI fallback also fails, so the handler reports the
@@ -456,6 +463,8 @@ def _install(
             code = remaining_push_results.pop(0) if remaining_push_results else push_returncode
             return SimpleNamespace(returncode=code, stdout="", stderr="denied: push")
         if argv[:3] == ["docker", "image", "inspect"]:
+            if "{{.Id}}" in argv:
+                return SimpleNamespace(returncode=0, stdout=f"{image_id}\n", stderr="")
             if "RepoDigests" in " ".join(argv):
                 name = argv[-1].split("@")[0].rsplit(":", 1)[0]
                 return SimpleNamespace(
@@ -523,6 +532,7 @@ async def test_without_a_platform_registry_the_pull_is_as_before(monkeypatch) ->
                 "image": "alpine:3.20",
                 "served": "alpine:3.20",
                 "digest": digest,
+                "image_id": "",
             },
         )
     ]
@@ -930,6 +940,74 @@ async def test_a_job_served_from_the_cache_records_the_copy_digest(monkeypatch) 
     assert outcome.image_served == f"{OWN_COPY}:{KEY_TAG}"
     assert outcome.image_source == "cache"
     assert outcome.image_digest in _create_argv(captured)
+
+
+IMAGE_ID = "sha256:" + "42" * 32
+
+
+def _cache_hit(registries) -> None:
+    registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
+        UPSTREAM_DIGEST
+    )
+    registries.manifests[("http://registry.hegemony.internal", OWN_REPO, KEY_TAG)] = (
+        "sha256:" + "22" * 32
+    )
+
+
+async def test_a_job_records_the_image_id_it_ran(monkeypatch) -> None:
+    registries, captured = _install(monkeypatch, image_id=IMAGE_ID)
+    _cache_hit(registries)
+    events: list = []
+    job = ContainerJob(config={"image": "alpine:3.20", "command": ["true"]}, handler_id="tool.run")
+    outcome = await run_container_job(_handler_ctx(events), job)
+    assert not hasattr(outcome, "success"), getattr(outcome, "error", None)
+    assert outcome.image_id == IMAGE_ID
+    # The ID is read from the reference the container runs by.
+    inspected = [cmd for cmd, _env in captured["run"] if "{{.Id}}" in cmd]
+    assert inspected == [
+        ["docker", "image", "inspect", "--format", "{{.Id}}", outcome.image_digest]
+    ]
+    assert _digest_events(events)[0][1]["image_id"] == IMAGE_ID
+
+
+async def test_a_copy_with_the_expected_image_id_runs(monkeypatch) -> None:
+    registries, captured = _install(monkeypatch, image_id=IMAGE_ID)
+    _cache_hit(registries)
+    events: list = []
+    job = ContainerJob(
+        config={"image": "alpine:3.20", "command": ["true"]},
+        handler_id="tool.run",
+        expected_image_id=IMAGE_ID,
+    )
+    outcome = await run_container_job(_handler_ctx(events), job)
+    assert not hasattr(outcome, "success"), getattr(outcome, "error", None)
+    assert outcome.image_source == "cache"
+    assert _docker(captured, "create")
+
+
+@pytest.mark.parametrize("reported", ["sha256:" + "66" * 32, ""])
+async def test_a_copy_with_another_image_id_is_refused_before_it_runs(
+    monkeypatch, reported: str
+) -> None:
+    """A copy in the platform registry that is not the expected image never runs.
+
+    Its key tag names the upstream digest, but a tag can be pushed over; the
+    image ID cannot be faked. An ID the daemon does not report is refused too.
+    """
+    registries, captured = _install(monkeypatch, image_id=reported)
+    _cache_hit(registries)
+    events: list = []
+    job = ContainerJob(
+        config={"image": "alpine:3.20", "command": ["true"]},
+        handler_id="tool.run",
+        expected_image_id=IMAGE_ID,
+    )
+    outcome = await run_container_job(_handler_ctx(events), job)
+    assert isinstance(outcome, HandlerResult) and outcome.success is False
+    assert IMAGE_ID in (outcome.error or "")
+    assert (reported or "an unknown image ID") in (outcome.error or "")
+    assert _docker(captured, "create") == []
+    assert "image_id_mismatch" in _milestones(events)
 
 
 async def test_tool_configs_pass_the_option_through(monkeypatch) -> None:

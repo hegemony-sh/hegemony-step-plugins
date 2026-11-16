@@ -39,7 +39,11 @@ step pulling it at the same moment, cannot change what runs, and the record
 names exactly the content that ran. The step's log says it too, right after the pull: "Running
 the image by digest: ghcr.io/…@sha256:…". An image built on the sandbox daemon
 and never pushed has no digest: it runs by its tag, `image_digest` is empty,
-and the log says so.
+and the log says so. The evidence also records the image's ID (`image_id`,
+the digest of its configuration). A copy of an image in another registry can
+have another digest (the copy keeps one platform of a multi-platform image,
+or another manifest format), but always the same ID, so the ID is what shows
+two steps ran the same image.
 
 When the platform runs its own container registry, Cache image (on by
 default) keeps a copy of the pulled image there, under the organization's
@@ -157,8 +161,8 @@ artifact - stdout and stderr each capped at 2.5 MB (half of a 5 MB budget),
 with a truncation marker beyond that - that also records the exit code, image and its digest, duration, and the separated
 stdout/stderr streams. Text files harvested from the new-artifacts folder are
 added as further evidence artifacts; binary files become downloadable run
-artifacts. Metrics record `exit_code`, `duration_seconds`, `image`, and
-`image_digest`.
+artifacts. Metrics record `exit_code`, `duration_seconds`, `image`,
+`image_digest` and `image_id`.
 While the container runs, its output streams into the step's live log, up to
 5 MB. Past that the live log says so and shows no more; the container goes on,
 and the evidence keeps stdout and stderr as above.
