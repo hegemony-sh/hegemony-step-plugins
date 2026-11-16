@@ -39,6 +39,7 @@ from hegemony_step_sdk.ssh import (
     configure_paramiko,
     hop_allows_legacy,
     is_weak_ssh_public_key,
+    negotiation_failure_detail,
     paramiko_algorithm_lists,
     validate_ssh_public_key,
 )
@@ -67,6 +68,9 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+#: SSH_MSG_KEXINIT (RFC 4253 §12): paramiko hands its parser the message without it.
+_MSG_KEXINIT = 20
 
 #: How long the executor thread waits for the host's verifier, which runs on
 #: the event loop the transport was called from.
@@ -228,6 +232,36 @@ if paramiko is not None:
         client_kexinit = b""
         server_kexinit = b""
 
+        def _parse_kex_init(self, m: Any) -> None:
+            """Keep the server's KEXINIT and name both sides' lists when nothing matches.
+
+            paramiko records the server's message only once it agreed on every
+            algorithm, and its error names just the kind that failed.
+            """
+            if not self.server_kexinit:
+                self.server_kexinit = bytes([_MSG_KEXINIT]) + m.get_remainder()
+            try:
+                super()._parse_kex_init(m)
+            except paramiko.IncompatiblePeer as exc:
+                detail = self._negotiation_detail()
+                if not detail:
+                    raise
+                raise paramiko.IncompatiblePeer(f"{exc}: {detail}") from exc
+
+        def _negotiation_detail(self) -> str:
+            """What each side offered for the kinds the key exchange found no match in."""
+            try:
+                with_legacy = None if self._allow_legacy else _offered_algorithms(True)
+                return negotiation_failure_detail(
+                    self.client_kexinit,
+                    self.server_kexinit,
+                    with_legacy=with_legacy,
+                    legacy_allowed=self._allow_legacy,
+                )
+            except Exception:  # noqa: BLE001 - the detail is extra; keep paramiko's error
+                logger.debug("could not describe the SSH negotiation failure", exc_info=True)
+                return ""
+
         @property
         def local_kex_init(self) -> bytes | None:
             return self.__dict__.get("_local_kex_init")
@@ -247,6 +281,26 @@ if paramiko is not None:
             self.__dict__["_remote_kex_init"] = message
             if message is not None and not self.server_kexinit:
                 self.server_kexinit = message
+
+
+def _incompatible_peer(exc: BaseException) -> BaseException | None:
+    """The algorithm mismatch behind ``exc``, if it is one.
+
+    netmiko reports every paramiko ``SSHException`` while connecting as a
+    ``NetmikoTimeoutException``; a key exchange that agreed on nothing is not a
+    timeout, and its own message names what each side offered.
+    """
+    incompatible = getattr(paramiko, "IncompatiblePeer", None)
+    if not isinstance(incompatible, type):
+        return None
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, incompatible):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _keep_kexinit(connection: Any, *, allow_legacy: bool = False) -> None:
@@ -288,6 +342,22 @@ def _agreed_algorithms(client: Any) -> SshAlgorithms | None:
         logger.debug("could not read the SSH host key to classify it", exc_info=True)
         return agreed
     return replace(agreed, weak_host_key=is_weak_ssh_public_key(line))
+
+
+def _offered_algorithms(allow_legacy: bool) -> dict[str, tuple[str, ...]]:
+    """What a connection offers, by kind: a transport set up the same way, unconnected."""
+    if paramiko is None:
+        raise RuntimeError("paramiko is not installed")
+    ours, theirs = socket.socketpair()
+    try:
+        transport = _KexinitKeepingTransport(ours, allow_legacy=allow_legacy)
+        try:
+            return paramiko_algorithm_lists(transport)
+        finally:
+            transport.close()
+    finally:
+        theirs.close()
+        ours.close()
 
 
 class _NullCancellationRegistry:
@@ -581,18 +651,7 @@ class SSHTransport:
         The exact lists its connections and its bastion hop use, read from a
         Paramiko transport set up the same way on an unconnected socket.
         """
-        if paramiko is None:
-            raise RuntimeError("paramiko is not installed")
-        ours, theirs = socket.socketpair()
-        try:
-            transport = _KexinitKeepingTransport(ours, allow_legacy=allow_legacy)
-            try:
-                return paramiko_algorithm_lists(transport)
-            finally:
-                transport.close()
-        finally:
-            theirs.close()
-            ours.close()
+        return _offered_algorithms(allow_legacy)
 
     def __init__(
         self,
@@ -919,9 +978,12 @@ class SSHTransport:
                 connection._open()
             except Exception as exc:
                 refusal = self._refusal(exc, self.host, self.port, keys)
-                if refusal is None:
-                    raise
-                raise refusal from exc
+                if refusal is not None:
+                    raise refusal from exc
+                incompatible = _incompatible_peer(exc)
+                if incompatible is not None:
+                    raise incompatible from exc
+                raise
         except BaseException:
             if bastion is not None:
                 with contextlib.suppress(Exception):

@@ -20,6 +20,7 @@ import asyncssh
 import pytest
 
 from hegemony_step_sdk import DeviceConnectionSpec, JumpHostSpec, SshAlgorithms
+from hegemony_step_sdk.ssh import negotiation_failure_detail
 from hegemony_transport_asyncssh.transport import AsyncSSHTransport
 from hegemony_transport_netmiko import transport as netmiko_transport
 from hegemony_transport_scrapli.transport import ScrapliTransport
@@ -111,6 +112,65 @@ def test_nothing_in_common_is_left_empty():
 def test_a_message_that_is_not_a_whole_kexinit_is_refused(message: bytes):
     with pytest.raises(ValueError):
         SshAlgorithms.from_kexinit(message, kexinit(("curve25519-sha256",)))
+
+
+# --- what an error names when the two sides agree on nothing --------------------------------
+
+CLIENT = kexinit(
+    ("mlkem768x25519-sha256", "curve25519-sha256", "ext-info-c", "kex-strict-c-v00@openssh.com"),
+    host_key=("ssh-ed25519", "rsa-sha2-256"),
+    cipher=("aes128-ctr",),
+    mac=("hmac-sha2-256",),
+)
+OLD_DEVICE = kexinit(
+    ("diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1"),
+    host_key=("ssh-rsa",),
+    cipher=("aes128-ctr", "aes128-cbc"),
+    mac=("hmac-sha1",),
+)
+
+
+def test_the_detail_names_what_each_side_offers_for_each_kind_without_a_match():
+    detail = negotiation_failure_detail(CLIENT, OLD_DEVICE)
+
+    assert detail == (
+        "no key exchange (kex) algorithm in common; the device offers: "
+        "diffie-hellman-group14-sha1, diffie-hellman-group1-sha1; this connection offers: "
+        "mlkem768x25519-sha256, curve25519-sha256. "
+        "no host key algorithm in common; the device offers: ssh-rsa; "
+        "this connection offers: ssh-ed25519, rsa-sha2-256. "
+        "no MAC (message authentication code) algorithm in common; the device offers: "
+        "hmac-sha1; this connection offers: hmac-sha2-256"
+    )
+
+
+def test_the_detail_says_which_names_the_legacy_opt_in_would_add():
+    with_legacy = {"kex": ("diffie-hellman-group14-sha1",), "host_key": (), "mac": ("hmac-sha1",)}
+
+    detail = negotiation_failure_detail(CLIENT, OLD_DEVICE, with_legacy=with_legacy)
+
+    assert "allowing legacy SSH (allow_legacy_ssh) would add: diffie-hellman-group14-sha1" in detail
+    assert "would add: hmac-sha1" in detail
+    assert detail.count("would not help: this transport supports none of the device's") == 1
+
+
+def test_the_detail_says_when_legacy_ssh_is_already_allowed():
+    detail = negotiation_failure_detail(CLIENT, OLD_DEVICE, legacy_allowed=True)
+
+    assert detail.count("legacy SSH is already allowed for this connection") == 3
+
+
+def test_a_mac_is_not_needed_beside_a_cipher_with_integrity_built_in():
+    client = kexinit(("curve25519-sha256",), cipher=("aes256-gcm@openssh.com",))
+    device = kexinit(("curve25519-sha256",), cipher=("aes256-gcm@openssh.com",), mac=("hmac-sha1",))
+
+    assert negotiation_failure_detail(client, device) == ""
+
+
+@pytest.mark.parametrize("message", [b"", bytes([21]) + bytes(40)], ids=["empty", "not kexinit"])
+def test_no_detail_without_both_whole_messages(message: bytes):
+    assert negotiation_failure_detail(CLIENT, message) == ""
+    assert negotiation_failure_detail(message, OLD_DEVICE) == ""
 
 
 # --- the transports, against real SSH servers -----------------------------------------------
@@ -235,3 +295,32 @@ async def test_without_a_recorder_the_transports_connect_as_before(servers, make
     port = await servers.device(_ed25519())
 
     await _run(make(port, None))
+
+
+@pytest.mark.asyncio
+async def test_netmiko_names_the_algorithms_when_the_device_offers_none_it_accepts(servers):
+    port = await servers.device(_ed25519(), kex_algs=["diffie-hellman-group14-sha1"])
+    transport = TRANSPORTS["netmiko"][0](
+        DeviceConnectionSpec(
+            host=HOST,
+            port=port,
+            username=USERNAME,
+            password=PASSWORD,
+            platform="ios-xe",
+            connect_timeout=5.0,
+            command_timeout=5.0,
+        ),
+        host_key_verifier=checks_off(),
+    )
+
+    [result] = await transport.execute_commands(["show flash"])
+
+    assert result.exit_code == -1
+    # netmiko calls the mismatch a timeout; the transport reports it as what it is.
+    assert result.error.startswith(
+        "SSH connection failed: Incompatible ssh peer (no acceptable kex"
+    )
+    assert "the device offers: diffie-hellman-group14-sha1;" in result.error
+    assert "this connection offers: mlkem768x25519-sha256," in result.error
+    assert "ext-info-c" not in result.error
+    assert "allow_legacy_ssh" in result.error
