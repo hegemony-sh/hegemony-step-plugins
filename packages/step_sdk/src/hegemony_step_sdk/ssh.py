@@ -467,6 +467,7 @@ def negotiation_failure_detail(
         return ""
     ciphers = (_first_match(client[2], server[2]), _first_match(client[3], server[3]))
     parts: list[str] = []
+    reported: set[int] = set()
     for kind, index, label in _NEGOTIATED_LISTS:
         ours, theirs = client[index], server[index]
         if _first_match(ours, theirs):
@@ -475,8 +476,13 @@ def negotiation_failure_detail(
         if kind == "mac" and ciphers[index - 4] in _AEAD_CIPHERS:
             continue
         # The device-to-client list is reported only when it says something new.
-        if index in (3, 5) and (ours, theirs) == (client[index - 1], server[index - 1]):
+        if (
+            index in (3, 5)
+            and index - 1 in reported
+            and (ours, theirs) == (client[index - 1], server[index - 1])
+        ):
             continue
+        reported.add(index)
         text = (
             f"no {label} algorithm in common; the device offers: "
             f"{_name_list(theirs)}; this connection offers: {_name_list(ours)}"

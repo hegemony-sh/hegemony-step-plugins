@@ -179,6 +179,35 @@ def test_a_mac_is_not_needed_beside_a_cipher_with_integrity_built_in():
     assert negotiation_failure_detail(client, device) == ""
 
 
+def test_a_mac_mismatch_is_reported_when_only_the_other_direction_has_integrity_built_in():
+    lists = (
+        ("curve25519-sha256",),
+        ("ssh-ed25519",),
+        ("aes256-gcm@openssh.com",),
+        ("aes128-ctr",),
+        ("hmac-sha2-256",),
+        ("hmac-sha2-256",),
+        ("none",),
+        ("none",),
+        (),
+        (),
+    )
+    body = b"".join(
+        len(names).to_bytes(4, "big") + names for names in (",".join(x).encode() for x in lists)
+    )
+    client = bytes([20]) + bytes(16) + body + b"\x00" + bytes(4)
+    device = kexinit(
+        ("curve25519-sha256",),
+        cipher=("aes256-gcm@openssh.com", "aes128-ctr"),
+        mac=("hmac-sha1",),
+    )
+
+    detail = negotiation_failure_detail(client, device)
+
+    assert detail.startswith("no MAC (message authentication code, device to client) algorithm")
+    assert "the device offers: hmac-sha1; this connection offers: hmac-sha2-256" in detail
+
+
 @pytest.mark.parametrize("message", [b"", bytes([21]) + bytes(40)], ids=["empty", "not kexinit"])
 def test_no_detail_without_both_whole_messages(message: bytes):
     assert negotiation_failure_detail(CLIENT, message) == ""
