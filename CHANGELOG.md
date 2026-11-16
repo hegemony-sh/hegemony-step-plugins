@@ -1,3 +1,11 @@
+## [0.42.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.1...v0.42.2) (2026-11-16)
+
+### Bug Fixes
+
+* **step-sdk:** report a device-to-client MAC mismatch beside an AEAD cipher ([0ea382f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0ea382f8d3b0ec691b840fe92234a964ca52c365))
+* **transport-netmiko:** name both sides' algorithms when SSH negotiation fails ([7237f21](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7237f212669d16d36fb9d086ec4b7563e572649b))
+* **transport-netmiko:** say to choose another transport when none can match ([a0d1471](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a0d1471356cfd1a16440427b766b3421657a0d8a))
+
 ## [0.42.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.0...v0.42.1) (2026-11-16)
 
 ### Bug Fixes
