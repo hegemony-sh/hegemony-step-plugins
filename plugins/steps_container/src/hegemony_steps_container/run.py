@@ -91,6 +91,8 @@ logger = logging.getLogger(__name__)
 # The image-size lookup is a caption, not a step operation: bounded well below
 # any step deadline so a wedged daemon costs a missing number, not the step.
 _IMAGE_INSPECT_TIMEOUT = 15.0
+# What `docker image inspect --format {{.Id}}` prints: the config's digest.
+_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 #: Saving a copy to the platform registry: keep this much of the step's deadline
 #: for the step itself, never spend more than the cap, and skip below the floor.
 _COPY_RESERVE_SECONDS = 20.0
@@ -1233,6 +1235,7 @@ def _container_run_result(ctx: HandlerContext, outcome: ContainerJobResult) -> H
             "duration_seconds": outcome.duration_seconds,
             "image": outcome.image,
             "image_digest": outcome.image_digest,
+            "image_id": outcome.image_id,
             "image_served": outcome.image_served,
             "image_source": outcome.image_source,
             "image_cached": outcome.image_cached,
@@ -2304,12 +2307,62 @@ class RunContainerHandler(BaseHandler):
             )
             if image_digest:
                 config = {**config, "image": image_digest}
+            # The image ID is the same for every copy of one image, whatever
+            # manifest a registry serves it by: it is what shows that a cached
+            # copy is the image a job asked for (see ContainerJob.expected_image_id).
+            image_id = await self._image_id(
+                docker_bin=docker_bin,
+                image=image_digest or served,
+                docker_env=docker_env,
+                deadline=deadline,
+            )
+            expected_image_id = (getattr(job, "expected_image_id", "") or "").strip()
+            if expected_image_id and image_id != expected_image_id:
+                found = image_id or "an unknown image ID"
+                message = (
+                    f"The pulled image {image_digest or served} has {found}, not "
+                    f"{expected_image_id}, the image this step must run; refusing to run it"
+                )
+                await _safe_emit_progress(
+                    message,
+                    attrs={
+                        "milestone": "image_id_mismatch",
+                        "image": image,
+                        "served": served,
+                        "digest": image_digest,
+                        "image_id": image_id,
+                        "expected_image_id": expected_image_id,
+                    },
+                )
+                return HandlerResult(
+                    success=False,
+                    error=message,
+                    summary="Image differs from the expected one",
+                    metrics={
+                        "image": image,
+                        "image_digest": image_digest,
+                        "image_served": served,
+                        "image_source": acquired.source,
+                        "image_id": image_id,
+                        "expected_image_id": expected_image_id,
+                    },
+                )
+            # Without a registry digest the tag is all that names the image, and
+            # a pull or retag can move it between this check and `docker create`:
+            # the container then runs by the image ID just read, so what runs is
+            # the image that was checked and recorded.
+            if not image_digest and image_id:
+                config = {**config, "image": image_id}
             # The step's log names what runs, digest included, as its evidence does.
             await _safe_emit_progress(
                 f"Running the image by digest: {image_digest}"
                 if image_digest
                 else (
-                    f"No registry digest for {served}: the container runs by tag "
+                    f"No registry digest for {served}: the container runs by its image "
+                    f"ID {image_id} (an image built on the sandbox daemon and never "
+                    "pushed has no digest)"
+                    if image_id
+                    else f"No registry digest for {served}: the container runs by tag "
                     "(an image built on the sandbox daemon and never pushed has none)"
                 ),
                 attrs={
@@ -2317,6 +2370,7 @@ class RunContainerHandler(BaseHandler):
                     "image": image,
                     "served": served,
                     "digest": image_digest,
+                    "image_id": image_id,
                 },
             )
 
@@ -2732,6 +2786,7 @@ class RunContainerHandler(BaseHandler):
                                 "error": error,
                                 "image": image,
                                 "image_digest": image_digest,
+                                "image_id": image_id,
                                 "image_served": served,
                                 "image_source": acquired.source,
                                 "image_cached": acquired.cached,
@@ -2875,6 +2930,7 @@ class RunContainerHandler(BaseHandler):
                         "exit_code": exit_code,
                         "image": image,
                         "image_digest": image_digest,
+                        "image_id": image_id,
                         "image_served": served,
                         "image_source": acquired.source,
                         "image_cached": acquired.cached,
@@ -2909,6 +2965,7 @@ class RunContainerHandler(BaseHandler):
                 collected=collected,
                 collect_errors=collect_errors,
                 image_digest=image_digest,
+                image_id=image_id,
                 image_served=served,
                 image_source=acquired.source,
                 image_cached=acquired.cached,
@@ -3631,6 +3688,36 @@ class RunContainerHandler(BaseHandler):
         if not digest:
             logger.info("No registry digest for image %s; running it by tag", image)
         return digest
+
+    async def _image_id(
+        self,
+        *,
+        docker_bin: str,
+        image: str,
+        docker_env: dict[str, str],
+        deadline: float,
+    ) -> str:
+        """The pulled ``image``'s ID (``sha256:...``), or "" when the daemon does not say.
+
+        Never fails the step by itself: a job that needs the ID
+        (``expected_image_id``) refuses an empty one.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return ""
+        try:
+            proc = await self._run_docker(
+                docker_bin,
+                ["image", "inspect", "--format", "{{.Id}}", image],
+                env=docker_env,
+                timeout=min(remaining, _IMAGE_INSPECT_TIMEOUT),
+            )
+        except (subprocess.SubprocessError, OSError):
+            return ""
+        if proc.returncode != 0:
+            return ""
+        image_id = proc.stdout.strip()
+        return image_id if _IMAGE_ID.fullmatch(image_id) else ""
 
     @staticmethod
     async def _run_docker(

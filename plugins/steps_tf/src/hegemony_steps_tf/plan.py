@@ -721,6 +721,10 @@ class TfPlanHandler(BaseHandler):
             # image's tag may move. Empty for an image the registry never saw
             # (built on the sandbox daemon).
             "image_digest": outcome.image_digest,
+            # The image's ID: tf.apply runs only an image with it. A copy from
+            # the platform registry's cache has another digest than the image
+            # it copies, so only the ID shows it is the same image.
+            "image_id": outcome.image_id,
             # tf.apply pulls the plan's image the way the plan did.
             "cache_image": config.cache_image,
             # tf.apply applies the saved plan only while it has this digest.
@@ -743,6 +747,7 @@ class TfPlanHandler(BaseHandler):
                 "duration_seconds": outcome.duration_seconds,
                 "image": image,
                 "image_digest": outcome.image_digest,
+                "image_id": outcome.image_id,
                 "image_served": outcome.image_served,
                 "image_source": outcome.image_source,
                 "image_cached": outcome.image_cached,
