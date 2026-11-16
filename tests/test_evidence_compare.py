@@ -628,3 +628,49 @@ def test_json_diff_on_text_that_is_not_json_is_exact() -> None:
     passed, details = handler._compare(_ROUTES, _ROUTES + "\n", "json_diff", [])
     assert passed is False
     assert details["json_parsed"] is False
+
+
+def _ssh_algorithms() -> dict:
+    """The record the platform adds to every step that opened an SSH connection."""
+    return {
+        "kind": "transport_meta",
+        "name": "ssh-algorithms",
+        "content_json": {
+            "hops": [{"hop": "device", "kex": "diffie-hellman-group1-sha1", "cipher": "aes256-cbc"}]
+        },
+    }
+
+
+async def test_changed_mode_ignores_the_platforms_connection_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One device, one command that changed: the same SSH record on both sides must not fail it."""
+    egress = {"kind": "egress_report", "name": "egress", "content_json": {"allowed": []}}
+    pre = [*_collected({"show flash": "2 files"}), _ssh_algorithms(), egress]
+    post = [*_collected({"show flash": "3 files"}), _ssh_algorithms(), egress]
+
+    result = await _compare(pre, post, monkeypatch, mode="changed")
+
+    assert result.success is True, result.error
+    content = result.evidence[0]["content_json"]
+    assert content["artifacts_compared"] == ["r1:show flash"]
+
+
+async def test_an_explicit_artifact_name_still_compares_a_platform_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pre = [*_collected({"show flash": "2 files"}), _ssh_algorithms()]
+    post = [*_collected({"show flash": "3 files"}), _ssh_algorithms()]
+    handler = _handler_with(pre, post, monkeypatch)
+
+    result = await handler.execute(
+        _ctx(
+            precheck_step_id="precheck",
+            postcheck_step_id="postcheck",
+            comparison_type="exact",
+            artifact_name="ssh-algorithms",
+        )
+    )
+
+    assert result.success is True, result.error
+    assert result.evidence[0]["content_json"]["artifacts_compared"] == ["ssh-algorithms"]

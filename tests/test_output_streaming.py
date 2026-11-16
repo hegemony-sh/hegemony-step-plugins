@@ -21,8 +21,6 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from scrapli.exceptions import ScrapliTimeout
-
 from hegemony_step_sdk import DeviceConnectionSpec, HandlerContext, HandlerServices
 from tests.ssh_fakes import checks_off
 
@@ -95,7 +93,7 @@ async def test_scrapli_timing_streams_marker_and_chunks():
     transport = ScrapliTransport(_SPEC, output_sink=sink, host_key_verifier=checks_off())
     connection = _scrapli_connection()
     connection.channel.read = AsyncMock(
-        side_effect=[b"copying...", ScrapliTimeout("quiet"), b"1234 bytes copied"]
+        side_effect=[b"copying...", TimeoutError(), b"1234 bytes copied"]
     )
 
     with patch.object(transport_module, "AsyncScrapli", return_value=connection):
@@ -115,7 +113,7 @@ async def test_scrapli_broken_sink_never_fails_the_command():
     transport = ScrapliTransport(_SPEC, output_sink=_BrokenSink(), host_key_verifier=checks_off())
     connection = _scrapli_connection()
     connection.channel.read = AsyncMock(
-        side_effect=[b"done", ScrapliTimeout("q1"), ScrapliTimeout("q2"), ScrapliTimeout("q3")]
+        side_effect=[b"done", TimeoutError(), TimeoutError(), TimeoutError()]
     )
 
     with patch.object(transport_module, "AsyncScrapli", return_value=connection):
