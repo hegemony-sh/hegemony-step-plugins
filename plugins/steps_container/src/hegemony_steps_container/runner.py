@@ -189,6 +189,11 @@ class ContainerJobResult:
     # whichever registry or manifest it was pulled by; "" when the daemon did
     # not report it.
     image_id: str = ""
+    # The daemon's own ID of that image (``docker create`` takes it): the
+    # configuration digest on the classic store, the pulled manifest's or
+    # index's on the containerd store. Content-addressed, so it names one
+    # image on that daemon; "" when the daemon did not report it.
+    image_local_id: str = ""
 
 
 class ContainerExecutionConfig(BaseModel):

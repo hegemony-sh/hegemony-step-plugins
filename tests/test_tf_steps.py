@@ -2052,3 +2052,24 @@ async def test_apply_step_refuses_a_plan_that_could_not_record_its_image_id(monk
     assert result.success is False
     assert "could not record its image's ID" in (result.error or "")
     assert not any(call[1] == "create" for call in state["calls"])
+
+
+@pytest.mark.asyncio
+async def test_plan_step_hands_the_daemon_id_when_no_configuration_id_is_known(monkeypatch):
+    """On the containerd store, an image built on the sandbox has no configuration ID."""
+    import dataclasses
+
+    from hegemony_steps_tf import plan as plan_module
+
+    local_id = "sha256:" + "6" * 64
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    real = plan_module.run_container_job
+
+    async def without_configuration_id(ctx, job):
+        outcome = await real(ctx, job)
+        return dataclasses.replace(outcome, image_id="", image_local_id=local_id)
+
+    monkeypatch.setattr(plan_module, "run_container_job", without_configuration_id)
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+    assert result.success is True, result.error
+    assert result.output["image_id"] == local_id

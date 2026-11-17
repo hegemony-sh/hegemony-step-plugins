@@ -1288,13 +1288,19 @@ async def test_on_the_containerd_store_a_copy_is_checked_by_its_registry_config(
         assert result.metrics["image_id"] == CONFIG_AMD64
 
 
-async def test_on_the_containerd_store_an_image_no_registry_knows_keeps_its_daemon_id(
+async def test_on_the_containerd_store_an_image_no_registry_knows_runs_by_its_daemon_id(
     monkeypatch,
 ) -> None:
-    """An image built on the daemon: plan and apply on that daemon see the same ID."""
+    """An image built on the sandbox and never pushed, on the containerd store.
+
+    Docker 29 lists a repository digest even for such an image (checked on a
+    daemon: `local/tool@<its index digest>`), so nothing local tells it from a
+    pulled one, and no registry knows its configuration. Its configuration ID
+    stays unknown; the daemon's own ID, content-addressed, still names it, so
+    a job expecting that ID (a tf.apply after its tf.plan) runs it.
+    """
     local_id = "sha256:" + "5a" * 32
-    # No registry digest at all (the count is 0): built here, never pushed.
-    _install(monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64 0")
+    _install(monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64")
     identity = await RunContainerHandler()._image_identity(
         reference="tools/runner:dev",
         repository="tools/runner:dev",
@@ -1303,7 +1309,32 @@ async def test_on_the_containerd_store_an_image_no_registry_knows_keeps_its_daem
         docker_env={"DOCKER_HOST": "tcp://dind:2375"},
         deadline=time.monotonic() + 60,
     )
-    assert (identity.local_id, identity.image_id) == (local_id, local_id)
+    assert (identity.local_id, identity.image_id) == (local_id, "")
+
+    events: list = []
+    job = ContainerJob(
+        config={"image": "tools/runner:dev", "command": ["true"], "cache_image": False},
+        handler_id="tool.run",
+        expected_image_id=local_id,
+    )
+    outcome = await run_container_job(_handler_ctx(events, services=_CacheServices(None)), job)
+    assert not hasattr(outcome, "success"), getattr(outcome, "error", None)
+    assert (outcome.image_id, outcome.image_local_id) == ("", local_id)
+
+
+async def test_a_job_expecting_another_daemon_id_is_refused(monkeypatch) -> None:
+    _install(
+        monkeypatch,
+        image_store="containerd",
+        copy_identity="sha256:" + "5b" * 32 + " linux/amd64",
+    )
+    job = ContainerJob(
+        config={"image": "tools/runner:dev", "command": ["true"], "cache_image": False},
+        handler_id="tool.run",
+        expected_image_id="sha256:" + "5a" * 32,
+    )
+    outcome = await run_container_job(_handler_ctx([], services=_CacheServices(None)), job)
+    assert isinstance(outcome, HandlerResult) and outcome.success is False
 
 
 async def test_on_the_containerd_store_an_unreadable_registry_config_is_no_id(
@@ -1371,7 +1402,7 @@ async def test_a_pulled_image_whose_registry_cannot_say_has_no_id_on_containerd(
     """Its daemon ID is a manifest digest there: never offered as the configuration digest."""
     local_id = "sha256:" + "5e" * 32
     registries, _ = _install(
-        monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64 1"
+        monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64"
     )
     registries.unreachable.add("https://ghcr.io")
     identity = await RunContainerHandler()._image_identity(
@@ -1391,7 +1422,7 @@ async def test_an_unknown_store_reads_a_pinned_image_from_its_registry(monkeypat
     copy_digest = _copy_manifest(registries, CONFIG_AMD64)
     pinned = f"{OWN_COPY}@{copy_digest}"
     registries, captured = _install(
-        monkeypatch, image_store="broken", copy_identity=f"{copy_digest} linux/amd64 1"
+        monkeypatch, image_store="broken", copy_identity=f"{copy_digest} linux/amd64"
     )
     _copy_manifest(registries, CONFIG_AMD64)
     handler = RunContainerHandler()

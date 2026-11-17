@@ -94,11 +94,8 @@ logger = logging.getLogger(__name__)
 _IMAGE_INSPECT_TIMEOUT = 15.0
 # Longest a cache hit spends checking its copy against the image's registry.
 _VERIFY_MAX_SECONDS = 30.0
-# The image inspect that names an image: its ID, its platform, and how many
-# registry digests it has (0 for an image built on the daemon and never pushed).
-_IDENTITY_FORMAT = (
-    "{{.Id}} {{.Os}}/{{.Architecture}}{{with .Variant}}/{{.}}{{end}} {{len .RepoDigests}}"
-)
+# The image inspect that names an image: its ID and its platform.
+_IDENTITY_FORMAT = "{{.Id}} {{.Os}}/{{.Architecture}}{{with .Variant}}/{{.}}{{end}}"
 # What `docker info` names the containerd image store's snapshotter.
 _CONTAINERD_SNAPSHOTTER = "io.containerd.snapshotter"
 # What `docker image inspect --format {{.Id}}` prints: on the classic store the
@@ -2351,7 +2348,11 @@ class RunContainerHandler(BaseHandler):
             )
             image_id = identity.image_id
             expected_image_id = (getattr(job, "expected_image_id", "") or "").strip()
-            if expected_image_id and image_id != expected_image_id:
+            # The daemon's own ID is content-addressed: an equal one is the same
+            # image. A plan whose registry could not give the configuration
+            # digest (an image built on the sandbox and never pushed, on the
+            # containerd store) records that ID instead.
+            if expected_image_id and expected_image_id not in (image_id, identity.local_id):
                 found = image_id or "an unknown image ID"
                 message = (
                     f"The pulled image {image_digest or served} has {found}, not "
@@ -3000,6 +3001,7 @@ class RunContainerHandler(BaseHandler):
                 collect_errors=collect_errors,
                 image_digest=image_digest,
                 image_id=image_id,
+                image_local_id=identity.local_id,
                 image_served=served,
                 image_source=acquired.source,
                 image_cached=acquired.cached,
@@ -3439,39 +3441,26 @@ class RunContainerHandler(BaseHandler):
 
     async def _image_id_and_platform(
         self, *, docker_bin: str, image: str, docker_env: dict[str, str], timeout: float
-    ) -> tuple[str, str, bool]:
-        """``image``'s ID, ``os/arch[/variant]`` and whether any registry knows it.
-
-        The last is False only for an image with no registry digest at all (built
-        on the daemon and never pushed); an answer without the count reads as
-        pulled, which never lets a daemon ID stand in for a configuration
-        digest. Empty values when the daemon does not say.
-        """
+    ) -> tuple[str, str]:
+        """``image``'s ID and ``os/arch[/variant]`` from the daemon; empty when it does not say."""
         try:
             proc = await self._run_docker(
                 docker_bin,
-                [
-                    "image",
-                    "inspect",
-                    "--format",
-                    _IDENTITY_FORMAT,
-                    image,
-                ],
+                ["image", "inspect", "--format", _IDENTITY_FORMAT, image],
                 env=docker_env,
                 timeout=min(timeout, _IMAGE_INSPECT_TIMEOUT),
             )
         except (subprocess.SubprocessError, OSError):
-            return "", "", True
+            return "", ""
         if proc.returncode != 0:
-            return "", "", True
+            return "", ""
         parts = proc.stdout.split()
         if len(parts) < 2:
-            return "", "", True
+            return "", ""
         image_id, platform = parts[0], parts[1]
         if not _IMAGE_ID.fullmatch(image_id) or platform.count("/") not in (1, 2):
-            return "", "", True
-        pulled = parts[2:3] != ["0"]
-        return image_id, platform, pulled
+            return "", ""
+        return image_id, platform
 
     async def _acquire_image(
         self,
@@ -3953,15 +3942,16 @@ class RunContainerHandler(BaseHandler):
         ID. The containerd store reports the digest of the manifest or index
         the image was pulled by instead: the configuration digest is then read
         from the registry ``repository`` lives in, by that digest (content
-        checked against it), for the image's platform. An image that no
-        registry knows (built on the daemon) is known by its daemon ID.
-        ``local_id`` is the daemon's own ID, which ``docker create`` takes.
-        Never fails the step by itself.
+        checked against it), for the image's platform. ``local_id`` is the
+        daemon's own ID, which ``docker create`` takes; it is content-addressed
+        on both stores, so two equal ones are the same image on that daemon
+        (an image built there and never pushed is known only by it). Never
+        fails the step by itself.
         """
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return _ImageIdentity()
-        local_id, platform, pulled = await self._image_id_and_platform(
+        local_id, platform = await self._image_id_and_platform(
             docker_bin=docker_bin, image=reference, docker_env=docker_env, timeout=remaining
         )
         if not local_id:
@@ -3972,10 +3962,6 @@ class RunContainerHandler(BaseHandler):
             timeout=deadline - time.monotonic(),
         )
         if store == "classic":
-            return _ImageIdentity(local_id=local_id, image_id=local_id, platform=platform)
-        if store == "containerd" and not pulled:
-            # No registry digest at all: built on this daemon and never pushed.
-            # Plan and apply on this daemon see the same ID; no registry can say more.
             return _ImageIdentity(local_id=local_id, image_id=local_id, platform=platform)
         name, at, pinned = reference.rpartition("@")
         if at and _IMAGE_ID.fullmatch(pinned):
