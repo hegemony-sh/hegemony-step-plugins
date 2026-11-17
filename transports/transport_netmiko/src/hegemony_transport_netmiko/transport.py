@@ -34,7 +34,6 @@ from hegemony_step_sdk import (
     SshAlgorithms,
     TransportOutputSink,
 )
-from hegemony_step_sdk.device_copy import COPY_DONE_MARKERS, COPY_ERROR_MARKERS, copy_answer
 from hegemony_step_sdk.ssh import (
     MIN_DH_GROUP_BITS,
     configure_paramiko,
@@ -521,6 +520,51 @@ def _is_mode_wrapper(command: str) -> bool:
 def _is_save_command(command_lower: str) -> bool:
     """'write ...' / 'copy run ...': always run at privilege-exec."""
     return command_lower.startswith("write") or command_lower.startswith("copy run")
+
+
+#: Output that ends a ``copy <url> <fs>`` dialogue, whether it worked or not.
+#: "nknown command" is a platform without this copy command ("% Unknown
+#: command" on FRR, "unknown command." on Junos): the answer is final, so do
+#: not wait out the timeout.
+_COPY_DONE_MARKERS = (
+    "bytes copied",
+    "%Error",
+    "Error opening",
+    "Invalid",
+    "not found",
+    "timed out",
+    "refused",
+    "Could not",
+    "Incomplete command",
+    "nknown command",
+    "Broken pipe",
+)
+
+#: Output that means the copy failed.
+_COPY_ERROR_MARKERS = (
+    "%Error",
+    "Error opening",
+    "Error reading",
+    "Invalid",
+    "not found",
+    "refused",
+    "Could not",
+    "Broken pipe",
+    "timed out",
+)
+
+
+def _copy_answer(output: str, url: str, dest_filename: str) -> str:
+    """The device's own words in a copy dialogue: ``output`` without the inputs it echoes.
+
+    The device repeats the URL and the file name (the command echo,
+    "Destination filename [<name>]?", "Accessing <url>..."), so a name like
+    ``Invalid-image.bin`` must not read as the device's "Invalid".
+    """
+    for echoed in (url, dest_filename):
+        if echoed:
+            output = output.replace(echoed, "")
+    return output
 
 
 #: What IOS asks before a copy to startup-config, unless 'file prompt quiet'
@@ -1493,8 +1537,8 @@ class SSHTransport:
                 # Check for completion/error indicators FIRST (before prompt handling)
                 # This ensures we exit the loop when transfer completes or fails.
                 # Not in the raw output: the device echoes the URL and the name.
-                answer = copy_answer(output, url, dest_filename)
-                if any(marker in answer for marker in COPY_DONE_MARKERS):
+                answer = _copy_answer(output, url, dest_filename)
+                if any(marker in answer for marker in _COPY_DONE_MARKERS):
                     break
 
                 # Check for destination filename prompt (only handle once)
@@ -1533,8 +1577,8 @@ class SSHTransport:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
 
             # Check for errors first (more specific matches)
-            answer = copy_answer(output, url, dest_filename)
-            has_error = any(marker in answer for marker in COPY_ERROR_MARKERS)
+            answer = _copy_answer(output, url, dest_filename)
+            has_error = any(marker in answer for marker in _COPY_ERROR_MARKERS)
 
             if has_error:
                 # Not the output: the device echoes the copy command and its URL.
