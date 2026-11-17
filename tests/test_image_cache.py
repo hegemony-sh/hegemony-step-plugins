@@ -1447,3 +1447,34 @@ async def test_an_unknown_store_reads_a_pinned_image_from_its_registry(monkeypat
     assert (tag_identity.local_id, tag_identity.image_id) == (copy_digest, "")
     # A failed answer is not remembered: each lookup asks again.
     assert len(_docker(captured, "info")) == 2
+
+
+@pytest.mark.parametrize(
+    ("platform", "entry_platform"),
+    [
+        # The configuration names no variant; the index says v8 (or v7 for arm).
+        ("linux/arm64", {"os": "linux", "architecture": "arm64", "variant": "v8"}),
+        ("linux/arm", {"os": "linux", "architecture": "arm", "variant": "v7"}),
+        # And the other way round.
+        ("linux/arm64/v8", {"os": "linux", "architecture": "arm64"}),
+    ],
+)
+def test_a_missing_variant_means_the_architectures_default(
+    platform: str, entry_platform: dict[str, str]
+) -> None:
+    digest = "sha256:" + "0a" * 32
+    entries = [
+        {"digest": "sha256:" + "0b" * 32, "platform": {"os": "linux", "architecture": "amd64"}},
+        {"digest": digest, "platform": entry_platform},
+    ]
+    assert _platform_entry(entries, platform) == digest
+
+
+def test_a_missing_variant_does_not_match_another_one() -> None:
+    entries = [
+        {
+            "digest": "sha256:" + "0c" * 32,
+            "platform": {"os": "linux", "architecture": "arm", "variant": "v6"},
+        }
+    ]
+    assert _platform_entry(entries, "linux/arm") is None

@@ -401,15 +401,25 @@ class RegistryClient:
         return "Basic " + base64.b64encode(raw).decode("ascii")
 
 
+# The variant an architecture means when none is named (containerd's platform
+# normalisation).
+_DEFAULT_VARIANTS = {"arm64": "v8", "arm": "v7"}
+
+
 def _platform_entry(entries: list, platform: str) -> str | None:
     """The digest of the index entry for ``platform`` (``os/arch[/variant]``), or None.
 
-    Attestations and other entries without a real platform never match. An
-    entry without a variant matches a platform with one only when no entry
-    names that variant.
+    Attestations and other entries without a real platform never match. A
+    missing variant means the architecture's default, as containerd reads it
+    (``v8`` for arm64, ``v7`` for arm): an arm64 image's configuration often
+    names no variant while its index entry says ``v8``. Otherwise an entry
+    without a variant matches a platform with one only when no entry names
+    that variant.
     """
     os_name, _, rest = platform.partition("/")
     arch, _, variant = rest.partition("/")
+    default = _DEFAULT_VARIANTS.get(arch, "")
+    wanted = variant or default
     loose: str | None = None
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("digest"), str):
@@ -421,7 +431,7 @@ def _platform_entry(entries: list, platform: str) -> str | None:
             continue
         if not _DIGEST.match(entry["digest"]):
             continue
-        if (spec.get("variant") or "") == variant:
+        if (spec.get("variant") or default) == wanted:
             return entry["digest"]
         if not spec.get("variant") and loose is None:
             loose = entry["digest"]
