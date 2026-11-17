@@ -2395,12 +2395,10 @@ class RunContainerHandler(BaseHandler):
                 if image_digest
                 else (
                     f"No registry digest for {served}: the container runs by its image "
-                    f"ID {identity.local_id} (the pull reported no digest, and the "
-                    "daemon lists none for this repository)"
+                    f"ID {identity.local_id} (no registry digest is available)"
                     if identity.local_id
                     else f"No registry digest for {served}: the container runs by tag "
-                    "(the pull reported no digest, and the daemon lists none for this "
-                    "repository)"
+                    "(no registry digest or image ID is available)"
                 ),
                 attrs={
                     "milestone": "image_digest",

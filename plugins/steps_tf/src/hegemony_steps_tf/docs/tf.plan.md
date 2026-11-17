@@ -91,9 +91,9 @@ digest: a saved plan is refused by any other tool version, and the tag may
 move between the plan and an approved apply. When the plan ran a copy from
 the platform registry, the digest names that copy, which the apply pulls
 from the platform registry too. The image is always pulled, so one kept only
-in the sandbox (built there, never pushed) cannot be planned with. When a
-pull reports no digest, the apply pulls the tag and runs it by the image ID
-the plan recorded.
+in the sandbox (built there, never pushed) cannot be planned with. When no
+registry digest is available (neither the pull nor the sandbox daemon gives
+one), the apply pulls the tag and runs it by the image ID the plan recorded.
 
 The plan also records the image's ID (`image_id`). A copy in the platform
 registry has another digest than the image it was copied from, so the digest
