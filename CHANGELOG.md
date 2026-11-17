@@ -1,3 +1,14 @@
+## [0.43.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.43.0...v0.43.1) (2026-11-17)
+
+### Bug Fixes
+
+* **container:** compare images by configuration digest only, and read it once ([70e4f66](https://github.com/hegemony-sh/hegemony-step-plugins/commit/70e4f66d02fefdc1631a53bffbbc40c9f421ba31))
+* **container:** keep the image store question to the step's deadline ([d42fba9](https://github.com/hegemony-sh/hegemony-step-plugins/commit/d42fba92073b35b09b99a6b45a84c8e6eb7d739a))
+* **container:** let tf.apply match a locally built image by its daemon ID ([aa1ec07](https://github.com/hegemony-sh/hegemony-step-plugins/commit/aa1ec079112c8d25e3d7cea7cfc8db10c2faaf0a))
+* **container:** never record a manifest digest as an image's configuration ID ([a4ec112](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a4ec11244cea62f2e953af3e1fbd79919b6b0f64))
+* **container:** read a missing platform variant as the architecture's default ([372708c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/372708cecfc3ef69aa121431f9e6fdd948b1aec4))
+* **container:** read the image ID the same way on the containerd image store ([f95d0d2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f95d0d2a0ad9b8fd44374c754f29e238355e1cdc))
+
 ## [0.43.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.4...v0.43.0) (2026-11-16)
 
 ### Features
