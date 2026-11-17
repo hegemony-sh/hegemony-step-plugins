@@ -130,6 +130,9 @@ def _install_docker(
 
     def fake_run(cmd, *args, **kwargs):
         state["calls"].append(list(cmd))
+        if cmd[1:2] == ["info"]:
+            # A classic-store daemon: its image ID is the configuration digest.
+            return SimpleNamespace(returncode=0, stdout="overlay2|[]\n", stderr="")
         if cmd[1:3] == ["image", "inspect"] and "{{json .RepoDigests}}" in cmd:
             return SimpleNamespace(returncode=0, stdout=json.dumps(repo_digests or []), stderr="")
         if len(cmd) >= 4 and cmd[1] == "cp":
@@ -452,7 +455,7 @@ async def test_run_container_job_stages_files_and_collects(monkeypatch):
             "docker.io/library/python@sha256:ccc",
         ),
         ("python", ["python@sha256:ccc"], "python@sha256:ccc"),
-        # Built on the daemon, never pushed: no digest, the tag runs.
+        # The daemon lists no digest for the repository: none to report.
         ("tool:local", [], ""),
         # Already pinned: nothing to look up.
         ("ghcr.io/x/tool@sha256:ddd", [], "ghcr.io/x/tool@sha256:ddd"),
@@ -527,8 +530,8 @@ async def test_without_a_digest_the_job_runs_by_the_image_id_it_checked(monkeypa
     image_id = "sha256:" + "7" * 64
 
     def run(cmd, *args, **kwargs):
-        if cmd[1:3] == ["image", "inspect"] and "{{.Id}}" in cmd:
-            return SimpleNamespace(returncode=0, stdout=image_id + "\n", stderr="")
+        if cmd[1:3] == ["image", "inspect"] and any("{{.Id}}" in a for a in cmd):
+            return SimpleNamespace(returncode=0, stdout=f"{image_id} linux/amd64\n", stderr="")
         return fake_run(cmd, *args, **kwargs)
 
     monkeypatch.setattr("subprocess.run", run)

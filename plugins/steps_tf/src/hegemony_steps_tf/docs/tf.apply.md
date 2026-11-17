@@ -21,8 +21,9 @@ the plan ran a copy from the platform registry, that copy is what the apply
 pulls, and the plan's Cache image choice applies to the apply too. The apply
 also checks the pulled image's ID against the one the plan recorded, and fails
 before it starts the tool when they differ: the saved plan is applied only by
-the image that made it. A plan that recorded an empty ID (the sandbox daemon
-did not report it) is refused. Only a plan from an older `tf.plan`, which
+the image that made it. A plan that recorded an empty ID (it could not be
+read) is refused, and so is an apply that cannot read the ID of the image it
+pulled; the error says which, and a retry can pass. Only a plan from an older `tf.plan`, which
 recorded no ID at all, is applied without this check. Give both steps shared (or
 explicit) execution affinity so they share the run's workspace and worker; the
 worker must have shared workspaces enabled. Every container step in the run

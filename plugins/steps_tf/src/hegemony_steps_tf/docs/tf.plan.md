@@ -90,16 +90,23 @@ and its metrics, as `tf.apply` does in its own), and `tf.apply` runs that
 digest: a saved plan is refused by any other tool version, and the tag may
 move between the plan and an approved apply. When the plan ran a copy from
 the platform registry, the digest names that copy, which the apply pulls
-from the platform registry too. An image built on the sandbox and never
-pushed has no digest, so the apply pulls its tag and runs it by the image
-ID the plan recorded.
+from the platform registry too. The image is always pulled, so one kept only
+in the sandbox (built there, never pushed) cannot be planned with. When no
+registry digest is available (neither the pull nor the sandbox daemon gives
+one), the apply pulls the tag and checks the pulled image against the ID the
+plan recorded; the container then runs by whatever reference the apply's own
+pull pins (its digest, or else the daemon's ID of it).
 
 The plan also records the image's ID (`image_id`). A copy in the platform
 registry has another digest than the image it was copied from, so the digest
 alone cannot show the apply runs what the plan ran. The apply checks the ID
 and fails before it starts its container when the image it pulled has
-another one. A plan that could not read its image's ID (the sandbox daemon
-did not answer) records it empty, and its apply refuses to run: plan again.
+another one. When the ID cannot be read (on Docker's containerd image store,
+when the image's registry does not answer the manifest lookup, although the
+pull itself worked) the plan records it empty, and its apply refuses to run:
+plan again. The sandbox daemon's own ID of the image is in the metrics as
+`image_local_id`, for the record only: on the containerd store it differs
+between an image and its copy in the platform registry, so it is not compared.
 
 ## Applying The Plan
 

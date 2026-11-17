@@ -37,15 +37,29 @@ was given (`image`) and the registry digest of the image it pulled
 that digest, so a tag that moves while the step runs, even through another
 step pulling it at the same moment, cannot change what runs, and the record
 names exactly the content that ran. The step's log says it too, right after the pull: "Running
-the image by digest: ghcr.io/…@sha256:…". An image built on the sandbox daemon
-and never pushed has no digest: `image_digest` is empty, the container runs by
-the image ID read right after the pull (so a retag in the meantime cannot
+the image by digest: ghcr.io/…@sha256:…". The step always pulls its image, so an
+image kept only in the sandbox (built there, never pushed) cannot run here: no
+registry serves it. When a pull reports no digest and the daemon lists none for
+the repository, `image_digest` is empty, the container runs by the image ID
+read right after the pull (so a retag in the meantime cannot
 change what runs; by its tag only when the daemon reports no ID), and the log
 says so. The evidence also records the image's ID (`image_id`,
 the digest of its configuration). A copy of an image in another registry can
 have another digest (the copy keeps one platform of a multi-platform image,
 or another manifest format), but always the same ID, so the ID is what shows
-two steps ran the same image.
+two steps ran the same image. The sandbox daemon's image store does not
+change it. The classic store reports the configuration digest as the image's
+ID. The containerd image store (the default for new Docker 29 installs)
+reports the digest of the manifest or index the image was pulled by instead,
+so the step reads the configuration digest from the image's registry by that
+digest (its content checked against it). Those manifest requests can count
+against a registry's pull limits, so on that store a plain `container.run`
+step does not make them and records no `image_id`; steps that compare images
+(`tf.plan`, `tf.apply`, a cache hit's check) do. Every step records the
+daemon's own ID as `image_local_id`: on the classic store it equals
+`image_id`, on the containerd store it names the image on that daemon only (a
+copy in another registry has another one). When the daemon does not say which
+store it uses, only an image pulled by a digest gets an `image_id`.
 
 When the platform runs its own container registry, Cache image (on by
 default) keeps a copy of the pulled image there, under the organization's
@@ -176,7 +190,7 @@ with a truncation marker beyond that - that also records the exit code, image an
 stdout/stderr streams. Text files harvested from the new-artifacts folder are
 added as further evidence artifacts; binary files become downloadable run
 artifacts. Metrics record `exit_code`, `duration_seconds`, `image`,
-`image_digest` and `image_id`.
+`image_digest`, `image_id` and `image_local_id`.
 While the container runs, its output streams into the step's live log, up to
 5 MB. Past that the live log says so and shows no more; the container goes on,
 and the evidence keeps stdout and stderr as above.

@@ -435,6 +435,7 @@ class TfApplyHandler(BaseHandler):
             "image": image,
             "image_digest": outcome.image_digest,
             "image_id": outcome.image_id,
+            "image_local_id": outcome.image_local_id,
             "image_served": outcome.image_served,
             "image_source": outcome.image_source,
             "image_cached": outcome.image_cached,
