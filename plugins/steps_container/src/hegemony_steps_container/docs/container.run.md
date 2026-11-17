@@ -37,9 +37,11 @@ was given (`image`) and the registry digest of the image it pulled
 that digest, so a tag that moves while the step runs, even through another
 step pulling it at the same moment, cannot change what runs, and the record
 names exactly the content that ran. The step's log says it too, right after the pull: "Running
-the image by digest: ghcr.io/…@sha256:…". An image built on the sandbox daemon
-and never pushed has no digest: `image_digest` is empty, the container runs by
-the image ID read right after the pull (so a retag in the meantime cannot
+the image by digest: ghcr.io/…@sha256:…". The step always pulls its image, so an
+image kept only in the sandbox (built there, never pushed) cannot run here: no
+registry serves it. When a pull reports no digest and the daemon lists none for
+the repository, `image_digest` is empty, the container runs by the image ID
+read right after the pull (so a retag in the meantime cannot
 change what runs; by its tag only when the daemon reports no ID), and the log
 says so. The evidence also records the image's ID (`image_id`,
 the digest of its configuration). A copy of an image in another registry can

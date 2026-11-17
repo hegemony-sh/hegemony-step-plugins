@@ -90,9 +90,10 @@ and its metrics, as `tf.apply` does in its own), and `tf.apply` runs that
 digest: a saved plan is refused by any other tool version, and the tag may
 move between the plan and an approved apply. When the plan ran a copy from
 the platform registry, the digest names that copy, which the apply pulls
-from the platform registry too. An image built on the sandbox and never
-pushed has no digest, so the apply pulls its tag and runs it by the image
-ID the plan recorded.
+from the platform registry too. The image is always pulled, so one kept only
+in the sandbox (built there, never pushed) cannot be planned with. When a
+pull reports no digest, the apply pulls the tag and runs it by the image ID
+the plan recorded.
 
 The plan also records the image's ID (`image_id`). A copy in the platform
 registry has another digest than the image it was copied from, so the digest

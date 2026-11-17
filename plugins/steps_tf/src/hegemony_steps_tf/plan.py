@@ -718,8 +718,8 @@ class TfPlanHandler(BaseHandler):
             "image": image,
             # The image by digest, which tf.apply runs: it must run the same
             # tool version, since a saved plan is refused by any other, and the
-            # image's tag may move. Empty for an image the registry never saw
-            # (built on the sandbox daemon).
+            # image's tag may move. Empty when the pull reported no digest and
+            # the daemon lists none for the repository.
             "image_digest": outcome.image_digest,
             # The image's ID: tf.apply runs only an image with it. A copy from
             # the platform registry's cache has another digest than the image

@@ -452,7 +452,7 @@ async def test_run_container_job_stages_files_and_collects(monkeypatch):
             "docker.io/library/python@sha256:ccc",
         ),
         ("python", ["python@sha256:ccc"], "python@sha256:ccc"),
-        # Built on the daemon, never pushed: no digest, the tag runs.
+        # The daemon lists no digest for the repository: none to report.
         ("tool:local", [], ""),
         # Already pinned: nothing to look up.
         ("ghcr.io/x/tool@sha256:ddd", [], "ghcr.io/x/tool@sha256:ddd"),

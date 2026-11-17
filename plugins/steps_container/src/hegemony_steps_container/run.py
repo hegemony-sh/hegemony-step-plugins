@@ -2395,11 +2395,12 @@ class RunContainerHandler(BaseHandler):
                 if image_digest
                 else (
                     f"No registry digest for {served}: the container runs by its image "
-                    f"ID {identity.local_id} (an image built on the sandbox daemon and "
-                    "never pushed has no digest)"
+                    f"ID {identity.local_id} (the pull reported no digest, and the "
+                    "daemon lists none for this repository)"
                     if identity.local_id
                     else f"No registry digest for {served}: the container runs by tag "
-                    "(an image built on the sandbox daemon and never pushed has none)"
+                    "(the pull reported no digest, and the daemon lists none for this "
+                    "repository)"
                 ),
                 attrs={
                     "milestone": "image_digest",
@@ -3859,9 +3860,9 @@ class RunContainerHandler(BaseHandler):
 
         The fallback for a pull that did not report its digest: read from the
         image's RepoDigests, the digests the daemon pulled it by, for the
-        repository ``image`` names (in ``image``'s own spelling). An image
-        built on the daemon and never pushed has none; the step then runs, and
-        reports, the tag. Never fails the step.
+        repository ``image`` names (in ``image``'s own spelling). When the
+        daemon lists none for that repository, the step runs by the image ID
+        (or, without one, the tag) and reports that. Never fails the step.
         """
         if "@" in image:
             return image
