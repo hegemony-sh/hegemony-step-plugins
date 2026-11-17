@@ -50,9 +50,9 @@ change it. The classic store reports the configuration digest as the image's
 ID. The containerd image store (the default for new Docker 29 installs)
 reports the digest of the manifest or index the image was pulled by instead,
 so the step reads the configuration digest from the image's registry by that
-digest (its content checked against it). When no registry can say (the image
-was built on the sandbox and never pushed, or its registry cannot be asked)
-there is no recorded ID, and the daemon's own ID is recorded as
+digest (its content checked against it). When the registry does not answer
+that lookup (a login only the daemon holds, a rate limit), although the pull
+itself worked, there is no recorded ID, and the daemon's own ID is recorded as
 `image_local_id` instead: it is content-addressed too, so it names one image
 on that daemon. When the daemon does not say which store it uses, only an
 image pulled by a digest gets an ID, read from its registry.

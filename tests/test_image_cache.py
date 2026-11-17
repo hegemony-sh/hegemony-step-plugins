@@ -1288,16 +1288,16 @@ async def test_on_the_containerd_store_a_copy_is_checked_by_its_registry_config(
         assert result.metrics["image_id"] == CONFIG_AMD64
 
 
-async def test_on_the_containerd_store_an_image_no_registry_knows_runs_by_its_daemon_id(
+async def test_on_the_containerd_store_an_image_without_a_config_id_runs_by_its_daemon_id(
     monkeypatch,
 ) -> None:
-    """An image built on the sandbox and never pushed, on the containerd store.
+    """On the containerd store, a pulled image whose registry will not answer the
+    configuration lookup (here: no registry answers for its host).
 
-    Docker 29 lists a repository digest even for such an image (checked on a
-    daemon: `local/tool@<its index digest>`), so nothing local tells it from a
-    pulled one, and no registry knows its configuration. Its configuration ID
-    stays unknown; the daemon's own ID, content-addressed, still names it, so
-    a job expecting that ID (a tf.apply after its tf.plan) runs it.
+    Its configuration ID stays unknown; the daemon's own ID, content-addressed,
+    still names it, so a job expecting that ID (a tf.apply after its tf.plan on
+    the same daemon) runs it. The pull still happens first: an image no registry
+    holds fails there (see test_a_job_whose_image_cannot_be_pulled_never_runs).
     """
     local_id = "sha256:" + "5a" * 32
     _install(monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64")
@@ -1478,3 +1478,26 @@ def test_a_missing_variant_does_not_match_another_one() -> None:
         }
     ]
     assert _platform_entry(entries, "linux/arm") is None
+
+
+async def test_a_job_whose_image_cannot_be_pulled_never_runs(monkeypatch) -> None:
+    """An image only the sandbox holds (built there, never pushed) fails at the pull.
+
+    The identity fallback to the daemon's ID never lets a step run an image the
+    registry did not serve: a container step always pulls first.
+    """
+    _, captured = _install(
+        monkeypatch,
+        image_store="containerd",
+        pull_failures=frozenset({"local/tool:dev"}),
+        copy_identity="sha256:" + "5a" * 32 + " linux/amd64",
+    )
+    job = ContainerJob(
+        config={"image": "local/tool:dev", "command": ["true"], "cache_image": False},
+        handler_id="tool.run",
+        expected_image_id="sha256:" + "5a" * 32,
+    )
+    outcome = await run_container_job(_handler_ctx([], services=_CacheServices(None)), job)
+    assert isinstance(outcome, HandlerResult) and outcome.success is False
+    assert "pull" in (outcome.error or "").lower()
+    assert _docker(captured, "create") == []

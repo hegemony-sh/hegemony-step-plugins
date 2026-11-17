@@ -724,9 +724,9 @@ class TfPlanHandler(BaseHandler):
             # The image's ID: tf.apply runs only an image with it. A copy from
             # the platform registry's cache has another digest than the image
             # it copies, so only the ID shows it is the same image.
-            # Without one (an image built on the sandbox and never pushed, on
-            # the containerd store), the daemon's own ID, which names the same
-            # image on that daemon; tf.apply accepts either.
+            # Without one (on the containerd store, when the registry would not
+            # answer the configuration lookup), the daemon's own ID, which names
+            # the same image on that daemon; tf.apply accepts either.
             "image_id": outcome.image_id or outcome.image_local_id,
             # tf.apply pulls the plan's image the way the plan did.
             "cache_image": config.cache_image,

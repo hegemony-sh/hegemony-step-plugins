@@ -2349,9 +2349,10 @@ class RunContainerHandler(BaseHandler):
             image_id = identity.image_id
             expected_image_id = (getattr(job, "expected_image_id", "") or "").strip()
             # The daemon's own ID is content-addressed: an equal one is the same
-            # image. A plan whose registry could not give the configuration
-            # digest (an image built on the sandbox and never pushed, on the
-            # containerd store) records that ID instead.
+            # image. A plan whose configuration digest could not be read (on the
+            # containerd store, the daemon pulled the image but its registry
+            # refused or failed this step's manifest lookup) records that ID
+            # instead. The image was still pulled: nothing here skips the pull.
             if expected_image_id and expected_image_id not in (image_id, identity.local_id):
                 found = image_id or "an unknown image ID"
                 message = (
@@ -3944,9 +3945,8 @@ class RunContainerHandler(BaseHandler):
         from the registry ``repository`` lives in, by that digest (content
         checked against it), for the image's platform. ``local_id`` is the
         daemon's own ID, which ``docker create`` takes; it is content-addressed
-        on both stores, so two equal ones are the same image on that daemon
-        (an image built there and never pushed is known only by it). Never
-        fails the step by itself.
+        on both stores, so two equal ones are the same image on that daemon.
+        Never fails the step by itself.
         """
         remaining = deadline - time.monotonic()
         if remaining <= 0:

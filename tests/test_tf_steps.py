@@ -2056,7 +2056,7 @@ async def test_apply_step_refuses_a_plan_that_could_not_record_its_image_id(monk
 
 @pytest.mark.asyncio
 async def test_plan_step_hands_the_daemon_id_when_no_configuration_id_is_known(monkeypatch):
-    """On the containerd store, an image built on the sandbox has no configuration ID."""
+    """On the containerd store, a registry that does not answer leaves no configuration ID."""
     import dataclasses
 
     from hegemony_steps_tf import plan as plan_module
