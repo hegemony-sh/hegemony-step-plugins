@@ -34,6 +34,7 @@ from hegemony_step_sdk import (
     SshAlgorithms,
     TransportOutputSink,
 )
+from hegemony_step_sdk.device_copy import COPY_DONE_MARKERS, COPY_ERROR_MARKERS, copy_answer
 from hegemony_step_sdk.ssh import (
     MIN_DH_GROUP_BITS,
     configure_paramiko,
@@ -1490,26 +1491,10 @@ class SSHTransport:
                     }
 
                 # Check for completion/error indicators FIRST (before prompt handling)
-                # This ensures we exit the loop when transfer completes or fails
-                if any(
-                    indicator in output
-                    for indicator in [
-                        "bytes copied",
-                        "%Error",
-                        "Error opening",
-                        "Invalid",
-                        "not found",
-                        "timed out",
-                        "refused",
-                        "Could not",
-                        "Incomplete command",
-                        # A platform without this copy command ("% Unknown
-                        # command" on FRR, "unknown command." on Junos): the
-                        # answer is final, so do not wait out the timeout.
-                        "nknown command",
-                        "Broken pipe",
-                    ]
-                ):
+                # This ensures we exit the loop when transfer completes or fails.
+                # Not in the raw output: the device echoes the URL and the name.
+                answer = copy_answer(output, url, dest_filename)
+                if any(marker in answer for marker in COPY_DONE_MARKERS):
                     break
 
                 # Check for destination filename prompt (only handle once)
@@ -1548,18 +1533,8 @@ class SSHTransport:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
 
             # Check for errors first (more specific matches)
-            error_patterns = [
-                "%Error",
-                "Error opening",
-                "Error reading",
-                "Invalid",
-                "not found",
-                "refused",
-                "Could not",
-                "Broken pipe",
-                "timed out",
-            ]
-            has_error = any(err in output for err in error_patterns)
+            answer = copy_answer(output, url, dest_filename)
+            has_error = any(marker in answer for marker in COPY_ERROR_MARKERS)
 
             if has_error:
                 # Not the output: the device echoes the copy command and its URL.
@@ -1572,7 +1547,7 @@ class SSHTransport:
 
             # Check for success indicators
             # "bytes copied" is the definitive success indicator for IOS copy
-            transferred = "bytes copied" in output.lower()
+            transferred = "bytes copied" in answer.lower()
 
             return {
                 "transferred": transferred,

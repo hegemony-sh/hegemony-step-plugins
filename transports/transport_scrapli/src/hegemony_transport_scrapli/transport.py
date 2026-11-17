@@ -40,6 +40,7 @@ from hegemony_step_sdk import (
     SshAlgorithms,
     TransportOutputSink,
 )
+from hegemony_step_sdk.device_copy import COPY_DONE_MARKERS, COPY_ERROR_MARKERS, copy_answer
 from hegemony_step_sdk.ssh import (
     asyncssh_algorithm_lists,
     asyncssh_algorithms,
@@ -253,50 +254,6 @@ _TIMING_POLL_SECONDS = 2.5
 #: after this many consecutive empty reads (mirrors send_command_timing's
 #: "read until quiet" semantics).
 _QUIET_READS_DONE = 3
-
-
-#: Output that ends a ``copy <url> <fs>`` dialogue, whether it worked or not.
-#: "nknown command" is a platform without this copy command ("% Unknown
-#: command" on FRR, "unknown command." on Junos): the answer is final.
-_COPY_DONE_MARKERS = (
-    "bytes copied",
-    "%Error",
-    "Error opening",
-    "Invalid",
-    "not found",
-    "timed out",
-    "refused",
-    "Could not",
-    "Incomplete command",
-    "nknown command",
-    "Broken pipe",
-)
-
-#: Output that means the copy failed.
-_COPY_ERROR_MARKERS = (
-    "%Error",
-    "Error opening",
-    "Error reading",
-    "Invalid",
-    "not found",
-    "refused",
-    "Could not",
-    "Broken pipe",
-    "timed out",
-)
-
-
-def _copy_answer(output: str, url: str, dest_filename: str) -> str:
-    """The device's own words in a copy dialogue: ``output`` without the inputs it echoes.
-
-    The device repeats the URL and the file name (the command echo,
-    "Destination filename [<name>]?", "Accessing <url>..."), so a name like
-    ``Invalid-image.bin`` must not read as the device's "Invalid".
-    """
-    for echoed in (url, dest_filename):
-        if echoed:
-            output = output.replace(echoed, "")
-    return output
 
 
 #: Lines that open a config block. Only ``end`` closes one: ``exit`` inside a
@@ -1299,8 +1256,8 @@ class ScrapliTransport:
                     break
                 output += chunk
 
-                answer = _copy_answer(output, url, dest_filename)
-                if any(marker in answer for marker in _COPY_DONE_MARKERS):
+                answer = copy_answer(output, url, dest_filename)
+                if any(marker in answer for marker in COPY_DONE_MARKERS):
                     break
                 if "Destination filename" in output and not dest_filename_handled:
                     connection.channel.write("\n")
@@ -1314,8 +1271,8 @@ class ScrapliTransport:
                     overwrite_handled = True
 
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            answer = _copy_answer(output, url, dest_filename)
-            if any(marker in answer for marker in _COPY_ERROR_MARKERS):
+            answer = copy_answer(output, url, dest_filename)
+            if any(marker in answer for marker in COPY_ERROR_MARKERS):
                 # Not the output: the device echoes the copy command and its URL.
                 logger.error(f"HTTP transfer to {self.host} failed")
                 return {"transferred": False, "output": output, "elapsed_ms": elapsed_ms}
