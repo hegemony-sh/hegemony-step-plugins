@@ -466,12 +466,21 @@ def _install(
         if argv[:2] == ["docker", "info"]:
             if image_store == "broken":
                 return SimpleNamespace(returncode=1, stdout="", stderr="daemon busy")
+            if image_store == "starting":
+                # A daemon that answers before it knows its storage driver.
+                return SimpleNamespace(returncode=0, stdout="|null\n", stderr="")
+            if image_store == "vfs":
+                # A classic driver that prints no status list.
+                return SimpleNamespace(returncode=0, stdout="vfs|null\n", stderr="")
             status = (
                 [["driver-type", "io.containerd.snapshotter.v1"]]
                 if image_store == "containerd"
                 else [["Backing Filesystem", "extfs"]]
             )
-            return SimpleNamespace(returncode=0, stdout=json.dumps(status), stderr="")
+            driver = "overlayfs" if image_store == "containerd" else "overlay2"
+            return SimpleNamespace(
+                returncode=0, stdout=f"{driver}|{json.dumps(status)}\n", stderr=""
+            )
         if argv[:2] == ["docker", "push"]:
             code = remaining_push_results.pop(0) if remaining_push_results else push_returncode
             return SimpleNamespace(returncode=code, stdout="", stderr="denied: push")
@@ -552,6 +561,7 @@ async def test_without_a_platform_registry_the_pull_is_as_before(monkeypatch) ->
                 "served": "alpine:3.20",
                 "digest": digest,
                 "image_id": "",
+                "image_local_id": "",
             },
         )
     ]
@@ -981,11 +991,9 @@ async def test_a_job_records_the_image_id_it_ran(monkeypatch) -> None:
     outcome = await run_container_job(_handler_ctx(events), job)
     assert not hasattr(outcome, "success"), getattr(outcome, "error", None)
     assert outcome.image_id == IMAGE_ID
-    # The ID is read from the reference the container runs by.
-    inspected = [cmd[-1] for cmd, _env in captured["run"] if any("{{.Id}}" in a for a in cmd)]
-    # The last inspect names what the container runs by: its digest, or the
-    # daemon's ID when the pull reported none.
-    assert inspected[-1] == (outcome.image_digest or outcome.image_id)
+    assert outcome.image_local_id == IMAGE_ID  # the classic store: the same ID
+    # The pull reported no digest, so the container runs by the ID that was read.
+    assert IMAGE_ID in _create_argv(captured)
     assert _digest_events(events)[0][1]["image_id"] == IMAGE_ID
 
 
@@ -1024,7 +1032,7 @@ async def test_a_copy_with_another_image_id_is_refused_before_it_runs(
     outcome = await run_container_job(_handler_ctx(events), job)
     assert isinstance(outcome, HandlerResult) and outcome.success is False
     assert IMAGE_ID in (outcome.error or "")
-    assert (reported or "an unknown image ID") in (outcome.error or "")
+    assert (reported or "could not be read") in (outcome.error or "")
     assert _docker(captured, "create") == []
     assert "image_id_mismatch" in _milestones(events)
 
@@ -1288,29 +1296,19 @@ async def test_on_the_containerd_store_a_copy_is_checked_by_its_registry_config(
         assert result.metrics["image_id"] == CONFIG_AMD64
 
 
-async def test_on_the_containerd_store_an_image_without_a_config_id_runs_by_its_daemon_id(
+async def test_on_the_containerd_store_the_daemon_id_never_stands_in_for_the_image_id(
     monkeypatch,
 ) -> None:
-    """On the containerd store, a pulled image whose registry will not answer the
-    configuration lookup (here: no registry answers for its host).
+    """The daemon's ID differs between an image and its copy there: it is not compared.
 
-    Its configuration ID stays unknown; the daemon's own ID, content-addressed,
-    still names it, so a job expecting that ID (a tf.apply after its tf.plan on
-    the same daemon) runs it. The pull still happens first: an image no registry
-    holds fails there (see test_a_job_whose_image_cannot_be_pulled_never_runs).
+    A job expecting an ID whose registry will not give the configuration digest
+    is refused, even when the expected value equals the daemon's ID; the error
+    says the ID could not be read, not that the image is another one.
     """
     local_id = "sha256:" + "5a" * 32
-    _install(monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64")
-    identity = await RunContainerHandler()._image_identity(
-        reference="tools/runner:dev",
-        repository="tools/runner:dev",
-        cache=None,
-        docker_bin="docker",
-        docker_env={"DOCKER_HOST": "tcp://dind:2375"},
-        deadline=time.monotonic() + 60,
+    _, captured = _install(
+        monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64"
     )
-    assert (identity.local_id, identity.image_id) == (local_id, "")
-
     events: list = []
     job = ContainerJob(
         config={"image": "tools/runner:dev", "command": ["true"], "cache_image": False},
@@ -1318,23 +1316,36 @@ async def test_on_the_containerd_store_an_image_without_a_config_id_runs_by_its_
         expected_image_id=local_id,
     )
     outcome = await run_container_job(_handler_ctx(events, services=_CacheServices(None)), job)
-    assert not hasattr(outcome, "success"), getattr(outcome, "error", None)
-    assert (outcome.image_id, outcome.image_local_id) == ("", local_id)
+    assert isinstance(outcome, HandlerResult) and outcome.success is False
+    assert "could not be read" in (outcome.error or "") and local_id in (outcome.error or "")
+    assert outcome.metrics["image_local_id"] == local_id
+    assert _docker(captured, "create") == []
 
 
-async def test_a_job_expecting_another_daemon_id_is_refused(monkeypatch) -> None:
-    _install(
-        monkeypatch,
-        image_store="containerd",
-        copy_identity="sha256:" + "5b" * 32 + " linux/amd64",
+async def test_on_the_containerd_store_a_plain_job_asks_no_registry_for_its_image_id(
+    monkeypatch,
+) -> None:
+    """Manifest requests can count against pull limits: only jobs that compare images pay."""
+    local_id = "sha256:" + "5c" * 32
+    registries, _ = _install(
+        monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64"
     )
     job = ContainerJob(
-        config={"image": "tools/runner:dev", "command": ["true"], "cache_image": False},
+        config={"image": "ghcr.io/x/tool:1", "command": ["true"], "cache_image": False},
         handler_id="tool.run",
-        expected_image_id="sha256:" + "5a" * 32,
     )
     outcome = await run_container_job(_handler_ctx([], services=_CacheServices(None)), job)
-    assert isinstance(outcome, HandlerResult) and outcome.success is False
+    assert not hasattr(outcome, "success"), getattr(outcome, "error", None)
+    assert (outcome.image_id, outcome.image_local_id) == ("", local_id)
+    assert registries.requests == []
+
+    asking = ContainerJob(
+        config={"image": "ghcr.io/x/tool:1", "command": ["true"], "cache_image": False},
+        handler_id="tool.run",
+        needs_image_id=True,
+    )
+    await run_container_job(_handler_ctx([], services=_CacheServices(None)), asking)
+    assert any("ghcr.io/v2/x/tool/manifests/" in url for _m, url in registries.requests)
 
 
 async def test_on_the_containerd_store_an_unreadable_registry_config_is_no_id(
@@ -1353,23 +1364,33 @@ async def test_on_the_containerd_store_an_unreadable_registry_config_is_no_id(
         docker_bin="docker",
         docker_env={"DOCKER_HOST": "tcp://dind:2375"},
         deadline=time.monotonic() + 60,
+        resolve=True,
     )
     assert (identity.local_id, identity.image_id) == (digest, "")
 
 
-async def test_the_image_store_is_asked_once_per_daemon(monkeypatch) -> None:
-    _, captured = _install(
-        monkeypatch, image_store="containerd", copy_identity="sha256:" + "5c" * 32 + " linux/amd64"
-    )
+@pytest.mark.parametrize(
+    ("answer", "store"),
+    [
+        ("containerd", "containerd"),
+        ("classic", "classic"),
+        # A classic driver without a status list is still a real answer.
+        ("vfs", "classic"),
+        # No driver named, or no answer: never read as the classic store.
+        ("starting", "unknown"),
+        ("broken", "unknown"),
+    ],
+)
+async def test_the_image_store_is_read_from_a_real_answer_only(
+    monkeypatch, answer: str, store: str
+) -> None:
+    _, captured = _install(monkeypatch, image_store=answer)
     handler = RunContainerHandler()
     env = {"DOCKER_HOST": "tcp://dind:2375"}
-    assert (
-        await handler._image_store(docker_bin="docker", docker_env=env, timeout=60) == "containerd"
-    )
-    assert (
-        await handler._image_store(docker_bin="docker", docker_env=env, timeout=60) == "containerd"
-    )
-    assert len(_docker(captured, "info")) == 1
+    assert await handler._image_store(docker_bin="docker", docker_env=env, timeout=60) == store
+    # Nothing is remembered: a daemon recreated with another store is asked again.
+    await handler._image_store(docker_bin="docker", docker_env=env, timeout=60)
+    assert len(_docker(captured, "info")) == 2
 
 
 async def test_the_image_store_question_keeps_to_the_steps_deadline(monkeypatch) -> None:
@@ -1385,15 +1406,14 @@ async def test_the_image_store_question_keeps_to_the_steps_deadline(monkeypatch)
         docker_bin="docker",
         docker_env={"DOCKER_HOST": "tcp://dind:2375"},
         deadline=time.monotonic() + 3,
+        resolve=True,
     )
     [info_timeout] = [t for cmd, t in captured["timeouts"] if cmd[:2] == ["docker", "info"]]
     assert info_timeout is not None and info_timeout <= 3
-    # Out of time, the daemon is not asked at all, and nothing is remembered.
-    fresh = RunContainerHandler()
+    # Out of time, the daemon is not asked at all.
     env = {"DOCKER_HOST": "tcp://other:2375"}
-    assert await fresh._image_store(docker_bin="docker", docker_env=env, timeout=0) == "unknown"
+    assert await handler._image_store(docker_bin="docker", docker_env=env, timeout=0) == "unknown"
     assert len(_docker(captured, "info")) == 1
-    assert await fresh._image_store(docker_bin="docker", docker_env=env, timeout=60) == "containerd"
 
 
 async def test_a_pulled_image_whose_registry_cannot_say_has_no_id_on_containerd(
@@ -1412,6 +1432,7 @@ async def test_a_pulled_image_whose_registry_cannot_say_has_no_id_on_containerd(
         docker_bin="docker",
         docker_env={"DOCKER_HOST": "tcp://dind:2375"},
         deadline=time.monotonic() + 60,
+        resolve=True,
     )
     assert (identity.local_id, identity.image_id) == (local_id, "")
 
@@ -1434,6 +1455,7 @@ async def test_an_unknown_store_reads_a_pinned_image_from_its_registry(monkeypat
         docker_bin="docker",
         docker_env=env,
         deadline=time.monotonic() + 60,
+        resolve=True,
     )
     assert pinned_identity.image_id == CONFIG_AMD64
     tag_identity = await handler._image_identity(
@@ -1443,9 +1465,9 @@ async def test_an_unknown_store_reads_a_pinned_image_from_its_registry(monkeypat
         docker_bin="docker",
         docker_env=env,
         deadline=time.monotonic() + 60,
+        resolve=True,
     )
     assert (tag_identity.local_id, tag_identity.image_id) == (copy_digest, "")
-    # A failed answer is not remembered: each lookup asks again.
     assert len(_docker(captured, "info")) == 2
 
 
@@ -1501,3 +1523,67 @@ async def test_a_job_whose_image_cannot_be_pulled_never_runs(monkeypatch) -> Non
     assert isinstance(outcome, HandlerResult) and outcome.success is False
     assert "pull" in (outcome.error or "").lower()
     assert _docker(captured, "create") == []
+
+
+async def test_a_verified_cache_hit_reads_the_copy_once(monkeypatch) -> None:
+    """The step reuses what the cache check read: no second inspect or registry lookup."""
+    registries, _ = _install(monkeypatch)
+    key = cache_key_tag(_upstream_index(registries))
+    copy_tag = f"{OWN_COPY}:{key}"
+    copy_digest = _copy_manifest(registries, CONFIG_AMD64)
+    pinned = f"{OWN_COPY}@{copy_digest}"
+    registries, captured = _install(
+        monkeypatch,
+        image_store="containerd",
+        pull_digests={copy_tag: copy_digest},
+        copy_identity={pinned: f"{copy_digest} linux/amd64"},
+    )
+    _upstream_index(registries)
+    _copy_manifest(registries, CONFIG_AMD64)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    assert "image_cache_verified" in _milestones(events)
+    inspects = [cmd for cmd, _env in captured["run"] if any("{{.Os}}" in a for a in cmd)]
+    assert len(inspects) == 1
+    copy_gets = [
+        url
+        for m, url in registries.requests
+        if m == "GET" and url.startswith(PLATFORM_REGISTRY) and copy_digest in url
+    ]
+    assert len(copy_gets) == 1
+    assert result.metrics["image_id"] == CONFIG_AMD64
+    assert result.metrics["image_local_id"] == copy_digest
+
+
+async def test_the_cache_check_keeps_half_its_budget_for_the_upstream_lookup(monkeypatch) -> None:
+    """Reading the copy may not use up the time the verdict's lookup needs."""
+    registries, _ = _install(monkeypatch, copy_identity=f"{CONFIG_AMD64} linux/amd64")
+    index = _upstream_index(registries)
+    handler = RunContainerHandler()
+    seen: dict[str, float] = {}
+    real = handler._image_identity
+
+    async def spy(**kwargs: Any):
+        seen["budget"] = kwargs["deadline"] - time.monotonic()
+        return await real(**kwargs)
+
+    monkeypatch.setattr(handler, "_image_identity", spy)
+    started = time.monotonic()
+    matches, _identity = await handler._copy_matches_upstream(
+        upstream=_client(registries.transport(HUB).handler, base_url=HUB),
+        repo="library/alpine",
+        upstream_digest=index,
+        copy=f"{OWN_COPY}:{cache_key_tag(index)}",
+        pinned=f"{OWN_COPY}:{cache_key_tag(index)}",
+        cache=CACHE,
+        image="alpine:3.20",
+        docker_bin="docker",
+        docker_env={"DOCKER_HOST": "tcp://dind:2375"},
+        deadline=started + 600,
+        emit=AsyncMock(),
+    )
+    assert matches is True
+    # The whole budget is 30 s here: the copy's read gets at most half.
+    assert 0 < seen["budget"] <= 15.01

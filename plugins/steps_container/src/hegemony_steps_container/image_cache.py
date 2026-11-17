@@ -180,6 +180,13 @@ class AcquiredImage:
     # the container then runs by this ID, so a retag of the copy's tag after
     # the check cannot change what runs. "" otherwise.
     image_id: str = ""
+    # What a cache check read of the copy at the reference it runs by: the
+    # daemon's ID, the configuration digest and the platform. The step reuses
+    # them instead of asking the daemon and the registry a second time. ""
+    # when no check read them.
+    checked_local_id: str = ""
+    checked_config_id: str = ""
+    checked_platform: str = ""
 
 
 def plan_cache(image: str, cache: ImageCache) -> CachePlan | None:

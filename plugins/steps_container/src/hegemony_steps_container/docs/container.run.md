@@ -52,12 +52,14 @@ change it. The classic store reports the configuration digest as the image's
 ID. The containerd image store (the default for new Docker 29 installs)
 reports the digest of the manifest or index the image was pulled by instead,
 so the step reads the configuration digest from the image's registry by that
-digest (its content checked against it). When the registry does not answer
-that lookup (a login only the daemon holds, a rate limit), although the pull
-itself worked, there is no recorded ID, and the daemon's own ID is recorded as
-`image_local_id` instead: it is content-addressed too, so it names one image
-on that daemon. When the daemon does not say which store it uses, only an
-image pulled by a digest gets an ID, read from its registry.
+digest (its content checked against it). Those manifest requests can count
+against a registry's pull limits, so on that store a plain `container.run`
+step does not make them and records no `image_id`; steps that compare images
+(`tf.plan`, `tf.apply`, a cache hit's check) do. Every step records the
+daemon's own ID as `image_local_id`: on the classic store it equals
+`image_id`, on the containerd store it names the image on that daemon only (a
+copy in another registry has another one). When the daemon does not say which
+store it uses, only an image pulled by a digest gets an `image_id`.
 
 When the platform runs its own container registry, Cache image (on by
 default) keeps a copy of the pulled image there, under the organization's
@@ -188,7 +190,7 @@ with a truncation marker beyond that - that also records the exit code, image an
 stdout/stderr streams. Text files harvested from the new-artifacts folder are
 added as further evidence artifacts; binary files become downloadable run
 artifacts. Metrics record `exit_code`, `duration_seconds`, `image`,
-`image_digest` and `image_id`.
+`image_digest`, `image_id` and `image_local_id`.
 While the container runs, its output streams into the step's live log, up to
 5 MB. Past that the live log says so and shows no more; the container goes on,
 and the evidence keeps stdout and stderr as above.

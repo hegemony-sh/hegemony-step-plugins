@@ -515,6 +515,9 @@ def _install_docker(
 
     def fake_run(cmd, *args, **kwargs):
         state["calls"].append(list(cmd))
+        if cmd[1:2] == ["info"]:
+            # A classic-store daemon: its image ID is the configuration digest.
+            return SimpleNamespace(returncode=0, stdout="overlay2|[]\n", stderr="")
         if cmd[1:3] == ["image", "inspect"] and any("{{.Id}}" in a for a in cmd):
             identity = f"{image_id} linux/amd64" if image_id else ""
             return SimpleNamespace(returncode=0, stdout=f"{identity}\n", stderr="")
@@ -2055,8 +2058,12 @@ async def test_apply_step_refuses_a_plan_that_could_not_record_its_image_id(monk
 
 
 @pytest.mark.asyncio
-async def test_plan_step_hands_the_daemon_id_when_no_configuration_id_is_known(monkeypatch):
-    """On the containerd store, a registry that does not answer leaves no configuration ID."""
+async def test_plan_step_records_no_image_id_it_could_not_read(monkeypatch):
+    """The daemon's own ID never stands in: it differs between an image and its copy.
+
+    Such a plan's apply is refused (see
+    test_apply_step_refuses_a_plan_that_could_not_record_its_image_id).
+    """
     import dataclasses
 
     from hegemony_steps_tf import plan as plan_module
@@ -2064,12 +2071,16 @@ async def test_plan_step_hands_the_daemon_id_when_no_configuration_id_is_known(m
     local_id = "sha256:" + "6" * 64
     _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
     real = plan_module.run_container_job
+    asked: list[bool] = []
 
     async def without_configuration_id(ctx, job):
+        asked.append(job.needs_image_id)
         outcome = await real(ctx, job)
         return dataclasses.replace(outcome, image_id="", image_local_id=local_id)
 
     monkeypatch.setattr(plan_module, "run_container_job", without_configuration_id)
     result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
     assert result.success is True, result.error
-    assert result.output["image_id"] == local_id
+    assert asked == [True]
+    assert result.output["image_id"] == ""
+    assert (result.metrics["image_id"], result.metrics["image_local_id"]) == ("", local_id)

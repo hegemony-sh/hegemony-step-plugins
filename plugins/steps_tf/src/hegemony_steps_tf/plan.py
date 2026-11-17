@@ -473,6 +473,8 @@ class TfPlanHandler(BaseHandler):
                     handler_id=self.handler_id,
                     extra_hosts=dict(access.extra_hosts) if access else {},
                     stop_grace_seconds=config.stop_grace_seconds,
+                    # tf.apply checks the image it pulls against this plan's.
+                    needs_image_id=True,
                 )
                 ran_tool = True
                 outcome = await run_container_job(ctx, job)
@@ -724,10 +726,10 @@ class TfPlanHandler(BaseHandler):
             # The image's ID: tf.apply runs only an image with it. A copy from
             # the platform registry's cache has another digest than the image
             # it copies, so only the ID shows it is the same image.
-            # Without one (on the containerd store, when the registry would not
-            # answer the configuration lookup), the daemon's own ID, which names
-            # the same image on that daemon; tf.apply accepts either.
-            "image_id": outcome.image_id or outcome.image_local_id,
+            # Empty when it could not be read (on the containerd image store,
+            # the image's registry did not answer): tf.apply then refuses the
+            # plan, and planning again reads it.
+            "image_id": outcome.image_id,
             # tf.apply pulls the plan's image the way the plan did.
             "cache_image": config.cache_image,
             # tf.apply applies the saved plan only while it has this digest.
@@ -751,6 +753,7 @@ class TfPlanHandler(BaseHandler):
                 "image": image,
                 "image_digest": outcome.image_digest,
                 "image_id": outcome.image_id,
+                "image_local_id": outcome.image_local_id,
                 "image_served": outcome.image_served,
                 "image_source": outcome.image_source,
                 "image_cached": outcome.image_cached,

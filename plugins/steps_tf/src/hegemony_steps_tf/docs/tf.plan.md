@@ -101,12 +101,12 @@ The plan also records the image's ID (`image_id`). A copy in the platform
 registry has another digest than the image it was copied from, so the digest
 alone cannot show the apply runs what the plan ran. The apply checks the ID
 and fails before it starts its container when the image it pulled has
-another one. When the configuration digest cannot be read (on Docker's
-containerd image store, when the image's registry does not answer the
-manifest lookup, although the pull itself worked) the plan records the
-sandbox daemon's own ID, which names the same image on that daemon, and the
-apply accepts that. A plan that could read neither records
-the ID empty, and its apply refuses to run: plan again.
+another one. When the ID cannot be read (on Docker's containerd image store,
+when the image's registry does not answer the manifest lookup, although the
+pull itself worked) the plan records it empty, and its apply refuses to run:
+plan again. The sandbox daemon's own ID of the image is in the metrics as
+`image_local_id`, for the record only: on the containerd store it differs
+between an image and its copy in the platform registry, so it is not compared.
 
 ## Applying The Plan
 
