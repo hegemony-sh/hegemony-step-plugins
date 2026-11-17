@@ -93,7 +93,9 @@ the platform registry, the digest names that copy, which the apply pulls
 from the platform registry too. The image is always pulled, so one kept only
 in the sandbox (built there, never pushed) cannot be planned with. When no
 registry digest is available (neither the pull nor the sandbox daemon gives
-one), the apply pulls the tag and runs it by the image ID the plan recorded.
+one), the apply pulls the tag and checks the pulled image against the ID the
+plan recorded; the container then runs by whatever reference the apply's own
+pull pins (its digest, or else the daemon's ID of it).
 
 The plan also records the image's ID (`image_id`). A copy in the platform
 registry has another digest than the image it was copied from, so the digest
