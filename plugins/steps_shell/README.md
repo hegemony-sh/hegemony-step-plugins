@@ -13,7 +13,12 @@ Handlers: `shell.execute` — run commands on Linux/Unix hosts with exec-channel
 semantics (meaningful exit codes, separate stdout/stderr), optionally wrapped
 in `sh`/`bash`/`pwsh`; `shell.file_download` — have each host download a
 file-repository file with `curl` through a short-lived link, and verify its
-SHA-256. The transport (SSH today, WinRM planned) is resolved
+SHA-256. The file is picked in the editor or comes from a "Repository file"
+run-form field (`file: "{{ inputs.package }}"`); the step's output carries a
+reference to it (`{{ steps.<id>.output.file }}`, looked up again by path;
+`output.file_id` names the exact file; on an older platform a download named
+by id has no `output.file`, so pass `output.file_id` through `file_ids`) for
+later steps. The transport (SSH today, WinRM planned) is resolved
 from `device.access_config` via the platform's `open_shell` service; per
 CONVENTIONS.md, neither transport nor interpreter ever appears in handler ids.
 

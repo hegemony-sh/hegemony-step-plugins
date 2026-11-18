@@ -281,6 +281,12 @@ class FileDownload:
     step that hands the link to a target fails with a clear message then.
     ``worker_url`` is the same link as the worker process itself reaches it,
     for a handler that fetches the file onto the worker.
+
+    ``repository`` (the file repository's name), ``repository_id``, ``path``
+    (folder and file name, no leading slash), ``folder``, ``content_type``,
+    ``sha512`` and ``metadata`` (the stored file's metadata) describe where
+    the file lives. A host older than these fields leaves them at their
+    defaults: empty text, None and an empty dict.
     """
 
     file_id: str
@@ -294,6 +300,13 @@ class FileDownload:
     # ISO 8601, with a UTC offset.
     expires_at: str
     md5: str | None = None
+    repository: str = ""
+    repository_id: str = ""
+    path: str = ""
+    folder: str = ""
+    content_type: str | None = None
+    sha512: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -548,17 +561,33 @@ class HandlerServices(Protocol):
         raise NotImplementedError
 
     def open_file_download(
-        self, file_id: str, *, ttl_seconds: int = 600
+        self,
+        file_id: str | None = None,
+        *,
+        repository: str | None = None,
+        path: str | None = None,
+        ttl_seconds: int = 600,
     ) -> AbstractAsyncContextManager[FileDownload]:
-        """Open a short-lived download link to the file-repository file ``file_id``.
+        """Open a short-lived download link to one file-repository file.
 
         For a step that stages a file on a target: the step hands
         :attr:`FileDownload.url` to the target, which downloads the file from
         the platform by itself (``Transport.http_transfer``, a ``curl`` on a
-        server). ``file_id`` is the stored file's id, as a step field marked
-        ``x_widget: repository-file-select`` stores it (name such a field
-        ``file_ids``: the platform refuses to delete a file a flow lists
-        there).
+        server). Name the file in one of two ways:
+
+        - ``file_id``: the stored file's id, as a step field marked
+          ``x_widget: repository-file-select`` stores it (name such a field
+          ``file_ids``: the platform refuses to delete a file a flow lists
+          there).
+        - ``repository`` and ``path``: the file repository's name and the
+          file's path in it (folder and file name, no leading slash), as a
+          :class:`~hegemony_step_sdk.FileRef` gives them. The repository is
+          looked up in the run's organization first, then in the shared
+          organization. Two files with the same path are refused as
+          ambiguous.
+
+        A platform older than ``repository`` and ``path`` raises
+        ``TypeError`` when they are passed.
 
         The host finds only files the run's organization may read: its own
         and those the platform's shared organization publishes. The link
@@ -569,7 +598,8 @@ class HandlerServices(Protocol):
         naming the run, the step and the file.
 
         Raises ``LookupError`` for a file the organization does not have,
-        ``ValueError`` for a malformed ``file_id`` or ``ttl_seconds``, and
+        ``ValueError`` for a malformed ``file_id``, ``repository``, ``path``
+        or ``ttl_seconds`` or an ambiguous path, and
         ``RuntimeError`` when the host cannot be reached or the step or run
         has ended. Hosts without support raise ``NotImplementedError``; a
         platform older than this method has no such attribute at all, so
