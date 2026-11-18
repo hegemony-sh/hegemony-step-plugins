@@ -20,7 +20,7 @@ import re
 import socket
 import tempfile
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, TypeVar, cast
@@ -33,6 +33,14 @@ from hegemony_step_sdk import (
     SshAlgorithmRecorder,
     SshAlgorithms,
     TransportOutputSink,
+)
+from hegemony_step_sdk.cli_prompts import (
+    CliPrompt,
+    CliPromptError,
+    PromptDialogue,
+    last_line,
+    prompts_for,
+    waiting_at,
 )
 from hegemony_step_sdk.ssh import (
     MIN_DH_GROUP_BITS,
@@ -584,8 +592,23 @@ def _copy_answer(output: str, url: str, dest_fs: str, dest_filename: str) -> str
 #: to overwrite it. Enter takes the answer the device offers.
 _COPY_QUESTION = r"(?:Destination filename \[[^\]\n]*\]\?|\[confirm\])"
 
+#: How often a command answering prompts reads the session.
+_PROMPT_POLL_SECONDS = 0.2
+
 #: A copy to startup-config asks at most these two questions.
 _MAX_COPY_ANSWERS = 2
+
+
+#: The questions a copy to startup-config asks, answered with Enter as the
+#: built-in dialogue does, after any the step lists itself.
+_STARTUP_COPY_PROMPTS = (
+    CliPrompt(expect=r"Destination filename \[[^\]\n]*\]\?"),
+    CliPrompt(expect=r"\[confirm\]"),
+)
+
+#: Error of a result for a command not run because an earlier one may have left
+#: the device at a question: its text would be taken as the answer.
+_LEFT_WAITING_ERROR = "Skipped: an earlier command may have left the device waiting at a question"
 
 
 def _is_startup_copy(command: str) -> bool:
@@ -691,6 +714,16 @@ class SSHTransport:
         if not isinstance(allow_legacy, bool):
             raise ValueError("allow_legacy must be a boolean")
         self._allow_legacy_ssh = allow_legacy
+
+    #: Feature flag: ``configure_cli_prompts`` answers the questions a step lists.
+    supports_cli_prompts = True
+    _cli_prompts: tuple[CliPrompt, ...] = ()
+    #: Set when a command may have left the device at a question.
+    _left_waiting = False
+
+    def configure_cli_prompts(self, prompts: Sequence[CliPrompt]) -> None:
+        """Set the questions the step's commands may ask, and what to answer."""
+        self._cli_prompts = tuple(prompts)
 
     def _legacy(self, *, jump_host: bool) -> bool:
         """Whether a hop may use legacy SSH: the step setting, or that hop's inventory flag."""
@@ -1101,6 +1134,11 @@ class SSHTransport:
             if not command.strip():
                 connection.write_channel("\n")
                 raw_output = connection.read_channel()
+            elif prompts := prompts_for(command, self._cli_prompts):
+                if _is_startup_copy(command):
+                    # The flow's entries first; the copy's own questions still answered.
+                    prompts = [*prompts, *_STARTUP_COPY_PROMPTS]
+                raw_output = self._send_with_prompts(connection, command, prompts)
             elif _is_startup_copy(command):
                 raw_output = self._send_startup_copy(connection, command)
             else:
@@ -1113,11 +1151,18 @@ class SSHTransport:
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
+            error = self._exception_error(e)
+            if isinstance(e, (ReadTimeout, CliPromptError)):
+                # The device may still be waiting at a question.
+                self._left_waiting = True
+            if isinstance(e, ReadTimeout):
+                # The device may be waiting at a question the step did not list.
+                error += "; if the command asks a question, list it under prompts"
             return SSHResult(
                 command=command,
                 output="",
                 exit_code=-1,
-                error=str(e),
+                error=error,
                 latency_ms=latency_ms,
             )
         latency_ms = (time.perf_counter() - start) * 1000
@@ -1143,6 +1188,52 @@ class SSHTransport:
             )
         logger.info(f"Command on {self.host} completed in {latency_ms:.0f}ms")
         return SSHResult(command=command, output=output, exit_code=0, latency_ms=latency_ms)
+
+    def _send_with_prompts(self, connection, command: str, prompts: Sequence[CliPrompt]) -> str:
+        """Run ``command``, answering the questions ``prompts`` list, until the prompt returns.
+
+        The session is read here rather than by send_command, so the output is
+        kept: a question nobody listed fails the command with the line the
+        device is waiting at. ``command_timeout`` bounds each wait, from the
+        command or an answer to the next question or the prompt. The output
+        keeps neither the command echo nor the trailing prompt.
+        """
+        prompt = connection.find_prompt().strip()
+        dialogue = PromptDialogue(prompts)
+        connection.write_channel(command + connection.RETURN)
+        output = ""
+        # Where the output after the latest answer starts: the question just
+        # answered is not read as a new one.
+        since_answer = 0
+        deadline = time.monotonic() + self.command_timeout
+        while True:
+            if self._cancellation_registry.is_cancelled(self.step_run_id):
+                raise CliPromptError("The step was cancelled while the command ran")
+            expired = time.monotonic() >= deadline
+            chunk = connection.read_channel()
+            if chunk:
+                output += chunk
+                recent = output[since_answer:]
+                if last_line(recent) == prompt:
+                    break
+                answer = None if expired else dialogue.answer_for(recent)
+                if answer is not None:
+                    connection.write_channel(answer + connection.RETURN)
+                    since_answer = len(output)
+                    deadline = time.monotonic() + self.command_timeout
+                    continue
+            if expired or time.monotonic() >= deadline:
+                raise CliPromptError(
+                    f"Timed out after {self.command_timeout:g} seconds; {waiting_at(output)} "
+                    "(list that question under prompts if the command should answer it)"
+                )
+            time.sleep(_PROMPT_POLL_SECONDS)
+        lines = output.rstrip().splitlines()
+        if lines and lines[0].strip() == command.strip():
+            lines.pop(0)
+        if lines and lines[-1].strip() == prompt:
+            lines.pop()
+        return "\n".join(lines)
 
     def _send_startup_copy(self, connection, command: str) -> str:
         """Run a copy to startup-config, answering its questions with Enter.
@@ -1329,9 +1420,17 @@ class SSHTransport:
                     if any(r.exit_code != 0 for r in step_results):
                         skip_reason = self._skip_reason()
             else:
-                # Execute show/exec commands individually
-                for command in commands:
+                # Execute show/exec commands individually. After a command that
+                # may have left the device at a question, the next one would be
+                # taken as the answer, so the rest are not sent.
+                self._left_waiting = False
+                for index, command in enumerate(commands):
                     results.append(self._run_exec_command(connection, command))
+                    if self._left_waiting:
+                        results.extend(
+                            _skipped(cmd, _LEFT_WAITING_ERROR) for cmd in commands[index + 1 :]
+                        )
+                        break
 
         except NetmikoAuthenticationException as e:
             logger.error(f"Authentication failed to {self.host}: {e}")

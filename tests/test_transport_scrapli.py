@@ -1015,3 +1015,33 @@ async def test_without_a_jump_host_the_full_budget_applies():
     with patch.object(transport_module, "AsyncScrapli", scrapli_cls):
         await transport._open_connection()
     assert scrapli_cls.call_args.kwargs["timeout_socket"] == 30.0
+
+
+async def test_a_prompted_command_after_a_config_block_returns_to_the_exec_prompt_first():
+    """The raw write skips send_command's own return from configuration mode."""
+    from hegemony_step_sdk.cli_prompts import CliPrompt
+
+    connection = _iosxe_connection()
+    connection.send_configs.return_value = [_response()]
+    connection.acquire_priv = AsyncMock()
+    reads = [b"Delete filename [a.bin]? ", b"\nr1#"]
+
+    async def read() -> bytes:
+        return reads.pop(0) if reads else b""
+
+    connection.channel.read = AsyncMock(side_effect=read)
+    order: list[str] = []
+    connection.acquire_priv.side_effect = lambda level: order.append(f"acquire {level}")
+    connection.channel.write.side_effect = lambda text: order.append(f"write {text!r}")
+    transport = _make_transport()
+    transport.configure_cli_prompts([CliPrompt(expect=r"Delete filename")])
+
+    with patch.object(
+        hegemony_transport_scrapli.transport, "AsyncScrapli", return_value=connection
+    ):
+        results = await transport.execute_commands(
+            ["configure terminal", "hostname r1", "end", "delete flash:a.bin"]
+        )
+
+    assert results[-1].exit_code == 0, results[-1].error
+    assert order[:2] == ["acquire privilege_exec", "write 'delete flash:a.bin\\n'"]

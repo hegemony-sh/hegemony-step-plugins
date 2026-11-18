@@ -28,6 +28,7 @@ import contextlib
 import logging
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -39,6 +40,14 @@ from hegemony_step_sdk import (
     SshAlgorithmRecorder,
     SshAlgorithms,
     TransportOutputSink,
+)
+from hegemony_step_sdk.cli_prompts import (
+    CliPrompt,
+    CliPromptError,
+    PromptDialogue,
+    last_line,
+    prompts_for,
+    waiting_at,
 )
 from hegemony_step_sdk.ssh import (
     hop_allows_legacy,
@@ -350,6 +359,18 @@ _COPY_QUESTION_AT_END = re.compile(r"(?:Destination filename \[[^\]\n]*\]\?|\[co
 _MAX_COPY_ANSWERS = 2
 
 
+#: The questions a copy to startup-config asks, answered with Enter as the
+#: built-in dialogue does, after any the step lists itself.
+_STARTUP_COPY_PROMPTS = (
+    CliPrompt(expect=r"Destination filename \[[^\]\n]*\]\?"),
+    CliPrompt(expect=r"\[confirm\]"),
+)
+
+#: Error of a result for a command not run because an earlier one may have left
+#: the device at a question: its text would be taken as the answer.
+_LEFT_WAITING_ERROR = "Skipped: an earlier command may have left the device waiting at a question"
+
+
 def _is_startup_copy(command: str) -> bool:
     """'copy <source> startup-config', the destination in any abbreviation."""
     words = command.lower().split()
@@ -451,6 +472,16 @@ class ScrapliTransport:
         if not isinstance(allow_legacy, bool):
             raise ValueError("allow_legacy must be a boolean")
         self._allow_legacy_ssh = allow_legacy
+
+    #: Feature flag: ``configure_cli_prompts`` answers the questions a step lists.
+    supports_cli_prompts = True
+    _cli_prompts: tuple[CliPrompt, ...] = ()
+    #: Set when a command may have left the device at a question.
+    _left_waiting = False
+
+    def configure_cli_prompts(self, prompts: Sequence[CliPrompt]) -> None:
+        """Set the questions the step's commands may ask, and what to answer."""
+        self._cli_prompts = tuple(prompts)
 
     def _legacy(self, *, jump_host: bool) -> bool:
         """Whether a hop may use legacy SSH: the step setting, or that hop's inventory flag."""
@@ -863,18 +894,98 @@ class ScrapliTransport:
     async def _send_exec_command(self, connection, command: str) -> ScrapliResult:
         """Run one command at privilege-exec; a CLI error pattern gives exit code 1."""
         try:
-            if _is_startup_copy(command):
+            if prompts := prompts_for(command, self._cli_prompts):
+                if _is_startup_copy(command):
+                    # The flow's entries first; the copy's own questions still answered.
+                    prompts = [*prompts, *_STARTUP_COPY_PROMPTS]
+                result = await self._send_with_prompts(connection, command, prompts)
+            elif _is_startup_copy(command):
                 result = await self._send_startup_copy(connection, command)
             else:
                 result = self._result_from_response(command, await connection.send_command(command))
         except Exception as e:
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
-            return ScrapliResult(command=command, output="", exit_code=-1, error=str(e))
+            error = str(e)
+            if isinstance(e, (ScrapliTimeout, CliPromptError)):
+                # The device may still be waiting at a question.
+                self._left_waiting = True
+            if isinstance(e, ScrapliTimeout):
+                # The device may be waiting at a question the step did not list.
+                error += "; if the command asks a question, list it under prompts"
+            return ScrapliResult(command=command, output="", exit_code=-1, error=error)
         if result.exit_code == 0:
             logger.info(f"Command on {self.host} completed in {result.latency_ms:.0f}ms")
         else:
             logger.warning(f"Command on {self.host} returned a CLI error")
         return result
+
+    async def _send_with_prompts(
+        self, connection, command: str, prompts: Sequence[CliPrompt]
+    ) -> ScrapliResult:
+        """Run ``command``, answering the questions ``prompts`` list, until the prompt returns.
+
+        The channel is read here rather than by send_command, so the output is
+        kept: a question nobody listed fails the command with the line the
+        device is waiting at. ``command_timeout`` bounds each wait, from the
+        command or an answer to the next question or the prompt. The output
+        keeps neither the command echo nor the trailing prompt.
+        """
+        exec_prompt = connection.privilege_levels[connection.default_desired_privilege_level]
+        prompt = re.compile(exec_prompt.pattern, flags=re.I | re.M)
+        dialogue = PromptDialogue(prompts)
+        started = time.perf_counter()
+        # send_command would return to the exec prompt first (a configuration
+        # block before this command leaves configuration mode open); the raw
+        # write below does not, so do it here.
+        await connection.acquire_priv(connection.default_desired_privilege_level)
+        connection.channel.write(command + "\n")
+        output = ""
+        # Where the output after the latest answer starts: the question just
+        # answered is not read as a new one.
+        since_answer = 0
+        deadline = time.monotonic() + self.command_timeout
+        while True:
+            if self._cancellation_registry.is_cancelled(self.step_run_id):
+                raise CliPromptError("The step was cancelled while the command ran")
+            # Each read waits no longer than the command has left, so a question
+            # that comes after the timeout is not answered.
+            remaining = deadline - time.monotonic()
+            chunk = await self._read_channel_chunk(
+                connection, timeout=max(min(_TIMING_POLL_SECONDS, remaining), 0.01)
+            )
+            if chunk is None:
+                raise CliPromptError(f"The connection closed; {waiting_at(output)}")
+            if chunk:
+                output += chunk
+                recent = output[since_answer:]
+                if prompt.fullmatch(last_line(recent)):
+                    break
+                answer = None if time.monotonic() >= deadline else dialogue.answer_for(recent)
+                if answer is not None:
+                    connection.channel.write(answer + "\n")
+                    since_answer = len(output)
+                    deadline = time.monotonic() + self.command_timeout
+                    continue
+            if time.monotonic() >= deadline:
+                raise CliPromptError(
+                    f"Timed out after {self.command_timeout:g} seconds; {waiting_at(output)} "
+                    "(list that question under prompts if the command should answer it)"
+                )
+        lines = output.rstrip().splitlines()
+        if lines and lines[0].strip() == command.strip():
+            lines.pop(0)
+        if lines and prompt.fullmatch(lines[-1].strip()):
+            lines.pop()
+        text = "\n".join(lines)
+        latency_ms = (time.perf_counter() - started) * 1000
+        cli_error = _detect_cli_error(text)
+        return ScrapliResult(
+            command=command,
+            output=text,
+            exit_code=1 if cli_error else 0,
+            error=cli_error,
+            latency_ms=latency_ms,
+        )
 
     async def _send_startup_copy(self, connection, command: str) -> ScrapliResult:
         """Run a copy to startup-config, answering its questions with Enter.
@@ -982,7 +1093,17 @@ class ScrapliTransport:
                     if any(r.exit_code != 0 for r in step_results):
                         skip_reason = self._skip_reason()
             else:
-                for command in commands:
+                # After a command that may have left the device at a question,
+                # the next one would be taken as the answer: the rest are not sent.
+                self._left_waiting = False
+                for index, command in enumerate(commands):
+                    if self._left_waiting:
+                        results.extend(
+                            _skipped(cmd, _LEFT_WAITING_ERROR)
+                            for cmd in commands[index:]
+                            if cmd.strip()
+                        )
+                        break
                     if not command.strip():
                         continue
                     if self._cancellation_registry.is_cancelled(self.step_run_id):
@@ -1057,7 +1178,7 @@ class ScrapliTransport:
             )
         )
 
-    async def _read_channel_chunk(self, connection) -> str | None:
+    async def _read_channel_chunk(self, connection, timeout: float | None = None) -> str | None:
         """One channel read, bounded by ``_TIMING_POLL_SECONDS``.
 
         Returns the decoded text (empty when nothing arrived within the poll
@@ -1070,7 +1191,9 @@ class ScrapliTransport:
         Cancelling the read leaves unread data in asyncssh's buffer.
         """
         try:
-            chunk = await asyncio.wait_for(connection.channel.read(), _TIMING_POLL_SECONDS)
+            chunk = await asyncio.wait_for(
+                connection.channel.read(), _TIMING_POLL_SECONDS if timeout is None else timeout
+            )
         except TimeoutError:
             return ""
         except ScrapliTimeout as read_err:
