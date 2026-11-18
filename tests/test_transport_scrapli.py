@@ -790,7 +790,9 @@ async def test_http_transfer_ends_at_its_timeout_without_a_copy():
     connection.close.assert_awaited()
 
 
-@pytest.mark.parametrize("name", ["Invalid-image.bin", "refused.bin", "not found.cfg"])
+@pytest.mark.parametrize(
+    "name", ["Invalid-image.bin", "refused.bin", "not found.cfg", "bytes", "copied"]
+)
 async def test_http_transfer_does_not_read_the_echoed_name_as_an_error(name):
     url = f"http://10.123.2.4:8080/api/dl/tok/{name}"
     connection = _copy_connection(
