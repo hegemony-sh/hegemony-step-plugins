@@ -289,7 +289,7 @@ def test_valid_ecdsa_key_is_accepted(curve):
 @pytest.mark.parametrize("legacy", [False, True])
 def test_security_key_authentication_is_allowed_without_widening_host_policy(legacy):
     """Enable hardware-backed client signatures without trusting new host types."""
-    from hegemony_step_sdk.ssh import asyncssh_algorithms
+    from hegemony_transport_support.ssh import asyncssh_algorithms
 
     policy = asyncssh_algorithms(asyncssh, legacy)
     options = asyncssh.SSHClientConnectionOptions(**policy)

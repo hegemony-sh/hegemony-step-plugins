@@ -25,6 +25,7 @@ from package_paths import PACKAGE_DIRS, ROOT
 
 EXPECTED_MODULES = (
     "hegemony_step_sdk",
+    "hegemony_transport_support",
     "hegemony_steps_general",
     "hegemony_steps_probe",
     "hegemony_steps_netcli",
