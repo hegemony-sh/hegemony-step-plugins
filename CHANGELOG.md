@@ -1,3 +1,19 @@
+## [0.44.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.43.2...v0.44.0) (2026-11-18)
+
+### ⚠ BREAKING CHANGES
+
+* **sdk:** hegemony_step_sdk.ssh no longer exports configure_paramiko,
+paramiko_algorithm_lists, asyncssh_algorithms, asyncssh_algorithm_lists,
+asyncssh_security_options or validate_asyncssh_client_key. A deprecated
+re-export is not possible without the SDK importing
+hegemony-transport-support. Import them from hegemony_transport_support.ssh
+(internal, no stability promise), or apply the SDK's algorithm_policy and
+validate_ssh_public_key directly.
+
+### Code Refactoring
+
+* **sdk:** move SSH library glue into hegemony-transport-support ([d923cf2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/d923cf29f2a0486b5108ad1436d3be8c7049448b))
+
 ## [0.43.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.43.1...v0.43.2) (2026-11-18)
 
 ### Bug Fixes
