@@ -17,12 +17,22 @@ checksum on the host.
 
 ## Using It
 
-Pick the file with **File Repository File**; the step takes exactly one.
-The field stores the file's id, and it also accepts a `{{ variable }}`
-template that gives one, so a run input can choose the file. A file the
-field names directly cannot be deleted from the repository while the flow
-uses it. The file must be in a repository of the run's organization, or in
-one the shared organization publishes.
+Pick the file with **File**; the step takes exactly one. Browse the file
+repositories and pick it, or type a template that gives a file reference: a
+run-form field of the "Repository file" type (`{{ inputs.firmware }}`), or
+another download step's `{{ steps.NODE_ID.output.file }}`. A reference
+names the file by its repository's name and its path there
+(`{"repository": "Internal object storage", "path": "firmware/iosxe/cat9k.bin"}`).
+The repository is looked up in the run's organization first, then in the
+shared organization. Two files with the same path in one repository are
+refused as ambiguous: remove or move one. A file the field names directly
+cannot be deleted from the repository while the flow uses it.
+
+**File by id (legacy)**, under the advanced settings, is how flows saved
+before **File** name the file: by its stored id. Such flows keep working.
+Set one of the two, not both. Naming a file by repository and path needs a
+Hegemony version that supports it; an older one fails the step and says to
+upgrade or use a file id.
 
 **Destination** is where the file goes on the target: a device filesystem
 with its colon (`flash:`, the default, or `bootflash:`), or a directory on a
@@ -92,21 +102,37 @@ Later steps can read:
   the stored file's size and checksums, for a verification step. `md5` is
   null for a file stored without one, so check it before a step uses it.
 - `steps.NODE_ID.output.transferred_count`: how many targets completed the download.
+- `steps.NODE_ID.output.repository`, `steps.NODE_ID.output.path` and
+  `steps.NODE_ID.output.folder`: the file repository's name, the file's path in
+  it (folder and file name) and its folder (empty for the repository root).
+  `steps.NODE_ID.output.repository_id` is the repository's id.
+- `steps.NODE_ID.output.content_type`, `steps.NODE_ID.output.sha512` and
+  `steps.NODE_ID.output.metadata`: the stored file's content type, SHA-512
+  (null for a file stored without one) and the metadata stored with it.
+- `steps.NODE_ID.output.file`: a file reference to the same file
+  (`{"repository": ..., "path": ...}`). Another download step takes it as
+  its **File**: `{{ steps.NODE_ID.output.file }}`.
+
+The repository keys need a Hegemony version that reports them; an older one
+leaves them null when the step names the file by id.
 
 Each target contributes a "File download" evidence artifact with what it
 printed during the transfer, the file's details and the time taken; the
-download link is replaced by a placeholder there. A target that fails
+download link is replaced by a placeholder there. It also names the file's
+repository, path and checksums. A target that fails
 contributes an "Error" artifact instead. Metrics record `device_count`,
 `transferred_count` and `size_bytes`.
 
 ## When It Fails
 
 The step fails immediately when no target devices are configured, when no
-file or more than one is selected, when Destination or Destination Filename
+file or more than one is selected, when both File and File by id (legacy) are
+set, when File is not a file reference, when Destination or Destination Filename
 contains a line break, another control character or a question mark, when
 Destination Filename
 has a directory part, and on a platform that cannot issue download links. Per target, it fails when the device has no management host,
-when the file is not one the run's organization may read, when the stored
+when the file is not one the run's organization may read or its path is
+ambiguous, when the platform cannot open files by repository and path, when the stored
 file's name contains a control character, a question mark or a directory part
 and no
 Destination Filename is set,

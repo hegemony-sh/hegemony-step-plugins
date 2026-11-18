@@ -15,12 +15,22 @@ to Device) instead.
 
 ## Using It
 
-Pick the file with **File Repository File**; the step takes exactly one. The
-field stores the file's id, and it also accepts a `{{ variable }}` template
-that gives one, so a run input can choose the file. A file the field names
-directly cannot be deleted from the repository while the flow uses it. The
-file must be in a repository of the run's organization, or in one the shared
-organization publishes.
+Pick the file with **File**; the step takes exactly one. Browse the file
+repositories and pick it, or type a template that gives a file reference: a
+run-form field of the "Repository file" type (`{{ inputs.package }}`), or
+another download step's `{{ steps.NODE_ID.output.file }}`. A reference
+names the file by its repository's name and its path there
+(`{"repository": "Internal object storage", "path": "releases/app-release-1.4.2.tar.gz"}`).
+The repository is looked up in the run's organization first, then in the
+shared organization. Two files with the same path in one repository are
+refused as ambiguous: remove or move one. A file the field names directly
+cannot be deleted from the repository while the flow uses it.
+
+**File by id (legacy)**, under the advanced settings, is how flows saved
+before **File** name the file: by its stored id. Such flows keep working.
+Set one of the two, not both. Naming a file by repository and path needs a
+Hegemony version that supports it; an older one fails the step and says to
+upgrade or use a file id.
 
 **Destination Directory** is the directory the file goes into, as an absolute
 path (`/var/tmp` by default). It must exist, and the account the step logs in
@@ -107,21 +117,36 @@ Later steps can read:
   checksum check.
 - `steps.NODE_ID.output.transferred_count`: how many hosts completed the
   download.
+- `steps.NODE_ID.output.repository`, `steps.NODE_ID.output.path` and
+  `steps.NODE_ID.output.folder`: the file repository's name, the file's path in
+  it (folder and file name) and its folder (empty for the repository root).
+  `steps.NODE_ID.output.repository_id` is the repository's id.
+- `steps.NODE_ID.output.content_type`, `steps.NODE_ID.output.sha512` and
+  `steps.NODE_ID.output.metadata`: the stored file's content type, SHA-512
+  (null for a file stored without one) and the metadata stored with it.
+- `steps.NODE_ID.output.file`: a file reference to the same file
+  (`{"repository": ..., "path": ...}`). Another download step takes it as
+  its **File**: `{{ steps.NODE_ID.output.file }}`.
+
+The repository keys need a Hegemony version that reports them; an older one
+leaves them null when the step names the file by id.
 
 Each host contributes a "File download" evidence artifact with the file's
-details and where it went. A host that fails contributes an "Error" artifact
+details (repository, path and checksums included) and where it went. A host that fails contributes an "Error" artifact
 instead; the download link never appears in either. Metrics record
 `device_count`, `transferred_count` and `size_bytes`.
 
 ## When It Fails
 
 The step fails immediately when no target devices are configured, when no
-file or more than one is selected, when Destination Directory is not an
+file or more than one is selected, when both File and File by id (legacy) are
+set, when File is not a file reference, when Destination Directory is not an
 absolute path, when Destination Directory or Destination Filename contains a
 line break or another control character, when Destination Filename has a
 directory part, and on a platform that cannot issue download links. Per host,
 it fails when the device has no management host, when the connection fails,
-when the file is not one the run's organization may read, when the stored
+when the file is not one the run's organization may read or its path is
+ambiguous, when the platform cannot open files by repository and path, when the stored
 file's name contains a control character or a directory part and no
 Destination Filename is set, when the platform has no
 `HEGEMONY_API_EXTERNAL_URL`, when `curl` fails (it is not installed, the host

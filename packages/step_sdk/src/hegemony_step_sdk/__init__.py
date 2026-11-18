@@ -37,6 +37,7 @@ from .contract import (
     resolve_target_devices_for_roles,
 )
 from .enums import StepKind
+from .file_refs import FileRef, parse_file_ref
 from .probes import (
     PROBE_ENTRY_POINT_GROUP,
     BaseProbe,
@@ -104,6 +105,7 @@ __all__ = [
     "DeviceConnectionSpec",
     "DeviceCredentials",
     "FileDownload",
+    "FileRef",
     "HandlerContext",
     "HandlerResult",
     "HandlerServices",
@@ -128,5 +130,6 @@ __all__ = [
     "__version__",
     "for_each_target_device",
     "max_parallel_from_config",
+    "parse_file_ref",
     "resolve_target_devices_for_roles",
 ]

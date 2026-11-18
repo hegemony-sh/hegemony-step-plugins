@@ -144,7 +144,11 @@ def test_handler_services_declares_open_file_download():
     # Not a coroutine: it returns an async context manager, like open_state_backend.
     assert not inspect.iscoroutinefunction(sdk.HandlerServices.open_file_download)
     parameters = inspect.signature(sdk.HandlerServices.open_file_download).parameters
-    assert list(parameters) == ["self", "file_id", "ttl_seconds"]
+    assert list(parameters) == ["self", "file_id", "repository", "path", "ttl_seconds"]
+    assert parameters["file_id"].default is None
+    for name in ("repository", "path"):
+        assert parameters[name].default is None
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
     assert parameters["ttl_seconds"].default == 600
     assert parameters["ttl_seconds"].kind is inspect.Parameter.KEYWORD_ONLY
     with pytest.raises(NotImplementedError):
@@ -165,6 +169,69 @@ def test_a_file_download_keeps_its_links_out_of_its_repr():
     )
     assert "hgm_run_secret" not in repr(download)
     assert download.md5 is None
+    # Fields added later default, so a host that does not set them still builds one.
+    assert download.repository == download.repository_id == ""
+    assert download.path == download.folder == ""
+    assert download.content_type is None and download.sha512 is None
+    assert download.metadata == {}
+
+
+def test_handlers_render_no_config_key_natively_unless_they_ask():
+    assert sdk.BaseHandler.native_config_keys == frozenset()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"repository": "Internal object storage", "path": "firmware/iosxe/cat9k.bin"},
+        [{"repository": "Internal object storage", "path": "firmware/iosxe/cat9k.bin"}],
+        '{"repository": "Internal object storage", "path": "firmware/iosxe/cat9k.bin"}',
+        '[{"repository": "Internal object storage", "path": "firmware/iosxe/cat9k.bin"}]',
+        "{'repository': 'Internal object storage', 'path': 'firmware/iosxe/cat9k.bin'}",
+        # What a run-form field resolves to: extra keys are ignored.
+        {
+            "repository": "Internal object storage",
+            "path": "firmware/iosxe/cat9k.bin",
+            "folder": "firmware/iosxe",
+            "filename": "cat9k.bin",
+        },
+        {"repository": " Internal object storage ", "path": "/firmware/iosxe/cat9k.bin"},
+    ],
+)
+def test_a_file_ref_is_read_from_every_form_a_step_receives(value):
+    ref = sdk.parse_file_ref(value)
+    assert ref == sdk.FileRef(repository="Internal object storage", path="firmware/iosxe/cat9k.bin")
+    assert ref.as_dict() == {
+        "repository": "Internal object storage",
+        "path": "firmware/iosxe/cat9k.bin",
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ({"path": "a.bin"}, "missing repository"),
+        ({"repository": "Repo"}, "missing path"),
+        ({}, "missing repository and path"),
+        ({"repository": "", "path": "a.bin"}, "missing repository"),
+        ({"repository": "Repo", "path": "  "}, "missing path"),
+        ({"repository": "Repo", "path": "/"}, "missing path"),
+        ({"repository": 1, "path": "a.bin"}, "missing repository"),
+        ([{"repository": "R", "path": "a"}, {"repository": "R", "path": "b"}], "exactly one"),
+        ([], "empty list"),
+        ("", "empty"),
+        ("   ", "empty"),
+        ("firmware/cat9k.bin", "not a file reference"),
+        ('"text"', "not a file reference"),
+        ("42", "not a file reference"),
+        (42, "not a file reference"),
+        (None, "not a file reference"),
+        (["a.bin"], "not a file reference"),
+    ],
+)
+def test_anything_else_is_refused_with_a_clear_message(value, message):
+    with pytest.raises(ValueError, match=message):
+        sdk.parse_file_ref(value)
 
 
 def test_the_secret_store_defaults_say_a_host_does_not_support_them():

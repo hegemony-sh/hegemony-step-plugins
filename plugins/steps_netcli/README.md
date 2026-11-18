@@ -14,6 +14,13 @@ handler layer from device access config.
 
 Handlers: `netcli.execute`, `netcli.collect_evidence`, `netcli.file_download`.
 
+`netcli.file_download` names its file by repository and path in **File**: picked
+in the editor, or from a "Repository file" run-form field
+(`file: "{{ inputs.firmware }}"`). Its output carries the file's repository,
+path, checksums and metadata, and a reference to it
+(`{{ steps.<id>.output.file }}`) that a later step takes as its own **File**.
+Flows that name the file by id (`file_ids`) keep working.
+
 Namespace prefix (= entry-point name): `netcli.` — see the repo-level
 `CONVENTIONS.md` for the naming rules.
 

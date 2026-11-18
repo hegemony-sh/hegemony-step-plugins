@@ -362,6 +362,12 @@ class BaseHandler(ABC):
     # instead reach the handler as raw templates (the handler renders them itself
     # with its own context, e.g. the notification single-JIT renderer).
     raw_config_keys: frozenset[str] = frozenset()
+    # Config keys whose value, when it is one whole ``{{ }}`` expression, is
+    # rendered to the native value (a dict, a list) instead of its text, so
+    # ``"{{ inputs.firmware }}"`` reaches the handler as the file reference
+    # the run form resolved. Hosts older than this attribute render text; a
+    # handler parses such text itself (``parse_file_ref`` does).
+    native_config_keys: frozenset[str] = frozenset()
 
     # --- Registry/editor metadata (served via the step-handler-types endpoint) ---
 
