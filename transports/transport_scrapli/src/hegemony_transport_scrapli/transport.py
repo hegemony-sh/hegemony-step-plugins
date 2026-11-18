@@ -1309,7 +1309,10 @@ class ScrapliTransport:
                     break
                 output += chunk
 
-                answer = _copy_answer(output, url, dest_fs, dest_filename)
+                # Complete lines only: a read can end inside an echoed URL, whose
+                # partial text would not be removed and could hold a marker.
+                complete = output[: output.rfind("\n") + 1]
+                answer = _copy_answer(complete, url, dest_fs, dest_filename)
                 if any(marker in answer for marker in _COPY_DONE_MARKERS):
                     break
                 if "Destination filename" in output and not dest_filename_handled:
