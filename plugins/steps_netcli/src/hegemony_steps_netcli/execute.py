@@ -59,9 +59,10 @@ class ExecuteCliConfig(SshSecurityConfig):
             "fails the command with the line the device is waiting at. Applies to "
             "commands run at the exec prompt, not to configuration lines."
         ),
-        # Set in the flow's YAML for now: the editor form has no widget for a
-        # list of entries, and a text field would overwrite it.
-        json_schema_extra={"x_hidden": True},
+        # One row per entry in the step form; an editor without the widget
+        # would show the list as text, so the platform pins this release only
+        # once it has the widget.
+        json_schema_extra={"x_widget": "cli-prompts", "x_col_span": 2},
     )
     max_parallel_devices: int = Field(
         default=1,

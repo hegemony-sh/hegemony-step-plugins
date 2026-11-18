@@ -93,10 +93,11 @@ applies to each wait, from the command or an answer to the next question or
 the prompt. An answer can hold a `{{ secret(...) }}` reference; it is masked
 like other secret values.
 
-Prompts apply to commands run at the exec prompt, not to configuration lines,
-and need the netmiko or scrapli transport; with another transport the step
-fails rather than skip them. They are set in the flow's YAML: the editor form
-does not show them yet, and keeps them when the step is saved.
+In the step form, Answers to questions has one row per entry: the command
+pattern, the question, the answer and "Every time" (`repeat`). Prompts apply
+to commands run at the exec prompt, not to configuration lines, and need the
+netmiko or scrapli transport; with another transport the step fails rather
+than skip them.
 
 ## SSH Compatibility
 
