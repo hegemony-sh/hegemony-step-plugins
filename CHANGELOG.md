@@ -1,3 +1,13 @@
+## [0.43.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.43.1...v0.43.2) (2026-11-18)
+
+### Bug Fixes
+
+* **transport-netmiko:** judge a copy's progress on complete lines only ([f4c9aeb](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f4c9aebedab13aea37407bb705b1d14ba5fc8e17))
+* **transport-netmiko:** read a copy's outcome without the inputs it echoes ([7d601e5](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7d601e5096dbbd2165f617dfc626bd34a76b8375))
+* **transport-netmiko:** strip a copy's file name only where it is echoed ([45db016](https://github.com/hegemony-sh/hegemony-step-plugins/commit/45db0169f7e03e04e36cc29ba08ac54dae829f18))
+* **transport-scrapli:** judge a copy's progress on complete lines only ([39c08ab](https://github.com/hegemony-sh/hegemony-step-plugins/commit/39c08ab2a36249ec4b89a4e88ba66c540f76dbec))
+* **transport-scrapli:** strip a copy's file name only where it is echoed ([417dc39](https://github.com/hegemony-sh/hegemony-step-plugins/commit/417dc392d8c3cd4858eba944a4b021a95044f758))
+
 ## [0.43.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.43.0...v0.43.1) (2026-11-17)
 
 ### Bug Fixes
