@@ -58,7 +58,8 @@ def parse_file_ref(value: Any) -> FileRef:
 
     Accepts a dict with non-empty ``repository`` and ``path`` text, a list
     with exactly one such dict, or either as JSON or Python-literal text.
-    A leading slash on ``path`` is dropped.
+    A leading slash on ``path`` is dropped; spaces in it are kept, since a
+    stored file name may start or end with one.
     """
     if isinstance(value, str):
         text = value.strip()
@@ -85,7 +86,9 @@ def parse_file_ref(value: Any) -> FileRef:
     if missing:
         raise ValueError(f"File reference is missing {' and '.join(missing)}")
     repository = value["repository"].strip()
-    path = value["path"].strip().lstrip("/")
-    if not path:
+    # Only slashes are trimmed: a stored file name may end in a space, and the
+    # path must still name that file.
+    path = value["path"].lstrip("/")
+    if not path.strip():
         raise ValueError("File reference is missing path")
     return FileRef(repository=repository, path=path)

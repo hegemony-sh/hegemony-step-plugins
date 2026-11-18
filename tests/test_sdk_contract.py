@@ -207,6 +207,13 @@ def test_a_file_ref_is_read_from_every_form_a_step_receives(value):
     }
 
 
+def test_spaces_in_a_file_refs_path_are_kept():
+    """A stored file name may end in a space; the path must still name that file."""
+    ref = sdk.parse_file_ref({"repository": "Repo", "path": "/fw/image.bin "})
+
+    assert ref.path == "fw/image.bin "
+
+
 @pytest.mark.parametrize(
     ("value", "message"),
     [
