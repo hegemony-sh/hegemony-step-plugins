@@ -112,9 +112,10 @@ def waiting_at(output: str) -> str:
 class PromptDialogue:
     """What to send for one command, given what the device has printed.
 
-    Each entry answers once per command unless it repeats. An entry that
-    matches again after its one answer, or more than ``MAX_PROMPT_ANSWERS``
-    answers in all, ends the dialogue with :class:`CliPromptError`.
+    Each entry answers once per command unless it repeats; the first entry
+    that matches and is not spent answers. A question only spent entries
+    match, or more than ``MAX_PROMPT_ANSWERS`` answers in all, ends the
+    dialogue with :class:`CliPromptError`.
     """
 
     def __init__(self, prompts: Sequence[CliPrompt]) -> None:
@@ -127,14 +128,14 @@ class PromptDialogue:
         line = last_line(output)
         if not line:
             return None
+        asked_again = False
         for index, prompt in enumerate(self._prompts):
             if not re.search(prompt.expect, line):
                 continue
             if index in self._used and not prompt.repeat:
-                raise CliPromptError(
-                    f"The device asked {line!r} again; that answer is given once per "
-                    "command (set repeat to answer it every time)"
-                )
+                # Spent: a later entry for the same question may still answer.
+                asked_again = True
+                continue
             self._answers += 1
             if self._answers > MAX_PROMPT_ANSWERS:
                 raise CliPromptError(
@@ -142,4 +143,9 @@ class PromptDialogue:
                 )
             self._used.add(index)
             return prompt.answer
+        if asked_again:
+            raise CliPromptError(
+                f"The device asked {line!r} again; that answer is given once per "
+                "command (set repeat to answer it every time)"
+            )
         return None

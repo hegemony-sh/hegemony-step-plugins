@@ -542,6 +542,14 @@ _PROMPT_POLL_SECONDS = 0.2
 _MAX_COPY_ANSWERS = 2
 
 
+#: The questions a copy to startup-config asks, answered with Enter as the
+#: built-in dialogue does, after any the step lists itself.
+_STARTUP_COPY_PROMPTS = (
+    CliPrompt(expect=r"Destination filename \[[^\]\n]*\]\?"),
+    CliPrompt(expect=r"\[confirm\]"),
+)
+
+
 def _is_startup_copy(command: str) -> bool:
     """'copy <source> startup-config', the destination in any abbreviation."""
     words = command.lower().split()
@@ -1064,6 +1072,9 @@ class SSHTransport:
                 connection.write_channel("\n")
                 raw_output = connection.read_channel()
             elif prompts := prompts_for(command, self._cli_prompts):
+                if _is_startup_copy(command):
+                    # The flow's entries first; the copy's own questions still answered.
+                    prompts = [*prompts, *_STARTUP_COPY_PROMPTS]
                 raw_output = self._send_with_prompts(connection, command, prompts)
             elif _is_startup_copy(command):
                 raw_output = self._send_startup_copy(connection, command)

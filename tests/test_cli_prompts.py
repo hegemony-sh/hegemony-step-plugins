@@ -68,6 +68,17 @@ def test_each_entry_answers_once_and_matches_the_last_line_only():
         dialogue.answer_for("Delete flash:b.bin? [confirm]")
 
 
+def test_a_spent_entry_lets_a_later_one_for_the_same_question_answer():
+    dialogue = PromptDialogue(
+        [CliPrompt(expect=r"\[confirm\]", answer="y"), CliPrompt(expect=r"\[confirm\]")]
+    )
+
+    assert dialogue.answer_for("Proceed? [confirm]") == "y"
+    assert dialogue.answer_for("Really? [confirm]") == ""
+    with pytest.raises(CliPromptError, match="again"):
+        dialogue.answer_for("Sure? [confirm]")
+
+
 def test_a_repeating_entry_answers_every_time_up_to_the_limit():
     dialogue = PromptDialogue([CliPrompt(expect=r"\[confirm\]", answer="y", repeat=True)])
 
@@ -144,3 +155,17 @@ async def test_without_prompts_a_timeout_suggests_listing_the_question(servers, 
     [result] = results
     assert result.exit_code == -1
     assert "list it under prompts" in result.error
+
+
+@pytest.mark.asyncio
+async def test_a_save_keeps_its_own_answers_beside_a_prompt_for_every_command(
+    servers, transport_id
+):
+    """A flow-wide [confirm] entry must not take the save's destination question away."""
+    results = await _run(
+        servers, transport_id, [CliPrompt(expect=r"\[confirm\]")], ["copy run start"]
+    )
+
+    [result] = results
+    assert result.exit_code == 0, result.error
+    assert "[OK]" in result.output

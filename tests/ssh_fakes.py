@@ -170,6 +170,10 @@ async def _session(process: asyncssh.SSHServerProcess) -> None:
             await _copy_dialogue(process, command)
         elif command.startswith("delete "):
             await _delete_dialogue(process, command)
+        elif command == "copy run start":
+            process.stdout.write("Destination filename [startup-config]? ")
+            await process.stdin.readline()
+            process.stdout.write("\r\nBuilding configuration...\r\n[OK]\r\n")
         elif command and not command.startswith("terminal"):
             process.stdout.write(f"output of {command}\r\n")
         process.stdout.write(PROMPT)
