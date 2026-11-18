@@ -106,7 +106,9 @@ def last_line(output: str) -> str:
 def waiting_at(output: str) -> str:
     """Where a command stopped, for an error message."""
     line = last_line(output)
-    return f"the device is waiting at: {line!r}" if line else "the device printed nothing"
+    # Quoted as printed, not with repr: escaping would double a backslash in
+    # an echoed secret, and the host masks a secret by its literal value.
+    return f'the device is waiting at: "{line}"' if line else "the device printed nothing"
 
 
 class PromptDialogue:
@@ -145,7 +147,7 @@ class PromptDialogue:
             return prompt.answer
         if asked_again:
             raise CliPromptError(
-                f"The device asked {line!r} again; that answer is given once per "
+                f'The device asked "{line}" again; that answer is given once per '
                 "command (set repeat to answer it every time)"
             )
         return None

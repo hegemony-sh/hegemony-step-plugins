@@ -26,6 +26,7 @@ from hegemony_step_sdk.cli_prompts import (
     CliPromptError,
     PromptDialogue,
     prompts_for,
+    waiting_at,
 )
 from hegemony_transport_netmiko.transport import SSHTransport
 from hegemony_transport_scrapli.transport import ScrapliTransport
@@ -77,6 +78,18 @@ def test_a_spent_entry_lets_a_later_one_for_the_same_question_answer():
     assert dialogue.answer_for("Really? [confirm]") == ""
     with pytest.raises(CliPromptError, match="again"):
         dialogue.answer_for("Sure? [confirm]")
+
+
+def test_a_device_line_is_quoted_as_printed_so_a_secret_in_it_stays_maskable():
+    """The host masks a secret by its literal value; repr would double a backslash."""
+    line = r"Password for Svc\Admin: s3cr\et"
+
+    assert line in waiting_at(f"x\n{line}")
+    dialogue = PromptDialogue([CliPrompt(expect="Password")])
+    dialogue.answer_for(line)
+    with pytest.raises(CliPromptError) as asked:
+        dialogue.answer_for(line)
+    assert line in str(asked.value)
 
 
 def test_a_repeating_entry_answers_every_time_up_to_the_limit():
@@ -144,7 +157,7 @@ async def test_a_question_nobody_listed_names_the_line_the_device_waits_at(serve
 
     [result] = results
     assert result.exit_code == -1
-    assert "the device is waiting at: 'Delete flash:mega.jpg? [confirm]'" in result.error
+    assert 'the device is waiting at: "Delete flash:mega.jpg? [confirm]"' in result.error
     assert "under prompts" in result.error
 
 
@@ -169,3 +182,19 @@ async def test_a_save_keeps_its_own_answers_beside_a_prompt_for_every_command(
     [result] = results
     assert result.exit_code == 0, result.error
     assert "[OK]" in result.output
+
+
+@pytest.mark.asyncio
+async def test_after_a_question_nobody_answered_the_next_command_is_not_sent(servers, transport_id):
+    """Its text would be taken as the answer to the question still pending."""
+    results = await _run(
+        servers,
+        transport_id,
+        DELETE_PROMPTS[:1],
+        ["delete flash:mega.jpg", "show flash"],
+        timeout=1.0,
+    )
+
+    assert [r.exit_code for r in results] == [-1, -1]
+    assert results[1].command == "show flash"
+    assert "left the device waiting at a question" in (results[1].error or "")

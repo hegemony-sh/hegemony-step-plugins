@@ -549,6 +549,10 @@ _STARTUP_COPY_PROMPTS = (
     CliPrompt(expect=r"\[confirm\]"),
 )
 
+#: Error of a result for a command not run because an earlier one may have left
+#: the device at a question: its text would be taken as the answer.
+_LEFT_WAITING_ERROR = "Skipped: an earlier command may have left the device waiting at a question"
+
 
 def _is_startup_copy(command: str) -> bool:
     """'copy <source> startup-config', the destination in any abbreviation."""
@@ -657,6 +661,8 @@ class SSHTransport:
     #: Feature flag: ``configure_cli_prompts`` answers the questions a step lists.
     supports_cli_prompts = True
     _cli_prompts: tuple[CliPrompt, ...] = ()
+    #: Set when a command may have left the device at a question.
+    _left_waiting = False
 
     def configure_cli_prompts(self, prompts: Sequence[CliPrompt]) -> None:
         """Set the questions the step's commands may ask, and what to answer."""
@@ -1089,6 +1095,9 @@ class SSHTransport:
             latency_ms = (time.perf_counter() - start) * 1000
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             error = self._exception_error(e)
+            if isinstance(e, (ReadTimeout, CliPromptError)):
+                # The device may still be waiting at a question.
+                self._left_waiting = True
             if isinstance(e, ReadTimeout):
                 # The device may be waiting at a question the step did not list.
                 error += "; if the command asks a question, list it under prompts"
@@ -1143,19 +1152,20 @@ class SSHTransport:
         while True:
             if self._cancellation_registry.is_cancelled(self.step_run_id):
                 raise CliPromptError("The step was cancelled while the command ran")
+            expired = time.monotonic() >= deadline
             chunk = connection.read_channel()
             if chunk:
                 output += chunk
                 recent = output[since_answer:]
                 if last_line(recent) == prompt:
                     break
-                answer = dialogue.answer_for(recent)
+                answer = None if expired else dialogue.answer_for(recent)
                 if answer is not None:
                     connection.write_channel(answer + connection.RETURN)
                     since_answer = len(output)
                     deadline = time.monotonic() + self.command_timeout
                     continue
-            if time.monotonic() >= deadline:
+            if expired or time.monotonic() >= deadline:
                 raise CliPromptError(
                     f"Timed out after {self.command_timeout:g} seconds; {waiting_at(output)} "
                     "(list that question under prompts if the command should answer it)"
@@ -1353,9 +1363,17 @@ class SSHTransport:
                     if any(r.exit_code != 0 for r in step_results):
                         skip_reason = self._skip_reason()
             else:
-                # Execute show/exec commands individually
-                for command in commands:
+                # Execute show/exec commands individually. After a command that
+                # may have left the device at a question, the next one would be
+                # taken as the answer, so the rest are not sent.
+                self._left_waiting = False
+                for index, command in enumerate(commands):
                     results.append(self._run_exec_command(connection, command))
+                    if self._left_waiting:
+                        results.extend(
+                            _skipped(cmd, _LEFT_WAITING_ERROR) for cmd in commands[index + 1 :]
+                        )
+                        break
 
         except NetmikoAuthenticationException as e:
             logger.error(f"Authentication failed to {self.host}: {e}")

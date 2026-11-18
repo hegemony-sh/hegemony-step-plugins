@@ -354,6 +354,10 @@ _STARTUP_COPY_PROMPTS = (
     CliPrompt(expect=r"\[confirm\]"),
 )
 
+#: Error of a result for a command not run because an earlier one may have left
+#: the device at a question: its text would be taken as the answer.
+_LEFT_WAITING_ERROR = "Skipped: an earlier command may have left the device waiting at a question"
+
 
 def _is_startup_copy(command: str) -> bool:
     """'copy <source> startup-config', the destination in any abbreviation."""
@@ -460,6 +464,8 @@ class ScrapliTransport:
     #: Feature flag: ``configure_cli_prompts`` answers the questions a step lists.
     supports_cli_prompts = True
     _cli_prompts: tuple[CliPrompt, ...] = ()
+    #: Set when a command may have left the device at a question.
+    _left_waiting = False
 
     def configure_cli_prompts(self, prompts: Sequence[CliPrompt]) -> None:
         """Set the questions the step's commands may ask, and what to answer."""
@@ -888,6 +894,9 @@ class ScrapliTransport:
         except Exception as e:
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             error = str(e)
+            if isinstance(e, (ScrapliTimeout, CliPromptError)):
+                # The device may still be waiting at a question.
+                self._left_waiting = True
             if isinstance(e, ScrapliTimeout):
                 # The device may be waiting at a question the step did not list.
                 error += "; if the command asks a question, list it under prompts"
@@ -913,6 +922,10 @@ class ScrapliTransport:
         prompt = re.compile(exec_prompt.pattern, flags=re.I | re.M)
         dialogue = PromptDialogue(prompts)
         started = time.perf_counter()
+        # send_command would return to the exec prompt first (a configuration
+        # block before this command leaves configuration mode open); the raw
+        # write below does not, so do it here.
+        await connection.acquire_priv(connection.default_desired_privilege_level)
         connection.channel.write(command + "\n")
         output = ""
         # Where the output after the latest answer starts: the question just
@@ -922,7 +935,12 @@ class ScrapliTransport:
         while True:
             if self._cancellation_registry.is_cancelled(self.step_run_id):
                 raise CliPromptError("The step was cancelled while the command ran")
-            chunk = await self._read_channel_chunk(connection)
+            # Each read waits no longer than the command has left, so a question
+            # that comes after the timeout is not answered.
+            remaining = deadline - time.monotonic()
+            chunk = await self._read_channel_chunk(
+                connection, timeout=max(min(_TIMING_POLL_SECONDS, remaining), 0.01)
+            )
             if chunk is None:
                 raise CliPromptError(f"The connection closed; {waiting_at(output)}")
             if chunk:
@@ -930,7 +948,7 @@ class ScrapliTransport:
                 recent = output[since_answer:]
                 if prompt.fullmatch(last_line(recent)):
                     break
-                answer = dialogue.answer_for(recent)
+                answer = None if time.monotonic() >= deadline else dialogue.answer_for(recent)
                 if answer is not None:
                     connection.channel.write(answer + "\n")
                     since_answer = len(output)
@@ -1063,7 +1081,17 @@ class ScrapliTransport:
                     if any(r.exit_code != 0 for r in step_results):
                         skip_reason = self._skip_reason()
             else:
-                for command in commands:
+                # After a command that may have left the device at a question,
+                # the next one would be taken as the answer: the rest are not sent.
+                self._left_waiting = False
+                for index, command in enumerate(commands):
+                    if self._left_waiting:
+                        results.extend(
+                            _skipped(cmd, _LEFT_WAITING_ERROR)
+                            for cmd in commands[index:]
+                            if cmd.strip()
+                        )
+                        break
                     if not command.strip():
                         continue
                     if self._cancellation_registry.is_cancelled(self.step_run_id):
@@ -1138,7 +1166,7 @@ class ScrapliTransport:
             )
         )
 
-    async def _read_channel_chunk(self, connection) -> str | None:
+    async def _read_channel_chunk(self, connection, timeout: float | None = None) -> str | None:
         """One channel read, bounded by ``_TIMING_POLL_SECONDS``.
 
         Returns the decoded text (empty when nothing arrived within the poll
@@ -1151,7 +1179,9 @@ class ScrapliTransport:
         Cancelling the read leaves unread data in asyncssh's buffer.
         """
         try:
-            chunk = await asyncio.wait_for(connection.channel.read(), _TIMING_POLL_SECONDS)
+            chunk = await asyncio.wait_for(
+                connection.channel.read(), _TIMING_POLL_SECONDS if timeout is None else timeout
+            )
         except TimeoutError:
             return ""
         except ScrapliTimeout as read_err:
