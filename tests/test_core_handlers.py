@@ -1489,3 +1489,93 @@ async def test_collect_evidence_keeps_devices_that_share_a_name_apart():
 
     assert result.output is not None
     assert sorted(result.output["devices"]) == ["core", "edge (d1)", "edge (d2)"]
+
+
+class _PromptTransport:
+    """A transport that records the prompts the step hands it."""
+
+    def __init__(self, *, answers_prompts: bool = True) -> None:
+        self.prompts: list[Any] | None = None
+        if answers_prompts:
+            self.configure_cli_prompts = self._configure
+
+    def _configure(self, prompts) -> None:
+        self.prompts = list(prompts)
+
+    async def execute_commands(self, commands):
+        class _Result:
+            def __init__(self, command: str) -> None:
+                self.command = command
+                self.output = ""
+                self.exit_code = 0
+                self.error = None
+                self.latency_ms = 1.0
+
+        return [_Result(c) for c in commands]
+
+
+class _OneTransport:
+    def __init__(self, transport: _PromptTransport) -> None:
+        self.transport = transport
+
+    def connect(self, device, **kwargs):
+        return self.transport
+
+
+_DELETE_PROMPTS = [
+    {"command": "^delete ", "expect": r"Delete filename \[.*\]\?"},
+    {"command": "^delete ", "expect": r"\[confirm\]", "answer": "", "repeat": False},
+]
+
+
+async def test_execute_cli_hands_the_listed_prompts_to_the_transport():
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    transport = _PromptTransport()
+    result = await ExecuteCLIActionHandler().execute(
+        _netcli_ctx(
+            _OneTransport(transport), commands=["delete flash:a.bin"], prompts=_DELETE_PROMPTS
+        )
+    )
+
+    assert result.success is True, result.error
+    assert transport.prompts is not None
+    assert [p.expect for p in transport.prompts] == [p["expect"] for p in _DELETE_PROMPTS]
+
+
+async def test_execute_cli_without_prompts_leaves_the_transport_as_it_was():
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    transport = _PromptTransport()
+    result = await ExecuteCLIActionHandler().execute(_netcli_ctx(_OneTransport(transport)))
+
+    assert result.success is True, result.error
+    assert transport.prompts is None
+
+
+async def test_execute_cli_refuses_prompts_a_transport_cannot_answer():
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    result = await ExecuteCLIActionHandler().execute(
+        _netcli_ctx(
+            _OneTransport(_PromptTransport(answers_prompts=False)),
+            commands=["delete flash:a.bin"],
+            prompts=_DELETE_PROMPTS,
+        )
+    )
+
+    assert result.success is False
+    assert "cannot answer prompts" in (result.error or "")
+
+
+async def test_execute_cli_rejects_an_invalid_prompt_before_connecting():
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    services = _RecordingConnects()
+    result = await ExecuteCLIActionHandler().execute(
+        _netcli_ctx(services, prompts=[{"expect": "("}])
+    )
+
+    assert result.success is False
+    assert (result.error or "").startswith("Invalid prompts:")
+    assert services.calls == []

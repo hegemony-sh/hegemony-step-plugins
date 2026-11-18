@@ -63,6 +63,41 @@ transport, a configuration block that holds a `banner`, `macro name` or
 `crypto pki certificate chain` line takes about two seconds a line: free
 text gets no prompt back, so each line waits for the device to go quiet.
 
+## Commands That Ask Questions
+
+Some commands stop at a question before the device prompt returns, such as
+the file name and `[confirm]` of a `delete`. The step waits for the prompt,
+so such a command runs into the command timeout, and the error then
+suggests listing the question. List the questions a command may ask, and
+what to answer, under `prompts`:
+
+```yaml
+commands:
+  - delete flash:old-image.bin
+prompts:
+  - command: '^delete '               # regular expression on the command text
+    expect: 'Delete filename \[.*\]\?'  # regular expression on the last line
+    answer: ''                        # empty: Enter alone
+  - command: '^delete '
+    expect: '\[confirm\]'
+```
+
+Each entry applies to the commands its `command` pattern finds (an empty
+`command` applies it to every command), and is matched against the last line
+the device printed. It answers once per command; set `repeat: true` to answer
+it every time it is asked, such as the per-file confirmations of a
+`delete /recursive`, up to 50 answers. Only listed questions are answered: a
+question nobody listed, or a question asked again after its one answer, fails
+the command with the line the device is waiting at. The command timeout
+applies to each wait, from the command or an answer to the next question or
+the prompt. An answer can hold a `{{ secret(...) }}` reference; it is masked
+like other secret values.
+
+Prompts apply to commands run at the exec prompt, not to configuration lines,
+and need the netmiko or scrapli transport; with another transport the step
+fails rather than skip them. They are set in the flow's YAML: the editor form
+does not show them yet, and keeps them when the step is saved.
+
 ## SSH Compatibility
 
 Allow legacy SSH algorithms defaults to off. Enable `allow_legacy_ssh` only

@@ -8,7 +8,7 @@
 import logging
 from dataclasses import dataclass, field
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
 
 from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
@@ -22,11 +22,14 @@ from hegemony_step_sdk import (
     for_each_target_device,
     max_parallel_from_config,
 )
+from hegemony_step_sdk.cli_prompts import CliPrompt
 from hegemony_step_sdk.ssh import SshSecurityConfig, configure_ssh_security
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 30
+
+_PROMPTS = TypeAdapter(list[CliPrompt])
 
 
 class ExecuteCliConfig(SshSecurityConfig):
@@ -44,6 +47,21 @@ class ExecuteCliConfig(SshSecurityConfig):
             "x_rows": 3,
             "x_col_span": 2,
         },
+    )
+    prompts: list[CliPrompt] = Field(
+        default_factory=list,
+        title="Answers to questions",
+        description=(
+            "Questions a command may ask before the device prompt returns, and what to "
+            "answer, such as the 'Delete filename [x]?' and '[confirm]' of a delete. Each "
+            "entry names the commands it applies to by a pattern, and answers once per "
+            "command unless it repeats. Only listed questions are answered; any other "
+            "fails the command with the line the device is waiting at. Applies to "
+            "commands run at the exec prompt, not to configuration lines."
+        ),
+        # Set in the flow's YAML for now: the editor form has no widget for a
+        # list of entries, and a text field would overwrite it.
+        json_schema_extra={"x_hidden": True},
     )
     max_parallel_devices: int = Field(
         default=1,
@@ -119,6 +137,15 @@ class ExecuteCLIActionHandler(BaseHandler):
                 summary="Missing command configuration",
             )
 
+        try:
+            prompts = _PROMPTS.validate_python(ctx.config.get("prompts") or [])
+        except ValidationError as exc:
+            return HandlerResult(
+                success=False,
+                error=f"Invalid prompts: {exc.errors()[0].get('msg', exc)}",
+                summary="Prompt configuration error",
+            )
+
         services = ctx.require_services()
         command_timeout = float(
             ctx.config.get("command_timeout_seconds") or _DEFAULT_COMMAND_TIMEOUT_SECONDS
@@ -144,6 +171,14 @@ class ExecuteCLIActionHandler(BaseHandler):
                     step_run_id=ctx.step_run_id,
                 )
                 configure_ssh_security(ssh, ctx.config.get("allow_legacy_ssh", False))
+                if prompts:
+                    set_prompts = getattr(ssh, "configure_cli_prompts", None)
+                    if not callable(set_prompts):
+                        raise ValueError(
+                            "this device's transport cannot answer prompts; use the "
+                            "netmiko or scrapli transport"
+                        )
+                    set_prompts(prompts)
                 # Execute all commands together so config mode detection works
                 results = await ssh.execute_commands(commands)
 

@@ -136,6 +136,17 @@ async def _copy_dialogue(process: asyncssh.SSHServerProcess, command: str) -> No
     process.stdout.write("!!!!\r\n4096 bytes copied in 0.1 secs (40960 bytes/sec)\r\n")
 
 
+async def _delete_dialogue(process: asyncssh.SSHServerProcess, command: str) -> None:
+    """IOS's ``delete flash:<name>``: the file name, then a confirmation."""
+    path = command.split(maxsplit=1)[1]
+    name = path.rsplit(":", 1)[-1]
+    process.stdout.write(f"Delete filename [{name}]? ")
+    await process.stdin.readline()
+    process.stdout.write(f"\r\nDelete {path}? [confirm]")
+    await process.stdin.readline()
+    process.stdout.write("\r\n")
+
+
 async def _session(process: asyncssh.SSHServerProcess) -> None:
     """An exec command answers once; a shell is a router-like prompt loop."""
     if process.command is not None:
@@ -157,6 +168,8 @@ async def _session(process: asyncssh.SSHServerProcess) -> None:
             break
         if command.startswith("copy http"):
             await _copy_dialogue(process, command)
+        elif command.startswith("delete "):
+            await _delete_dialogue(process, command)
         elif command and not command.startswith("terminal"):
             process.stdout.write(f"output of {command}\r\n")
         process.stdout.write(PROMPT)
