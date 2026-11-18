@@ -773,7 +773,9 @@ def test_http_transfer_stops_at_once_when_the_device_does_not_know_the_command(a
     assert connection.read_channel.call_count == 1
 
 
-@pytest.mark.parametrize("name", ["Invalid-image.bin", "refused.bin", "not found.cfg"])
+@pytest.mark.parametrize(
+    "name", ["Invalid-image.bin", "refused.bin", "not found.cfg", "bytes", "copied"]
+)
 def test_http_transfer_does_not_read_the_echoed_name_as_an_error(name):
     """The device echoes the URL and the name: a marker in them is not its answer."""
     url = f"http://10.123.2.4:8080/api/dl/tok/{name}"
