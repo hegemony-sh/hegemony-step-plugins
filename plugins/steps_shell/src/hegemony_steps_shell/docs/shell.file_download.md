@@ -126,7 +126,12 @@ Later steps can read:
   (null for a file stored without one) and the metadata stored with it.
 - `steps.NODE_ID.output.file`: a file reference to the same file
   (`{"repository": ..., "path": ...}`). Another download step takes it as
-  its **File**: `{{ steps.NODE_ID.output.file }}`.
+  its **File**: `{{ steps.NODE_ID.output.file }}`. The next step looks the
+  repository and path up again, so it gets whatever file is at that path
+  then. To get exactly the file this step downloaded, pass
+  `{{ steps.NODE_ID.output.file_id }}` as its **File by id (legacy)**
+  instead. `file` is null when the platform did not report where the file
+  is (an older platform given a file id); pass the id then too.
 
 The repository keys need a Hegemony version that reports them; an older one
 leaves them null when the step names the file by id.

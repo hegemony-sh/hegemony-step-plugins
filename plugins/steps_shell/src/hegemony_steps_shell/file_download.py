@@ -77,7 +77,9 @@ def _is_unset(value: Any) -> bool:
     if value is None:
         return True
     if isinstance(value, str):
-        return not value.strip()
+        # An empty list or object rendered as text (an older platform passes
+        # the setting on as text) is as empty as the value itself.
+        return value.strip() in ("", "[]", "{}")
     if isinstance(value, (list, tuple, dict)):
         return not value
     return False
@@ -100,6 +102,13 @@ def _file_details(download: FileDownload) -> dict[str, Any]:
         "sha512": getattr(download, "sha512", None),
         "metadata": dict(getattr(download, "metadata", None) or {}),
     }
+
+
+def _file_ref_of(file_info: dict[str, Any] | None) -> dict[str, str] | None:
+    """The reference a later step can take for the file the host named, or None."""
+    if not file_info or not file_info.get("repository") or not file_info.get("path"):
+        return None
+    return {"repository": file_info["repository"], "path": file_info["path"]}
 
 
 def _file_output(file_info: dict[str, Any], ref: FileRef | None) -> dict[str, Any]:
@@ -558,6 +567,7 @@ class ShellFileDownloadHandler(BaseHandler):
                         "device_id": device_id,
                         "device_name": device_name,
                         **(outcome.file or {}),
+                        "file": _file_ref_of(outcome.file),
                         "dest_dir": dest_dir,
                         "dest_filename": dest_filename,
                         "dest_path": dest_path,
@@ -576,6 +586,19 @@ class ShellFileDownloadHandler(BaseHandler):
 
         errors = [error for outcome in outcomes for error in outcome.errors]
         all_success = all(outcome.success for outcome in outcomes)
+        # Each target opens its own link, so a path is looked up once per
+        # target. Should the path name another file part way through (the
+        # file was moved or replaced), the targets hold different files: the
+        # step fails rather than report one file for all of them.
+        got_ids = sorted(
+            {str(o.file["file_id"]) for o in outcomes if o.file and o.file.get("file_id")}
+        )
+        if len(got_ids) > 1:
+            all_success = False
+            errors.append(
+                f"the hosts did not all get the same file: {', '.join(got_ids)}; "
+                "the file at that path changed during the step"
+            )
         transferred_count = sum(1 for outcome in outcomes if outcome.transferred)
         file_info = next((outcome.file for outcome in outcomes if outcome.file), None) or {}
         filename = str(file_info.get("filename") or "")

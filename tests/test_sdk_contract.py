@@ -736,3 +736,8 @@ def test_combined_ca_pem_puts_the_system_store_first():
     assert trust.combined_ca_pem(None, system_pem="SYSTEM") == "SYSTEM\n"
     assert trust.combined_ca_pem("", system_pem="") == ""
     assert "-----BEGIN CERTIFICATE-----" in trust.system_ca_pem()
+
+
+def test_a_file_ref_nested_past_the_decoders_limit_is_refused_as_not_a_reference():
+    with pytest.raises(ValueError, match="not a file reference"):
+        sdk.parse_file_ref("[" * 100_000 + "]" * 100_000)

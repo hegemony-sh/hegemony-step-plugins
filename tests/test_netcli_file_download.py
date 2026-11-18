@@ -93,6 +93,8 @@ class FakeServices:
         self.legacy: list[bool] = []
         self.fail: dict[str, Any] = {}
         self.open_error: Exception | None = None
+        #: File ids to serve, one per link, before falling back to the asked one.
+        self.served_ids: list[str] = []
 
     @asynccontextmanager
     async def open_file_download(
@@ -126,7 +128,7 @@ class FakeServices:
         link_path = f"/dl/hgm_run_token{number}/{FILENAME}"
         try:
             yield FileDownload(
-                file_id=file_id or FILE_ID,
+                file_id=self.served_ids.pop(0) if self.served_ids else (file_id or FILE_ID),
                 filename=self.filename,
                 size_bytes=1024,
                 sha256="ab" * 32,
@@ -621,7 +623,7 @@ async def test_file_and_file_by_id_together_are_refused_before_any_link():
     assert services.opened == [] and services.connects == []
 
 
-@pytest.mark.parametrize("file", [None, "", "  ", [], {}])
+@pytest.mark.parametrize("file", [None, "", "  ", [], {}, "[]", " {} "])
 async def test_an_empty_file_leaves_the_file_id_in_charge(file):
     services = FakeServices()
 
@@ -684,3 +686,30 @@ def test_the_file_field_takes_a_reference_and_the_id_field_is_legacy():
     assert properties["file"]["title"] == "File"
     assert properties["file_ids"]["title"] == "File by id (legacy)"
     assert properties["file_ids"]["x_advanced"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_evidence_carries_the_reference_a_later_step_can_take():
+    services = FakeServices()
+
+    result, _ = await _run(services, {"file": REF})
+
+    assert result.success is True, result.error
+    [artifact] = result.evidence
+    assert artifact["content_json"]["file"] == REF
+
+
+@pytest.mark.asyncio
+async def test_targets_that_get_different_files_for_one_path_fail_the_step():
+    services = FakeServices()
+    other = "9a3e1d4c-5b6f-4f7a-8b9c-0d1e2f3a4b5c"
+    services.served_ids = [FILE_ID, other]
+
+    result, _ = await _run(
+        services, {"file": REF}, [_device("rtr1", "192.0.2.1"), _device("rtr2", "192.0.2.2")]
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert "did not all get the same file" in result.error
+    assert FILE_ID in result.error and other in result.error

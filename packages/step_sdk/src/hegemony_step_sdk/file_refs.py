@@ -43,6 +43,11 @@ def _from_text(text: str) -> Any:
     """The value ``text`` holds, read as JSON or else as a Python literal."""
     try:
         return json.loads(text)
+    except RecursionError:
+        # Nested deeper than the decoder goes: no reference looks like that.
+        raise ValueError(
+            "File is not a file reference: expected an object with repository and path"
+        ) from None
     except ValueError:
         pass
     try:
