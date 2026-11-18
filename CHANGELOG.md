@@ -1,3 +1,9 @@
+## [0.46.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.46.0...v0.46.1) (2026-11-18)
+
+### Bug Fixes
+
+* **container:** read the image ID on Docker 29 ([ea6adc4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ea6adc41b185af271b5c1ac6062a7bb1d7e6df86))
+
 ## [0.46.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.45.0...v0.46.0) (2026-11-18)
 
 ### Features
