@@ -1021,8 +1021,13 @@ async def test_the_identity_inspect_reads_an_image_without_a_variant(tmp_path):
     (tmp_path / "f").write_text("hi\n")
     layer = tmp_path / "layer.tar"
     subprocess.run(["tar", "-cf", str(layer), "-C", str(tmp_path), "f"], check=True)
-    # `docker import` makes an image with no variant and needs no registry.
-    subprocess.run([docker, "import", str(layer), tag], check=True, capture_output=True)
+    # `docker import` needs no registry. The platform is named: the daemon's
+    # own one has a variant on ARM hosts (linux/arm64/v8).
+    subprocess.run(
+        [docker, "import", "--platform", "linux/amd64", str(layer), tag],
+        check=True,
+        capture_output=True,
+    )
     try:
         image_id, platform = await RunContainerHandler()._image_id_and_platform(
             docker_bin=docker, image=tag, docker_env=dict(os.environ), timeout=30
