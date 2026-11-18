@@ -251,6 +251,26 @@ in the images and are omitted from the demo manifest).
   the host resolves credentials into a `DeviceConnectionSpec` and injects its
   cancellation registry, so a transport wheel stays free of the platform's
   secret pipeline.
+- **The SDK is the contract only.** `hegemony-step-sdk` holds what steps,
+  transports and the host all rely on: protocols, data types, config models,
+  errors, entry-point names, constants, and policy that must be the same for
+  every transport (for SSH: which algorithms and keys are weak, the legacy
+  opt-in, `SshSecurityConfig`). It holds no code that only transports use and
+  no glue for one library (Paramiko, AsyncSSH, …).
+- **Code shared between transports goes to `hegemony-transport-support`**
+  (`packages/transport_support`, module `hegemony_transport_support`), for
+  example `hegemony_transport_support.ssh`, which maps the SDK's SSH policy
+  onto Paramiko and AsyncSSH. It is internal, with no stability promise, for
+  the built-in transports only; it releases in lockstep with the SDK and the
+  transports, which pin it exactly (`==<version>`, like the SDK).
+  The dependency direction is
+  `steps → SDK ← transport-support ← transports`: the SDK never imports it,
+  step plugins never import it or any transport, and no transport imports
+  another transport. `tests/test_package_architecture.py` enforces this.
+- **Small helpers used by two transports may be duplicated** instead of moved
+  to `hegemony-transport-support` (for example the copy-dialogue markers in
+  the netmiko and scrapli transports). Move code there once sharing it is
+  clearly worth a cross-package API.
 - **Probes** implement tcp/icmp/http/dns checks (`hegemony-probe-net`) and are
   consumed by BOTH the one-shot `probe.*` step handlers (via
   `services.run_probe`) and the host `MonitorManager` tick loop — one

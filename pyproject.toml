@@ -33,6 +33,7 @@ package = false
 [tool.uv.workspace]
 members = [
     "packages/step_sdk",
+    "packages/transport_support",
     "plugins/steps_general",
     "plugins/steps_probe",
     "plugins/steps_netcli",
@@ -55,6 +56,7 @@ members = [
 
 [tool.uv.sources]
 hegemony-step-sdk = { workspace = true }
+hegemony-transport-support = { workspace = true }
 hegemony-steps-general = { workspace = true }
 hegemony-steps-probe = { workspace = true }
 hegemony-steps-netcli = { workspace = true }
@@ -87,6 +89,7 @@ ignore = ["E501"]
 combine-as-imports = true
 known-first-party = [
     "hegemony_step_sdk",
+    "hegemony_transport_support",
     "hegemony_steps_general",
     "hegemony_steps_probe",
     "hegemony_steps_netcli",

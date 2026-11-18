@@ -790,7 +790,9 @@ async def test_http_transfer_ends_at_its_timeout_without_a_copy():
     connection.close.assert_awaited()
 
 
-@pytest.mark.parametrize("name", ["Invalid-image.bin", "refused.bin", "not found.cfg"])
+@pytest.mark.parametrize(
+    "name", ["Invalid-image.bin", "refused.bin", "not found.cfg", "bytes", "copied"]
+)
 async def test_http_transfer_does_not_read_the_echoed_name_as_an_error(name):
     url = f"http://10.123.2.4:8080/api/dl/tok/{name}"
     connection = _copy_connection(
@@ -809,6 +811,22 @@ async def test_http_transfer_does_not_read_the_echoed_name_as_an_error(name):
 
     assert result["transferred"] is True, result["output"]
     assert _written(connection) == [f"copy {url} flash:{name}\n", "\n"]
+
+
+async def test_http_transfer_waits_for_an_echoed_url_split_across_reads():
+    """A read that ends inside the echoed URL does not end the dialogue."""
+    url = "http://10.123.2.4:8080/api/dl/tok/Invalid-image.bin"
+    connection = _copy_connection(
+        "copy http://10.123.2.4:8080/api/dl/tok/Invalid",
+        "-image.bin flash:image.bin\r\nDestination filename [image.bin]? ",
+        f"\r\nAccessing {url}...\r\n!!!!",
+        "\r\n4096 bytes copied in 0.1 secs (40960 bytes/sec)\r\nr1#",
+    )
+
+    result = await _http_transfer(connection, url, timeout_seconds=60)
+
+    assert result["transferred"] is True, result["output"]
+    assert _written(connection) == [f"copy {url} flash:image.bin\n", "\n"]
 
 
 async def test_http_transfer_url_is_not_logged(caplog):

@@ -109,8 +109,9 @@ Legacy SSH algorithms are off by default; a step turns them on with the
 `allow_legacy_ssh` setting (`SshSecurityConfig`). A transport that honours it
 also has a static `ssh_algorithm_lists(allow_legacy=False)`, the exact
 algorithms its connections offer by kind (`kex`, `host_key`, `cipher`, `mac`),
-built with `hegemony_step_sdk.ssh.asyncssh_algorithm_lists` or
-`paramiko_algorithm_lists`. Comparing the two calls shows what the opt-in
+built from the SDK's policy (`hegemony_step_sdk.ssh.algorithm_policy`); the
+built-in transports apply it through their internal `hegemony-transport-support`
+package, which is not part of this SDK. Comparing the two calls shows what the opt-in
 adds. `legacy_algorithms(agreed, secure, with_legacy)` names the algorithms a
 connection agreed on that only the opt-in allowed. The field's JSON schema carries
 `"x_help": "legacy-ssh-algorithms"`, the help topic a host links the

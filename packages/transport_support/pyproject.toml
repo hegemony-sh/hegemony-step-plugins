@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[project]
+name = "hegemony-transport-support"
+version = "0.44.0"
+description = "Internal code shared by Hegemony's built-in device transports (no stability promise)"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE-*.txt"]
+requires-python = ">=3.11"
+# No SSH library: callers pass their library module or objects in, like the
+# SDK policy it applies.
+dependencies = ["hegemony-step-sdk==0.44.0"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "hegemony_transport_support"
+module-root = "src"

@@ -24,6 +24,7 @@ members = [
     "hegemony-transport-asyncssh",
     "hegemony-transport-netmiko",
     "hegemony-transport-scrapli",
+    "hegemony-transport-support",
 ]
 
 [[package]]
@@ -478,7 +479,7 @@ wheels = [
 
 [[package]]
 name = "hegemony-probe-net"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "probes/probe_net" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -534,7 +535,7 @@ fuzz = [
 
 [[package]]
 name = "hegemony-step-sdk"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "packages/step_sdk" }
 dependencies = [
     { name = "pydantic" },
@@ -545,7 +546,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.7" }]
 
 [[package]]
 name = "hegemony-steps-ansible"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_ansible" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -560,7 +561,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-container"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_container" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -575,7 +576,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-evidence"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_evidence" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -590,7 +591,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-flow"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_flow" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -605,7 +606,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-general"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_general" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -620,7 +621,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-http"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_http" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -635,7 +636,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-inventory"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_inventory" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -646,7 +647,7 @@ requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
 
 [[package]]
 name = "hegemony-steps-monitor"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_monitor" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -657,7 +658,7 @@ requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
 
 [[package]]
 name = "hegemony-steps-netbox"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_netbox" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -674,7 +675,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-netcli"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_netcli" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -689,7 +690,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-probe"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_probe" }
 dependencies = [
     { name = "cryptography" },
@@ -708,7 +709,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-secret"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_secret" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -719,7 +720,7 @@ requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
 
 [[package]]
 name = "hegemony-steps-shell"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_shell" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -734,7 +735,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-tf"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "plugins/steps_tf" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -749,25 +750,28 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-transport-asyncssh"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "transports/transport_asyncssh" }
 dependencies = [
     { name = "asyncssh" },
     { name = "hegemony-step-sdk" },
+    { name = "hegemony-transport-support" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "asyncssh", specifier = ">=2.24.0" },
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "hegemony-transport-support", editable = "packages/transport_support" },
 ]
 
 [[package]]
 name = "hegemony-transport-netmiko"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "transports/transport_netmiko" }
 dependencies = [
     { name = "hegemony-step-sdk" },
+    { name = "hegemony-transport-support" },
     { name = "netmiko" },
     { name = "paramiko" },
 ]
@@ -775,24 +779,38 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "hegemony-transport-support", editable = "packages/transport_support" },
     { name = "netmiko", specifier = ">=4.3.0" },
     { name = "paramiko", specifier = ">=5.1.0" },
 ]
 
 [[package]]
 name = "hegemony-transport-scrapli"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "transports/transport_scrapli" }
 dependencies = [
     { name = "hegemony-step-sdk" },
+    { name = "hegemony-transport-support" },
     { name = "scrapli", extra = ["asyncssh"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "hegemony-transport-support", editable = "packages/transport_support" },
     { name = "scrapli", extras = ["asyncssh"], specifier = ">=2024.7.30,<2026.10" },
 ]
+
+[[package]]
+name = "hegemony-transport-support"
+version = "0.44.0"
+source = { editable = "packages/transport_support" }
+dependencies = [
+    { name = "hegemony-step-sdk" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
 
 [[package]]
 name = "httpcore"
