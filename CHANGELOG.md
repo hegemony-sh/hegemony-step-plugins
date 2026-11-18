@@ -1,3 +1,15 @@
+## [0.45.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.44.0...v0.45.0) (2026-11-18)
+
+### Features
+
+* **netcli:** answer the questions a command asks, as the step lists them ([da74718](https://github.com/hegemony-sh/hegemony-step-plugins/commit/da74718c225e7bfcc041aba1b0604fe7963e0660))
+* **netcli:** edit a step's answers in the step form ([e026679](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e0266790727393da107739a4657ed46232ca94d9)), closes [hegemony-sh/hegemony#828](https://github.com/hegemony-sh/hegemony/issues/828)
+
+### Bug Fixes
+
+* **netcli:** keep a pending question from taking the next command ([f5fdd6d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f5fdd6d68f7299d9c91da0eeae9baee0a461f51d))
+* **netcli:** keep a save's own answers beside the step's prompts ([8ce1dcf](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8ce1dcf84e798b617b5224e0eb219e1bec6648d7))
+
 ## [0.44.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.43.2...v0.44.0) (2026-11-18)
 
 ### ⚠ BREAKING CHANGES
