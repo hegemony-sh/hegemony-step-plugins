@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 PACKAGE_DIRS = (
     ROOT / "packages" / "step_sdk",
+    ROOT / "packages" / "transport_support",
     ROOT / "plugins" / "steps_general",
     ROOT / "plugins" / "steps_probe",
     ROOT / "plugins" / "steps_netcli",

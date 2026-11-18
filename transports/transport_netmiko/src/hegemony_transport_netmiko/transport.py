@@ -36,12 +36,14 @@ from hegemony_step_sdk import (
 )
 from hegemony_step_sdk.ssh import (
     MIN_DH_GROUP_BITS,
-    configure_paramiko,
     hop_allows_legacy,
     is_weak_ssh_public_key,
     negotiation_failure_detail,
-    paramiko_algorithm_lists,
     validate_ssh_public_key,
+)
+from hegemony_transport_support.ssh import (
+    configure_paramiko,
+    paramiko_algorithm_lists,
 )
 
 try:

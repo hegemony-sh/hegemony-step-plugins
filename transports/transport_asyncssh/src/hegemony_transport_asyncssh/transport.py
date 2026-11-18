@@ -38,12 +38,14 @@ from hegemony_step_sdk import (
     TransportOutputSink,
 )
 from hegemony_step_sdk.ssh import (
-    asyncssh_algorithm_lists,
-    asyncssh_algorithms,
-    asyncssh_security_options,
     hop_allows_legacy,
     is_weak_ssh_public_key,
     validate_ssh_public_key,
+)
+from hegemony_transport_support.ssh import (
+    asyncssh_algorithm_lists,
+    asyncssh_algorithms,
+    asyncssh_security_options,
 )
 
 try:

@@ -24,6 +24,7 @@ members = [
     "hegemony-transport-asyncssh",
     "hegemony-transport-netmiko",
     "hegemony-transport-scrapli",
+    "hegemony-transport-support",
 ]
 
 [[package]]
@@ -754,12 +755,14 @@ source = { editable = "transports/transport_asyncssh" }
 dependencies = [
     { name = "asyncssh" },
     { name = "hegemony-step-sdk" },
+    { name = "hegemony-transport-support" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "asyncssh", specifier = ">=2.24.0" },
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "hegemony-transport-support", editable = "packages/transport_support" },
 ]
 
 [[package]]
@@ -768,6 +771,7 @@ version = "0.43.1"
 source = { editable = "transports/transport_netmiko" }
 dependencies = [
     { name = "hegemony-step-sdk" },
+    { name = "hegemony-transport-support" },
     { name = "netmiko" },
     { name = "paramiko" },
 ]
@@ -775,6 +779,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "hegemony-transport-support", editable = "packages/transport_support" },
     { name = "netmiko", specifier = ">=4.3.0" },
     { name = "paramiko", specifier = ">=5.1.0" },
 ]
@@ -785,14 +790,27 @@ version = "0.43.1"
 source = { editable = "transports/transport_scrapli" }
 dependencies = [
     { name = "hegemony-step-sdk" },
+    { name = "hegemony-transport-support" },
     { name = "scrapli", extra = ["asyncssh"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "hegemony-transport-support", editable = "packages/transport_support" },
     { name = "scrapli", extras = ["asyncssh"], specifier = ">=2024.7.30,<2026.10" },
 ]
+
+[[package]]
+name = "hegemony-transport-support"
+version = "0.43.1"
+source = { editable = "packages/transport_support" }
+dependencies = [
+    { name = "hegemony-step-sdk" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
 
 [[package]]
 name = "httpcore"

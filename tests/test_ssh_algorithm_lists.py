@@ -15,14 +15,13 @@ from hegemony_step_sdk.ssh import (
     LEGACY_SSH_HELP_TOPIC,
     SSH_ALGORITHM_KINDS,
     SshSecurityConfig,
-    asyncssh_algorithm_lists,
-    asyncssh_algorithms,
     is_weak_algorithm,
     legacy_algorithms,
 )
 from hegemony_transport_asyncssh.transport import AsyncSSHTransport
 from hegemony_transport_netmiko.transport import SSHTransport
 from hegemony_transport_scrapli.transport import ScrapliTransport
+from hegemony_transport_support.ssh import asyncssh_algorithm_lists, asyncssh_algorithms
 
 TRANSPORTS = (AsyncSSHTransport, ScrapliTransport, SSHTransport)
 KIND_FOR_WEAKNESS = {"kex": "kex", "host_key": "signature", "cipher": "cipher", "mac": "mac"}
