@@ -992,3 +992,66 @@ def test_bounded_passes_a_stop_request_on_without_preserve_status(tmp_path):
     [*probes, launch] = calls.read_text().splitlines()
     assert probes == ["--preserve-status -s TERM -k 300 5 true", "-s TERM -k 300 5 true"]
     assert launch.startswith("-s TERM -k 300 ")
+
+
+def _docker_daemon() -> str | None:
+    """The docker CLI when a daemon answers it, for tests that need a real one."""
+    docker = shutil.which("docker")
+    if docker is None:
+        return None
+    try:
+        info = subprocess.run([docker, "info"], capture_output=True, timeout=10)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return docker if info.returncode == 0 else None
+
+
+@pytest.mark.asyncio
+async def test_the_identity_inspect_reads_an_image_without_a_variant(tmp_path):
+    """The ID-and-platform inspect works on a real daemon for an image with no variant.
+
+    Docker 29 leaves ``Variant`` out of the inspect data when it is empty (any
+    amd64 image), and a template reading ``.Variant`` then fails for every
+    image: tf.plan recorded no image ID, and every tf.apply refused its plan.
+    """
+    docker = _docker_daemon()
+    if docker is None:
+        pytest.skip("needs a docker daemon")
+    tag = f"hegemony-test/identity:{os.getpid()}"
+    (tmp_path / "f").write_text("hi\n")
+    layer = tmp_path / "layer.tar"
+    subprocess.run(["tar", "-cf", str(layer), "-C", str(tmp_path), "f"], check=True)
+    # `docker import` needs no registry. The platform is named: the daemon's
+    # own one has a variant on ARM hosts (linux/arm64/v8).
+    subprocess.run(
+        [docker, "import", "--platform", "linux/amd64", str(layer), tag],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        image_id, platform = await RunContainerHandler()._image_id_and_platform(
+            docker_bin=docker, image=tag, docker_env=dict(os.environ), timeout=30
+        )
+    finally:
+        subprocess.run([docker, "image", "rm", "-f", tag], capture_output=True)
+    assert image_id.startswith("sha256:")
+    assert platform.count("/") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_identity_inspect_is_logged(monkeypatch, caplog):
+    """The step carries on without the ID, but the daemon's reason is logged."""
+
+    def run(cmd, *args, **kwargs):
+        return SimpleNamespace(
+            returncode=1, stdout="", stderr='template parsing error: no entry for key "X"\n'
+        )
+
+    monkeypatch.setattr("subprocess.run", run)
+    with caplog.at_level("WARNING", logger="hegemony_steps_container.run"):
+        result = await RunContainerHandler()._image_id_and_platform(
+            docker_bin="docker", image="x/tool:1", docker_env={}, timeout=5
+        )
+    assert result == ("", "")
+    assert "x/tool:1" in caplog.text
+    assert "template parsing error" in caplog.text
