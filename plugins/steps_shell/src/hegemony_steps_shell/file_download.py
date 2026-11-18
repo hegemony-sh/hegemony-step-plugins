@@ -567,7 +567,7 @@ class ShellFileDownloadHandler(BaseHandler):
                         "device_id": device_id,
                         "device_name": device_name,
                         **(outcome.file or {}),
-                        "file": _file_ref_of(outcome.file),
+                        "file": _file_ref_of(outcome.file) or (ref.as_dict() if ref else None),
                         "dest_dir": dest_dir,
                         "dest_filename": dest_filename,
                         "dest_path": dest_path,

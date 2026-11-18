@@ -19,7 +19,9 @@ in the editor, or from a "Repository file" run-form field
 (`file: "{{ inputs.firmware }}"`). Its output carries the file's repository,
 path, checksums and metadata, and a reference to it
 (`{{ steps.<id>.output.file }}`) that a later step takes as its own **File**
-(looked up again by path; `output.file_id` names the exact file).
+(looked up again by path; `output.file_id` names the exact file). On an
+older platform, a download named by id has no `output.file`: pass
+`output.file_id` through `file_ids` instead.
 Flows that name the file by id (`file_ids`) keep working.
 
 Namespace prefix (= entry-point name): `netcli.` — see the repo-level

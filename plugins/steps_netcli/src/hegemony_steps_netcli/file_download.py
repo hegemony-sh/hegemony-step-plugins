@@ -467,7 +467,7 @@ class FileDownloadHandler(BaseHandler):
                         "device_id": device_id,
                         "device_name": device_name,
                         **(outcome.file or {}),
-                        "file": _file_ref_of(outcome.file),
+                        "file": _file_ref_of(outcome.file) or (ref.as_dict() if ref else None),
                         "dest_fs": dest_fs,
                         "dest_filename": dest_filename,
                         "success": transferred,

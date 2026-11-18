@@ -96,6 +96,8 @@ class FakeServices:
         self.open_error: Exception | None = None
         #: File ids to serve, one per link, before falling back to the asked one.
         self.served_ids: list[str] = []
+        #: Whether a link opened by repository and path reports where the file is.
+        self.report_location = True
         self.shell_error: Exception | None = None
 
     @asynccontextmanager
@@ -115,6 +117,7 @@ class FakeServices:
             self.opened.append({"file_id": file_id, "ttl_seconds": ttl_seconds})
         else:
             self.opened.append({"repository": repository, "path": path, "ttl_seconds": ttl_seconds})
+        if repository is not None and self.report_location:
             located.update(
                 {
                     "repository": repository,
@@ -826,3 +829,16 @@ async def test_targets_that_get_different_files_for_one_path_fail_the_step():
     assert result.error is not None
     assert "did not all get the same file" in result.error
     assert FILE_ID in result.error and other in result.error
+
+
+@pytest.mark.asyncio
+async def test_evidence_falls_back_to_the_configured_reference_when_the_host_names_no_location():
+    services = FakeServices()
+    services.report_location = False
+
+    result, _ = await _run(services, {"file": REF})
+
+    assert result.success is True, result.error
+    [artifact] = result.evidence
+    assert artifact["content_json"]["file"] == REF
+    assert result.output is not None and result.output["file"] == REF
