@@ -1,3 +1,15 @@
+## [0.46.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.45.0...v0.46.0) (2026-11-18)
+
+### Features
+
+* **file-download:** name the file by repository and path, and report it in the output ([bbaeaf0](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bbaeaf0ebb0026418c4b6a98e10643f0f0e8229b))
+
+### Bug Fixes
+
+* **file-download:** evidence falls back to the configured file reference ([3ba5487](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3ba5487ae96050bb5f2c1a1b6a8b4f0f84d8f958))
+* **file-download:** one file for every target, and the reference in evidence ([7b01e3f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7b01e3f347ac584827e2367194d4b8e25c81c055))
+* **sdk:** keep spaces in a file reference's path ([3c9f8c8](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3c9f8c88b14cbd43c3b52b90a1f01701b671c89c))
+
 ## [0.45.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.44.0...v0.45.0) (2026-11-18)
 
 ### Features
