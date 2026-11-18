@@ -94,8 +94,12 @@ logger = logging.getLogger(__name__)
 _IMAGE_INSPECT_TIMEOUT = 15.0
 # Longest a cache hit spends checking its copy against the image's registry.
 _VERIFY_MAX_SECONDS = 30.0
-# The image inspect that names an image: its ID and its platform.
-_IDENTITY_FORMAT = "{{.Id}} {{.Os}}/{{.Architecture}}{{with .Variant}}/{{.}}{{end}}"
+# The image inspect that names an image: its ID and its platform. The variant
+# is read with `index`, not as `.Variant`: Docker 29 leaves the key out of the
+# inspect data when the image has none (any amd64 image), and `.Variant` then
+# fails the whole template ("map has no entry for key"), so no image's ID
+# could be read. `index` gives "" for a missing key.
+_IDENTITY_FORMAT = '{{.Id}} {{.Os}}/{{.Architecture}}{{with index . "Variant"}}/{{.}}{{end}}'
 # What `docker info` names the containerd image store's snapshotter.
 _CONTAINERD_SNAPSHOTTER = "io.containerd.snapshotter"
 # What `docker image inspect --format {{.Id}}` prints: on the classic store the
@@ -3497,12 +3501,25 @@ class RunContainerHandler(BaseHandler):
         except (subprocess.SubprocessError, OSError):
             return "", ""
         if proc.returncode != 0:
+            # The caller carries on without the ID; the reason is kept here,
+            # since a failure for every image would otherwise go unexplained.
+            logger.warning(
+                "Could not read the image ID and platform of %s: %s",
+                image,
+                (str(proc.stderr or "").strip() or f"exit code {proc.returncode}")[:300],
+            )
             return "", ""
         parts = proc.stdout.split()
         if len(parts) < 2:
+            logger.warning("The daemon named no image ID and platform for %s", image)
             return "", ""
         image_id, platform = parts[0], parts[1]
         if not _IMAGE_ID.fullmatch(image_id) or platform.count("/") not in (1, 2):
+            logger.warning(
+                "The daemon named an unusable image ID and platform for %s: %r",
+                image,
+                proc.stdout.strip()[:300],
+            )
             return "", ""
         return image_id, platform
 
