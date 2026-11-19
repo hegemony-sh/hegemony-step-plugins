@@ -842,3 +842,21 @@ async def test_evidence_falls_back_to_the_configured_reference_when_the_host_nam
     [artifact] = result.evidence
     assert artifact["content_json"]["file"] == REF
     assert result.output is not None and result.output["file"] == REF
+
+
+@pytest.mark.asyncio
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs():
+    # The editor's variable picker lists output_fields; they must match.
+    result, _ = await _run(FakeServices(), {"file_ids": [FILE_ID]})
+
+    assert result.success is True, result.error
+    declared = [field.name for field in ShellFileDownloadHandler.output_fields]
+    assert len(declared) == len(set(declared))
+    assert set(declared) == set(result.output)
+
+
+def test_the_docs_page_names_every_declared_output_field():
+    text = load_docs_bundle("hegemony_steps_shell")["shell.file_download"]
+    for field in ShellFileDownloadHandler.output_fields:
+        assert f"output.{field.name}`" in text, field.name
+        assert field.description and field.type, field.name
