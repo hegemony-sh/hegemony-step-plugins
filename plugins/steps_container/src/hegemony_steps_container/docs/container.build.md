@@ -147,9 +147,10 @@ Past that the live log says so and shows no more; the build goes on. Later steps
 can read `steps.NODE_ID.output.reference`: for a pushed image, the image by
 digest (`registry.hegemony.internal/orgs/ORG/NAME@sha256:…`, or
 `ghcr.io/acme/NAME@sha256:…`), which a `container.run` step can run exactly.
-Also `steps.NODE_ID.output.digest`, `.image` (the repository), `.tags`,
-`.references` (one per tag), `.destination` (`platform`, `remote` or `local`)
-and `.pushed`.
+Also `steps.NODE_ID.output.digest`, `steps.NODE_ID.output.image` (the
+repository), `steps.NODE_ID.output.tags`, `steps.NODE_ID.output.references`
+(one per tag), `steps.NODE_ID.output.destination` (`platform`, `remote` or
+`local`) and `steps.NODE_ID.output.pushed`. A build that fails has no output.
 
 An image kept in the sandbox has no digest a registry knows (`.digest` is
 empty), so its reference is the run tag

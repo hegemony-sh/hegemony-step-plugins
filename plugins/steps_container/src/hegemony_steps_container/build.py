@@ -81,6 +81,7 @@ from hegemony_step_sdk import (
     HandlerTargeting,
     ImageBuild,
     ImageCache,
+    OutputField,
     StepKind,
 )
 
@@ -770,6 +771,18 @@ class _BuildLog:
         return output
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("image", "Repository of the built image", "string"),
+    OutputField("digest", "Image digest (empty for an image kept in the sandbox)", "string"),
+    OutputField("reference", "Image to run: by digest when pushed, else the run tag", "string"),
+    OutputField("tags", "Tags the image got", "list"),
+    OutputField("references", "One image reference per tag", "list"),
+    OutputField("destination", "Where the image went: platform, remote or local", "string"),
+    OutputField("pushed", "Whether the image was pushed to a registry", "bool"),
+)
+
+
 class BuildImageHandler(BaseHandler):
     """Build an image from flow attachments; push it to a registry, or keep it in the sandbox."""
 
@@ -788,6 +801,7 @@ class BuildImageHandler(BaseHandler):
     # Secret references reach the handler as written (see resolve_secret_values).
     raw_config_keys = frozenset({"secrets"})
     config_model = BuildImageConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"dockerfile": "Dockerfile"}
     default_timeout_seconds = DEFAULT_BUILD_TIMEOUT_SECONDS
 
