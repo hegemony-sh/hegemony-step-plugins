@@ -1639,3 +1639,32 @@ async def test_a_failed_write_after_keeping_the_previous_keys_says_where_they_we
     assert result.success is False
     assert result.output["previous_path"] == "certs/web-old"
     _assert_no_values(result)
+
+
+@pytest.mark.asyncio
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs(store, workspace):
+    _put(workspace, "out/cert.pem", CERT_PEM)
+
+    result = await _run({"path": "certs/web", "files": {"cert": "out/cert.pem"}}, store)
+
+    assert result.success is True, result.error
+    assert {field.name for field in WriteSecretHandler.output_fields} == set(result.output)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_step_outputs_the_declared_keys_too(store):
+    result = await _run({"path": "certs/web"}, store)
+
+    assert result.success is False
+    assert {field.name for field in WriteSecretHandler.output_fields} == set(result.output)
+
+
+def test_secret_write_docs_name_every_declared_output_field():
+    from hegemony_step_sdk.docs import load_docs_bundle
+
+    page = load_docs_bundle("hegemony_steps_secret")["secret.write"]
+    output_section = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in WriteSecretHandler.output_fields:
+        name = field.name
+        assert f"`{name}`" in output_section or f"output.{name}`" in output_section, name
+        assert field.description and field.type, name

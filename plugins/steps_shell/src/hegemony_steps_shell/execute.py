@@ -29,6 +29,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     InvalidConfigError,
+    OutputField,
     StepKind,
     command_label,
     for_each_target_device,
@@ -274,6 +275,12 @@ class _DeviceOutcome:
     success: bool = True
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("stdout", "Combined standard output of every command on every host", "string"),
+)
+
+
 class ShellExecuteHandler(BaseHandler):
     """Run shell commands on each target host over the device's shell transport."""
 
@@ -284,6 +291,7 @@ class ShellExecuteHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=True, ips=False)
     config_model = ShellExecuteConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"shell": "default", "fail_fast": True, "command_timeout_seconds": 60}
 
     def template_errors(self, config: dict[str, Any]) -> list[str]:
