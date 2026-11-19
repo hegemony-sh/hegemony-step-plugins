@@ -196,8 +196,8 @@ attestations. That job is in this repository's workflow, not the shared one,
 because trusted publishing does not work inside a reusable workflow; it runs
 in the `pypi` environment, which waits for a required reviewer. If it fails (a
 package without a matching trusted publisher, say), fix the cause and re-run
-the failed job within a day, while the run's `release-assets` artifact lasts;
-files PyPI already holds are skipped. Publishing the Release also starts the
+the failed job; it downloads the files from the published Release, so a re-run
+works at any time, and files PyPI already holds are skipped. Publishing the Release also starts the
 `Images` workflow, which publishes the steps' runner images (`ansible-runner`,
 `opentofu-runner`) as `X.Y.Z` and `X.Y` from the tag; the release commit
 carries the steps' defaults moved to `X.Y`. There is no manual step any more:
