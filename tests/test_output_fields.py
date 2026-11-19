@@ -28,7 +28,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 #: The platform reads a name as dotted segments of letters, digits and
 #: underscores; it skips any other (packages/core/step_handlers/registry.py).
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
-_TYPES = {"string", "int", "float", "bool", "object", "list"}
+#: "any" marks a key whose value can be of more than one type.
+_TYPES = {"string", "int", "float", "bool", "object", "list", "any"}
 #: Handlers whose output is empty by design.
 _NO_OUTPUT = {
     "flow.notify",

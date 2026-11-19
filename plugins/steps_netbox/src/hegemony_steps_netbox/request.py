@@ -433,8 +433,9 @@ _OUTPUT_FIELDS = (
     ),
     OutputField(
         "data",
-        "What a route returned that is not an object or a list (when a post route answers so)",
-        "object",
+        "What a route returned that is not an object or a list, such as text or a number "
+        "(when a post route answers so)",
+        "any",
     ),
     OutputField("data_truncated", "True when the object or list was left out for size", "bool"),
     OutputField("extracted", "The values Extract picked, by name", "object"),

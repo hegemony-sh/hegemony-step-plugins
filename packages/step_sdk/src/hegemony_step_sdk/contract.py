@@ -126,7 +126,8 @@ class OutputField:
     ``name`` is the key's path under ``output``, dotted for a nested key
     (``size_bytes``, ``file.path``); a flow reads it as
     ``{{ steps.NODE_ID.output.<name> }}``. ``type`` is a hint shown beside it
-    (``string``, ``int``, ``bool``, ``object``, ``list``); ``description``
+    (``string``, ``int``, ``float``, ``bool``, ``object``, ``list``, or ``any``
+    for a value of more than one type); ``description``
     says what it holds.
     """
 

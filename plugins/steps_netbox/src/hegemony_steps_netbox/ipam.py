@@ -283,8 +283,16 @@ _ALLOCATE_OUTPUT_FIELDS = (
     OutputField("pool_id", "NetBox ID of the pool the objects came from", "int"),
     OutputField("id", "NetBox ID of the first object", "int"),
     OutputField("ids", "NetBox IDs of all objects", "list"),
-    OutputField("value", "Address, prefix, VLAN ID or ASN of the first object", "string"),
-    OutputField("values", "Addresses, prefixes, VLAN IDs or ASNs of all objects", "list"),
+    OutputField(
+        "value",
+        "Address or prefix (text), or VLAN ID or ASN (number) of the first object",
+        "any",
+    ),
+    OutputField(
+        "values",
+        "Addresses or prefixes (text), or VLAN IDs or ASNs (numbers) of all objects",
+        "list",
+    ),
     OutputField(
         "object", "The first object as NetBox returned it (null when over 64 KiB)", "object"
     ),
