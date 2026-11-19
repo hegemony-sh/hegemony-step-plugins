@@ -30,7 +30,13 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 _TYPES = {"string", "int", "float", "bool", "object", "list"}
 #: Handlers whose output is empty by design.
-_NO_OUTPUT = {"flow.notify", "general.noop", "general.sleep"}
+_NO_OUTPUT = {
+    "flow.notify",
+    "general.noop",
+    "general.sleep",
+    "monitor.connectivity",
+    "probe.wait_reachable",
+}
 
 
 def _handlers() -> list[tuple[str, Any]]:
@@ -75,6 +81,21 @@ def test_the_handler_declares_its_output_fields(package, handler):
         assert _NAME.fullmatch(field.name), field.name
         assert field.description.strip(), f"{field.name} has no description"
         assert field.type in _TYPES, f"{field.name}: unknown type {field.type!r}"
-        assert f"output.{field.name}`" in page, (
-            f"docs/{handler.handler_id}.md does not name output.{field.name}"
+        assert _names_key(page, field.name), (
+            f"docs/{handler.handler_id}.md does not name output key {field.name}"
         )
+
+
+def _output_section(page: str) -> str:
+    """The page's Output section (from its ``## Output`` heading to the next)."""
+    match = re.search(r"^## Output\b.*?(?=^## |\Z)", page, flags=re.MULTILINE | re.DOTALL)
+    return match.group(0) if match else ""
+
+
+def _names_key(page: str, name: str) -> bool:
+    """Whether the page names output key ``name``.
+
+    Anywhere as ``steps.NODE_ID.output.<name>``, or in the Output section as
+    the bare key in backticks (the style some pages list their keys in).
+    """
+    return f"output.{name}`" in page or f"`{name}`" in _output_section(page)
