@@ -171,8 +171,8 @@ Every key, for the variable picker and later steps:
 `steps.NODE_ID.output.output_changes`, `steps.NODE_ID.output.drift`,
 `steps.NODE_ID.output.engine`, `steps.NODE_ID.output.image`,
 `steps.NODE_ID.output.image_digest`, `steps.NODE_ID.output.image_id`,
-`steps.NODE_ID.output.cache_image` (whether the image was pulled through the
-cache), `steps.NODE_ID.output.plan_sha256`, `steps.NODE_ID.output.state`
+`steps.NODE_ID.output.cache_image` (the step's **Cache image** setting, which
+`tf.apply` reuses; it does not say whether a cache was used), `steps.NODE_ID.output.plan_sha256`, `steps.NODE_ID.output.state`
 (managed, backend or ephemeral), `steps.NODE_ID.output.state_name` (the
 managed state's name, empty otherwise), `steps.NODE_ID.output.state_held`,
 `steps.NODE_ID.output.working_dir`, `steps.NODE_ID.output.apply_ready`

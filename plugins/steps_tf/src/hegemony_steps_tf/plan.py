@@ -410,7 +410,11 @@ _OUTPUT_FIELDS = (
     OutputField("image", "Image the plan ran", "string"),
     OutputField("image_digest", "The same image by digest (empty when it has none)", "string"),
     OutputField("image_id", "The image's ID (empty when not reported)", "string"),
-    OutputField("cache_image", "Whether the image was pulled through the cache", "bool"),
+    OutputField(
+        "cache_image",
+        "The step's cache_image setting, passed on to tf.apply (not proof a cache was used)",
+        "bool",
+    ),
     OutputField("plan_sha256", "SHA-256 of the saved plan", "string"),
     OutputField("state", "State mode: managed, backend or ephemeral", "string"),
     OutputField("state_name", "Managed state name (empty for other modes)", "string"),

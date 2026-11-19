@@ -2108,8 +2108,9 @@ async def test_a_plan_outputs_only_declared_keys(monkeypatch):
     result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
 
     assert result.success is True, result.error
-    # Only the truncation flag is missing: fewer than 200 resources change.
-    assert _declared(TfPlanHandler) - set(result.output) == {"resource_changes_truncated"}
+    # Every key the plan reports is declared, and only the truncation flag is
+    # missing: fewer than 200 resources change.
+    assert set(result.output) == _declared(TfPlanHandler) - {"resource_changes_truncated"}
 
 
 @pytest.mark.asyncio
