@@ -27,6 +27,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     InvalidConfigError,
+    OutputField,
     StepKind,
 )
 from hegemony_steps_http.security import is_templated
@@ -272,6 +273,26 @@ def allocate_errors(config: AllocateConfig, *, allow_templates: bool) -> list[st
     return errors
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_ALLOCATE_OUTPUT_FIELDS = (
+    OutputField("ok", "Whether the step succeeded", "bool"),
+    OutputField(
+        "allocated", "True when new objects were taken, false when earlier ones were reused", "bool"
+    ),
+    OutputField("resource", "The kind of object taken (IP address, prefix, VLAN or ASN)", "string"),
+    OutputField("pool_id", "NetBox ID of the pool the objects came from", "int"),
+    OutputField("id", "NetBox ID of the first object", "int"),
+    OutputField("ids", "NetBox IDs of all objects", "list"),
+    OutputField("value", "Address, prefix, VLAN ID or ASN of the first object", "string"),
+    OutputField("values", "Addresses, prefixes, VLAN IDs or ASNs of all objects", "list"),
+    OutputField(
+        "object", "The first object as NetBox returned it (null when over 64 KiB)", "object"
+    ),
+    OutputField("objects", "All objects as NetBox returned them (null when over 64 KiB)", "list"),
+    OutputField("status", "HTTP status of the request that failed (when the step fails)", "int"),
+)
+
+
 class AllocateHandler(BaseHandler):
     """Take the next free IP address, prefix, VLAN or ASN from a NetBox pool."""
 
@@ -286,6 +307,7 @@ class AllocateHandler(BaseHandler):
     targeting = HandlerTargeting(roles=False, ips=False)
     raw_config_keys = frozenset({"token", "ca_bundle"})
     config_model = AllocateConfig
+    output_fields = _ALLOCATE_OUTPUT_FIELDS
     default_config = {"allocate": "ip_from_prefix", "count": 1}
 
     def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
@@ -546,6 +568,21 @@ def release_errors(config: ReleaseConfig, *, allow_templates: bool) -> list[str]
     return errors
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_RELEASE_OUTPUT_FIELDS = (
+    OutputField("ok", "Whether the step succeeded", "bool"),
+    OutputField("status", "HTTP status of the last NetBox response", "int"),
+    OutputField("resource", "The kind of object released", "string"),
+    OutputField("released", "How many objects were deleted", "int"),
+    OutputField("ids", "NetBox IDs of the deleted objects", "list"),
+    OutputField(
+        "values",
+        "Addresses, prefixes, VLAN IDs or ASNs of the deleted objects (when found by Filters)",
+        "list",
+    ),
+)
+
+
 class ReleaseHandler(BaseHandler):
     """Give back IP addresses, prefixes, VLANs or ASNs by deleting them from NetBox."""
 
@@ -560,6 +597,7 @@ class ReleaseHandler(BaseHandler):
     targeting = HandlerTargeting(roles=False, ips=False)
     raw_config_keys = frozenset({"token", "ca_bundle"})
     config_model = ReleaseConfig
+    output_fields = _RELEASE_OUTPUT_FIELDS
     default_config = {"resource": "ip_address", "max_objects": 1, "missing_ok": True}
 
     def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None) -> None:

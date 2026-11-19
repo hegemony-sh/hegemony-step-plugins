@@ -17,6 +17,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StepKind,
     command_label,
 )
@@ -171,6 +172,16 @@ class AssertConfig(BaseModel):
     )
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("passed", "Whether every checked artifact passed", "bool"),
+    OutputField("checked", "Names of the artifacts checked", "list"),
+    OutputField(
+        "failed", "Names of the artifacts that did not pass or could not be fetched", "list"
+    ),
+)
+
+
 class AssertHandler(BaseHandler):
     """Handler for inline assertions with expected values.
 
@@ -198,6 +209,7 @@ class AssertHandler(BaseHandler):
     category = "Checks"
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = AssertConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"operator": "contains"}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:

@@ -663,3 +663,21 @@ async def test_assert_fails_every_device_when_the_run_fetch_fails() -> None:
     assert result.success is False
     assert (result.error or "").count("could not fetch artifact content") == 3
     assert api.fetches == 1
+
+
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs() -> None:
+    # The editor's variable picker lists output_fields; they must match.
+    command, output = next(iter(_OUTPUTS.items()))
+    result = await _assert_command(_collected("collect", _OUTPUTS), command, output)
+    assert result.success is True, result.error
+    assert set(result.output) == {field.name for field in AssertHandler.output_fields}
+
+
+def test_the_docs_page_names_every_declared_output_field() -> None:
+    from hegemony_step_sdk.docs import load_docs_bundle
+
+    page = load_docs_bundle("hegemony_steps_evidence")["evidence.assert"]
+    output = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in AssertHandler.output_fields:
+        assert f"`{field.name}`" in output, field.name
+        assert field.description and field.type, field.name

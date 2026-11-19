@@ -25,6 +25,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     InvalidConfigError,
+    OutputField,
     StepKind,
 )
 from hegemony_steps_http.jsonpath import PathError, get_path, parse_path
@@ -413,6 +414,33 @@ def _ids(objects: list[Any]) -> list[Any]:
     return [item.get("id") for item in objects if isinstance(item, dict)]
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("status", "HTTP status of the last NetBox response", "int"),
+    OutputField("ok", "Whether the step succeeded", "bool"),
+    OutputField("action", "What the step did (get, list, create, update, delete, post)", "string"),
+    OutputField("endpoint", "The NetBox endpoint called", "string"),
+    OutputField("method", "HTTP method of the last request", "string"),
+    OutputField("found", "Whether the object existed (when Missing is OK is on)", "bool"),
+    OutputField("id", "The object's NetBox ID, or null", "int"),
+    OutputField("object", "The object NetBox returned, or null", "object"),
+    OutputField("objects", "The objects of a list (when the answer is a list)", "list"),
+    OutputField("ids", "NetBox IDs of the listed objects (when the answer is a list)", "list"),
+    OutputField("count", "NetBox's total for the list (when the answer is a list)", "int"),
+    OutputField("returned", "How many objects came back (when the answer is a list)", "int"),
+    OutputField(
+        "more", "Whether Max Results stopped the list early (when the answer is a list)", "bool"
+    ),
+    OutputField(
+        "data",
+        "What a route returned that is not an object or a list (when a post route answers so)",
+        "object",
+    ),
+    OutputField("data_truncated", "True when the object or list was left out for size", "bool"),
+    OutputField("extracted", "The values Extract picked, by name", "object"),
+)
+
+
 class NetBoxRequestHandler(BaseHandler):
     """Read, create, update or delete NetBox objects, or post to a NetBox endpoint."""
 
@@ -427,6 +455,7 @@ class NetBoxRequestHandler(BaseHandler):
     targeting = HandlerTargeting(roles=False, ips=False)
     raw_config_keys = frozenset({"token", "ca_bundle"})
     config_model = NetBoxRequestConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"action": "get"}
 
     def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None) -> None:

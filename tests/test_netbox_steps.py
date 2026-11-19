@@ -1428,3 +1428,72 @@ async def test_netbox_trusts_the_organization_cas_unless_a_ca_bundle_pins_others
     # A host without the service: the client verifies against its default store.
     await _run(NetBoxRequestHandler, netbox, _config(endpoint="dcim/devices", object_id="33"))
     assert seen[-1] is True
+
+
+# --- declared output fields ---------------------------------------------------------------------
+
+
+def _declared(handler_class: type) -> set[str]:
+    return {field.name.split(".")[0] for field in handler_class.output_fields}
+
+
+async def test_the_declared_output_fields_cover_what_each_step_outputs():
+    # The editor's variable picker lists output_fields; every key a step
+    # outputs must be among them.
+    def allocate(request, body):
+        if request.method == "GET":
+            return _json(PREFIX)
+        return _json({"id": 99, "address": "10.20.0.5/24"}, 201)
+
+    allocated = await _run(AllocateHandler, NetBox(allocate), _config(pool_id="7"))
+    assert allocated.success, allocated.error
+    assert set(allocated.output) == _declared(AllocateHandler) - {"status"}
+
+    def full(request, body):
+        if request.method == "GET":
+            return _json(PREFIX)
+        return _json({"detail": "Insufficient space"}, 409)
+
+    refused = await _run(AllocateHandler, NetBox(full), _config(pool_id="7"))
+    assert not refused.success
+    assert set(refused.output) <= _declared(AllocateHandler)
+
+    released = await _run(
+        ReleaseHandler, NetBox(lambda request, body: httpx.Response(204)), _config(object_id="99")
+    )
+    assert released.success, released.error
+    assert set(released.output) == _declared(ReleaseHandler)
+
+    rendered = await _run(
+        RenderConfigHandler,
+        NetBox(lambda request, body: _json({"configtemplate": {"name": "b"}, "content": "x\n"})),
+        _config(),
+        target_devices_by_role={"fleet": [_device("web-01", "33")]},
+        target_roles=["fleet"],
+    )
+    assert rendered.success, rendered.error
+    assert set(rendered.output) == _declared(RenderConfigHandler)
+
+    got = await _run(
+        NetBoxRequestHandler,
+        NetBox(lambda request, body: _json(DEVICE)),
+        _config(endpoint="dcim/devices", object_id=33),
+    )
+    listed = await _run(
+        NetBoxRequestHandler,
+        NetBox(lambda request, body: _json({"count": 1, "results": [DEVICE]})),
+        _config(action="list", endpoint="dcim/devices"),
+    )
+    assert got.success and listed.success
+    assert set(got.output) | set(listed.output) <= _declared(NetBoxRequestHandler)
+
+
+@pytest.mark.parametrize(
+    "handler_class", [AllocateHandler, ReleaseHandler, RenderConfigHandler, NetBoxRequestHandler]
+)
+def test_the_docs_page_names_every_declared_output_field(handler_class):
+    page = load_docs_bundle("hegemony_steps_netbox")[handler_class.handler_id]
+    output = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in handler_class.output_fields:
+        assert f"`{field.name}`" in output, field.name
+        assert field.description and field.type, field.name

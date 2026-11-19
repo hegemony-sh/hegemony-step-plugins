@@ -39,6 +39,7 @@ from hegemony_step_sdk import (
     HandlerServices,
     HandlerTargeting,
     InvalidConfigError,
+    OutputField,
     StepKind,
 )
 from hegemony_step_sdk.trust import add_trusted_cas, org_trusted_ca_pem
@@ -864,6 +865,32 @@ def _strip_for_new_origin(
         headers.pop(name, None)
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("status", "HTTP status of the last response (null if none arrived)", "int"),
+    OutputField("ok", "Whether the step succeeded", "bool"),
+    OutputField("url", "URL of the last request, after redirects", "string"),
+    OutputField("method", "HTTP method", "string"),
+    OutputField("headers", "Headers of the last response, names lower-cased", "object"),
+    OutputField("elapsed_ms", "Time spent on all requests, in milliseconds", "int"),
+    OutputField("size_bytes", "Body bytes read, all pages together", "int"),
+    OutputField("body_sha256", "SHA-256 of the last body", "string"),
+    OutputField("pages", "Number of pages fetched", "int"),
+    OutputField(
+        "more_pages", "Whether Max Pages stopped the step while another page was linked", "bool"
+    ),
+    OutputField(
+        "body", "Last response body as text, at most 64 KiB (unless Sensitive response)", "string"
+    ),
+    OutputField("body_truncated", "Whether body was cut (unless Sensitive response)", "bool"),
+    OutputField("data", "Body parsed as JSON, or null (unless Sensitive response)", "object"),
+    OutputField(
+        "data_truncated", "True when data was left out for size (unless Sensitive response)", "bool"
+    ),
+    OutputField("extracted", "The Extract values by name (unless Sensitive response)", "object"),
+)
+
+
 class HttpRequestHandler(BaseHandler):
     """Send one HTTP(S) request (optionally following next-page links) from the worker."""
 
@@ -879,6 +906,7 @@ class HttpRequestHandler(BaseHandler):
     # Secret references reach the handler as written (see resolve_secret_text).
     raw_config_keys = frozenset({"auth_secret", "ca_bundle"})
     config_model = HttpRequestConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"method": "GET", "expected_status": "200-299"}
 
     def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
