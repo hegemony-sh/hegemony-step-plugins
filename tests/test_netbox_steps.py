@@ -24,7 +24,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
-from hegemony_step_sdk import HandlerContext, HandlerServices
+from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerServices
 from hegemony_step_sdk.docs import check_page, load_docs_bundle
 from hegemony_steps_http import security
 from hegemony_steps_netbox import ALL_HANDLERS, register
@@ -1433,7 +1433,7 @@ async def test_netbox_trusts_the_organization_cas_unless_a_ca_bundle_pins_others
 # --- declared output fields ---------------------------------------------------------------------
 
 
-def _declared(handler_class: type) -> set[str]:
+def _declared(handler_class: type[BaseHandler]) -> set[str]:
     return {field.name.split(".")[0] for field in handler_class.output_fields}
 
 

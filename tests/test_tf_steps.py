@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hegemony_step_sdk import (
+    BaseHandler,
     ContainerRuntime,
     HandlerContext,
     HandlerResult,
@@ -2086,7 +2087,7 @@ async def test_plan_step_records_no_image_id_it_could_not_read(monkeypatch):
     assert (result.metrics["image_id"], result.metrics["image_local_id"]) == ("", local_id)
 
 
-def _declared(handler: type) -> set[str]:
+def _declared(handler: type[BaseHandler]) -> set[str]:
     names = [field.name for field in handler.output_fields]
     assert len(names) == len(set(names))
     return set(names)
