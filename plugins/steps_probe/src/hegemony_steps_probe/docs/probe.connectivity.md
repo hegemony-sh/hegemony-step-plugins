@@ -57,6 +57,7 @@ time when it reports one. Each probed target adds one `transport_meta`
 evidence record named `connectivity_<check type>_<device name>` capturing
 the host, the check type, and either the probe's metrics or the error text.
 
+`steps.NODE_ID.output.targets` maps each target's name to its result.
 Later steps read each target's result from
 `steps.NODE_ID.output.targets['<device name>']`: `ok`, `error` (empty when
 it passed) and `latency_ms`, plus the facts its evidence records (the

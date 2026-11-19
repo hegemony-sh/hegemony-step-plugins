@@ -49,6 +49,7 @@ capturing the queried name, record type, resolver (`system` when none was
 set), the normalized answers, any missing expected values, and the error
 text when resolution failed.
 
+`steps.NODE_ID.output.targets` maps each target's name to its result.
 Later steps read each target's result from
 `steps.NODE_ID.output.targets['<device name>']`: `ok`, `error` (empty when
 it passed) and `latency_ms`, plus the facts its evidence records

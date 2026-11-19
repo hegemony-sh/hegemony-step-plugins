@@ -27,6 +27,7 @@ from hegemony_step_sdk import (
 
 from .targets import (
     DEFAULT_MAX_PARALLEL_TARGETS,
+    TARGETS_OUTPUT_FIELDS,
     TargetOutcome,
     all_probe_targets,
     chain_output,
@@ -165,6 +166,7 @@ class DnsProbeHandler(BaseHandler):
     description = "Resolve a DNS name (or each target's hostname) and assert the answers."
     category = "Checks"
     config_model = DnsProbeConfig
+    output_fields = TARGETS_OUTPUT_FIELDS
     default_config = {"record_type": "A", "attempt_timeout_seconds": 5}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
