@@ -116,6 +116,12 @@ through `hegemony_steps_container.runner` instead of copying
   the step or report it as unknown.
 - **Docs.** Each handler has its page under `docs/` in the wheel, and the
   wheel README names its handlers and links there.
+- **Output fields.** List the keys the step puts in its output as
+  `output_fields` (`OutputField(name, description, type)`). The flow
+  editor's variable picker offers them to later steps as
+  `{{ steps.NODE_ID.output.<name> }}`. Keep the list equal to what the step
+  really outputs, and name each key in the docs page's Output section; the
+  download steps' tests check both.
 - **Default image and licences.** Declare the image a step pulls when its
   author sets none as a module-level `DEFAULT_IMAGE` (a string) or
   `DEFAULT_IMAGES` (a dict of strings) literal. `scripts/check_image_licenses.py`

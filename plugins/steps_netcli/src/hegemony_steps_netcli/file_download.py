@@ -31,6 +31,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StepKind,
     for_each_target_device,
     max_parallel_from_config,
@@ -253,6 +254,31 @@ def _without_link(text: str, url: str) -> str:
     return text.replace(url, _LINK_PLACEHOLDER)
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("filename", "Name of the stored file", "string"),
+    OutputField("file_id", "Id of the stored file", "string"),
+    OutputField("dest_fs", "File system the file went to on each device", "string"),
+    OutputField("dest_filename", "File name on each device", "string"),
+    OutputField("size_bytes", "Size of the stored file in bytes", "int"),
+    OutputField("sha256", "SHA-256 of the stored file", "string"),
+    OutputField("md5", "MD5 of the stored file (null if not stored)", "string"),
+    OutputField("sha512", "SHA-512 of the stored file (null if not stored)", "string"),
+    OutputField("content_type", "Content type of the stored file", "string"),
+    OutputField("metadata", "Metadata stored with the file", "object"),
+    OutputField("transferred_count", "Devices that completed the download", "int"),
+    OutputField("repository", "Name of the file repository", "string"),
+    OutputField("repository_id", "Id of the file repository", "string"),
+    OutputField("path", "Path of the file in the repository (folder and name)", "string"),
+    OutputField("folder", "Folder of the file (empty for the repository root)", "string"),
+    OutputField(
+        "file",
+        "File reference to the same file, for another download step's File",
+        "object",
+    ),
+)
+
+
 class FileDownloadHandler(BaseHandler):
     """Handler that has each target download one file-repository file."""
 
@@ -266,6 +292,7 @@ class FileDownloadHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=True, ips=False)
     config_model = FileDownloadConfig
+    output_fields = _OUTPUT_FIELDS
     # "{{ inputs.firmware }}" reaches the handler as the file reference itself.
     native_config_keys = frozenset({"file"})
     # A software image over a slow link takes a while, and every target has

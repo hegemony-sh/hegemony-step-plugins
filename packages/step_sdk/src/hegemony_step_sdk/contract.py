@@ -119,6 +119,22 @@ class HandlerTargeting:
     multi_role: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class OutputField:
+    """One key a handler puts in its step output, for the flow editor's variable picker.
+
+    ``name`` is the key's path under ``output``, dotted for a nested key
+    (``size_bytes``, ``file.path``); a flow reads it as
+    ``{{ steps.NODE_ID.output.<name> }}``. ``type`` is a hint shown beside it
+    (``string``, ``int``, ``bool``, ``object``, ``list``); ``description``
+    says what it holds.
+    """
+
+    name: str
+    description: str = ""
+    type: str = ""
+
+
 def _device_identity_key(device: dict[str, Any]) -> tuple[str, str] | None:
     """Return a stable target-device identity key when one is available."""
     device_id = device.get("id")
@@ -445,6 +461,11 @@ class BaseHandler(ABC):
     config_model: type[BaseModel] | None = None
     # Initial config the editor seeds for a newly added step of this handler.
     default_config: dict[str, Any] = {}
+    # The keys the handler puts in ``HandlerResult.output``. The flow editor's
+    # variable picker lists them for a later step
+    # (``{{ steps.NODE_ID.output.<name> }}``). Purely descriptive: the host
+    # does not check the output against them. Empty when not declared.
+    output_fields: tuple[OutputField, ...] = ()
 
     @abstractmethod
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
