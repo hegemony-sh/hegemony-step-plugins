@@ -9,13 +9,13 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 Security reports are handled privately. Please do not open a public GitHub issue for vulnerabilities, suspected vulnerabilities, leaked secrets, or exploit details.
 
-This policy covers what this repository publishes: the step-handler SDK, the step-handler, device-transport and probe wheels, the `ansible-runner` and `opentofu-runner` images, and the build and release workflows. For a vulnerability in the Hegemony platform itself, follow the reporting instructions in the [platform's SECURITY.md](https://github.com/hegemony-sh/hegemony/blob/develop/SECURITY.md).
+This policy covers what this repository publishes: the step-handler SDK, the step-handler, device-transport and probe wheels, the `ansible-runner` and `opentofu-runner` images, and the build and release workflows. For a vulnerability in the Hegemony platform itself, follow the reporting instructions in the [platform's SECURITY.md](https://github.com/hegemony-sh/hegemony/blob/main/SECURITY.md).
 
 ## Supported versions
 
 Releases are cut from `main` only, and a release is immutable. A security fix is therefore published as a new release of the newest line (the version in the [Releases](https://github.com/hegemony-sh/hegemony-step-plugins/releases) list) and is not backported to older releases of this repository.
 
-Which Hegemony platform versions are supported, and for how long, is set by the platform's [support policy](https://github.com/hegemony-sh/hegemony/blob/develop/SECURITY.md#supported-versions). The platform picks up a fix from this repository by pinning the new release, so a platform fix release may be needed before a deployment receives it.
+Which Hegemony platform versions are supported, and for how long, is set by the platform's [support policy](https://github.com/hegemony-sh/hegemony/blob/main/SECURITY.md#supported-versions). The platform picks up a fix from this repository by pinning the new release, so a platform fix release may be needed before a deployment receives it.
 
 ## Reporting a vulnerability
 
