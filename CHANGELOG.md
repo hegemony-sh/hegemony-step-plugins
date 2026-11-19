@@ -1,3 +1,10 @@
+## [0.47.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.46.1...v0.47.0) (2026-11-19)
+
+### Features
+
+* **file-download:** declare the output fields for the variable picker ([7ce19ef](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7ce19ef01828145b1f689c49fcaaf03be31e983f))
+* **sdk:** let a handler declare its output fields ([f9bc031](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f9bc031f68ff280a2b66f0f6b65a6265830e1c9e))
+
 ## [0.46.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.46.0...v0.46.1) (2026-11-18)
 
 ### Bug Fixes
