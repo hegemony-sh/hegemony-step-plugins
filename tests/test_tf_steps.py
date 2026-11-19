@@ -2084,3 +2084,49 @@ async def test_plan_step_records_no_image_id_it_could_not_read(monkeypatch):
     assert asked == [True]
     assert result.output["image_id"] == ""
     assert (result.metrics["image_id"], result.metrics["image_local_id"]) == ("", local_id)
+
+
+def _declared(handler: type) -> set[str]:
+    names = [field.name for field in handler.output_fields]
+    assert len(names) == len(set(names))
+    return set(names)
+
+
+@pytest.mark.asyncio
+async def test_a_plan_outputs_only_declared_keys(monkeypatch):
+    # The editor's variable picker lists output_fields; every key a plan
+    # reports must be among them.
+    _install_docker(
+        monkeypatch,
+        out={
+            "plan-exitcode": b"2",
+            "plan.txt": b"Plan: 1 to add, 0 to change, 0 to destroy.\n",
+            PLAN_JSON_FILE: _PLAN_JSON,
+        },
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+
+    assert result.success is True, result.error
+    # Only the truncation flag is missing: fewer than 200 resources change.
+    assert _declared(TfPlanHandler) - set(result.output) == {"resource_changes_truncated"}
+
+
+@pytest.mark.asyncio
+async def test_an_apply_outputs_exactly_the_declared_keys(monkeypatch):
+    _install_docker(monkeypatch, out={}, exit_code=0)
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _Services(_plan_output())))
+
+    assert result.success is True, result.error
+    assert set(result.output) == _declared(TfApplyHandler)
+
+
+@pytest.mark.parametrize(
+    ("handler", "handler_id"), [(TfPlanHandler, "tf.plan"), (TfApplyHandler, "tf.apply")]
+)
+def test_the_docs_page_names_every_declared_output_field(handler, handler_id):
+    from hegemony_step_sdk.docs import load_docs_bundle
+
+    text = load_docs_bundle("hegemony_steps_tf")[handler_id]
+    for field in handler.output_fields:
+        assert f"output.{field.name}`" in text, field.name
+        assert field.description and field.type, field.name

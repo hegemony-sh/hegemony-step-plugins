@@ -22,7 +22,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, HandlerTargeting, StepKind
+from hegemony_step_sdk import (
+    BaseHandler,
+    HandlerContext,
+    HandlerResult,
+    HandlerTargeting,
+    OutputField,
+    StepKind,
+)
 from hegemony_steps_container.runner import (
     KILL_AFTER_SECONDS,
     OUTPUT_DIR,
@@ -276,6 +283,14 @@ def read_plan_handoff(plan_step: str, output: dict[str, Any]) -> PlanHandoff | s
     return handoff
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("applied", "Whether a plan was applied (false when it had no changes)", "bool"),
+    OutputField("outputs", "Non-sensitive output values after the apply", "object"),
+    OutputField("sensitive_outputs", "Names of sensitive outputs", "list"),
+)
+
+
 class TfApplyHandler(BaseHandler):
     """Apply the plan a tf.plan step saved earlier in the run."""
 
@@ -293,6 +308,7 @@ class TfApplyHandler(BaseHandler):
     raw_config_keys = frozenset({"secret_env", "state_encryption_key"})
     default_timeout_seconds = 3600
     config_model = TfApplyConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"timeout_seconds": 3600}
     run_timeout_field = "timeout_seconds"
 

@@ -50,7 +50,9 @@ The apply's output streams into the step's live log and is kept as the
 container output artifact. Later steps read the configuration's
 non-sensitive outputs under `steps.NODE_ID.output.outputs`, for example
 `steps.NODE_ID.output.outputs.vpc_id`; sensitive outputs are listed by name
-in `sensitive_outputs` but their values are never kept.
+in `steps.NODE_ID.output.sensitive_outputs` but their values are never kept.
+`steps.NODE_ID.output.applied` is true when a plan was applied, and false
+when the plan had no changes (the outputs are then the plan's).
 
 ## When It Fails
 

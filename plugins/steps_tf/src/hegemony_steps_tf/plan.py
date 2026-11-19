@@ -27,6 +27,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StateBackendAccess,
     StepKind,
 )
@@ -375,6 +376,52 @@ def saved_plan_digest(raw: bytes | None) -> str:
     return digest if SHA256_RE.fullmatch(digest) else ""
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("handler", "Always tf.plan; tf.apply refuses an output without it", "string"),
+    OutputField("has_changes", "Whether the plan has changes", "bool"),
+    OutputField("summary", "Summary line, such as Plan: +3 ~1 -0", "string"),
+    OutputField("add", "Resources to add (when the JSON plan was read)", "int"),
+    OutputField("change", "Resources to change (when the JSON plan was read)", "int"),
+    OutputField("destroy", "Resources to destroy (when the JSON plan was read)", "int"),
+    OutputField("replace", "Resources to replace (when the JSON plan was read)", "int"),
+    OutputField("import", "Resources to import (when the JSON plan was read)", "int"),
+    OutputField("move", "Resources to move (when the JSON plan was read)", "int"),
+    OutputField("read", "Data sources read during apply (when the JSON plan was read)", "int"),
+    OutputField("forget", "Resources to forget (when the JSON plan was read)", "int"),
+    OutputField(
+        "resource_changes",
+        "Changed resource addresses with their actions, the first 200 "
+        "(when the JSON plan was read)",
+        "list",
+    ),
+    OutputField(
+        "resource_changes_truncated",
+        "True when more than 200 resources change",
+        "bool",
+    ),
+    OutputField("output_changes", "Names of changed outputs (when the JSON plan was read)", "list"),
+    OutputField(
+        "drift",
+        "Resources changed outside the configuration (when the JSON plan was read)",
+        "int",
+    ),
+    OutputField("engine", "Tool that made the plan: opentofu or terraform", "string"),
+    OutputField("image", "Image the plan ran", "string"),
+    OutputField("image_digest", "The same image by digest (empty when it has none)", "string"),
+    OutputField("image_id", "The image's ID (empty when not reported)", "string"),
+    OutputField("cache_image", "Whether the image was pulled through the cache", "bool"),
+    OutputField("plan_sha256", "SHA-256 of the saved plan", "string"),
+    OutputField("state", "State mode: managed, backend or ephemeral", "string"),
+    OutputField("state_name", "Managed state name (empty for other modes)", "string"),
+    OutputField("state_held", "Whether the run still holds the managed state", "bool"),
+    OutputField("working_dir", "Working directory of the plan", "string"),
+    OutputField("apply_ready", "Whether tf.apply can apply the saved plan", "bool"),
+    OutputField("outputs", "Non-sensitive output values before the plan's changes", "object"),
+    OutputField("sensitive_outputs", "Names of sensitive outputs", "list"),
+)
+
+
 class TfPlanHandler(BaseHandler):
     """Plan an OpenTofu/Terraform configuration and report what would change."""
 
@@ -395,6 +442,7 @@ class TfPlanHandler(BaseHandler):
     raw_config_keys = frozenset({"secret_vars", "secret_env", "state_encryption_key"})
     default_timeout_seconds = 1800
     config_model = TfPlanConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"engine": "opentofu", "state": "managed", "timeout_seconds": 1800}
     run_timeout_field = "timeout_seconds"
 

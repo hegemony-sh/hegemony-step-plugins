@@ -81,6 +81,8 @@ class SendNotificationHandler(BaseHandler):
     category = "Notifications"
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = SendNotificationConfig
+    # Puts nothing in its step output.
+    output_fields = ()
 
     # title/message are notification templates rendered by this handler with the
     # notification context (run.*, event, ui_base_url, target_lines, steps, plus

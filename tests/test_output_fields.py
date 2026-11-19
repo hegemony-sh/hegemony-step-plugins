@@ -30,7 +30,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 _TYPES = {"string", "int", "float", "bool", "object", "list"}
 #: Handlers whose output is empty by design.
-_NO_OUTPUT = {"general.noop", "general.sleep"}
+_NO_OUTPUT = {"flow.notify", "general.noop", "general.sleep"}
 
 
 def _handlers() -> list[tuple[str, Any]]:
