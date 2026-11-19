@@ -1,3 +1,18 @@
+## [0.48.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.47.0...v0.48.0) (2026-11-19)
+
+### Features
+
+* **ansible,container:** declare the output fields for the variable picker ([0b0bcdf](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0b0bcdf3126b39c353739df085b994659491f494))
+* **netbox,http,evidence:** declare the output fields for the variable picker ([3ba3efc](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3ba3efc6a26969fae22d7929b18db349ba5f386a))
+* **netcli,shell,secret,inventory:** declare the output fields for the variable picker ([c48d9b6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c48d9b60a0f049935fd0fe9d5ca2b1085b975fca))
+* **probe:** declare the output fields for the variable picker ([f3604db](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f3604db498c688f871f76358169be58b19e40d64))
+* **tf,flow,general:** declare the output fields for the variable picker ([6ed1e97](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6ed1e970c1d7431dbe07abc2e5438d7301fc15e1))
+
+### Bug Fixes
+
+* **netbox:** correct two output type hints and the allocate failure docs ([171df93](https://github.com/hegemony-sh/hegemony-step-plugins/commit/171df939f5fd73411732896bfe1369f49dc257b5))
+* **tf:** describe cache_image as the setting, and check plan keys both ways ([0a79ac9](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0a79ac99a3f17474207434f5493482303eb53698))
+
 ## [0.47.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.46.1...v0.47.0) (2026-11-19)
 
 ### Features

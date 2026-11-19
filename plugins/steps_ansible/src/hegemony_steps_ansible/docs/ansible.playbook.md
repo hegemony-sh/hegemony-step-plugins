@@ -156,7 +156,7 @@ The output keys:
 
 ## Execution Image
 
-The default image, `ghcr.io/hegemony-sh/ansible-runner:0.47`, bundles
+The default image, `ghcr.io/hegemony-sh/ansible-runner:0.48`, bundles
 ansible-core, ansible-pylibssh, ncclient, and the network collections the
 platform maps device platforms onto. It is built from `images/ansible-runner/`
 in the hegemony-step-plugins repository and published on ghcr.io with every
