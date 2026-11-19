@@ -33,6 +33,7 @@ from .contract import (
     HandlerResult,
     HandlerTargeting,
     InvalidConfigError,
+    OutputField,
     command_label,
     resolve_target_devices_for_roles,
 )
@@ -110,6 +111,7 @@ __all__ = [
     "HandlerResult",
     "HandlerServices",
     "HandlerTargeting",
+    "OutputField",
     "HostKeyRejectedError",
     "HostKeyVerifier",
     "InvalidConfigError",
