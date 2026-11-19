@@ -32,6 +32,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerResult, HandlerServices
+from hegemony_step_sdk.docs import load_docs_bundle
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
 from hegemony_steps_container.run import (
     MAX_OUTPUT_DATA_BYTES,
@@ -1055,3 +1056,21 @@ async def test_a_failed_identity_inspect_is_logged(monkeypatch, caplog):
     assert result == ("", "")
     assert "x/tool:1" in caplog.text
     assert "template parsing error" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs(monkeypatch):
+    # The editor's variable picker lists output_fields; they must match.
+    _install_docker(monkeypatch, out_files={"output.json": b'{"k": 1}'})
+    result = await RunContainerHandler().execute(_ctx({"image": "alpine:3.20"}))
+
+    declared = [field.name for field in RunContainerHandler.output_fields]
+    assert len(declared) == len(set(declared))
+    assert set(result.output) == set(declared)
+
+
+def test_the_docs_page_names_every_declared_output_field():
+    text = load_docs_bundle("hegemony_steps_container")["container.run"]
+    for field in RunContainerHandler.output_fields:
+        assert f"output.{field.name}`" in text, field.name
+        assert field.description and field.type, field.name

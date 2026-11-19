@@ -159,9 +159,9 @@ feed the counters in the summary.
 
 ## Output
 
-Later steps read the results as `steps.NODE_ID.output.KEY`:
+Later steps read:
 
-- `endpoints`: one record per endpoint, targets first. Each carries `source`
+- `steps.NODE_ID.output.endpoints`: one record per endpoint, targets first. Each carries `source`
   (`target`, `endpoint`, or `pem`), `host`, `port`, `sni` (the server name
   sent, empty for an IP address), `device_id`, `device_name`, `reachable`,
   `error`, `tls_version`, `cipher`, `chain_ok`, `chain_error`, `hostname_ok`,
@@ -177,14 +177,14 @@ Later steps read the results as `steps.NODE_ID.output.KEY`:
   `key_curve`, `signature_algorithm`, `is_ca`, and `certificate_pem` when
   Include certificate PEM is on. Finally `ok` and `failures` say whether the
   endpoint passed and, if not, why.
-- `summary`: the counts `total`, `reachable`, `unreachable`, `expired`,
+- `steps.NODE_ID.output.summary`: the counts `total`, `reachable`, `unreachable`, `expired`,
   `chain_failures`, `hostname_failures`, `mismatches`, `ocsp_revoked`,
   `crl_revoked`, and `failed`, one `warn_N` per warning window (such as `warn_30`: certificates
   with fewer than 30 days left, expired ones included), and `min_days_left`.
-- `all_ok`: whether every endpoint passed every enabled assertion.
-- `min_days_left`: the fewest days left over all certificates, empty when no
+- `steps.NODE_ID.output.all_ok`: whether every endpoint passed every enabled assertion.
+- `steps.NODE_ID.output.min_days_left`: the fewest days left over all certificates, empty when no
   certificate was read.
-- `trust_store`: what chains were verified against: `ca_bundle` (only the CA
+- `steps.NODE_ID.output.trust_store`: what chains were verified against: `ca_bundle` (only the CA
   bundle), `system+org` (the system store plus the organization's trusted
   CAs) or `system` (the system store alone: the organization trusts no extra
   CA, or the platform does not offer the list).

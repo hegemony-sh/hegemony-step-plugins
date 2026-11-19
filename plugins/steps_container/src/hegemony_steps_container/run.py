@@ -31,6 +31,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     ImageCache,
+    OutputField,
     StepKind,
 )
 from hegemony_step_sdk.trust import (
@@ -1318,6 +1319,16 @@ def _host_access_enabled(config: dict[str, Any]) -> list[str]:
     ]
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("stdout", "Standard output (first 4096 characters)", "string"),
+    OutputField("stderr", "Standard error (first 4096 characters)", "string"),
+    OutputField(
+        "data", "Contents of /hegemony/out/output.json, when the container wrote it", "object"
+    ),
+)
+
+
 class RunContainerHandler(BaseHandler):
     """Handler for running commands inside Docker containers.
 
@@ -1335,6 +1346,7 @@ class RunContainerHandler(BaseHandler):
     # Secret references reach the handler as written (see resolve_secret_values).
     raw_config_keys = frozenset({"secrets"})
     config_model = RunContainerConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"timeout_seconds": 300}
     run_timeout_field = "timeout_seconds"
 

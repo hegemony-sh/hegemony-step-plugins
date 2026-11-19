@@ -17,6 +17,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StepKind,
     command_label,
     for_each_target_device,
@@ -107,6 +108,12 @@ class _DeviceOutcome:
     commands_run: int = 0
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("stdout", "Combined output of every command on every device", "string"),
+)
+
+
 class ExecuteCLIActionHandler(BaseHandler):
     """Handler for executing CLI commands as an action."""
 
@@ -117,6 +124,7 @@ class ExecuteCLIActionHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=True, ips=False)
     config_model = ExecuteCliConfig
+    output_fields = _OUTPUT_FIELDS
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Execute CLI commands on all target devices."""

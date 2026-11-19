@@ -674,3 +674,40 @@ async def test_an_explicit_artifact_name_still_compares_a_platform_record(
 
     assert result.success is True, result.error
     assert result.evidence[0]["content_json"]["artifacts_compared"] == ["ssh-algorithms"]
+
+
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The editor's variable picker lists output_fields; they must match, also
+    # when nothing could be compared.
+    declared = {field.name for field in CompareEvidenceHandler.output_fields}
+    compared = await _handler_with(
+        [_artifact("dc1:show version", "v1")], [_artifact("dc1:show version", "v1")], monkeypatch
+    ).execute(_ctx(precheck_step_id="precheck", postcheck_step_id="postcheck"))
+    assert compared.success is True, compared.error
+    assert set(compared.output) == declared
+
+    nothing = await _handler_with(
+        [_artifact("dc1:show ip route ospf", "x")],
+        [_artifact("dc1:show ip route ospf", "x")],
+        monkeypatch,
+    ).execute(
+        _ctx(
+            precheck_step_id="precheck",
+            postcheck_step_id="postcheck",
+            artifact_name_pattern="*running-config",
+        )
+    )
+    assert nothing.success is False
+    assert set(nothing.output) == declared
+
+
+def test_the_docs_page_names_every_declared_output_field() -> None:
+    from hegemony_step_sdk.docs import load_docs_bundle
+
+    page = load_docs_bundle("hegemony_steps_evidence")["evidence.compare"]
+    output = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in CompareEvidenceHandler.output_fields:
+        assert f"`{field.name}`" in output, field.name
+        assert field.description and field.type, field.name

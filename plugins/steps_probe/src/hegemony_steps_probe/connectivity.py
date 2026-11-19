@@ -31,6 +31,7 @@ from hegemony_step_sdk import (
 from .checks import CHECK_TYPE_LABELS, PORT_CHECKS, CheckUnavailable, default_port
 from .targets import (
     DEFAULT_MAX_PARALLEL_TARGETS,
+    TARGETS_OUTPUT_FIELDS,
     TargetOutcome,
     all_probe_targets,
     chain_output,
@@ -159,6 +160,7 @@ class ConnectivityCheckHandler(BaseHandler):
     description = "One-shot connectivity probes (TCP/ICMP/HTTP/DNS) against targets."
     category = "Checks"
     config_model = ConnectivityCheckConfig
+    output_fields = TARGETS_OUTPUT_FIELDS
     default_config = {"check_type": "tcp_connect", "attempt_timeout_seconds": 10, "attempts": 1}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:

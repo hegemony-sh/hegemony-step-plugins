@@ -54,6 +54,10 @@ Empty Existing Filters always allocate.
 - `object` and `objects`: the objects as NetBox returned them (left out when
   larger than 64 KiB).
 - `resource` and `pool_id`: what was taken, and from which pool.
+- `ok`: whether the step succeeded. When a request to NetBox fails, the
+  output holds only `ok`, `allocated` (false) and `status`, the HTTP status
+  of the request that failed. A step refused for its settings (no pool
+  chosen, say) has no output.
 
 Later steps read `steps.<id>.output.value`, for example to configure the
 address on a device, and pass `steps.<id>.output.id` to `netbox.ipam.release`.

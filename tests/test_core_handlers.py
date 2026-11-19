@@ -1579,3 +1579,46 @@ async def test_execute_cli_rejects_an_invalid_prompt_before_connecting():
     assert result.success is False
     assert (result.error or "").startswith("Invalid prompts:")
     assert services.calls == []
+
+
+async def test_execute_cli_declares_the_keys_it_outputs():
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    result = await ExecuteCLIActionHandler().execute(_netcli_ctx(_OneTransport(_PromptTransport())))
+
+    assert result.success is True, result.error
+    assert {field.name for field in ExecuteCLIActionHandler.output_fields} == set(result.output)
+
+
+async def test_collect_evidence_declares_the_keys_it_outputs():
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    services = _AnsweringConnects({"r1": {"show ip ospf neighbor": "10.255.0.2 Full/DR"}})
+    result = await CollectEvidenceHandler().execute(_collect_ctx(services, "r1"))
+
+    assert result.success is True, result.error
+    assert {field.name for field in CollectEvidenceHandler.output_fields} == set(result.output)
+
+
+def test_netcli_execute_docs_name_every_declared_output_field():
+    from hegemony_step_sdk.docs import load_docs_bundle
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    page = load_docs_bundle("hegemony_steps_netcli")["netcli.execute"]
+    output_section = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in ExecuteCLIActionHandler.output_fields:
+        name = field.name
+        assert f"`{name}`" in output_section or f"output.{name}`" in output_section, name
+        assert field.description and field.type, name
+
+
+def test_netcli_collect_evidence_docs_name_every_declared_output_field():
+    from hegemony_step_sdk.docs import load_docs_bundle
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    page = load_docs_bundle("hegemony_steps_netcli")["netcli.collect_evidence"]
+    output_section = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in CollectEvidenceHandler.output_fields:
+        name = field.name
+        assert f"`{name}`" in output_section or f"output.{name}`" in output_section, name
+        assert field.description and field.type, name

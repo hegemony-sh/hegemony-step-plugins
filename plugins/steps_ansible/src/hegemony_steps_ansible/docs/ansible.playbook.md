@@ -135,6 +135,25 @@ with `== false`, not `not`. Very large results are trimmed to fit (diffs
 first, then long messages, then task records); the play recap and the counts
 are always complete, and `results_trimmed` names what was left out.
 
+The output keys:
+
+- `steps.NODE_ID.output.exit_code`: the exit code of ansible-playbook.
+- `steps.NODE_ID.output.check_mode`: whether the playbook ran in check mode.
+- `steps.NODE_ID.output.changed`: whether any host changed (null when unknown).
+- `steps.NODE_ID.output.hosts`: the per-host task counts from the play recap.
+- `steps.NODE_ID.output.changed_hosts`, `steps.NODE_ID.output.failed_hosts`
+  and `steps.NODE_ID.output.unreachable_hosts`: the hosts in each state.
+- `steps.NODE_ID.output.stats`: the values the play published with `set_stats`.
+- `steps.NODE_ID.output.results_trimmed`: what was left out of very large
+  results, present only when something was.
+- `steps.NODE_ID.output.changed_hosts_truncated`,
+  `steps.NODE_ID.output.failed_hosts_truncated` and
+  `steps.NODE_ID.output.unreachable_hosts_truncated`: true when that host
+  list was cut to fit; present only then.
+- `steps.NODE_ID.output.hosts_truncated` and
+  `steps.NODE_ID.output.stats_truncated`: true when `hosts` or `stats` was
+  left out to fit; present only then.
+
 ## Execution Image
 
 The default image, `ghcr.io/hegemony-sh/ansible-runner:0.47`, bundles

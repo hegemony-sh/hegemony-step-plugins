@@ -370,3 +370,22 @@ async def test_an_invalid_config_fails_with_every_output_key():
     assert result.success is False
     assert result.output["provider"] == "primary"
     assert result.output["status"] is None and result.output["counts"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs():
+    result = await _run({"provider": "netbox:primary"}, FakeServices(_answer("ok")))
+
+    assert result.success is True, result.error
+    assert {field.name for field in InventorySyncHandler.output_fields} == set(result.output)
+
+
+def test_inventory_sync_docs_name_every_declared_output_field():
+    from hegemony_step_sdk.docs import load_docs_bundle
+
+    page = load_docs_bundle("hegemony_steps_inventory")["inventory.sync"]
+    output_section = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in InventorySyncHandler.output_fields:
+        name = field.name
+        assert f"`{name}`" in output_section or f"output.{name}`" in output_section, name
+        assert field.description and field.type, name

@@ -28,6 +28,7 @@ from hegemony_step_sdk.trust import add_trusted_cas, org_trusted_ca_pem
 
 from .targets import (
     DEFAULT_MAX_PARALLEL_TARGETS,
+    TARGETS_OUTPUT_FIELDS,
     TargetOutcome,
     all_probe_targets,
     chain_output,
@@ -196,6 +197,7 @@ class HttpProbeHandler(BaseHandler):
     description = "Request an HTTP(S) endpoint on each target and assert status/body."
     category = "Checks"
     config_model = HttpProbeConfig
+    output_fields = TARGETS_OUTPUT_FIELDS
     default_config = {"scheme": "http", "path": "/", "expected_status": "200-399"}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:

@@ -209,3 +209,33 @@ async def test_an_invalid_setting_starts_no_child_run() -> None:
     assert result.summary == "Nested flow configuration error"
     assert "poll_interval_seconds" in (result.error or "")
     assert services.child_run_payloads == []
+
+
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs() -> None:
+    # The editor's variable picker lists output_fields; a waited, successful
+    # child run gives every key.
+    services = _FakeServices(["SUCCESS"])
+    result = await RunFlowHandler().execute(_ctx({**_BASE, "flow_name": "X"}, services))
+
+    assert result.success is True, result.error
+    declared = [field.name for field in RunFlowHandler.output_fields]
+    assert len(declared) == len(set(declared))
+    assert set(declared) == set(result.output)
+
+
+async def test_a_step_that_does_not_wait_outputs_only_declared_keys() -> None:
+    services = _FakeServices()
+    config = {**_BASE, "flow_name": "X", "wait_for_completion": False}
+    result = await RunFlowHandler().execute(_ctx(config, services))
+
+    assert result.success is True, result.error
+    assert set(result.output) <= {field.name for field in RunFlowHandler.output_fields}
+
+
+def test_the_docs_page_names_every_declared_output_field() -> None:
+    from hegemony_step_sdk.docs import load_docs_bundle
+
+    text = load_docs_bundle("hegemony_steps_flow")["flow.run"]
+    for field in RunFlowHandler.output_fields:
+        assert f"output.{field.name}`" in text, field.name
+        assert field.description and field.type, field.name

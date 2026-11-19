@@ -34,6 +34,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StepKind,
 )
 from hegemony_steps_container.run import RunContainerHandler
@@ -633,6 +634,27 @@ def _explain_default_image_pull_failure(
     return result
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("exit_code", "Exit code of ansible-playbook", "int"),
+    OutputField("check_mode", "Whether the playbook ran in check mode", "bool"),
+    OutputField("changed", "Whether any host changed (null when the play gave no results)", "bool"),
+    OutputField("hosts", "Per-host task counts from the play recap", "object"),
+    OutputField("changed_hosts", "Hosts with changes", "list"),
+    OutputField("failed_hosts", "Hosts with failed tasks", "list"),
+    OutputField("unreachable_hosts", "Hosts that could not be reached", "list"),
+    OutputField("stats", "Values the play published with set_stats", "object"),
+    OutputField("results_trimmed", "What was left out of very large results, when any was", "list"),
+    OutputField("changed_hosts_truncated", "True when changed_hosts was cut to fit", "bool"),
+    OutputField("failed_hosts_truncated", "True when failed_hosts was cut to fit", "bool"),
+    OutputField(
+        "unreachable_hosts_truncated", "True when unreachable_hosts was cut to fit", "bool"
+    ),
+    OutputField("hosts_truncated", "True when hosts was left out to fit", "bool"),
+    OutputField("stats_truncated", "True when stats was left out to fit", "bool"),
+)
+
+
 class AnsiblePlaybookHandler(BaseHandler):
     """Run an Ansible playbook against the step's targets, inventory generated."""
 
@@ -650,6 +672,7 @@ class AnsiblePlaybookHandler(BaseHandler):
     raw_config_keys = frozenset({"secrets", "group_secrets", "vault_password", "vault_ids"})
     default_timeout_seconds = 1800
     config_model = AnsiblePlaybookConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"playbook": "site.yml", "timeout_seconds": 1800}
     run_timeout_field = "timeout_seconds"
 

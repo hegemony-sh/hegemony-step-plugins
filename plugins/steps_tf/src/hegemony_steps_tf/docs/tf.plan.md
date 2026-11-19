@@ -160,6 +160,26 @@ for the apply. `image` is the image the plan ran, `image_digest`
 the same image by digest (empty when it has none), and `image_id` its ID
 (empty when the sandbox daemon did not report it).
 
+Every key, for the variable picker and later steps:
+`steps.NODE_ID.output.handler`, `steps.NODE_ID.output.has_changes`,
+`steps.NODE_ID.output.summary`, the counts `steps.NODE_ID.output.add`,
+`steps.NODE_ID.output.change`, `steps.NODE_ID.output.destroy`,
+`steps.NODE_ID.output.replace`, `steps.NODE_ID.output.import`,
+`steps.NODE_ID.output.move`, `steps.NODE_ID.output.read` and
+`steps.NODE_ID.output.forget`, `steps.NODE_ID.output.resource_changes`,
+`steps.NODE_ID.output.resource_changes_truncated`,
+`steps.NODE_ID.output.output_changes`, `steps.NODE_ID.output.drift`,
+`steps.NODE_ID.output.engine`, `steps.NODE_ID.output.image`,
+`steps.NODE_ID.output.image_digest`, `steps.NODE_ID.output.image_id`,
+`steps.NODE_ID.output.cache_image` (the step's **Cache image** setting, which
+`tf.apply` reuses; it does not say whether a cache was used), `steps.NODE_ID.output.plan_sha256`, `steps.NODE_ID.output.state`
+(managed, backend or ephemeral), `steps.NODE_ID.output.state_name` (the
+managed state's name, empty otherwise), `steps.NODE_ID.output.state_held`,
+`steps.NODE_ID.output.working_dir`, `steps.NODE_ID.output.apply_ready`
+(whether `tf.apply` can apply the saved plan), `steps.NODE_ID.output.outputs`
+and `steps.NODE_ID.output.sensitive_outputs`. The counts, the change lists and
+`drift` are missing when the JSON plan could not be read.
+
 ## When It Fails
 
 The step succeeds when the plan is made, with or without changes. It fails

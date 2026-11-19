@@ -33,6 +33,7 @@ from hegemony_step_sdk import (
     ImageBuild,
     ImageCache,
 )
+from hegemony_step_sdk.docs import load_docs_bundle
 from hegemony_steps_container import ALL_HANDLERS
 from hegemony_steps_container.build import (
     CREATED_LABEL,
@@ -1523,3 +1524,29 @@ async def test_tab_separated_instructions_keep_their_protections(
 
     assert result.success, result.error
     assert not any(context.startswith("alpine") for context in _contexts(fake_docker))
+
+
+@pytest.mark.asyncio
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs(fake_docker) -> None:
+    # The editor's variable picker lists output_fields; they must match.
+    _save_login(fake_docker["config_dir"], "ghcr.io")
+    services = _Services(
+        fake_docker["bin"],
+        fake_docker["config_dir"],
+        build=_target(BUILD_NETWORK_DEFAULT, push=False, external_push=True),
+    )
+    result = await BuildImageHandler().execute(
+        _ctx({"image": "ghcr.io/acme/tool", "context_dir": "images/tool"}, services, [])
+    )
+
+    assert result.success, result.error
+    declared = [field.name for field in BuildImageHandler.output_fields]
+    assert len(declared) == len(set(declared))
+    assert set(result.output) == set(declared)
+
+
+def test_the_docs_page_names_every_declared_output_field() -> None:
+    text = load_docs_bundle("hegemony_steps_container")["container.build"]
+    for field in BuildImageHandler.output_fields:
+        assert f"output.{field.name}`" in text, field.name
+        assert field.description and field.type, field.name

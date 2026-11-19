@@ -26,6 +26,7 @@ from hegemony_step_sdk import (
     HandlerServices,
     JumpHostSpec,
 )
+from hegemony_step_sdk.docs import load_docs_bundle
 from hegemony_steps_ansible.inventory import (
     build_inventory,
     group_name,
@@ -1448,3 +1449,39 @@ def test_handler_metadata():
     # Secret fields reach the handler as written (never resolved twice).
     assert handler.raw_config_keys == {"secrets", "group_secrets", "vault_password", "vault_ids"}
     assert handler.targeting.roles is True and handler.targeting.ips is False
+
+
+@pytest.mark.asyncio
+async def test_the_declared_output_fields_cover_every_key_the_step_outputs(monkeypatch):
+    # The editor's variable picker lists output_fields; every key must be there.
+    collected = _results_json(
+        {"r1": {"ok": 2, "changed": 1, "failures": 0, "unreachable": 0}},
+    )
+    _install_docker(monkeypatch, collected=collected, exit_code=0)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+
+    declared = [field.name for field in AnsiblePlaybookHandler.output_fields]
+    assert len(declared) == len(set(declared))
+    assert set(result.output) <= set(declared)
+    # The truncation markers only appear on oversized output; the rest always do.
+    always = {name for name in declared if not name.endswith(("_truncated", "_trimmed"))}
+    assert set(result.output) == always
+    # So do the keys only an oversized output gets.
+    names = [f"h{index}" for index in range(MAX_OUTPUT_HOST_NAMES + 1)]
+    bounded = _bounded_output(
+        {
+            "changed_hosts": names,
+            "failed_hosts": names,
+            "unreachable_hosts": names,
+            "hosts": {"h": {"blob": "x" * MAX_OUTPUT_BYTES}},
+            "stats": {"blob": "x" * MAX_OUTPUT_BYTES},
+        }
+    )
+    assert set(bounded) <= set(declared)
+
+
+def test_the_docs_page_names_every_declared_output_field():
+    text = load_docs_bundle("hegemony_steps_ansible")["ansible.playbook"]
+    for field in AnsiblePlaybookHandler.output_fields:
+        assert f"output.{field.name}`" in text, field.name
+        assert field.description and field.type, field.name

@@ -18,6 +18,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StepKind,
     command_label,
     for_each_target_device,
@@ -121,6 +122,18 @@ class _DeviceOutcome:
     failure: str | None = None
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField(
+        "devices",
+        "Each device's success, error and command outputs, keyed by device name",
+        "object",
+    ),
+    OutputField("truncated", "Outputs cut short, as device:command", "list"),
+    OutputField("omitted", "Devices whose command outputs did not fit", "list"),
+)
+
+
 class CollectEvidenceHandler(BaseHandler):
     """Handler for collecting CLI evidence from devices."""
 
@@ -132,6 +145,7 @@ class CollectEvidenceHandler(BaseHandler):
     # Devices come from roles only: an additional IP has no login details.
     targeting = HandlerTargeting(roles=True, ips=False)
     config_model = CollectEvidenceConfig
+    output_fields = _OUTPUT_FIELDS
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Collect CLI command outputs as evidence from all target devices."""

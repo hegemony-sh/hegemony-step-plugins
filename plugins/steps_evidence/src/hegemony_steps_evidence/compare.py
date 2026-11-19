@@ -20,6 +20,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StepKind,
 )
 
@@ -172,6 +173,19 @@ class CompareEvidenceConfig(BaseModel):
     )
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("passed", "Whether the comparison passed", "bool"),
+    OutputField("comparison_type", "The comparison mode", "string"),
+    OutputField("compared", "Artifacts found on both sides", "list"),
+    OutputField(
+        "failed", "Artifacts that did not meet the comparison or whose capture failed", "list"
+    ),
+    OutputField("missing_in_postcheck", "Artifacts found only in the precheck", "list"),
+    OutputField("only_in_postcheck", "Artifacts found only in the postcheck", "list"),
+)
+
+
 class CompareEvidenceHandler(BaseHandler):
     """Handler for comparing evidence from two phases (precheck vs postcheck)."""
 
@@ -182,6 +196,7 @@ class CompareEvidenceHandler(BaseHandler):
     category = "Checks"
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = CompareEvidenceConfig
+    output_fields = _OUTPUT_FIELDS
 
     async def _fetch_run_artifacts(self, ctx: HandlerContext) -> list[dict]:
         """Fetch the run's artifacts from the API; empty when the fetch fails."""
