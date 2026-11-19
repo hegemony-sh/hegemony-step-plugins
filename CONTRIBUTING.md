@@ -51,7 +51,7 @@ A commit written by an AI coding agent is signed off by the person who directs
 the agent and submits the work, as its author; the agent is credited in a
 `Co-authored-by:` trailer and never signs off in its own name. See the
 platform's
-[CONTRIBUTING.md](https://github.com/hegemony-sh/hegemony/blob/develop/CONTRIBUTING.md#licensing-and-dco).
+[CONTRIBUTING.md](https://github.com/hegemony-sh/hegemony/blob/main/CONTRIBUTING.md#licensing-and-dco).
 
 ## Local setup and checks
 

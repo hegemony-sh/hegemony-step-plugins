@@ -82,7 +82,7 @@ rest. Every wheel ships in the platform's images. The platform has no runtime
 switch that hides an installed step, so a deployment that must not offer one
 builds its api and worker images without the wheel (`uv pip uninstall` in a
 derived image; see the platform's
-[production hardening guide](https://github.com/hegemony-sh/hegemony/blob/develop/docs/deployment/production-hardening.md#step-handlers-in-the-images)).
+[production hardening guide](https://github.com/hegemony-sh/hegemony/blob/main/docs/deployment/production-hardening.md#step-handlers-in-the-images)).
 Hardened deployments may do that with `hegemony-steps-container` to disable
 container execution entirely.
 
