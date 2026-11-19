@@ -734,7 +734,9 @@ async def test_evidence_falls_back_to_the_configured_reference_when_the_host_nam
 @pytest.mark.asyncio
 async def test_the_declared_output_fields_are_the_keys_the_step_outputs():
     # The editor's variable picker lists output_fields; they must match.
-    result, _ = await _run(FakeServices(), {"file_ids": FILE_ID}, [_device("srv1", platform="linux")])
+    result, _ = await _run(
+        FakeServices(), {"file_ids": FILE_ID}, [_device("srv1", platform="linux")]
+    )
 
     assert result.success is True, result.error
     declared = [field.name for field in FileDownloadHandler.output_fields]
