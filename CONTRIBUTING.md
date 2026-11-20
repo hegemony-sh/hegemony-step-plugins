@@ -185,15 +185,23 @@ wheels and asserts one page per registered handler.
 A merge to `main` is a release. The `Release` workflow calls the shared
 [`plugin-release.yml`](https://github.com/hegemony-sh/hegemony-github-workflows)
 workflow, which runs [semantic-release](https://semantic-release.gitbook.io/):
-it reads the Conventional Commits since the last tag, derives the next
-version from them, bumps every package and SDK pin (`scripts/set_version.py`),
-refreshes `uv.lock`, builds and smoke-installs the wheels, prepends
-`CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`, tags `vX.Y.Z` and
-publishes the wheels plus `SHA256SUMS` as the GitHub Release. Publishing that
-Release starts the `Images` workflow, which publishes the steps' runner images
-(`ansible-runner`, `opentofu-runner`) as `X.Y.Z` and `X.Y` from the tag; the
-release commit carries the steps' defaults moved to `X.Y`. There is no manual
-step any more: do not bump versions or push `v*` tags by hand.
+it reads the Conventional Commits since the last tag, derives the next version
+from them, bumps every package and SDK pin (`scripts/set_version.py`),
+refreshes `uv.lock`, builds the wheels and sdists, smoke-installs the wheels,
+prepends `CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`, tags
+`vX.Y.Z` and publishes the wheels, the sdists and `SHA256SUMS` as the GitHub
+Release. Once that Release is published, the `pypi` job of `release.yml`
+uploads the same wheels and sdists to PyPI with trusted publishing and PEP 740
+attestations. That job is in this repository's workflow, not the shared one,
+because trusted publishing does not work inside a reusable workflow; it runs
+in the `pypi` environment, which waits for a required reviewer. If it fails (a
+package without a matching trusted publisher, say), fix the cause and re-run
+the failed job; it downloads the files from the published Release, so a re-run
+works at any time, and files PyPI already holds are skipped. Publishing the Release also starts the
+`Images` workflow, which publishes the steps' runner images (`ansible-runner`,
+`opentofu-runner`) as `X.Y.Z` and `X.Y` from the tag; the release commit
+carries the steps' defaults moved to `X.Y`. There is no manual step any more:
+do not bump versions or push `v*` tags by hand.
 
 | Commits since the last tag | Release |
 |---|---|
@@ -226,7 +234,10 @@ next run reads the tag as the last release. Publish that tag's assets by hand
 from a checkout of the tag, as the shared workflow's
 [README](https://github.com/hegemony-sh/hegemony-github-workflows#recovering-a-tag-without-a-release)
 describes (`gh release create vX.Y.Z --verify-tag ... dist/*.whl
-dist/SHA256SUMS` after rebuilding the wheels at that tag).
+dist/*.tar.gz dist/SHA256SUMS` after rebuilding the wheels and sdists at that
+tag, with `SHA256SUMS` covering `*.whl *.tar.gz`). The `pypi` job does not run
+for such a tag, so that release reaches PyPI only if its files are uploaded
+separately.
 
 The shared workflow is pinned by commit in `.github/workflows/release.yml`;
 a change merged to it reaches this repository through a pull request that

@@ -32,7 +32,7 @@ jobs:
     # reviewed code. The comment names the branch the pin was taken from; bump
     # the SHA in a pull request to pick up a change merged there (the
     # workflow's own release-tools lockfile moves with it).
-    uses: hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml@246e5ea38d929ee2bfd7dd8052356e878b0bf413 # main
+    uses: hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml@5a9633fe7a654e90a7384c960028705f1f51d524 # main
     # The union of what the called workflow's jobs need; it narrows per job
     # (contents: write for the release; id-token, attestations and
     # artifact-metadata for the provenance attestation of public releases).
@@ -48,3 +48,68 @@ jobs:
     # workflow fails fast with a clear message when it arrives empty.
     secrets:
       RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+
+  # The PyPI upload lives here, not in the shared workflow: PyPI's trusted
+  # publishing does not work from inside a reusable workflow, so the publisher
+  # each package has on PyPI names this file (release.yml) and the `pypi`
+  # environment. It takes the files the release job built, checksummed and
+  # attested (the release-assets artifact), rather than building again.
+  pypi:
+    name: Publish to PyPI
+    needs: release
+    # Only after the GitHub Release is published: an upload to PyPI cannot
+    # be undone, only yanked.
+    if: needs.release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+    permissions:
+      contents: read # download the published Release's assets
+      attestations: read # verify their provenance attestations
+      id-token: write # trusted publishing and the PyPI (PEP 740) attestations
+    steps:
+      # The files come from the published GitHub Release, not from a run
+      # artifact: a Release is immutable and stays, so the job still works
+      # when the required reviewer approves it days later or it is re-run.
+      - name: Download the published Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          gh release download "v${VERSION}" --repo "$REPOSITORY" --dir dist \
+            --pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS
+      # Upload exactly the files the release workflow built and attested:
+      # every wheel and sdist must be in SHA256SUMS with a matching hash,
+      # carry the released version and have a provenance attestation from
+      # the shared release workflow. PyPI refuses SHA256SUMS itself as an
+      # unknown file type, so it goes once checked.
+      - name: Check the files against the release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          sha256sum --check --strict SHA256SUMS
+          shopt -s nullglob
+          files=(*.whl *.tar.gz)
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::no wheels or sdists in the Release"; exit 1; }
+          for file in "${files[@]}"; do
+            grep -q "  ${file}\$" SHA256SUMS || { echo "::error::${file} is not in SHA256SUMS"; exit 1; }
+            case "$file" in
+              *-"${VERSION}"-py3-none-any.whl | *-"${VERSION}".tar.gz) ;;
+              *) echo "::error::${file} is not a ${VERSION} file"; exit 1 ;;
+            esac
+            gh attestation verify "$file" --repo "$REPOSITORY" \
+              --signer-workflow hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml \
+              > /dev/null
+          done
+          rm SHA256SUMS
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/
+          attestations: true # PEP 740 attestations, shown on PyPI
+          print-hash: true
+          skip-existing: true
