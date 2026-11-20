@@ -6,7 +6,7 @@
 """Unauthenticated probe step handlers (reachability, DNS, HTTP, TLS) for Hegemony.
 
 Outside-observation probes: one-shot connectivity, DNS, HTTP and TLS
-certificate checks, and stable-reachability waits. No device credentials
+certificate checks, and waits for targets to come up or go down. No device credentials
 involved.
 
 Registers under the ``hegemony.step_handlers`` entry-point group; the entry
@@ -23,6 +23,7 @@ from .dns_check import DnsProbeHandler
 from .http_check import HttpProbeHandler
 from .tls_check import TlsProbeHandler
 from .wait_reachable import WaitReachableHandler
+from .wait_unreachable import WaitUnreachableHandler
 
 ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
     ConnectivityCheckHandler,
@@ -30,6 +31,7 @@ ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
     HttpProbeHandler,
     TlsProbeHandler,
     WaitReachableHandler,
+    WaitUnreachableHandler,
 )
 
 
