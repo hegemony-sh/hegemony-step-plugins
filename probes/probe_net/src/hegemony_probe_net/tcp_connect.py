@@ -18,7 +18,13 @@ from typing import Any
 
 from hegemony_step_sdk import BaseProbe, ProbeResult
 
-from .socks import SocksError, SocksProxy, open_socks_connection, parse_socks_proxy
+from .socks import (
+    SocksError,
+    SocksProxy,
+    SocksTargetError,
+    open_socks_connection,
+    parse_socks_proxy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +90,9 @@ class TcpConnectProbe(BaseProbe):
             return ProbeResult(
                 ok=False,
                 metrics={"connect_ms": round(elapsed, 3), "port": port},
-                error_kind="socks_error",
+                # The proxy reached its end but not the target: report the
+                # target's failure, as without a proxy.
+                error_kind=e.error_kind if isinstance(e, SocksTargetError) else "socks_error",
                 error_detail=str(e),
             )
 

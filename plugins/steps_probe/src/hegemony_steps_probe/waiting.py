@@ -22,6 +22,10 @@ if TYPE_CHECKING:
     from .wait_reachable import WaitReachableConfig
 
 
+#: Failures that mean only that no answer came in time.
+NO_ANSWER_ERRORS = frozenset({"timeout", "no_response", "packet_loss"})
+
+
 class CheckMisconfigured(Exception):
     """The probe refused its options (a ``config_error``); no poll can pass."""
 
@@ -54,11 +58,15 @@ async def poll_target(
     device: dict[str, Any],
     deadline: float,
 ) -> ProbeResult | None:
-    """Poll one target once; its probe result, or None when it did not answer in time.
+    """Poll one target once; its probe result, or None when the poll was skipped.
 
     A poll never outlasts ``deadline`` (loop time), also when it starts late
-    in a round with more targets than run at once. run_probe applies the
-    flow egress gate, so a denied target raises here on its first poll and
+    in a round with more targets than run at once: one that would start at
+    or after it is skipped (None), since it learns nothing about the target.
+    A poll the deadline cut short that got no answer at all is skipped (None)
+    too: silence for less than Connect Timeout proves nothing, while a clear
+    refusal does. A probe that does not answer in its full time is a failed
+    ``timeout`` result. run_probe applies the flow egress gate, so a denied target raises here on its first poll and
     fails the step with the policy's reason. Raises ``CheckUnavailable``
     when the worker has no such check, and ``CheckMisconfigured`` when the
     probe refuses its options, which it would do on every poll.
@@ -84,10 +92,18 @@ async def poll_target(
             timeout=timeout,
         )
     except TimeoutError:
-        return None
+        result = ProbeResult(
+            ok=False, error_kind="timeout", error_detail=f"no answer within {timeout:g}s"
+        )
     except KeyError:
         raise CheckUnavailable from None
     if result.error_kind == "config_error":
         name = device.get("name", device["mgmt_host"])
         raise CheckMisconfigured(f"{name}: {result.error_detail}")
+    if (
+        not result.ok
+        and result.error_kind in NO_ANSWER_ERRORS
+        and timeout < config.connect_timeout_seconds
+    ):
+        return None
     return result

@@ -145,3 +145,66 @@ def test_the_docs_page_names_every_declared_output_field():
     text = load_docs_bundle("hegemony_steps_probe")[WaitUnreachableHandler.handler_id]
     for field in WaitUnreachableHandler.output_fields:
         assert f"output.{field.name}`" in text, field.name
+
+
+class _Slow:
+    """run_probe stand-in that answers after ``delay`` seconds."""
+
+    def __init__(self, answer: ProbeResult, delay: float = 0.0) -> None:
+        self.answer, self.delay, self.calls = answer, delay, 0
+
+    async def run_probe(self, check_type, address, options):
+        import asyncio
+
+        self.calls += 1
+        await asyncio.sleep(self.delay)
+        return self.answer
+
+
+def _config(**fields: Any) -> WaitUnreachableConfig:
+    return WaitUnreachableConfig.model_validate(
+        {"stable_seconds": 0, "max_wait_seconds": 30, **fields}
+    )
+
+
+async def test_a_poll_past_the_deadline_is_skipped():
+    import asyncio
+
+    from hegemony_steps_probe.waiting import poll_target
+
+    probes = _Slow(DOWN)
+    deadline = asyncio.get_running_loop().time() - 1
+    result = await poll_target(
+        cast(HandlerServices, probes), _config(), {"mgmt_host": "192.0.2.7"}, deadline
+    )
+    assert result is None
+    assert probes.calls == 0
+
+
+async def test_a_failed_poll_the_deadline_cut_short_proves_nothing():
+    import asyncio
+
+    from hegemony_steps_probe.waiting import poll_target
+
+    deadline = asyncio.get_running_loop().time() + 0.5
+    device = {"mgmt_host": "192.0.2.7"}
+    failed = await poll_target(cast(HandlerServices, _Slow(DOWN)), _config(), device, deadline)
+    assert failed is None
+    answered = await poll_target(cast(HandlerServices, _Slow(UP)), _config(), device, deadline)
+    assert answered is UP
+
+
+async def test_a_probe_with_no_answer_in_its_full_time_is_a_timeout():
+    import asyncio
+
+    from hegemony_steps_probe.waiting import poll_target
+
+    deadline = asyncio.get_running_loop().time() + 30
+    result = await poll_target(
+        cast(HandlerServices, _Slow(UP, delay=5)),
+        _config(connect_timeout_seconds=1),
+        {"mgmt_host": "192.0.2.7"},
+        deadline,
+    )
+    assert result is not None
+    assert result.ok is False and result.error_kind == "timeout"

@@ -34,6 +34,19 @@ class SocksError(Exception):
     """
 
 
+class SocksTargetError(SocksError):
+    """The proxy works, but it could not reach the target (a CONNECT reply).
+
+    The probes report it as they would the same failure without a proxy
+    (``error_kind``), not as a ``socks_error``: the proxy itself is fine, so
+    callers such as ``probe.wait_unreachable`` can count the target as down.
+    """
+
+    def __init__(self, message: str, error_kind: str) -> None:
+        super().__init__(message)
+        self.error_kind = error_kind
+
+
 #: RFC 1929 length-prefixes each field with a single byte.
 _CREDENTIALS_TOO_LONG = (
     "socks_proxy credentials do not fit SOCKS5 username/password auth "
@@ -111,6 +124,15 @@ _SOCKS_REPLY_ERRORS = {
     0x06: "TTL expired",
     0x07: "command not supported",
     0x08: "address type not supported",
+}
+
+#: CONNECT replies that say the target, not the proxy, failed, and the
+#: error_kind the same failure has without a proxy.
+_TARGET_REPLY_KINDS = {
+    0x03: "network_unreachable",
+    0x04: "no_route",
+    0x05: "connection_refused",
+    0x06: "timeout",
 }
 
 
@@ -216,9 +238,10 @@ async def _send_connect(
     if version != 0x05:
         raise SocksError("malformed SOCKS5 CONNECT reply")
     if reply != 0x00:
-        raise SocksError(
-            "SOCKS5 CONNECT failed: " + _SOCKS_REPLY_ERRORS.get(reply, f"reply {reply:#x}")
-        )
+        message = "SOCKS5 CONNECT failed: " + _SOCKS_REPLY_ERRORS.get(reply, f"reply {reply:#x}")
+        if reply in _TARGET_REPLY_KINDS:
+            raise SocksTargetError(message, _TARGET_REPLY_KINDS[reply])
+        raise SocksError(message)
     # Drain the bound address so the stream is positioned at tunneled data.
     if atyp == 0x01:
         await reader.readexactly(4)

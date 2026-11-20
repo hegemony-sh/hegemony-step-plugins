@@ -38,12 +38,15 @@ minute when it is shorter. Poll Interval (sec) (default 5) is the pause
 between poll rounds.
 
 A poll counts as failed when the target does not answer in time, refuses
-the connection, cannot be routed to, or fails the HTTP health request. A
-poll that shows the check itself could not run does not count either way:
-a SOCKS5 proxy that fails or refuses the login, a probe that fails with an
+the connection, cannot be routed to, or fails the HTTP health request,
+also when a SOCKS5 proxy reports one of these for the target. A poll that
+shows the check itself could not run does not count either way: a SOCKS5
+proxy that fails or refuses the login, a probe that fails with an
 unexpected error, a ping command missing on the worker. Such a poll starts
 the target's count over, so a broken proxy cannot make a device that is
-still up look down.
+still up look down. A poll the deadline cuts short counts only when it got
+an answer or a clear refusal; silence for less than Connect Timeout (sec)
+proves nothing.
 
 A target that does not answer from the first poll counts as down too
 (already down), for example when it reloaded before the step began. The

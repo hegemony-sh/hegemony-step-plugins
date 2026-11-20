@@ -230,14 +230,17 @@ class WaitUnreachableHandler(BaseHandler):
 
             for index, (result, polled_at) in zip(pending, polled, strict=True):
                 name = _name(target_devices[index])
-                if result is not None and result.ok:
+                if result is None:
+                    # Skipped at the deadline: no new evidence either way.
+                    continue
+                if result.ok:
                     answered[index] = True
                     unclear[index] = None
                     if down_since[index] is not None:
                         logger.info(f"Device {name} answered again, restarting its down count")
                     down_since[index] = None
                     continue
-                if result is not None and result.error_kind in INCONCLUSIVE_ERRORS:
+                if result.error_kind in INCONCLUSIVE_ERRORS:
                     # Neither up nor down: the count starts again once a
                     # poll can tell.
                     unclear[index] = result.error_detail or result.error_kind
