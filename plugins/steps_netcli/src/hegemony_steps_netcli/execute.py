@@ -6,7 +6,9 @@
 """ExecuteCLIActionHandler: execute CLI commands on devices as actions."""
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
 
@@ -72,6 +74,17 @@ class ExecuteCliConfig(SshSecurityConfig):
         title="Max Parallel Devices",
         description="Devices processed concurrently (1 = sequential)",
     )
+    allow_disconnect_after_last_command: bool = Field(
+        default=False,
+        title="Allow disconnect after the last command",
+        description=(
+            "Count it as success when the device closes the session during the "
+            "last command, as it does when a reload starts. A session closed "
+            "during an earlier command still fails. Needs the netmiko or "
+            "scrapli transport."
+        ),
+        json_schema_extra={"x_advanced": True},
+    )
     command_timeout_seconds: int = Field(
         _DEFAULT_COMMAND_TIMEOUT_SECONDS,
         ge=1,
@@ -106,12 +119,41 @@ class _DeviceOutcome:
     output_parts: list[str] = field(default_factory=list)
     success: bool = True
     commands_run: int = 0
+    disconnected: bool = False
 
 
 #: What the step puts in its output, for the flow editor's variable picker.
 _OUTPUT_FIELDS = (
     OutputField("stdout", "Combined output of every command on every device", "string"),
+    OutputField(
+        "disconnected",
+        "Devices that closed the session during the last command, when that is allowed",
+        "list",
+    ),
 )
+
+#: The note a command's evidence carries when its allowed disconnect counted as success.
+_ALLOWED_DISCONNECT_NOTE = "The device closed the session after the last command (allowed)"
+
+
+def _allowed_disconnect(results: Sequence[Any], commands: list[str]) -> int | None:
+    """The index of the result whose disconnect may count as success, if any.
+
+    Only the last command that is not blank qualifies: blank lines after it
+    are only Enter, and the transport reports them as skipped once the
+    session closed. The transport must have marked that result
+    ``disconnected``, which it does only when the session closed while the
+    command ran: a CLI error or a timeout on an open session is not one.
+    """
+    last_command = next((cmd.strip() for cmd in reversed(commands) if cmd.strip()), "")
+    for index in range(len(results) - 1, -1, -1):
+        result = results[index]
+        if not result.command.strip():
+            continue
+        if result.command.strip() != last_command:
+            return None
+        return index if getattr(result, "disconnected", False) is True else None
+    return None
 
 
 class ExecuteCLIActionHandler(BaseHandler):
@@ -155,6 +197,7 @@ class ExecuteCLIActionHandler(BaseHandler):
                 summary="Prompt configuration error",
             )
 
+        allow_disconnect = ctx.config.get("allow_disconnect_after_last_command") is True
         services = ctx.require_services()
         command_timeout = float(
             ctx.config.get("command_timeout_seconds") or _DEFAULT_COMMAND_TIMEOUT_SECONDS
@@ -188,8 +231,25 @@ class ExecuteCLIActionHandler(BaseHandler):
                             "netmiko or scrapli transport"
                         )
                     set_prompts(prompts)
+                if allow_disconnect and not getattr(ssh, "supports_disconnect_reports", False):
+                    raise ValueError(
+                        "this device's transport cannot tell a closed session from a "
+                        "failed command; use the netmiko or scrapli transport"
+                    )
                 # Execute all commands together so config mode detection works
-                results = await ssh.execute_commands(commands)
+                results = list(await ssh.execute_commands(commands))
+                # With the setting on, a session the device closed during the
+                # last command counts as success, and so do the blank lines
+                # after it that the closed session skipped.
+                allowed = _allowed_disconnect(results, commands) if allow_disconnect else None
+                if allowed is not None:
+                    outcome.disconnected = True
+                    logger.info(f"{device_name} closed the session after the last command")
+
+                def _failed(index: int) -> bool:
+                    if allowed is not None and index >= allowed:
+                        return False
+                    return results[index].exit_code != 0
 
                 # For config command sets, create a single consolidated artifact
                 if self._is_config_command_set(commands):
@@ -208,10 +268,10 @@ class ExecuteCLIActionHandler(BaseHandler):
                     full_output = ""
                     has_error = False
                     error_msg = None
-                    for result in results:
+                    for index, result in enumerate(results):
                         if result.output:
                             full_output += result.output + "\n"
-                        if result.exit_code != 0:
+                        if _failed(index):
                             has_error = True
                             if error_msg is None:
                                 error_msg = _top_level_cli_failure_detail(
@@ -257,12 +317,16 @@ class ExecuteCLIActionHandler(BaseHandler):
                                 "success": not has_error,
                                 "exit_code": 1 if has_error else 0,
                                 "error": error_msg,
+                                "disconnected": allowed is not None,
                             },
                         }
                     )
                 else:
                     # For show/exec commands, create individual artifacts per command
-                    for result in results:
+                    for index, result in enumerate(results):
+                        if allowed is not None and index > allowed:
+                            # Blank lines the closed session skipped.
+                            continue
                         command_display = command_label(result.command)
                         cmd_name = (
                             f"{command_display} ({device_name})"
@@ -285,13 +349,18 @@ class ExecuteCLIActionHandler(BaseHandler):
                                     "device_id": device_id,
                                     "device_name": device_name,
                                     "command": result.command,
-                                    "success": result.exit_code == 0,
+                                    "success": not _failed(index),
                                     "exit_code": result.exit_code,
-                                    "error": result.error,
+                                    "error": (
+                                        _ALLOWED_DISCONNECT_NOTE
+                                        if index == allowed
+                                        else result.error
+                                    ),
+                                    "disconnected": index == allowed,
                                 },
                             }
                         )
-                        if result.exit_code != 0:
+                        if _failed(index):
                             outcome.success = False
                             failure_detail = _top_level_cli_failure_detail(
                                 error=result.error,
@@ -333,8 +402,11 @@ class ExecuteCLIActionHandler(BaseHandler):
         all_success = all(outcome.success for outcome in outcomes)
         total_commands = sum(outcome.commands_run for outcome in outcomes)
 
+        disconnected_count = sum(outcome.disconnected for outcome in outcomes)
         if all_success:
             summary = f"Executed {len(commands)} commands on {len(target_devices)} device(s)"
+            if disconnected_count:
+                summary += f"; {disconnected_count} closed the session after the last command"
         else:
             summary = f"Command execution failed on some devices: {'; '.join(device_errors)}"
 
@@ -352,6 +424,11 @@ class ExecuteCLIActionHandler(BaseHandler):
             evidence=all_evidence,
             output={
                 "stdout": combined_output[:MAX_CHAIN_OUTPUT_CHARS],
+                "disconnected": [
+                    device.get("name", device.get("id", device.get("mgmt_host")))
+                    for device, outcome in zip(target_devices, outcomes, strict=True)
+                    if outcome.disconnected
+                ],
             },
         )
 

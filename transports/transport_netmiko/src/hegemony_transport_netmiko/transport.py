@@ -488,6 +488,8 @@ class SSHResult:
     exit_code: int
     error: str | None = None
     latency_ms: float = 0.0
+    #: The device closed the session while this command ran (a reload).
+    disconnected: bool = False
 
 
 # Map inventory platform strings to Netmiko device_type values.
@@ -609,6 +611,40 @@ _STARTUP_COPY_PROMPTS = (
 #: Error of a result for a command not run because an earlier one may have left
 #: the device at a question: its text would be taken as the answer.
 _LEFT_WAITING_ERROR = "Skipped: an earlier command may have left the device waiting at a question"
+_CLOSED_ERROR = "Skipped: the device closed the session"
+
+
+class _SessionClosed(Exception):
+    """The device closed the session while a command ran; ``output`` is what it sent first."""
+
+    def __init__(self, output: str) -> None:
+        super().__init__("The device closed the session")
+        self.output = output
+
+
+def _session_open(connection: Any) -> bool:
+    """Whether the SSH session is still open, from paramiko's own state.
+
+    A session the device closed cleanly reads as silence rather than an
+    error, so a command that ran into silence asks here. Nothing is written
+    to the device: a probe byte could reach one that waits at a question. A
+    session that went silent without closing (the network dropped it)
+    counts as open, since nothing proves it closed.
+    """
+    channel = getattr(connection, "remote_conn", None)
+    if channel is None:
+        return True
+    # Only real booleans count: anything else proves nothing.
+    if getattr(channel, "closed", None) is True or getattr(channel, "eof_received", None) is True:
+        return False
+    transport = getattr(channel, "transport", None)
+    is_active = getattr(transport, "is_active", None)
+    if callable(is_active):
+        try:
+            return is_active() is not False
+        except Exception:  # noqa: BLE001 - a check that cannot run proves nothing
+            return True
+    return True
 
 
 def _is_startup_copy(command: str) -> bool:
@@ -724,6 +760,10 @@ class SSHTransport:
     def configure_cli_prompts(self, prompts: Sequence[CliPrompt]) -> None:
         """Set the questions the step's commands may ask, and what to answer."""
         self._cli_prompts = tuple(prompts)
+
+    #: Feature flag: a result is ``disconnected`` when the device closed the
+    #: session while that exec command ran, such as on a reload.
+    supports_disconnect_reports = True
 
     def _legacy(self, *, jump_host: bool) -> bool:
         """Whether a hop may use legacy SSH: the step setting, or that hop's inventory flag."""
@@ -1150,6 +1190,16 @@ class SSHTransport:
                 )
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
+            if isinstance(e, _SessionClosed) or not _session_open(connection):
+                logger.warning(f"{self.host} closed the session during a command")
+                return SSHResult(
+                    command=command,
+                    output=getattr(e, "output", ""),
+                    exit_code=-1,
+                    error="The device closed the session",
+                    latency_ms=latency_ms,
+                    disconnected=True,
+                )
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             error = self._exception_error(e)
             if isinstance(e, (ReadTimeout, CliPromptError)):
@@ -1210,7 +1260,12 @@ class SSHTransport:
             if self._cancellation_registry.is_cancelled(self.step_run_id):
                 raise CliPromptError("The step was cancelled while the command ran")
             expired = time.monotonic() >= deadline
-            chunk = connection.read_channel()
+            try:
+                chunk = connection.read_channel()
+            except (OSError, EOFError) as exc:
+                raise _SessionClosed(output) from exc
+            if not chunk and not _session_open(connection):
+                raise _SessionClosed(output)
             if chunk:
                 output += chunk
                 recent = output[since_answer:]
@@ -1426,6 +1481,11 @@ class SSHTransport:
                 self._left_waiting = False
                 for index, command in enumerate(commands):
                     results.append(self._run_exec_command(connection, command))
+                    if results[-1].disconnected:
+                        results.extend(
+                            _skipped(cmd, _CLOSED_ERROR) for cmd in commands[index + 1 :]
+                        )
+                        break
                     if self._left_waiting:
                         results.extend(
                             _skipped(cmd, _LEFT_WAITING_ERROR) for cmd in commands[index + 1 :]

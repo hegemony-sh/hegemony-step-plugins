@@ -243,6 +243,8 @@ class ScrapliResult:
     exit_code: int
     error: str | None = None
     latency_ms: float = 0.0
+    #: The device closed the session while this command ran (a reload).
+    disconnected: bool = False
 
 
 # Map inventory platform strings to scrapli core platform names.
@@ -369,6 +371,32 @@ _STARTUP_COPY_PROMPTS = (
 #: Error of a result for a command not run because an earlier one may have left
 #: the device at a question: its text would be taken as the answer.
 _LEFT_WAITING_ERROR = "Skipped: an earlier command may have left the device waiting at a question"
+_CLOSED_ERROR = "Skipped: the device closed the session"
+
+
+class _SessionClosed(Exception):
+    """The device closed the session while a command ran; ``output`` is what it sent first."""
+
+    def __init__(self, output: str) -> None:
+        super().__init__("The device closed the session")
+        self.output = output
+
+
+def _session_open(connection: Any) -> bool:
+    """Whether the SSH session is still open, from scrapli's own state.
+
+    scrapli's ``isalive`` reads the transport's state and writes nothing to
+    the device. Only a real False counts as closed: a check that cannot run
+    proves nothing, and a session that went silent without closing (the
+    network dropped it) still counts as open.
+    """
+    isalive = getattr(connection, "isalive", None)
+    if not callable(isalive):
+        return True
+    try:
+        return isalive() is not False
+    except Exception:  # noqa: BLE001 - a check that cannot run proves nothing
+        return True
 
 
 def _is_startup_copy(command: str) -> bool:
@@ -482,6 +510,10 @@ class ScrapliTransport:
     def configure_cli_prompts(self, prompts: Sequence[CliPrompt]) -> None:
         """Set the questions the step's commands may ask, and what to answer."""
         self._cli_prompts = tuple(prompts)
+
+    #: Feature flag: a result is ``disconnected`` when the device closed the
+    #: session while that exec command ran, such as on a reload.
+    supports_disconnect_reports = True
 
     def _legacy(self, *, jump_host: bool) -> bool:
         """Whether a hop may use legacy SSH: the step setting, or that hop's inventory flag."""
@@ -904,6 +936,19 @@ class ScrapliTransport:
             else:
                 result = self._result_from_response(command, await connection.send_command(command))
         except Exception as e:
+            # scrapli closes the session itself when its own timeout runs
+            # out, so a timeout is never the device closing it.
+            if isinstance(e, _SessionClosed) or (
+                not isinstance(e, ScrapliTimeout) and not _session_open(connection)
+            ):
+                logger.warning(f"{self.host} closed the session during a command")
+                return ScrapliResult(
+                    command=command,
+                    output=getattr(e, "output", ""),
+                    exit_code=-1,
+                    error="The device closed the session",
+                    disconnected=True,
+                )
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             error = str(e)
             if isinstance(e, (ScrapliTimeout, CliPromptError)):
@@ -954,7 +999,7 @@ class ScrapliTransport:
                 connection, timeout=max(min(_TIMING_POLL_SECONDS, remaining), 0.01)
             )
             if chunk is None:
-                raise CliPromptError(f"The connection closed; {waiting_at(output)}")
+                raise _SessionClosed(output)
             if chunk:
                 output += chunk
                 recent = output[since_answer:]
@@ -1114,6 +1159,13 @@ class ScrapliTransport:
                         )
                         break
                     results.append(await self._send_exec_command(connection, command))
+                    if results[-1].disconnected:
+                        results.extend(
+                            _skipped(cmd, _CLOSED_ERROR)
+                            for cmd in commands[index + 1 :]
+                            if cmd.strip()
+                        )
+                        break
 
         except ScrapliAuthenticationFailed as e:
             logger.error(f"Authentication failed to {self.host}: {e}")

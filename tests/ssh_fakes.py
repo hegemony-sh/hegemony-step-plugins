@@ -170,6 +170,12 @@ async def _session(process: asyncssh.SSHServerProcess) -> None:
             await _copy_dialogue(process, command)
         elif command.startswith("delete "):
             await _delete_dialogue(process, command)
+        elif command == "reload":
+            # IOS confirms, says so, and closes the session as it goes down.
+            process.stdout.write("Proceed with reload? [confirm]")
+            await process.stdin.readline()
+            process.stdout.write("\r\nReload requested\r\n")
+            break
         elif command == "copy run start":
             process.stdout.write("Destination filename [startup-config]? ")
             await process.stdin.readline()
