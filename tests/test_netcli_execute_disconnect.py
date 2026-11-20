@@ -269,3 +269,57 @@ def test_the_setting_is_an_advanced_one_and_off_by_default():
     prop = ExecuteCliConfig.model_json_schema()["properties"]["allow_disconnect_after_last_command"]
     assert prop["default"] is False
     assert prop["x_advanced"] is True
+
+
+class _QuietScrapliConnection:
+    """Just enough of an AsyncScrapli connection for the prompt-answering read loop."""
+
+    def __init__(self, alive: bool) -> None:
+        import re
+        from types import SimpleNamespace
+
+        self.default_desired_privilege_level = "privilege_exec"
+        self.privilege_levels = {
+            "privilege_exec": SimpleNamespace(pattern=re.compile(r"^r1#$").pattern)
+        }
+        self.channel = SimpleNamespace(write=lambda data: None)
+        # The device closing the session leaves the stream at EOF.
+        self.transport = SimpleNamespace(stdout=SimpleNamespace(at_eof=lambda: not alive))
+        self.alive = alive
+
+    async def acquire_priv(self, level):
+        return None
+
+    def isalive(self) -> bool:
+        return self.alive
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scrapli_closed", "alive", "disconnected"),
+    [
+        (False, False, True),  # the device closed the session
+        (True, False, False),  # scrapli's own timeout closed it
+        (False, True, False),  # a read error on a session that is still open
+    ],
+)
+async def test_scrapli_reports_only_a_session_the_device_closed(
+    monkeypatch, scrapli_closed, alive, disconnected
+):
+    transport = ScrapliTransport(
+        DeviceConnectionSpec(
+            host=HOST, port=22, username=USERNAME, password=PASSWORD, platform="ios-xe"
+        ),
+        host_key_verifier=checks_off(),
+    )
+    transport.configure_cli_prompts(RELOAD_PROMPTS)
+
+    async def _read(connection, timeout=None):
+        transport._scrapli_closed = scrapli_closed
+        return None
+
+    monkeypatch.setattr(transport, "_read_channel_chunk", _read)
+    result = await transport._send_exec_command(_QuietScrapliConnection(alive), "reload")
+
+    assert result.disconnected is disconnected
+    assert result.exit_code == -1

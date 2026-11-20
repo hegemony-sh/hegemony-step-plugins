@@ -385,11 +385,20 @@ class _SessionClosed(Exception):
 def _session_open(connection: Any) -> bool:
     """Whether the SSH session is still open, from scrapli's own state.
 
-    scrapli's ``isalive`` reads the transport's state and writes nothing to
-    the device. Only a real False counts as closed: a check that cannot run
-    proves nothing, and a session that went silent without closing (the
-    network dropped it) still counts as open.
+    The device closing the session leaves the transport's output stream at
+    EOF; scrapli's ``isalive`` notices only later. Both read state and write
+    nothing to the device. Only a real True or False counts: a check that
+    cannot run proves nothing, and a session that went silent without
+    closing (the network dropped it) still counts as open.
     """
+    stdout = getattr(getattr(connection, "transport", None), "stdout", None)
+    at_eof = getattr(stdout, "at_eof", None)
+    if callable(at_eof):
+        try:
+            if at_eof() is True:
+                return False
+        except Exception:  # noqa: BLE001 - a check that cannot run proves nothing
+            pass
     isalive = getattr(connection, "isalive", None)
     if not callable(isalive):
         return True
@@ -514,6 +523,8 @@ class ScrapliTransport:
     #: Feature flag: a result is ``disconnected`` when the device closed the
     #: session while that exec command ran, such as on a reload.
     supports_disconnect_reports = True
+    #: Set when scrapli's own read timeout closed the session.
+    _scrapli_closed = False
 
     def _legacy(self, *, jump_host: bool) -> bool:
         """Whether a hop may use legacy SSH: the step setting, or that hop's inventory flag."""
@@ -939,7 +950,9 @@ class ScrapliTransport:
             # scrapli closes the session itself when its own timeout runs
             # out, so a timeout is never the device closing it.
             if isinstance(e, _SessionClosed) or (
-                not isinstance(e, ScrapliTimeout) and not _session_open(connection)
+                not isinstance(e, ScrapliTimeout)
+                and not self._scrapli_closed
+                and not _session_open(connection)
             ):
                 logger.warning(f"{self.host} closed the session during a command")
                 return ScrapliResult(
@@ -999,7 +1012,12 @@ class ScrapliTransport:
                 connection, timeout=max(min(_TIMING_POLL_SECONDS, remaining), 0.01)
             )
             if chunk is None:
-                raise _SessionClosed(output)
+                # Only the device closing the session is a disconnect: not
+                # scrapli's own timeout, nor a read error on a session that
+                # is still open.
+                if not self._scrapli_closed and not _session_open(connection):
+                    raise _SessionClosed(output)
+                raise CliPromptError(f"The connection closed; {waiting_at(output)}")
             if chunk:
                 output += chunk
                 recent = output[since_answer:]
@@ -1251,6 +1269,7 @@ class ScrapliTransport:
         except ScrapliTimeout as read_err:
             # scrapli's own timeout closed the connection: nothing more comes.
             logger.warning(f"Channel read timed out and scrapli closed it: {read_err}")
+            self._scrapli_closed = True
             return None
         except Exception as read_err:
             logger.warning(f"Error reading channel: {read_err}")
