@@ -1305,7 +1305,13 @@ class SSHTransport:
                     break
                 answer = None if expired else dialogue.answer_for(recent)
                 if answer is not None:
-                    connection.write_channel(answer + connection.RETURN)
+                    try:
+                        connection.write_channel(answer + connection.RETURN)
+                    except Exception as exc:
+                        # Keep what the device printed, a device error included.
+                        if not _session_open(connection):
+                            raise _SessionClosed(output) from exc
+                        raise
                     since_answer = len(output)
                     deadline = time.monotonic() + self.command_timeout
                     continue

@@ -1058,7 +1058,13 @@ class ScrapliTransport:
                     break
                 answer = None if time.monotonic() >= deadline else dialogue.answer_for(recent)
                 if answer is not None:
-                    connection.channel.write(answer + "\n")
+                    try:
+                        connection.channel.write(answer + "\n")
+                    except Exception as exc:
+                        # Keep what the device printed, a device error included.
+                        if not self._scrapli_closed and not _session_open(connection):
+                            raise _SessionClosed(output) from exc
+                        raise
                     since_answer = len(output)
                     deadline = time.monotonic() + self.command_timeout
                     continue

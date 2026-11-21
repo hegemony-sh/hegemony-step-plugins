@@ -543,3 +543,61 @@ async def test_a_prompts_entry_keeps_a_device_error_printed_before_the_close(ser
     assert results[0].disconnected is True
     assert results[0].exit_code == 1
     assert "Invalid input" in results[0].output
+
+
+_ERROR_THEN_QUESTION = "% Invalid input detected at '^' marker.\nProceed with reload? [confirm]"
+
+
+def test_netmiko_keeps_a_device_error_when_the_answer_cannot_be_written(monkeypatch):
+    transport = _netmiko()
+    monkeypatch.setattr(transport, "_cancellation_registry", _Registry(False))
+    writes: list[str] = []
+
+    def _write(data: str) -> None:
+        writes.append(data)
+        if len(writes) > 1:  # the command goes out; the answer meets a closed session
+            raise OSError("Socket is closed")
+
+    connection = SimpleNamespace(
+        find_prompt=lambda: "r1#",
+        write_channel=_write,
+        read_channel=lambda: _ERROR_THEN_QUESTION,
+        RETURN="\n",
+        remote_conn=SimpleNamespace(closed=True, eof_received=True, transport=None),
+    )
+    result = transport._run_exec_command(connection, "reload")
+
+    assert result.disconnected is True
+    assert result.exit_code == 1  # the device error keeps it failed
+    assert "Invalid input" in result.output
+
+
+@pytest.mark.asyncio
+async def test_scrapli_keeps_a_device_error_when_the_answer_cannot_be_written(monkeypatch):
+    transport = ScrapliTransport(
+        DeviceConnectionSpec(
+            host=HOST, port=22, username=USERNAME, password=PASSWORD, platform="ios-xe"
+        ),
+        host_key_verifier=checks_off(),
+    )
+    transport.configure_cli_prompts(RELOAD_PROMPTS)
+    monkeypatch.setattr(transport, "_cancellation_registry", _Registry(False))
+    connection = _QuietScrapliConnection(alive=False)
+    writes: list[str] = []
+
+    def _write(data: str) -> None:
+        writes.append(data)
+        if len(writes) > 1:
+            raise ConnectionError("transport closed")
+
+    connection.channel = SimpleNamespace(write=_write)
+
+    async def _read(conn, timeout=None):
+        return _ERROR_THEN_QUESTION
+
+    monkeypatch.setattr(transport, "_read_channel_chunk", _read)
+    result = await transport._send_exec_command(connection, "reload")
+
+    assert result.disconnected is True
+    assert result.exit_code == 1
+    assert "Invalid input" in result.output
