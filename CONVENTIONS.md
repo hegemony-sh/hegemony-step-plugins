@@ -36,13 +36,17 @@ platforms, transports, and libraries multiply.
    `general`, `probe`, `evidence`, `container`, `flow`, `http`, `secret`
    (and host-owned `monitor` for the in-tree background-monitor family).
 2. **Device-interaction paradigms** — protocol families whose config schemas
-   differ fundamentally: `netcli` today; `netconf`, `gnmi`, `shell` when they
-   exist. A NETCONF edit-config step is not a CLI step with a different
+   differ fundamentally: `netcli`, `shell` and `netconf` today; `gnmi` when
+   it exists. A NETCONF edit-config step is not a CLI step with a different
    transport — its config is payload-shaped, so it is a different handler in
    a different namespace.
 3. **Vendor-platform namespaces** — only for workflows whose semantics are
-   themselves platform-specific: none today; `cisco.iosxe`, `cisco.nxos`,
-   `arista.eos` as they appear. Vendor first, platform second.
+   themselves platform-specific: `cisco.iosxe` today (Atomic Configuration
+   Replace, whose input is IOS XE's own CLI-RPC model); `cisco.nxos`,
+   `arista.eos` as they appear. Vendor first, platform second. A vendor
+   wheel that speaks a paradigm's protocol builds on that paradigm's wheel
+   (`cisco.iosxe` on `netconf`'s client and transaction) and depends on it
+   at the same version.
 
 4. **Tool namespaces** — handlers that drive one external tool whose own
    concepts shape the config schema (a playbook, a plan file): `ansible`,

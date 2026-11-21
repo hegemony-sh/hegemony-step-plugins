@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[project]
+name = "hegemony-steps-netconf"
+version = "0.50.0"
+description = "NETCONF step handlers (get, edit-config with confirmed commit, rpc) for Hegemony"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE-*.txt"]
+requires-python = ">=3.11"
+dependencies = [
+    "hegemony-step-sdk==0.50.0",
+]
+
+[project.entry-points."hegemony.step_handlers"]
+netconf = "hegemony_steps_netconf:register"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "hegemony_steps_netconf"
+module-root = "src"
