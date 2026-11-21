@@ -162,6 +162,11 @@ class _SettleHandler(BaseHandler):
                         "rolled back when its confirm timeout ran out"
                     ) from None
             outcome.output["persist_id"] = persist_id
+            if outcome.output.get("save_error"):
+                raise NetconfError(
+                    "the commit was confirmed, but saving it to startup failed: "
+                    + str(outcome.output["save_error"])
+                )
 
         try:
             outcomes = await run_per_device(
@@ -187,8 +192,13 @@ class NetconfCommitHandler(_SettleHandler):
 
     async def _settle(self, session: Any, persist_id: str, config: Any) -> dict[str, Any]:
         await session.commit(persist_id=persist_id)
-        saved = await session.save_config() if config.save_config else ""
-        return {"confirmed": True, "saved": saved}
+        result: dict[str, Any] = {"confirmed": True, "saved": ""}
+        if config.save_config:
+            try:
+                result["saved"] = await session.save_config()
+            except Exception as exc:  # noqa: BLE001 - the commit is confirmed either way
+                result["save_error"] = str(exc) or type(exc).__name__
+        return result
 
 
 class NetconfCancelCommitHandler(_SettleHandler):

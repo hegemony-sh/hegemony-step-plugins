@@ -65,7 +65,7 @@ that changed adds `cli_output` evidence: `<device>:running-config diff`,
 
 - `steps.NODE_ID.output.devices`: each device's result by name: `ok`,
   `error`, `operation`, `datastore`, `changed`, `committed`, `pending`,
-  `persist_id`, `validated`, `saved`, `diff` and `notes`.
+  `persist_id`, `validated`, `saved`, `save_error`, `diff` and `notes`.
 - `steps.NODE_ID.output.truncated`: diffs cut short in the output (16 KiB a
   device, 64 KiB the step); the evidence keeps them whole.
 
@@ -74,7 +74,7 @@ that changed adds `cli_output` evidence: `<device>:running-config diff`,
 The step fails without connecting when both or neither of Configuration and
 Configuration File are set, and when the platform cannot open NETCONF
 sessions. A device fails when its configuration file is not attached to the
-flow, when it lacks the candidate datastore or the `Cisco-IOS-XE-cli-rpc`
+flow or is empty (a full replace with nothing would remove everything), when it lacks the candidate datastore or the `Cisco-IOS-XE-cli-rpc`
 model (the error lists the configuration ACR needs), when ACR rejects the
 configuration (the error quotes the device, which names the line), when a
 datastore is locked by another session, when validation or the commit is

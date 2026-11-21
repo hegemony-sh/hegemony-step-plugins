@@ -41,6 +41,7 @@ from hegemony_steps_netconf.edit_config import (
     change_output,
     change_summary,
     check_opener,
+    raise_if_unsaved,
 )
 from hegemony_steps_netconf.transaction import change_candidate
 
@@ -170,6 +171,9 @@ class ConfigReplaceHandler(BaseHandler):
                 found = _find_attachment(attachments, path)
                 if found is None:
                     raise ValueError(f"the flow has no attachment {path!r}")
+                if not found.strip():
+                    # A full replace with nothing would remove the whole configuration.
+                    raise ValueError(f"the attachment {path!r} is empty")
                 if len(found.encode()) > MAX_CONFIG_BYTES:
                     raise ValueError(
                         f"{path!r} is larger than {MAX_CONFIG_BYTES // (1024 * 1024)} MiB"
@@ -193,6 +197,7 @@ class ConfigReplaceHandler(BaseHandler):
                 )
             outcome.output = {**change_output(result), "operation": config.operation}
             outcome.evidence.extend(change_evidence(device, result, what="running-config"))
+            raise_if_unsaved(result)
 
         try:
             outcomes = await run_per_device(

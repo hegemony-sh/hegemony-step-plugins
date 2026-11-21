@@ -83,7 +83,9 @@ that changed adds `cli_output` evidence: `<device>:netconf diff`,
 - `steps.NODE_ID.output.devices`: each device's result by name: `ok`,
   `error`, `datastore`, `changed`, `committed`, `pending` (a confirmed
   commit waits for `netconf.commit`), `persist_id`, `validated`, `saved`
-  (`copy-config` or `save-config` when saved), `diff` and `notes`.
+  (`copy-config` or `save-config` when saved), `save_error`, `diff` and
+  `notes`. When saving fails after the commit, the device fails with
+  `committed` true and `save_error` set: the change stands, unsaved.
 - `steps.NODE_ID.output.truncated`: diffs cut short in the output (16 KiB a
   device, 64 KiB the step); the evidence keeps them whole.
 

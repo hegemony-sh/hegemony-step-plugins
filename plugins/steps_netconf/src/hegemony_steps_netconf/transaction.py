@@ -74,6 +74,8 @@ class ChangeResult:
     persist_id: str = ""
     validated: bool = False
     saved: str = ""
+    #: Why saving to startup failed after the change was made ("" if it did not).
+    save_error: str = ""
     diff: str = ""
     before: str = ""
     after: str = ""
@@ -163,7 +165,7 @@ async def change_candidate(
             return result
         await _commit(session, options, result, check)
         if options.save_config and result.committed and not result.pending:
-            result.saved = await session.save_config()
+            await _save(session, result)
         return result
     except BaseException:
         if "candidate" in locked and not result.committed and not result.pending:
@@ -234,14 +236,27 @@ async def _commit(
     result.committed = True
 
 
+async def _save(session: NetconfSession, result: ChangeResult) -> None:
+    """Save running to startup; a failure is recorded, not raised: the change stands."""
+    try:
+        result.saved = await session.save_config()
+    except Exception as exc:  # noqa: BLE001 - reported with the change kept
+        result.save_error = str(exc) or type(exc).__name__
+
+
 async def change_running(
     session: NetconfSession,
     *,
     apply: Callable[[], Awaitable[None]],
     read: Callable[[str], Awaitable[str]],
     options: ChangeOptions,
+    diff_complete: bool = True,
 ) -> ChangeResult:
-    """Apply the change to the running datastore at once (no candidate)."""
+    """Apply the change to the running datastore at once (no candidate).
+
+    With ``diff_complete`` False (a diff filter) an empty diff does not show
+    that nothing changed, so the change counts as made and is saved.
+    """
     if not session.supports(CAP_WRITABLE_RUNNING):
         raise NetconfError("the device's running datastore is not writable (:writable-running)")
     if options.dry_run:
@@ -258,13 +273,18 @@ async def change_running(
             result.before, result.after, before_name="running (before)", after_name="running"
         )
         result.changed = bool(result.diff)
-        result.committed = result.changed
+        result.committed = result.changed or not diff_complete
+        if not result.changed and not diff_complete:
+            result.notes.append(
+                "the filtered diff shows no difference; the part outside the filter may "
+                "have changed"
+            )
         if not session.supports(CAP_ROLLBACK_ON_ERROR):
             result.notes.append(
                 "the device has no :rollback-on-error, so a failed edit may have applied in part"
             )
-        if options.save_config and result.changed:
-            result.saved = await session.save_config()
+        if options.save_config and result.committed:
+            await _save(session, result)
         return result
     finally:
         if locked:

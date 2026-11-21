@@ -570,3 +570,158 @@ async def test_a_stalled_write_times_out_and_close_still_returns():
         await session.rpc("<get/>")
     await asyncio.wait_for(session.close(), timeout=5)
     assert channel.closed
+
+
+# --- Copilot review fixes ---------------------------------------------------
+
+
+def test_a_blank_leaf_value_is_data_not_indentation():
+    one = pretty('<a xmlns="u"><d> </d></a>')
+    two = pretty('<a xmlns="u"><d>  </d></a>')
+    assert one != two
+    assert "<d> </d>" in one
+
+
+async def test_a_policy_refusal_keeps_the_devices_done_before_it():
+    class _RefusesR2(FakeServices):
+        async def open_netconf(self, device: dict[str, Any], **kwargs: Any) -> Any:
+            if device["name"] == "r2":
+                raise PermissionError("egress to 192.0.2.1:830/tcp denied by the flow's policy")
+            return await super().open_netconf(device, **kwargs)
+
+    services = _RefusesR2(
+        {"r1": FakeNetconfDevice.with_config(BASE), "r2": FakeNetconfDevice.with_config(BASE)}
+    )
+    result = await NetconfEditConfigHandler().execute(
+        _ctx({"config": _hostname("r2"), "commit_mode": "later"}, services, names=("r1", "r2"))
+    )
+    assert not result.success
+    assert result.output["devices"]["r1"]["pending"] is True
+    assert result.output["devices"]["r1"]["persist_id"]
+    assert "denied by the flow's policy" in result.output["devices"]["r2"]["error"]
+
+
+async def test_the_log_names_the_failure_kind_not_the_device_text(caplog):
+    device = FakeNetconfDevice.with_config(BASE, fail_edit="invalid-value")
+    with caplog.at_level("INFO", logger="hegemony_steps_netconf.common"):
+        await NetconfEditConfigHandler().execute(
+            _ctx({"config": _hostname("r2")}, FakeServices({"r1": device}))
+        )
+    records = [r for r in caplog.records if r.getMessage() == "netconf step failed on a device"]
+    assert records and records[0].__dict__["error_type"] == "RpcFailed"
+    assert "edit refused" not in repr(records[0].__dict__)
+
+
+async def test_a_failed_save_keeps_the_committed_change():
+    capabilities = tuple(c for c in ALL_CAPABILITIES if "cisco-ia" not in c)
+    device = FakeNetconfDevice.with_config(BASE, capabilities=capabilities)
+    result = await NetconfEditConfigHandler().execute(
+        _ctx(
+            {"config": _hostname("r2"), "commit_mode": "direct", "save_config": True},
+            FakeServices({"r1": device}),
+        )
+    )
+    entry = result.output["devices"]["r1"]
+    assert not result.success
+    assert entry["committed"] and "no way to save" in entry["save_error"]
+    assert "the change was made, but saving it to startup failed" in (result.error or "")
+    assert [item["name"] for item in result.evidence][0] == "r1:netconf diff"
+    assert _running_hostname(device) == "r2"
+
+
+async def test_a_failed_save_after_confirming_keeps_confirmed():
+    capabilities = tuple(c for c in ALL_CAPABILITIES if "cisco-ia" not in c)
+    device = FakeNetconfDevice.with_config(BASE, capabilities=capabilities)
+    _, services = await _pending_change(device)
+    result = await NetconfCommitHandler().execute(
+        _ctx({"change_step": "change", "save_config": True}, services)
+    )
+    entry = result.output["devices"]["r1"]
+    assert not result.success
+    assert entry["confirmed"] is True and entry["persist_id"]
+    assert "confirmed, but saving it to startup failed" in (result.error or "")
+    assert device.pending is None
+
+
+async def test_running_with_a_diff_filter_counts_the_change_as_made():
+    capabilities = tuple(c for c in ALL_CAPABILITIES if "candidate" not in c)
+    device = FakeNetconfDevice.with_config(
+        BASE + '<other xmlns="urn:example:other"/>', capabilities=capabilities
+    )
+    result = await NetconfEditConfigHandler().execute(
+        _ctx(
+            {
+                "config": _hostname("r2"),
+                "diff_filter": '<other xmlns="urn:example:other"/>',
+                "save_config": True,
+            },
+            FakeServices({"r1": device}),
+        )
+    )
+    entry = result.output["devices"]["r1"]
+    assert result.success, result.error
+    assert entry["committed"] and entry["saved"] == "save-config"
+    assert device.saved == 1
+
+
+async def test_xpath_filters_declare_their_namespaces():
+    from hegemony_steps_netconf.client import filter_xml
+
+    body = filter_xml(
+        "xpath", "/if:interfaces", {"if": "urn:ietf:params:xml:ns:yang:ietf-interfaces"}
+    )
+    root = parse_xml(body, what="filter")
+    assert root.get("select") == "/if:interfaces"
+    assert 'xmlns:if="urn:ietf:params:xml:ns:yang:ietf-interfaces"' in body
+
+    device = FakeNetconfDevice.with_config(BASE)
+    result = await NetconfGetHandler().execute(
+        _ctx(
+            {
+                "filter_type": "xpath",
+                "filter": "/n:native",
+                "namespaces": {"n": NATIVE},
+            },
+            FakeServices({"r1": device}),
+        )
+    )
+    assert result.success, result.error
+    assert f'xmlns:n="{NATIVE}"' in next(r for r in device.requests if "get-config" in r)
+    errors = NetconfGetHandler().validate_config(
+        {"filter_type": "xpath", "filter": "/a", "namespaces": {"1bad": "u"}}
+    )
+    assert any("not a usable namespace prefix" in error for error in errors)
+
+
+async def test_close_closes_the_channel_even_when_cancelled():
+    import asyncio
+
+    class _Slow:
+        closed = False
+
+        async def write(self, data: bytes) -> None:
+            await asyncio.sleep(60)
+
+        async def read(self, max_bytes: int = 65536) -> bytes:
+            await asyncio.sleep(60)
+            return b""
+
+        async def close(self) -> None:
+            self.closed = True
+
+    channel = _Slow()
+    session = NetconfSession(channel, timeout=30)
+    task = asyncio.ensure_future(session.close())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert channel.closed
+
+
+async def test_an_omitted_operation_is_a_config_error():
+    assert any("'rpc' is required" in e for e in NetconfRpcHandler().validate_config({}))
+    result = await NetconfRpcHandler().execute(
+        _ctx({}, FakeServices({"r1": FakeNetconfDevice.with_config(BASE)}))
+    )
+    assert not result.success and "'rpc' is required" in (result.error or "")

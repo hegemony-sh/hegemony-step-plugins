@@ -21,7 +21,14 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
-from .client import CAP_CANDIDATE, CAP_STARTUP, CAP_XPATH, NetconfError, filter_xml
+from .client import (
+    CAP_CANDIDATE,
+    CAP_STARTUP,
+    CAP_XPATH,
+    NetconfError,
+    filter_xml,
+    namespace_errors,
+)
 from .common import (
     DeviceOutcome,
     NetconfConnectionConfig,
@@ -79,13 +86,31 @@ class NetconfGetConfig(NetconfConnectionConfig):
             "x_placeholder": ('<interfaces xmlns="urn:ietf:params:xml:ns:yang:ietf-interfaces"/>'),
         },
     )
+    namespaces: dict[str, str] = Field(
+        default_factory=dict,
+        title="Namespaces",
+        description=(
+            "Prefixes an XPath filter uses, one prefix=namespace per line, such as "
+            "if=urn:ietf:params:xml:ns:yang:ietf-interfaces. They are declared on the filter."
+        ),
+        json_schema_extra={
+            "x_widget": "env-vars",
+            "x_rows": 2,
+            "x_col_span": 2,
+            "x_placeholder": "if=urn:ietf:params:xml:ns:yang:ietf-interfaces",
+            "x_show_when": {"field": "filter_type", "value": "xpath"},
+        },
+    )
     max_parallel_devices: int = max_parallel_field(10)
 
     @model_validator(mode="after")
     def _filter_parses(self) -> NetconfGetConfig:
+        errors = namespace_errors(self.namespaces)
+        if errors:
+            raise ValueError("; ".join(errors))
         if self.filter.strip():
             try:
-                filter_xml(self.filter_type, self.filter)
+                filter_xml(self.filter_type, self.filter, self.namespaces)
             except NetconfError as exc:
                 raise ValueError(str(exc)) from None
         return self
@@ -119,7 +144,7 @@ class NetconfGetHandler(BaseHandler):
             config = self.parse_config(ctx.config, NetconfGetConfig)
         except InvalidConfigError as exc:
             return exc.result()
-        filter_body = filter_xml(config.filter_type, config.filter)
+        filter_body = filter_xml(config.filter_type, config.filter, config.namespaces)
 
         async def _work(device: dict[str, Any], outcome: DeviceOutcome) -> None:
             outcome.text_keys = ("data",)

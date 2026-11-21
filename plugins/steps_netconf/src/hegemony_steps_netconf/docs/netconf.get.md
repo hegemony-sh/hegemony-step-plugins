@@ -33,7 +33,14 @@ node with its namespace:
 ```
 
 An XPath filter (Filter Type XPath) is one expression, and needs the
-device's `:xpath` capability. An empty filter reads everything, which on a
+device's `:xpath` capability. Namespaces declares the prefixes it uses, one
+`prefix=namespace` per line:
+
+```text
+if=urn:ietf:params:xml:ns:yang:ietf-interfaces
+```
+
+for `/if:interfaces/if:interface[if:name='Gi1']`. An empty filter reads everything, which on a
 large device is a lot of data.
 
 Connect Timeout (sec), Request Timeout (sec) and Allow legacy SSH are

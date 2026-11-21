@@ -47,6 +47,7 @@ class NetconfRpcConfig(NetconfConnectionConfig):
 
     rpc: str = Field(
         default="",
+        validate_default=True,
         title="Operation",
         description=(
             "The XML that goes inside <rpc>: one operation element with its namespace, such "

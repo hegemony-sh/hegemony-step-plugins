@@ -179,3 +179,16 @@ def test_the_docs_page_names_every_declared_output_field(handler):
     text = load_docs_bundle("hegemony_steps_cisco_iosxe")[handler.handler_id]
     for field in handler.output_fields:
         assert f"output.{field.name}`" in text, field.name
+
+
+async def test_an_empty_attachment_is_never_sent_as_a_full_replace():
+    device = _device()
+    services = FakeServices({"r1": device})
+    services.attachments = [{"filename": "configs/r1.cfg", "content": "  \n"}]
+    result = await ConfigReplaceHandler().execute(
+        _ctx({"config_attachment": "configs/{device}.cfg"}, services)
+    )
+    assert not result.success
+    assert "is empty" in (result.error or "")
+    assert device.sessions_opened == 0
+    assert device.running_cli == RUNNING

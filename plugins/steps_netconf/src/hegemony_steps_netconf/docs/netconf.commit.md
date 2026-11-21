@@ -41,6 +41,7 @@ The step fails when Change Step is not set or has no output in this run.
 A device the change step left unchanged (or committed at once) has nothing
 pending and is skipped, with `skipped` true. A device fails when the change
 step has no result for it or failed on it, when it
-lacks `:confirmed-commit:1.1`, when it cannot be reached, and when it
-refuses the persist id: the commit was confirmed or cancelled already, or
+lacks `:confirmed-commit:1.1`, when it cannot be reached, when saving fails
+after the confirmation (`confirmed` stays true, with `save_error`), and when
+it refuses the persist id: the commit was confirmed or cancelled already, or
 rolled back when its timeout ran out.

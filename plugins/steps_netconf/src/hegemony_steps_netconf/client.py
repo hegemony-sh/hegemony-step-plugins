@@ -209,8 +209,10 @@ def pretty(text: str, namespaces: dict[str, str] | None = None) -> str:
 
 
 def _strip_blank_text(node: Any) -> None:
+    """Drop indentation between elements; a leaf's own text, blank or not, is data."""
+    has_elements = any(child.nodeType == child.ELEMENT_NODE for child in node.childNodes)
     for child in list(node.childNodes):
-        if child.nodeType == child.TEXT_NODE and not child.data.strip():
+        if has_elements and child.nodeType == child.TEXT_NODE and not child.data.strip():
             node.removeChild(child)
         elif child.nodeType == child.ELEMENT_NODE:
             _strip_blank_text(child)
@@ -251,14 +253,37 @@ def datastore(name: str) -> str:
     raise ValueError(f"unknown datastore {name!r}")
 
 
-def filter_xml(filter_type: str, value: str) -> str:
-    """The ``<filter>`` element for a subtree or XPath filter ("" for none)."""
+_PREFIX_NAME = re.compile(r"^[A-Za-z_][\w.-]*$")
+
+
+def namespace_errors(namespaces: dict[str, str]) -> list[str]:
+    """Why a prefix -> namespace map cannot be declared on a filter (empty when it can)."""
+    errors = []
+    for prefix, uri in namespaces.items():
+        if not _PREFIX_NAME.match(prefix) or prefix.lower().startswith("xml"):
+            errors.append(f"{prefix!r} is not a usable namespace prefix")
+        if not uri.strip():
+            errors.append(f"the namespace of prefix {prefix!r} is empty")
+    return errors
+
+
+def filter_xml(filter_type: str, value: str, namespaces: dict[str, str] | None = None) -> str:
+    """The ``<filter>`` element for a subtree or XPath filter ("" for none).
+
+    ``namespaces`` (prefix -> namespace) are declared on the element, so an
+    XPath expression can use those prefixes.
+    """
     if not value.strip():
         return ""
+    quote = {chr(34): "&quot;"}
+    declarations = "".join(
+        f' xmlns:{prefix}="{escape(uri.strip(), quote)}"'
+        for prefix, uri in (namespaces or {}).items()
+    )
     if filter_type == "xpath":
-        return f'<filter type="xpath" select="{escape(value.strip(), {chr(34): "&quot;"})}"/>'
+        return f'<filter type="xpath"{declarations} select="{escape(value.strip(), quote)}"/>'
     check_fragment(value, what="the subtree filter")
-    return f'<filter type="subtree">{value}</filter>'
+    return f'<filter type="subtree"{declarations}>{value}</filter>'
 
 
 class NetconfSession:
@@ -425,14 +450,17 @@ class NetconfSession:
             return
         self._closed = True
         # Bounded as a whole (the request has its own deadline too), so a
-        # stalled device cannot keep the channel, and its locks, open.
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(
-                self.rpc("<close-session/>", timeout=min(self.timeout, 10.0)),
-                timeout=min(self.timeout, 10.0) + 1.0,
-            )
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(self._channel.close(), timeout=10.0)
+        # stalled device cannot keep the channel, and its locks, open; the
+        # channel is closed even when the step is cancelled meanwhile.
+        try:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    self.rpc("<close-session/>", timeout=min(self.timeout, 10.0)),
+                    timeout=min(self.timeout, 10.0) + 1.0,
+                )
+        finally:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self._channel.close(), timeout=10.0)
 
     # --- operations -----------------------------------------------------
 

@@ -50,7 +50,7 @@ CHANGE_OUTPUT_FIELDS = (
     OutputField(
         "devices",
         "Each device's result by name: ok, error, datastore, changed, committed, pending, "
-        "persist_id, validated, saved, diff and notes",
+        "persist_id, validated, saved, save_error, diff and notes",
         "object",
     ),
     OutputField("truncated", "Output texts cut short, as device.key", "list"),
@@ -207,6 +207,7 @@ def change_output(result: ChangeResult) -> dict[str, Any]:
         "persist_id": result.persist_id,
         "validated": result.validated,
         "saved": result.saved,
+        "save_error": result.save_error,
         "diff": result.diff,
         "notes": result.notes,
     }
@@ -232,6 +233,14 @@ def change_evidence(
             )
         )
     return items
+
+
+def raise_if_unsaved(result: ChangeResult) -> None:
+    """Fail the device when saving failed, keeping its output and evidence."""
+    if result.save_error:
+        raise NetconfError(
+            "the change was made, but saving it to startup failed: " + result.save_error
+        )
 
 
 def change_summary(prefix: str, outcomes: list[DeviceOutcome]) -> str:
@@ -313,10 +322,15 @@ class NetconfEditConfigHandler(BaseHandler):
                     )
                 else:
                     result = await change_running(
-                        session, apply=_apply, read=_read, options=options
+                        session,
+                        apply=_apply,
+                        read=_read,
+                        options=options,
+                        diff_complete=not diff_filter,
                     )
             outcome.output = change_output(result)
             outcome.evidence.extend(change_evidence(device, result, what="netconf"))
+            raise_if_unsaved(result)
 
         try:
             outcomes = await run_per_device(

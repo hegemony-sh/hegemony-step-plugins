@@ -161,7 +161,7 @@ class DeviceOutcome:
 
 def describe_error(exc: BaseException) -> str:
     """The step's wording for a failure on one device."""
-    if isinstance(exc, (RpcFailed, NetconfError, SessionUnavailable, ValueError)):
+    if isinstance(exc, (RpcFailed, NetconfError, SessionUnavailable, ValueError, PermissionError)):
         return str(exc)
     if isinstance(exc, TimeoutError):
         return str(exc) or "timed out"
@@ -189,14 +189,20 @@ async def run_per_device(
             await work(device, outcome)
         except SessionUnavailable:
             raise
-        except PermissionError:
-            raise
         except Exception as exc:  # noqa: BLE001 - one device's failure is its own
+            # A policy refusal too: the devices done before it keep their
+            # results (a pending commit's persist id among them).
             outcome.ok = False
             outcome.error = describe_error(exc)
+            # The device's own error text can echo configuration, secrets
+            # included, so the log names only the kind of failure.
             logger.info(
                 "netconf step failed on a device",
-                extra={"run_id": ctx.run_id, "device": outcome.name, "error": outcome.error},
+                extra={
+                    "run_id": ctx.run_id,
+                    "device": outcome.name,
+                    "error_type": type(exc).__name__,
+                },
             )
         return outcome
 
