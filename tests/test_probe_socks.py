@@ -144,6 +144,12 @@ class _FakeSocks5Server:
                 await asyncio.sleep(2)
                 return
 
+            if self.hang_at == "bound":
+                # Success, then the bound address never comes.
+                writer.write(b"\x05\x00\x00\x01")
+                await writer.drain()
+                await asyncio.sleep(2)
+                return
             # The reply with a dummy bound address.
             writer.write(bytes([0x05, self.connect_reply]) + b"\x00\x01\x00\x00\x00\x00\x00\x00")
             await writer.drain()
@@ -654,7 +660,10 @@ async def test_a_general_proxy_failure_stays_a_socks_error():
 
 
 @pytest.mark.parametrize("probe_class", [TcpConnectProbe, HttpHealthProbe])
-@pytest.mark.parametrize(("hang_at", "kind"), [("greeting", "socks_error"), ("connect", "timeout")])
+@pytest.mark.parametrize(
+    ("hang_at", "kind"),
+    [("greeting", "socks_error"), ("connect", "timeout"), ("bound", "socks_error")],
+)
 async def test_a_stall_is_the_proxys_before_the_connect_and_the_targets_after(
     probe_class, hang_at, kind
 ):

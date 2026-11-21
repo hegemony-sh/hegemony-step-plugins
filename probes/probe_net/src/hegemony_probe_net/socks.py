@@ -246,6 +246,9 @@ async def _send_connect(
         if reply in _TARGET_REPLY_KINDS:
             raise SocksTargetError(message, _TARGET_REPLY_KINDS[reply])
         raise SocksError(message)
+    if stage is not None:
+        # The target answered; the rest of the reply is the proxy's to send.
+        stage.clear()
     # Drain the bound address so the stream is positioned at tunneled data.
     if atyp == 0x01:
         await reader.readexactly(4)
