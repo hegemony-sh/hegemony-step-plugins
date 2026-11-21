@@ -166,8 +166,21 @@ not the ansible-core inside: every run reports the exact version as
 `steps.NODE_ID.output.ansible_version`, and the image carries it in its
 `sh.hegemony.ansible-core.version` label. A patch release of the plugins may
 bring a newer 2.19 patch release, never another series: that comes only with
-a minor release of the plugins, and its changelog names it. For another
-ansible-core version, set Execution image to an image that has it. It is built from `images/ansible-runner/`
+a minor release of the plugins, and its changelog names it.
+
+To choose the series yourself, set **ansible-core version**: `default` (the
+series above), `2.19` or `2.21`. Each named series is the same image built
+with that ansible-core, published as
+`ghcr.io/hegemony-sh/ansible-runner:0.50-core2.21` and so on. A step that names
+a series stays on it when a later release of the plugins moves the default,
+and still gets that series' patch releases; a series is withdrawn only with a
+minor release, and a step that names a withdrawn one fails its validation
+rather than run another version. Collections follow ansible-core: check that
+the ones your playbook uses support the series you pick. For any other
+ansible-core version, set Execution image to an image that has it; an image
+of your own replaces ansible-core version, so set only one of the two.
+
+The image is built from `images/ansible-runner/`
 in the hegemony-step-plugins repository and published on ghcr.io with every
 release, tagged with the release version and its minor version; the step
 names the minor version of the wheel you run. The sandbox's Docker daemon

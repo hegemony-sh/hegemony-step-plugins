@@ -83,6 +83,12 @@ DEFAULT_IMAGES: dict[str, str] = {
     "terraform": "hashicorp/terraform:1.16.4",
 }
 BINARIES: dict[str, str] = {"opentofu": "tofu", "terraform": "terraform"}
+#: The OpenTofu series the runner image is also published for, as
+#: ``<default image>-tofu<series>`` (images/opentofu-runner/variants.json;
+#: tests/test_release_versions.py keeps the two equal). "default" is the plain
+#: tag, whose series a minor release of the plugins may move; a named series
+#: stays until a minor release stops publishing it.
+OpenTofuVersion = Literal["default", "1.12", "1.13"]
 #: The tools as their own output names them, for text a person reads.
 TOOL_NAMES: dict[str, str] = {"opentofu": "OpenTofu", "terraform": "Terraform"}
 
@@ -177,8 +183,30 @@ class TfContainerConfig(ContainerExecutionConfig):
     )
 
 
-def default_image(engine: str) -> str:
-    return DEFAULT_IMAGES.get(engine, DEFAULT_IMAGES["opentofu"])
+def default_image(engine: str, opentofu_version: str = "default") -> str:
+    """The image a step runs when it sets none: the engine's, at the OpenTofu series asked for."""
+    image = DEFAULT_IMAGES.get(engine, DEFAULT_IMAGES["opentofu"])
+    if engine == "opentofu" and opentofu_version != "default":
+        return f"{image}-tofu{opentofu_version}"
+    return image
+
+
+def step_image(config: dict[str, Any]) -> str:
+    """The image a plan step's raw config names: its own, else the default for its engine."""
+    engine = str(config.get("engine") or "opentofu")
+    version = str(config.get("opentofu_version") or "default")
+    return str(config.get("image") or "").strip() or default_image(engine, version)
+
+
+def opentofu_version_errors(config: dict[str, Any]) -> list[str]:
+    """A named OpenTofu series next to a setting that already decides the tool."""
+    if str(config.get("opentofu_version") or "default") == "default":
+        return []
+    if str(config.get("engine") or "opentofu") != "opentofu":
+        return ["'opentofu_version' needs the opentofu engine"]
+    if str(config.get("image") or "").strip():
+        return ["set 'image' or 'opentofu_version', not both: the image decides the version"]
+    return []
 
 
 def workdir_for(step_id: str) -> str:
@@ -416,10 +444,9 @@ def common_errors(config: dict[str, Any]) -> list[str]:
     """Checks shared by both steps: lock timeout, credentials, the container half."""
     errors = lock_timeout_errors(config.get("lock_timeout"))
     errors += secret_env_errors(config.get("secret_env"))
-    image = config.get("image") or default_image(str(config.get("engine") or "opentofu"))
     errors.extend(
         RunContainerHandler().validate_config(
-            container_config_from(config, image=str(image), command=[])
+            container_config_from(config, image=step_image(config), command=[])
         )
     )
     return errors

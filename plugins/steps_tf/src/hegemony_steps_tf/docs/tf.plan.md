@@ -82,8 +82,20 @@ OpenTofu image also carries it in its `sh.hegemony.opentofu.version` label. A
 patch release of the plugins may bring a newer patch release of the same
 series (1.12, 1.16), never another series: a state written by a newer series
 cannot always be read by an older one, so a new series comes only with a
-minor release of the plugins, and its changelog names it. To stay on a
-version of your choice, set Image.
+minor release of the plugins, and its changelog names it.
+
+To choose the OpenTofu series yourself, set **OpenTofu version**: `default`
+(the series above), `1.12` or `1.13`. Each named series is the same image
+built from that OpenTofu release, published as
+`ghcr.io/hegemony-sh/opentofu-runner:0.50-tofu1.13` and so on. A step that
+names a series stays on it when a later release of the plugins moves the
+default, and still gets that series' patch releases; a series is withdrawn
+only with a minor release, and a step that names a withdrawn one fails its
+validation rather than run another version. Move a state to a newer series
+deliberately: once a newer OpenTofu has written it, an older one may refuse
+it. `tf.apply` needs no setting, since it runs the plan's image. For any
+other version, or for Terraform, set Image; it replaces OpenTofu version, so
+set only one of the two.
 
 Image replaces either default; it needs a POSIX `sh` with `timeout` and
 `sha256sum` (as BusyBox and coreutils have) and must run as root, since the step writes the

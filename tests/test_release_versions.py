@@ -195,6 +195,87 @@ def test_every_file_that_names_a_default_tool_states_the_series_its_source_sets(
         assert len(verifier.tool_docs_failures(tool, series[:-1])) == len(tool.files)
 
 
+def test_the_series_a_step_can_choose_are_the_ones_the_images_are_built_for():
+    # variants.json is what the Images workflow builds; the step's Literal, its
+    # docs and the Dockerfile's defaults must say the same.
+    verifier = _script("verify_release_version")
+    paths = _script("package_paths")
+
+    chosen = [tool for tool in paths.BUNDLED_TOOLS if tool.variants]
+    assert [tool.name for tool in chosen] == ["ansible-core", "OpenTofu"]
+    for tool in chosen:
+        assert verifier.variant_failures(tool) == []
+        data = json.loads((paths.ROOT / tool.variants).read_text(encoding="utf-8"))
+        assert len(data["variants"]) >= 2, "a choice needs two series"
+        # A plain build of the Dockerfile is the default series' image.
+        dockerfile = (paths.ROOT / tool.source).read_text(encoding="utf-8")
+        for key, value in data["variants"][data["default"]].items():
+            assert re.search(rf'^ARG {key}="?{re.escape(value)}"?$', dockerfile, re.MULTILINE), (
+                f"{tool.source}: ARG {key} is not the default series' {value!r}"
+            )
+        # Each entry's own version is of its series.
+        for series, args in data["variants"].items():
+            assert args[data["version_arg"]].startswith(f"{series}."), series
+
+
+def test_the_images_workflow_builds_every_series_and_only_the_default_gets_the_plain_tags():
+    paths = _script("package_paths")
+    workflow = yaml.safe_load(
+        (paths.ROOT / ".github" / "workflows" / "images.yml").read_text(encoding="utf-8")
+    )
+    entries = workflow["jobs"]["image"]["strategy"]["matrix"]["include"]
+    for tool in paths.BUNDLED_TOOLS:
+        if not tool.variants:
+            continue
+        image = Path(tool.variants).parent.name
+        data = json.loads((paths.ROOT / tool.variants).read_text(encoding="utf-8"))
+        built = [entry for entry in entries if entry["image"] == image]
+        assert sorted(entry["variant"] for entry in built) == sorted(data["variants"])
+        for entry in built:
+            # The entry with the step's default line is the default series; the
+            # workflow gives the plain tags to that one only. It keeps the job
+            # name a branch protection rule may require.
+            is_default = entry["variant"] == data["default"]
+            assert bool(entry.get("default_file")) == is_default, entry["variant"]
+            assert ("name" not in entry) == is_default, entry["variant"]
+            if not is_default:
+                assert f"{tool.name} {entry['variant']}" in entry["name"]
+    # An image without variants has none in the matrix either.
+    assert all("variant" not in entry for entry in entries if entry["image"] == "git-runner")
+
+
+def test_a_patch_release_may_not_drop_a_series_a_step_can_choose():
+    verifier = _script("verify_release_version")
+    paths = _script("package_paths")
+    current = {
+        tool.variants: (paths.ROOT / tool.variants).read_text(encoding="utf-8")
+        for tool in paths.BUNDLED_TOOLS
+        if tool.variants
+    }
+
+    def with_another(tag: str, path: str) -> str | None:
+        data = json.loads(current[path])
+        data["variants"]["0.9"] = {}
+        return json.dumps(data)
+
+    def with_fewer(tag: str, path: str) -> str | None:
+        data = json.loads(current[path])
+        del data["variants"][max(data["variants"])]
+        return json.dumps(data)
+
+    same = verifier.dropped_variant_failures("0.50.1", "v0.50.0", lambda tag, path: current[path])
+    assert same == []
+    # Adding a series is fine; so is a release before there was a choice.
+    assert verifier.dropped_variant_failures("0.50.1", "v0.50.0", with_fewer) == []
+    assert verifier.dropped_variant_failures("0.50.1", "v0.50.0", lambda tag, path: None) == []
+    assert verifier.dropped_variant_failures("0.51.0", None, with_another) == []
+
+    failures = verifier.dropped_variant_failures("0.50.1", "v0.50.0", with_another)
+    assert len(failures) == 2
+    assert "no longer publishes ansible-core 0.9 (v0.50.0 did)" in failures[0]
+    assert "0.50.1 is a patch release" in failures[0]
+
+
 def test_a_file_missing_at_a_tag_is_told_from_a_tag_that_cannot_be_read(monkeypatch):
     verifier = _script("verify_release_version")
     answers: dict[str, tuple[int, str, str]] = {}

@@ -67,11 +67,13 @@ from hegemony_steps_tf.common import (
     TOOL_VERSION_FILE,
     VARS_FILE,
     collect_failure,
+    default_image,
     encryption_hcl,
     hcl_string,
     lock_conflict_error,
     lock_timeout_errors,
     public_outputs,
+    step_image,
     tool_deadline,
     tool_kill_after,
     tool_version,
@@ -2100,6 +2102,46 @@ async def test_plan_step_records_no_image_id_it_could_not_read(monkeypatch):
     assert asked == [True]
     assert result.output["image_id"] == ""
     assert (result.metrics["image_id"], result.metrics["image_local_id"]) == ("", local_id)
+
+
+def test_a_named_opentofu_series_runs_its_own_tag_of_the_default_image():
+    tofu = DEFAULT_IMAGES["opentofu"]
+    assert default_image("opentofu") == tofu
+    assert default_image("opentofu", "1.13") == f"{tofu}-tofu1.13"
+    # The default series by name too: it stays when the default moves.
+    assert default_image("opentofu", "1.12") == f"{tofu}-tofu1.12"
+    assert default_image("terraform", "1.13") == DEFAULT_IMAGES["terraform"]
+    assert step_image({"opentofu_version": "1.13"}) == f"{tofu}-tofu1.13"
+    assert step_image({"opentofu_version": "1.13", "image": " mine:1 "}) == "mine:1"
+    assert step_image({}) == tofu
+
+    handler = TfPlanHandler()
+    base = {"state": "ephemeral"}
+    assert handler.validate_config({**base, "opentofu_version": "1.13"}) == []
+    assert handler.validate_config({**base, "opentofu_version": "1.13", "image": "mine:1"}) == [
+        "set 'image' or 'opentofu_version', not both: the image decides the version"
+    ]
+    assert handler.validate_config({**base, "opentofu_version": "1.13", "engine": "terraform"}) == [
+        "'opentofu_version' needs the opentofu engine"
+    ]
+    # A series the image is not published for never reaches a pull.
+    unknown = handler.validate_config({**base, "opentofu_version": "1.11"})
+    assert len(unknown) == 1 and "opentofu_version" in unknown[0]
+
+
+@pytest.mark.asyncio
+async def test_a_plan_pulls_the_image_of_the_series_it_names(monkeypatch):
+    state = _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    result = await TfPlanHandler().execute(
+        _ctx({"state": "ephemeral", "opentofu_version": "1.13"}, _Services())
+    )
+
+    assert result.success is True, result.error
+    image = f"{DEFAULT_IMAGES['opentofu']}-tofu1.13"
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert image in create
+    # tf.apply runs the image the plan names.
+    assert result.output["image"] == image
 
 
 def _versioned(raw: bytes | None) -> Any:

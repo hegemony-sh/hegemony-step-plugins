@@ -60,6 +60,7 @@ from .common import (
     VARS_FILE,
     Engine,
     LockTimeout,
+    OpenTofuVersion,
     StateMode,
     TfContainerConfig,
     address_list_errors,
@@ -72,6 +73,7 @@ from .common import (
     lock_conflict_error,
     managed_state_access,
     managed_timeout_errors,
+    opentofu_version_errors,
     public_outputs,
     relative_path_error,
     release_state_hold,
@@ -259,14 +261,27 @@ class TfPlanConfig(TfContainerConfig):
         ),
         json_schema_extra={"x_advanced": True, "x_col_span": 2},
     )
+    opentofu_version: OpenTofuVersion = Field(
+        default="default",
+        title="OpenTofu version",
+        description=(
+            "The OpenTofu series to run: default (OpenTofu 1.12 today; a new minor release "
+            "of the plugins may move it), 1.12 or 1.13. Name a series to stay on it across "
+            "plugin upgrades; patch releases of that series still arrive. The step output "
+            "names the exact version that ran (tool_version). The apply step uses the same "
+            "one."
+        ),
+        json_schema_extra={"x_show_when": {"field": "engine", "value": "opentofu"}},
+    )
     image: str = Field(
         default="",
         title="Image",
         description=(
             "Container image with the tool, run as root with a POSIX sh. Leave empty for "
-            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.50 (OpenTofu 1.12) "
-            "for OpenTofu, hashicorp/terraform (Terraform 1.16) for Terraform. The step "
-            "output names the version that ran (tool_version)."
+            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.50 (OpenTofu 1.12, "
+            "or the series OpenTofu version names) for OpenTofu, hashicorp/terraform "
+            "(Terraform 1.16) for Terraform. An image replaces OpenTofu version, so set "
+            "only one. The step output names the version that ran (tool_version)."
         ),
         json_schema_extra={
             "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.50",
@@ -489,6 +504,7 @@ class TfPlanHandler(BaseHandler):
             errors.append("'replace' cannot be combined with 'destroy'")
         if modes.refresh_only and modes.replace:
             errors.append("'replace' cannot be combined with 'refresh_only'")
+        errors += opentofu_version_errors(config)
         if config.get("state_encryption_key") and config.get("engine") == "terraform":
             errors.append("'state_encryption_key' needs the opentofu engine")
         errors += common_errors(config)
@@ -503,7 +519,7 @@ class TfPlanHandler(BaseHandler):
                 summary="Config validation failed",
             )
         config = TfPlanConfig.model_validate(ctx.config)
-        image = config.image.strip() or default_image(config.engine)
+        image = config.image.strip() or default_image(config.engine, config.opentofu_version)
         shared = shared_workspace_mounted(ctx)
         workdir = workdir_for(ctx.step_id) if shared else LOCAL_WORKDIR
         state_name = config.state_name.strip() if config.state == "managed" else None

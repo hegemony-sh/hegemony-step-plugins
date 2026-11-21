@@ -52,6 +52,7 @@ from hegemony_steps_ansible.playbook import (
     _failure_detail,
     build_run_script,
     credential_host_vars,
+    execution_image,
 )
 from hegemony_steps_ansible.results import (
     CALLBACK_NAME,
@@ -1501,6 +1502,53 @@ def test_the_script_records_the_ansible_version_before_anything_can_fail():
         config, has_extra_vars=False, has_secrets=False, vault_files={}, deadline=1_900_000_000
     )
     assert f"\nif ! bounded ansible-playbook --version > {VERSION_FILE}" in bounded
+
+
+def test_a_named_ansible_core_series_runs_its_own_tag_of_the_default_image():
+    assert execution_image(DEFAULT_IMAGE) == DEFAULT_IMAGE
+    assert execution_image("", "default") == DEFAULT_IMAGE
+    assert execution_image(None, None) == DEFAULT_IMAGE
+    assert execution_image(DEFAULT_IMAGE, "2.21") == f"{DEFAULT_IMAGE}-core2.21"
+    # The default series by name too: it stays when the default moves.
+    assert execution_image(f" {DEFAULT_IMAGE} ", "2.19") == f"{DEFAULT_IMAGE}-core2.19"
+    # An image of the author's own is never rewritten.
+    assert execution_image("registry.example.com/ee:1", "default") == "registry.example.com/ee:1"
+
+    handler = AnsiblePlaybookHandler()
+    assert handler.validate_config({"playbook": "site.yml", "ansible_core_version": "2.21"}) == []
+    assert (
+        handler.validate_config(
+            {"playbook": "site.yml", "ansible_core_version": "2.21", "image": DEFAULT_IMAGE}
+        )
+        == []
+    )
+    both = handler.validate_config(
+        {
+            "playbook": "site.yml",
+            "ansible_core_version": "2.21",
+            "image": "registry.example.com/ee:1",
+        }
+    )
+    assert both == [
+        "set 'image' or 'ansible_core_version', not both: the image decides the version"
+    ]
+    # A series the image is not published for never reaches a pull.
+    unknown = handler.validate_config({"playbook": "site.yml", "ansible_core_version": "2.17"})
+    assert len(unknown) == 1 and "ansible_core_version" in unknown[0]
+
+
+@pytest.mark.asyncio
+async def test_the_step_pulls_the_image_of_the_series_it_names(monkeypatch):
+    recap = {"r1": {"ok": 1, "changed": 0, "failures": 0, "unreachable": 0}}
+    state = _install_docker(monkeypatch, collected=_results_json(recap), exit_code=0)
+    result = await AnsiblePlaybookHandler().execute(
+        _ctx({"playbook": "site.yml", "ansible_core_version": "2.21"}, [_device("r1")])
+    )
+
+    assert result.success is True, result.error
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert f"{DEFAULT_IMAGE}-core2.21" in create
+    assert DEFAULT_IMAGE not in create
 
 
 @pytest.mark.asyncio

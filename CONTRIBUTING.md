@@ -217,6 +217,20 @@ files that state a series (the steps' docs, READMEs and Image field help) are
 checked against the one that sets it, by the same script and by
 `tests/test_release_versions.py`.
 
+The series a step can choose (**ansible-core version**, **OpenTofu version**)
+are the entries of `images/<name>/variants.json`: the Images workflow builds
+the image's Dockerfile once per entry, with the entry's build arguments, and
+tags it `X.Y.Z-<tag><series>` and `X.Y-<tag><series>`; the default series
+also gets the plain tags. To offer another series, add its entry, a matrix
+entry for it in `.github/workflows/images.yml`, the series in the step's
+`Literal` (`AnsibleCoreVersion`, `OpenTofuVersion`) and in the step's docs;
+the same script and test check that these agree, and that the Dockerfile's
+`ARG` defaults are the default series' entry. An OpenTofu series needs its
+own `GO_MODULE_RAISES`: build it on a pull request and raise what the scan
+flags. Adding a series is a `feat`. Dropping one breaks the flows that name
+it, so it needs a minor release too (the script refuses a patch release that
+drops one): mark that commit as breaking.
+
 The 0.x rule is the `"breaking": true` entry in `.releaserc.json`'s
 `releaseRules`; once the packages reach 1.0, change its `release` to
 `major`. Deleting it is not enough: the analyzer applies every rule that
