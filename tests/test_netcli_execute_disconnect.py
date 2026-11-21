@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, cast
 
 import asyncssh
@@ -372,6 +373,7 @@ def test_netmiko_reports_a_device_close_only(
     monkeypatch.setattr(transport, "_cancellation_registry", _Registry(cancelled))
 
     def _closed(connection, command, prompts):
+        transport._command_sent = True  # the command went out, then the session closed
         raise netmiko_transport._SessionClosed(output)
 
     monkeypatch.setattr(transport, "_send_with_prompts", _closed)
@@ -447,3 +449,72 @@ async def test_a_device_error_before_the_close_fails_the_step():
     )
     assert result.success is False
     assert result.output["disconnected"] == []
+
+
+def test_netmiko_does_not_take_a_close_before_the_command_was_sent_for_a_reload(monkeypatch):
+    """The session closed while the prompt was being found: reload never went out."""
+    transport = _netmiko()
+    monkeypatch.setattr(transport, "_cancellation_registry", _Registry(False))
+
+    def _no_prompt():
+        raise OSError("Socket is closed")
+
+    closed_channel = SimpleNamespace(closed=True, eof_received=True, transport=None)
+    connection = SimpleNamespace(
+        find_prompt=_no_prompt,
+        write_channel=lambda data: None,
+        read_channel=lambda: "",
+        RETURN="\n",
+        remote_conn=closed_channel,
+    )
+    result = transport._run_exec_command(connection, "reload")
+
+    assert result.disconnected is False
+    assert result.exit_code == -1
+
+
+@pytest.mark.asyncio
+async def test_scrapli_does_not_take_a_close_before_the_command_was_sent_for_a_reload(
+    monkeypatch,
+):
+    transport = ScrapliTransport(
+        DeviceConnectionSpec(
+            host=HOST, port=22, username=USERNAME, password=PASSWORD, platform="ios-xe"
+        ),
+        host_key_verifier=checks_off(),
+    )
+    transport.configure_cli_prompts(RELOAD_PROMPTS)
+    monkeypatch.setattr(transport, "_cancellation_registry", _Registry(False))
+    connection = _QuietScrapliConnection(alive=False)
+
+    async def _closed_priv(level):
+        raise ConnectionError("transport at EOF; no more data to be read")
+
+    monkeypatch.setattr(connection, "acquire_priv", _closed_priv)
+    result = await transport._send_exec_command(connection, "reload")
+
+    assert result.disconnected is False
+
+
+@pytest.mark.asyncio
+async def test_scrapli_forgets_an_earlier_connections_timeout(monkeypatch):
+    transport = ScrapliTransport(
+        DeviceConnectionSpec(
+            host=HOST, port=22, username=USERNAME, password=PASSWORD, platform="ios-xe"
+        ),
+        host_key_verifier=checks_off(),
+    )
+    transport._scrapli_closed = True
+
+    class _Opened(Exception):
+        pass
+
+    def _stop(*args, **kwargs):
+        raise _Opened
+
+    from hegemony_transport_scrapli import transport as scrapli_transport
+
+    monkeypatch.setattr(scrapli_transport, "AsyncScrapli", _stop)
+    with pytest.raises(Exception):  # noqa: B017 - only the reset before opening matters
+        await transport._open_connection()
+    assert transport._scrapli_closed is False

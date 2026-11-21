@@ -782,6 +782,8 @@ class SSHTransport:
     #: Feature flag: a result is ``disconnected`` when the device closed the
     #: session while that exec command ran, such as on a reload.
     supports_disconnect_reports = True
+    #: Whether the running exec command was written to the device.
+    _command_sent = False
 
     def _legacy(self, *, jump_host: bool) -> bool:
         """Whether a hop may use legacy SSH: the step setting, or that hop's inventory flag."""
@@ -1188,6 +1190,9 @@ class SSHTransport:
     def _run_exec_command(self, connection, command: str) -> SSHResult:
         """Run one command at privilege-exec; a CLI error pattern gives exit code 1."""
         start = time.perf_counter()
+        # Only a session that closes after the command went out can be the
+        # command's doing (a reload); one that closed before it is not.
+        self._command_sent = False
         try:
             if not command.strip():
                 connection.write_channel("\n")
@@ -1200,6 +1205,9 @@ class SSHTransport:
             elif _is_startup_copy(command):
                 raw_output = self._send_startup_copy(connection, command)
             else:
+                # send_command writes the command itself; the best this can
+                # tell is that the session was open when it was handed over.
+                self._command_sent = _session_open(connection)
                 raw_output = connection.send_command(
                     command,
                     read_timeout=self.command_timeout,
@@ -1208,7 +1216,9 @@ class SSHTransport:
                 )
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
-            closed = isinstance(e, _SessionClosed) or not _session_open(connection)
+            closed = self._command_sent and (
+                isinstance(e, _SessionClosed) or not _session_open(connection)
+            )
             # Cancelling the run closes the session too; that is no reload.
             if closed and not self._cancellation_registry.is_cancelled(self.step_run_id):
                 logger.warning(f"{self.host} closed the session during a command")
@@ -1264,6 +1274,7 @@ class SSHTransport:
         prompt = connection.find_prompt().strip()
         dialogue = PromptDialogue(prompts)
         connection.write_channel(command + connection.RETURN)
+        self._command_sent = True
         output = ""
         # Where the output after the latest answer starts: the question just
         # answered is not read as a new one.
