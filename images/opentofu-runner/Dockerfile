@@ -32,7 +32,7 @@
 # release tag vX.Y.Z as ghcr.io/hegemony-sh/opentofu-runner:X.Y.Z and :X.Y. The
 # steps' default names X.Y (DEFAULT_IMAGES in
 # plugins/steps_tf/src/hegemony_steps_tf/common.py), currently
-# ghcr.io/hegemony-sh/opentofu-runner:0.50. That tag names a plugin release, not
+# ghcr.io/hegemony-sh/opentofu-runner:0.51. That tag names a plugin release, not
 # the OpenTofu inside: the image's sh.hegemony.opentofu.version label names it,
 # and so does every run (the steps' tool_version output). A patch release of
 # the plugins stays on OpenTofu 1.12; another series needs a minor release, so
@@ -40,7 +40,7 @@
 # release otherwise).
 #
 # The workflow also publishes the image for every OpenTofu series in
-# variants.json, as X.Y.Z-tofu<series> and X.Y-tofu<series> (0.50-tofu1.13, say):
+# variants.json, as X.Y.Z-tofu<series> and X.Y-tofu<series> (0.51-tofu1.13, say):
 # this Dockerfile built with that entry's build arguments, each series with its
 # own module raises and Go toolchain. The plan step's "OpenTofu version" names
 # one of them. The ARG defaults below are the default series' entry

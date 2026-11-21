@@ -1,3 +1,13 @@
+## [0.51.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.50.0...v0.51.0) (2026-11-21)
+
+### Features
+
+* **ansible,tf:** report the tool version every run used ([dd3f7da](https://github.com/hegemony-sh/hegemony-step-plugins/commit/dd3f7da7e49b26ef06226db5fd0551a406a29c46))
+
+### Bug Fixes
+
+* **tf:** close three gaps in the tool version reporting and its release check ([31a539f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/31a539fd2c05ce990727f1d7f312ceec672e12ee))
+
 ## [0.50.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.49.0...v0.50.0) (2026-11-21)
 
 ### Features

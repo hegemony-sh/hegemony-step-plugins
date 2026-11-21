@@ -10,7 +10,7 @@
 # ansible-runner and opentofu-runner are built once per tool series in
 # images/<name>/variants.json, each with that entry's build arguments. The
 # default series gets the tags described below; every series, the default
-# too, also gets X.Y.Z-<tag><series> and X.Y-<tag><series> (0.50-tofu1.13),
+# too, also gets X.Y.Z-<tag><series> and X.Y-<tag><series> (0.51-tofu1.13),
 # which the steps' version settings name.
 #
 # Publishing the GitHub Release vX.Y.Z (the Release workflow does, with
@@ -97,7 +97,7 @@ jobs:
             # The tool series this entry builds, from images/<name>/variants.json.
             # The default series is the image the plain tags name; every
             # series, the default too, is also tagged X.Y.Z-<tag><series> and
-            # X.Y-<tag><series> (0.50-core2.19), which a step's version
+            # X.Y-<tag><series> (0.51-core2.19), which a step's version
             # setting names. tests/test_release_versions.py checks these
             # entries against variants.json.
             variant: "2.19"

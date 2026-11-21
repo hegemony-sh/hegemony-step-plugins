@@ -278,13 +278,13 @@ class TfPlanConfig(TfContainerConfig):
         title="Image",
         description=(
             "Container image with the tool, run as root with a POSIX sh. Leave empty for "
-            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.50 (OpenTofu 1.12, "
+            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.51 (OpenTofu 1.12, "
             "or the series OpenTofu version names) for OpenTofu, hashicorp/terraform "
             "(Terraform 1.16) for Terraform. An image replaces OpenTofu version, so set "
             "only one. The step output names the version that ran (tool_version)."
         ),
         json_schema_extra={
-            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.50",
+            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.51",
             "x_advanced": True,
         },
     )
