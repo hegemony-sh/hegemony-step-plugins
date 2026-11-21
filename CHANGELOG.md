@@ -1,3 +1,14 @@
+## [0.52.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.51.0...v0.52.0) (2026-11-21)
+
+### Features
+
+* **ansible,tf:** let a step choose its ansible-core or OpenTofu series ([6c28424](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6c284242079f29d2f7abd05e7af9b768597cacd5))
+
+### Bug Fixes
+
+* **ansible,tf:** build the runner images on ansible-core 2.19.15 and OpenTofu 1.12.12 ([5370df0](https://github.com/hegemony-sh/hegemony-step-plugins/commit/5370df02045b3139f18bb1e299977f01f135f561))
+* **ansible:** let a flow saved with an earlier default image name a series ([0bc12a2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0bc12a2992c3c168c82e1069de4ecb1c68c874f1))
+
 ## [0.51.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.50.0...v0.51.0) (2026-11-21)
 
 ### Features

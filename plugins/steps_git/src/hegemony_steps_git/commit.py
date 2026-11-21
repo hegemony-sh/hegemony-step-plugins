@@ -59,7 +59,7 @@ HANDLER_ID = "git.commit"
 
 #: The step's default image: Alpine with git and the CA bundle, built from
 #: images/git-runner and published by the Images workflow for every release.
-DEFAULT_IMAGE = "ghcr.io/hegemony-sh/git-runner:0.51"
+DEFAULT_IMAGE = "ghcr.io/hegemony-sh/git-runner:0.52"
 
 #: Where the step's own files live in the container.
 GIT_ROOT = "/hegemony/git"
