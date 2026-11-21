@@ -159,7 +159,7 @@ The output keys:
 
 ## Execution Image
 
-The default image, `ghcr.io/hegemony-sh/ansible-runner:0.50`, bundles
+The default image, `ghcr.io/hegemony-sh/ansible-runner:0.51`, bundles
 ansible-core 2.19, ansible-pylibssh, ncclient, and the network collections the
 platform maps device platforms onto. Its tag names a release of the plugins,
 not the ansible-core inside: every run reports the exact version as
