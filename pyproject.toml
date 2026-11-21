@@ -48,6 +48,7 @@ members = [
     "plugins/steps_secret",
     "plugins/steps_inventory",
     "plugins/steps_netbox",
+    "plugins/steps_git",
     "probes/probe_net",
     "transports/transport_netmiko",
     "transports/transport_scrapli",
@@ -71,6 +72,7 @@ hegemony-steps-http = { workspace = true }
 hegemony-steps-secret = { workspace = true }
 hegemony-steps-inventory = { workspace = true }
 hegemony-steps-netbox = { workspace = true }
+hegemony-steps-git = { workspace = true }
 hegemony-probe-net = { workspace = true }
 hegemony-transport-netmiko = { workspace = true }
 hegemony-transport-scrapli = { workspace = true }
@@ -104,6 +106,7 @@ known-first-party = [
     "hegemony_steps_secret",
     "hegemony_steps_inventory",
     "hegemony_steps_netbox",
+    "hegemony_steps_git",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
     "hegemony_transport_scrapli",
