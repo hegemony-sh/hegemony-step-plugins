@@ -11,6 +11,7 @@ import fnmatch
 import importlib.util
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -188,8 +189,34 @@ def test_every_file_that_names_a_default_tool_states_the_series_its_source_sets(
         series = verifier.tool_series(tool, (paths.ROOT / tool.source).read_text(encoding="utf-8"))
         assert series is not None, tool.source
         assert verifier.tool_docs_failures(tool, series) == []
-        # And the check does fail for a series nothing states.
+        # And the check does fail for a series nothing states, also one the
+        # stated series merely starts with (1.1 in a file stating 1.12).
         assert len(verifier.tool_docs_failures(tool, "0.0")) == len(tool.files)
+        assert len(verifier.tool_docs_failures(tool, series[:-1])) == len(tool.files)
+
+
+def test_a_file_missing_at_a_tag_is_told_from_a_tag_that_cannot_be_read(monkeypatch):
+    verifier = _script("verify_release_version")
+    answers: dict[str, tuple[int, str, str]] = {}
+
+    def fake_git(*args: str):
+        code, out, err = answers[args[0]]
+        return subprocess.CompletedProcess(args, code, stdout=out, stderr=err)
+
+    monkeypatch.setattr(verifier, "_git", fake_git)
+
+    answers.update({"ls-tree": (0, "images/x/Dockerfile\n", ""), "show": (0, "ARG X=1\n", "")})
+    assert verifier._read_at("v0.48.0", "images/x/Dockerfile") == "ARG X=1\n"
+    # The tag has no such file: the tool is new.
+    answers["ls-tree"] = (0, "", "")
+    assert verifier._read_at("v0.48.0", "images/x/Dockerfile") is None
+    # The tag or its objects cannot be read: never taken for a missing file.
+    answers["ls-tree"] = (128, "", "fatal: Not a valid object name v0.48.0")
+    with pytest.raises(SystemExit, match="Could not read v0.48.0"):
+        verifier._read_at("v0.48.0", "images/x/Dockerfile")
+    answers.update({"ls-tree": (0, "images/x/Dockerfile\n", ""), "show": (128, "", "fatal: bad")})
+    with pytest.raises(SystemExit, match="Could not read images/x/Dockerfile at v0.48.0"):
+        verifier._read_at("v0.48.0", "images/x/Dockerfile")
 
 
 @pytest.mark.parametrize(

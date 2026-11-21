@@ -363,6 +363,8 @@ class TfApplyHandler(BaseHandler):
             return HandlerResult(
                 success=True,
                 summary=summary,
+                # No container ran, so this is the only metric there is.
+                metrics={"tool_version": handoff.tool_version},
                 # The state is as the plan found it, and so are its outputs.
                 output={
                     "applied": False,

@@ -1568,6 +1568,7 @@ async def test_apply_step_skips_a_plan_without_changes(monkeypatch):
         "outputs": {"vpc_id": "vpc-1"},
         "sensitive_outputs": ["db_password"],
     }
+    assert result.metrics == {"tool_version": "1.12.6"}
     assert state["calls"] == []
 
 

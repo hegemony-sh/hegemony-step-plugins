@@ -74,11 +74,15 @@ def tool_series(tool, text: str) -> str | None:
 
 
 def tool_docs_failures(tool, series: str) -> list[str]:
-    """The files that should state ``<name> <series>`` and do not."""
+    """The files that should state ``<name> <series>`` and do not.
+
+    The whole series: a file stating 1.12 does not state 1.1.
+    """
+    stated = re.compile(re.escape(f"{tool.name} {series}") + r"(?!\d)")
     return [
         f"{path.relative_to(ROOT)} must state {tool.name} {series} (set in {tool.source})"
         for path in tool.files
-        if f"{tool.name} {series}" not in path.read_text(encoding="utf-8")
+        if not stated.search(path.read_text(encoding="utf-8"))
     ]
 
 
@@ -139,8 +143,20 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _read_at(tag: str, path: str) -> str | None:
+    """``path`` at ``tag``; None only when the tag's tree has no such file.
+
+    A tag or an object that cannot be read (a partial clone, say) is not a
+    missing file: it ends the check, or a tool could move unseen.
+    """
+    listed = _git("ls-tree", "--name-only", tag, "--", path)
+    if listed.returncode != 0:
+        raise SystemExit(f"Could not read {tag} to look for {path}: {listed.stderr.strip()}")
+    if not listed.stdout.strip():
+        return None
     shown = _git("show", f"{tag}:{path}")
-    return shown.stdout if shown.returncode == 0 else None
+    if shown.returncode != 0:
+        raise SystemExit(f"Could not read {path} at {tag}: {shown.stderr.strip()}")
+    return shown.stdout
 
 
 def _release_tags() -> list[str]:
