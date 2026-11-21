@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 # Publishes the steps' default execution images, ghcr.io/<owner>/<name>, from
-# images/<name>: ansible-runner (ansible.playbook) and opentofu-runner (tf.plan
-# and tf.apply with OpenTofu). scripts/package_paths.py lists the same images.
+# images/<name>: ansible-runner (ansible.playbook), opentofu-runner (tf.plan
+# and tf.apply with OpenTofu) and git-runner (git.commit). scripts/package_paths.py lists the same images.
 #
 # Publishing the GitHub Release vX.Y.Z (the Release workflow does, with
 # RELEASE_TOKEN) publishes X.Y.Z and X.Y from its tag. Not the tag push: the
@@ -38,6 +38,7 @@ on:
     paths:
       - "images/ansible-runner/**"
       - "images/opentofu-runner/**"
+      - "images/git-runner/**"
       - ".github/workflows/images.yml"
   workflow_dispatch:
     inputs:
@@ -92,6 +93,11 @@ jobs:
             licenses: MPL-2.0 AND BSD-3-Clause AND Apache-2.0 AND MIT AND GPL-2.0-only AND GPL-2.0-or-later AND SSH-OpenSSH
             default_file: plugins/steps_tf/src/hegemony_steps_tf/common.py
             default_line: '    "opentofu": "{image}",'
+          - image: git-runner
+            description: Default execution image of the Hegemony git.commit step
+            licenses: GPL-2.0-only AND GPL-2.0-or-later AND MIT AND MPL-2.0 AND Apache-2.0
+            default_file: plugins/steps_git/src/hegemony_steps_git/commit.py
+            default_line: 'DEFAULT_IMAGE = "{image}"'
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
     steps:

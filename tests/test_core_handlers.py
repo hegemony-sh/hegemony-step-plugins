@@ -21,6 +21,7 @@ import hegemony_steps_container
 import hegemony_steps_evidence
 import hegemony_steps_flow
 import hegemony_steps_general
+import hegemony_steps_git
 import hegemony_steps_http
 import hegemony_steps_inventory
 import hegemony_steps_monitor
@@ -37,7 +38,14 @@ WHEELS = [
     (
         hegemony_steps_probe,
         "probe",
-        {"probe.connectivity", "probe.wait_reachable", "probe.http", "probe.dns", "probe.tls"},
+        {
+            "probe.connectivity",
+            "probe.wait_reachable",
+            "probe.http",
+            "probe.dns",
+            "probe.snmp",
+            "probe.tls",
+        },
     ),
     (
         hegemony_steps_netcli,
@@ -52,6 +60,7 @@ WHEELS = [
     (hegemony_steps_http, "http", {"http.request"}),
     (hegemony_steps_secret, "secret", {"secret.write"}),
     (hegemony_steps_inventory, "inventory", {"inventory.sync"}),
+    (hegemony_steps_git, "git", {"git.commit"}),
     (
         hegemony_steps_netbox,
         "netbox",

@@ -62,7 +62,7 @@ entry-point group and the platform discovers them at startup.
   | Wheel | Namespace | Handlers |
   | --- | --- | --- |
   | `plugins/steps_general` | `general.` | noop (hidden), sleep |
-  | `plugins/steps_probe` | `probe.` | connectivity, http, dns, tls, wait_reachable |
+  | `plugins/steps_probe` | `probe.` | connectivity, http, dns, tls, snmp (read only), wait_reachable |
   | `plugins/steps_netcli` | `netcli.` | execute, collect_evidence, file_download |
   | `plugins/steps_evidence` | `evidence.` | assert, compare |
   | `plugins/steps_container` | `container.` | run |
@@ -74,6 +74,7 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_http` | `http.` | request |
   | `plugins/steps_secret` | `secret.` | write — store, swap or delete a secret in the organization's secret store |
   | `plugins/steps_inventory` | `inventory.` | sync — sync an inventory provider of the run's organization now |
+  | `plugins/steps_git` | `git.` | commit — commit an earlier step's evidence (configuration backups) to a Git repository over HTTPS, only when it changed (built on `container.run`'s runner) |
   | `plugins/steps_netbox` | `netbox.` | request, ipam.allocate/release, render_config — NetBox objects, IP address management and config rendering (needs `hegemony-steps-http`) |
 
 Device transports (`transports/`: netmiko, scrapli, asyncssh) and the network
@@ -110,8 +111,8 @@ own; the platform's images already carry the rest.
 A wheel pins `hegemony-step-sdk` to its own exact version, and the SDK is not
 on an index, so name the SDK wheel of the same release in the same command,
 together with any wheel that the wheels you install depend on
-(`hegemony-steps-netbox` needs `hegemony-steps-http`; `hegemony-steps-ansible`
-and `hegemony-steps-tf` need `hegemony-steps-container`):
+(`hegemony-steps-netbox` needs `hegemony-steps-http`; `hegemony-steps-ansible`,
+`hegemony-steps-tf` and `hegemony-steps-git` need `hegemony-steps-container`):
 
 ```bash
 version=X.Y.Z   # a release tag without the leading v
@@ -147,9 +148,10 @@ install runs only if every wheel passes. Newer releases also attach that
 provenance as `hegemony-step-plugins-X.Y.Z.intoto.jsonl`; for older ones the
 command fetches it from GitHub.
 
-The runner images (`ghcr.io/hegemony-sh/ansible-runner` and
-`ghcr.io/hegemony-sh/opentofu-runner`) are signed by the Images workflow
-from the release tag, and carry the same kind of provenance. Both checks
+The runner images (`ghcr.io/hegemony-sh/ansible-runner`,
+`ghcr.io/hegemony-sh/opentofu-runner` and `ghcr.io/hegemony-sh/git-runner`)
+are signed by the Images workflow from the release tag, and carry the same
+kind of provenance. Both checks
 below accept only that workflow run at a release tag:
 
 ```bash
