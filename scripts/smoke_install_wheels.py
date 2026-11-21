@@ -41,6 +41,8 @@ EXPECTED_MODULES = (
     "hegemony_steps_inventory",
     "hegemony_steps_netbox",
     "hegemony_steps_git",
+    "hegemony_steps_netconf",
+    "hegemony_steps_cisco_iosxe",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
     "hegemony_transport_scrapli",
@@ -64,6 +66,8 @@ EXPECTED_ENTRY_POINTS = {
     "inventory",
     "netbox",
     "git",
+    "netconf",
+    "cisco.iosxe",
 }
 
 # Entry-point names under hegemony.probes (probe wheels).

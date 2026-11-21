@@ -28,6 +28,8 @@ PACKAGE_DIRS = (
     ROOT / "plugins" / "steps_inventory",
     ROOT / "plugins" / "steps_netbox",
     ROOT / "plugins" / "steps_git",
+    ROOT / "plugins" / "steps_netconf",
+    ROOT / "plugins" / "steps_cisco_iosxe",
     ROOT / "probes" / "probe_net",
     ROOT / "transports" / "transport_netmiko",
     ROOT / "transports" / "transport_scrapli",
