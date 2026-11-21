@@ -61,7 +61,9 @@ from hegemony_steps_ansible.results import (
     MAX_RESULTS_BYTES,
     MAX_TASK_RECORDS,
     RESULTS_FILE,
+    VERSION_FILE,
     parse_results,
+    parse_version,
     render_host_report,
 )
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
@@ -958,7 +960,11 @@ def _install_docker(
     pull_returncode: int = 0,
     collect_returncode: int = 0,
     pull_stdout: str = "",
+    version: bytes | None = b"ansible-playbook [core 2.19.13]\n  config file = None\n",
 ) -> dict[str, Any]:
+    """Fake docker. ``collected`` is the results file the play left (None:
+    none), ``version`` what ``ansible-playbook --version`` printed (None: no
+    file)."""
     state: dict[str, Any] = {"roots": {}, "calls": []}
     monkeypatch.setattr(
         "hegemony_steps_container.run.stream_pull",
@@ -983,9 +989,14 @@ def _install_docker(
                             state["roots"][rel] = fh.read()
             elif src.endswith(":/hegemony/out/.") and collect_returncode:
                 return SimpleNamespace(returncode=collect_returncode, stdout="", stderr="cp broke")
-            elif src.endswith(":/hegemony/out/.") and collected is not None:
-                with open(os.path.join(dest, "ansible-results.json"), "wb") as fh:
-                    fh.write(collected)
+            elif src.endswith(":/hegemony/out/."):
+                for name, data in (
+                    ("ansible-results.json", collected),
+                    ("ansible-version.txt", version),
+                ):
+                    if data is not None:
+                        with open(os.path.join(dest, name), "wb") as fh:
+                            fh.write(data)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("subprocess.run", fake_run)
@@ -1449,6 +1460,78 @@ def test_handler_metadata():
     # Secret fields reach the handler as written (never resolved twice).
     assert handler.raw_config_keys == {"secrets", "group_secrets", "vault_password", "vault_ids"}
     assert handler.targeting.roles is True and handler.targeting.ips is False
+
+
+@pytest.mark.parametrize(
+    ("raw", "version"),
+    [
+        (b"ansible-playbook [core 2.19.13]\n  config file = None\n", "2.19.13"),
+        (b"ansible-playbook [core 2.20.0rc1]\n", "2.20.0rc1"),
+        (b"ansible-playbook [core 2.21.0.dev0] (devel 0123abc) last updated\n", "2.21.0.dev0"),
+        # Before ansible-core 2.11.
+        (b"ansible-playbook 2.9.27\n  config file = None\n", "2.9.27"),
+        # Never a guess: no file, nothing in it, or not the version line.
+        (None, ""),
+        (b"", ""),
+        (b"[WARNING]: something\nansible-playbook [core 2.19.13]\n", ""),
+        (b"ansible-playbook [core $(reboot)]\n", ""),
+        (b"ansible [core 2.19.13]\n", ""),
+    ],
+)
+def test_the_ansible_version_is_what_ansible_reported_or_empty(raw, version):
+    assert parse_version(raw) == version
+
+
+def test_the_script_records_the_ansible_version_before_anything_can_fail():
+    config = AnsiblePlaybookConfig.model_validate(
+        {"playbook": "site.yml", "requirements_file": "requirements.yml"}
+    )
+    line = (
+        f"if ! ansible-playbook --version > {VERSION_FILE} 2>/dev/null; "
+        f"then rm -f {VERSION_FILE}; fi"
+    )
+    lines = build_run_script(
+        config, has_extra_vars=False, has_secrets=False, vault_files={}
+    ).splitlines()
+    assert line in lines
+    assert lines.index(line) < next(
+        i for i, text in enumerate(lines) if text.startswith("ansible-galaxy")
+    )
+    bounded = build_run_script(
+        config, has_extra_vars=False, has_secrets=False, vault_files={}, deadline=1_900_000_000
+    )
+    assert f"\nif ! bounded ansible-playbook --version > {VERSION_FILE}" in bounded
+
+
+@pytest.mark.asyncio
+async def test_the_step_reports_the_ansible_version_that_ran(monkeypatch):
+    recap = {"r1": {"ok": 1, "changed": 0, "failures": 0, "unreachable": 0}}
+    _install_docker(monkeypatch, collected=_results_json(recap), exit_code=0)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+
+    assert result.success is True, result.error
+    assert result.output["ansible_version"] == "2.19.13"
+    assert result.metrics["ansible_version"] == "2.19.13"
+
+
+@pytest.mark.asyncio
+async def test_a_play_that_never_started_still_names_its_ansible_version(monkeypatch):
+    # No results file: the version was written before the play.
+    _install_docker(monkeypatch, collected=None, exit_code=4)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+
+    assert result.success is False
+    assert result.output["ansible_version"] == "2.19.13"
+
+
+@pytest.mark.asyncio
+async def test_an_image_that_reports_no_version_gives_an_empty_one(monkeypatch):
+    recap = {"r1": {"ok": 1, "changed": 0, "failures": 0, "unreachable": 0}}
+    _install_docker(monkeypatch, collected=_results_json(recap), exit_code=0, version=None)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+
+    assert result.success is True, result.error
+    assert result.output["ansible_version"] == ""
 
 
 @pytest.mark.asyncio

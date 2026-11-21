@@ -56,6 +56,7 @@ from .common import (
     SECRET_VARS_FILE,
     SHA256_RE,
     TF_ROOT,
+    TOOL_NAMES,
     VARS_FILE,
     Engine,
     LockTimeout,
@@ -81,6 +82,8 @@ from .common import (
     tool_deadline,
     tool_env,
     tool_kill_after,
+    tool_version,
+    tool_version_line,
     typed_variable,
     variable_map_errors,
     workdir_for,
@@ -261,8 +264,9 @@ class TfPlanConfig(TfContainerConfig):
         title="Image",
         description=(
             "Container image with the tool, run as root with a POSIX sh. Leave empty for "
-            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.48 for OpenTofu, "
-            "hashicorp/terraform at a pinned version for Terraform."
+            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.48 (OpenTofu 1.12) "
+            "for OpenTofu, hashicorp/terraform (Terraform 1.16) for Terraform. The step "
+            "output names the version that ran (tool_version)."
         ),
         json_schema_extra={
             "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.48",
@@ -331,6 +335,8 @@ def build_plan_script(
     quoted_workdir = shlex.quote(workdir)
     lines = [
         *script_header(deadline, kill_after),
+        # First, so a plan that fails still names the version that failed.
+        tool_version_line(tf, run),
         f"rm -rf {quoted_workdir}",
         f"mkdir -p {quoted_workdir}",
         f"cp -R {shlex.quote(source)}/. {quoted_workdir}/",
@@ -407,6 +413,11 @@ _OUTPUT_FIELDS = (
         "int",
     ),
     OutputField("engine", "Tool that made the plan: opentofu or terraform", "string"),
+    OutputField(
+        "tool_version",
+        "Version of that tool, such as 1.12.6 (empty when the tool did not report it)",
+        "string",
+    ),
     OutputField("image", "Image the plan ran", "string"),
     OutputField("image_digest", "The same image by digest (empty when it has none)", "string"),
     OutputField("image_id", "The image's ID (empty when not reported)", "string"),
@@ -624,6 +635,7 @@ class TfPlanHandler(BaseHandler):
     ) -> HandlerResult:
         evidence = list(outcome.evidence)
         exit_code = outcome.exit_code
+        version = tool_version(outcome)
         if exit_code != 0:
             tool = BINARIES[config.engine]
             reason = (
@@ -641,6 +653,7 @@ class TfPlanHandler(BaseHandler):
                 metrics={
                     "exit_code": exit_code,
                     "duration_seconds": outcome.duration_seconds,
+                    "tool_version": version,
                     "image_digest": outcome.image_digest,
                     "image_served": outcome.image_served,
                     "image_source": outcome.image_source,
@@ -674,6 +687,7 @@ class TfPlanHandler(BaseHandler):
                 metrics={
                     "exit_code": exit_code,
                     "duration_seconds": outcome.duration_seconds,
+                    "tool_version": version,
                     "image_digest": outcome.image_digest,
                     "image_served": outcome.image_served,
                     "image_source": outcome.image_source,
@@ -701,6 +715,7 @@ class TfPlanHandler(BaseHandler):
                 metrics={
                     "exit_code": exit_code,
                     "duration_seconds": outcome.duration_seconds,
+                    "tool_version": version,
                     "image_digest": outcome.image_digest,
                     "image_served": outcome.image_served,
                     "image_source": outcome.image_source,
@@ -722,13 +737,17 @@ class TfPlanHandler(BaseHandler):
                 {
                     "kind": "step_result",
                     "name": f"plan_{ctx.step_id}.txt",
-                    # The digest tf.apply checks, for whoever approves this plan.
+                    # The digest tf.apply checks, for whoever approves this plan,
+                    # and the tool version, which the image's tag does not name.
                     "content_text": plan_text.rstrip("\n")
-                    + f"\n\nSaved plan {PLAN_FILE}, SHA-256: {plan_sha256}\n",
+                    + f"\n\nSaved plan {PLAN_FILE}, SHA-256: {plan_sha256}\n"
+                    + (f"Made by {TOOL_NAMES[config.engine]} {version}\n" if version else ""),
                     "content_json": {
                         "has_changes": has_changes,
                         **summary_data,
                         "plan_sha256": plan_sha256,
+                        "engine": config.engine,
+                        "tool_version": version,
                     },
                 }
             )
@@ -769,6 +788,9 @@ class TfPlanHandler(BaseHandler):
             **summary_data,
             "summary": summary,
             "engine": config.engine,
+            # What the tool itself reported; the image's tag names a plugin
+            # release, and a custom image names whatever its author chose.
+            "tool_version": version,
             "image": image,
             # The image by digest, which tf.apply runs: it must run the same
             # tool version, since a saved plan is refused by any other, and the
@@ -802,6 +824,7 @@ class TfPlanHandler(BaseHandler):
             metrics={
                 "exit_code": exit_code,
                 "duration_seconds": outcome.duration_seconds,
+                "tool_version": version,
                 "image": image,
                 "image_digest": outcome.image_digest,
                 "image_id": outcome.image_id,

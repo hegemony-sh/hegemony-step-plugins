@@ -53,6 +53,10 @@ non-sensitive outputs under `steps.NODE_ID.output.outputs`, for example
 in `steps.NODE_ID.output.sensitive_outputs` but their values are never kept.
 `steps.NODE_ID.output.applied` is true when a plan was applied, and false
 when the plan had no changes (the outputs are then the plan's).
+`steps.NODE_ID.output.tool_version` is the version of OpenTofu or Terraform
+that applied, such as `1.12.6`: the plan's version, since the apply runs the
+plan's image (and the version the plan reported when nothing was applied).
+It is empty when the tool reported none.
 
 ## When It Fails
 

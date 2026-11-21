@@ -67,6 +67,8 @@ from .common import (
     tool_deadline,
     tool_env,
     tool_kill_after,
+    tool_version,
+    tool_version_line,
     workdir_for,
 )
 
@@ -163,6 +165,7 @@ def build_apply_script(
         "\n".join(
             [
                 *script_header(deadline, kill_after),
+                tool_version_line(tf, run),
                 f"if [ ! -f {quoted_workdir}/{PLAN_FILE} ]; then",
                 f"  echo {shlex.quote(NO_PLAN_MESSAGE)} >&2",
                 f"  exit {EXIT_NO_PLAN}",
@@ -235,6 +238,8 @@ class PlanHandoff(BaseModel):
     working_dir: str
     apply_ready: bool
     has_changes: bool
+    # The version the plan's tool reported ("" from an older tf.plan, or unknown).
+    tool_version: str = ""
     outputs: dict[str, Any] = Field(default_factory=dict)
     sensitive_outputs: list[str] = Field(default_factory=list)
 
@@ -286,6 +291,12 @@ def read_plan_handoff(plan_step: str, output: dict[str, Any]) -> PlanHandoff | s
 #: What the step puts in its output, for the flow editor's variable picker.
 _OUTPUT_FIELDS = (
     OutputField("applied", "Whether a plan was applied (false when it had no changes)", "bool"),
+    OutputField(
+        "tool_version",
+        "Version of the tool that applied, such as 1.12.6; the plan's when nothing was "
+        "applied (empty when the tool did not report it)",
+        "string",
+    ),
     OutputField("outputs", "Non-sensitive output values after the apply", "object"),
     OutputField("sensitive_outputs", "Names of sensitive outputs", "list"),
 )
@@ -355,6 +366,8 @@ class TfApplyHandler(BaseHandler):
                 # The state is as the plan found it, and so are its outputs.
                 output={
                     "applied": False,
+                    # No tool ran here: the version the plan was made with.
+                    "tool_version": handoff.tool_version,
                     "outputs": handoff.outputs,
                     "sensitive_outputs": handoff.sensitive_outputs,
                 },
@@ -448,6 +461,7 @@ class TfApplyHandler(BaseHandler):
         metrics = {
             "exit_code": outcome.exit_code,
             "duration_seconds": outcome.duration_seconds,
+            "tool_version": tool_version(outcome),
             "image": image,
             "image_digest": outcome.image_digest,
             "image_id": outcome.image_id,
@@ -480,7 +494,12 @@ class TfApplyHandler(BaseHandler):
             summary=summary,
             metrics=metrics,
             evidence=list(outcome.evidence),
-            output={"applied": True, "outputs": values, "sensitive_outputs": sensitive},
+            output={
+                "applied": True,
+                "tool_version": metrics["tool_version"],
+                "outputs": values,
+                "sensitive_outputs": sensitive,
+            },
         )
 
 

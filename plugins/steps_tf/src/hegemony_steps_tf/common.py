@@ -83,6 +83,8 @@ DEFAULT_IMAGES: dict[str, str] = {
     "terraform": "hashicorp/terraform:1.16.4",
 }
 BINARIES: dict[str, str] = {"opentofu": "tofu", "terraform": "terraform"}
+#: The tools as their own output names them, for text a person reads.
+TOOL_NAMES: dict[str, str] = {"opentofu": "OpenTofu", "terraform": "Terraform"}
 
 ATTACHMENTS_ROOT = "/attachments"
 SHARED_ROOT = "/shared"
@@ -94,6 +96,9 @@ BACKEND_CONFIG_FILE = f"{TF_ROOT}/backend.hcl"
 VARS_FILE = f"{TF_ROOT}/vars.tfvars.json"
 SECRET_VARS_FILE = f"{TF_ROOT}/secret-vars.tfvars.json"
 PLAN_FILE = "plan.tfplan"
+#: ``version -json`` of the tool the step ran, read back as ``tool_version``:
+#: the image's tag names a plugin release, not the tool inside.
+TOOL_VERSION_FILE = f"{OUTPUT_DIR}/tool-version.json"
 #: A saved plan's digest as tf.plan records it: ``sha256sum``'s 64 hex digits.
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 #: An image ID as `docker image inspect --format {{.Id}}` prints it.
@@ -574,6 +579,42 @@ def tool_env() -> dict[str, str]:
         "TF_INPUT": "0",
         "CHECKPOINT_DISABLE": "1",
     }
+
+
+#: A version as either tool prints it: 1.12.6, 1.13.0-rc1, 1.16.4+ent.
+_TOOL_VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]{1,40})?")
+
+
+def tool_version_line(tool: str, run: str = "") -> str:
+    """The run script's line that records the tool's version (``run``: "bounded " or "").
+
+    Never fails the script: an image whose tool has no ``version -json``
+    leaves no file, and the step reports an empty version.
+    """
+    return (
+        f"if ! {run}{tool} version -json > {TOOL_VERSION_FILE} 2>/dev/null; "
+        f"then rm -f {TOOL_VERSION_FILE}; fi"
+    )
+
+
+def tool_version(outcome: Any) -> str:
+    """The version the tool reported (:data:`TOOL_VERSION_FILE`), or "" when unknown.
+
+    Both tools print ``{"terraform_version": "X.Y.Z", ...}``. Never a guess:
+    anything that is not a version is dropped.
+    """
+    raw = (getattr(outcome, "collected", None) or {}).get(TOOL_VERSION_FILE)
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return ""
+    version = data.get("terraform_version") if isinstance(data, dict) else None
+    if not isinstance(version, str):
+        return ""
+    version = version.strip().removeprefix("v")
+    return version if _TOOL_VERSION_RE.fullmatch(version) else ""
 
 
 def script_header(deadline: int | None = None, kill_after: int = KILL_AFTER_SECONDS) -> list[str]:

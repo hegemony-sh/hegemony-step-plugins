@@ -32,8 +32,13 @@
 # release tag vX.Y.Z as ghcr.io/hegemony-sh/opentofu-runner:X.Y.Z and :X.Y. The
 # steps' default names X.Y (DEFAULT_IMAGES in
 # plugins/steps_tf/src/hegemony_steps_tf/common.py), currently
-# ghcr.io/hegemony-sh/opentofu-runner:0.48. For another OpenTofu version, build
-# and push it under your own tag and set the plan step's Image:
+# ghcr.io/hegemony-sh/opentofu-runner:0.48. That tag names a plugin release, not
+# the OpenTofu inside: the image's sh.hegemony.opentofu.version label names it,
+# and so does every run (the steps' tool_version output). A patch release of
+# the plugins stays on OpenTofu 1.12; another series needs a minor release, so
+# commit that change as feat (scripts/verify_release_version.py refuses the
+# release otherwise). For another OpenTofu version, build and push
+# it under your own tag and set the plan step's Image:
 #
 #   docker build --no-cache --build-arg OPENTOFU_VERSION=<version> \
 #       --build-arg OPENTOFU_COMMIT=<commit the v<version> tag names> \
@@ -45,9 +50,14 @@
 # Both base images are pinned by digest, so a build uses exactly the reviewed
 # image; Renovate proposes the new digest when a tag moves
 # (.github/renovate.json).
+
+# Before the first FROM, so both stages can read it: the first builds this
+# version, the last names it in a label.
+ARG OPENTOFU_VERSION=1.12.6
+
 FROM golang:1.26.10-bookworm@sha256:5de7c99eb78ca5e515a4c340235d0955ec5964a5071c492c15503d7c267da473 AS tofu
 
-ARG OPENTOFU_VERSION=1.12.6
+ARG OPENTOFU_VERSION
 # The commit the v1.12.6 tag names; the build refuses any other.
 ARG OPENTOFU_COMMIT=b4305e5a5dd2fb79a27897ae30784a181d3a26cb
 # First fixed versions of the modules the scan flags (THIRD-PARTY-NOTICES.md);
@@ -96,6 +106,9 @@ RUN if [ -n "${GO_MODULE_RAISES}" ]; then \
     && test -s /out/doc/licenses/github.com/opentofu/opentofu/LICENSE
 
 FROM alpine:3.22@sha256:bfe7ceb9f09ec0566c48fb93356e45a47a00be5a1dd14fa5b909e7709c66b034
+
+ARG OPENTOFU_VERSION
+LABEL sh.hegemony.opentofu.version="${OPENTOFU_VERSION}"
 
 # The pinned base carries Alpine's fixes only up to its digest; upgrade so a
 # rebuild of the same tag still picks up the fixed packages.
