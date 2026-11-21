@@ -1,3 +1,9 @@
+## [0.52.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.52.0...v0.52.1) (2026-11-21)
+
+### Bug Fixes
+
+* **tf:** build OpenTofu 1.12 with Go 1.26.11 ([76c36ec](https://github.com/hegemony-sh/hegemony-step-plugins/commit/76c36ecb277b4b5957c642a3a3677b6792ab07b4))
+
 ## [0.52.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.51.0...v0.52.0) (2026-11-21)
 
 ### Features
