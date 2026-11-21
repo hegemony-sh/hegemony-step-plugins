@@ -3,18 +3,27 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Verify a release tag matches every package version, SDK pin, sibling-wheel pin, and image tag."""
+"""Verify a release tag matches every package version, SDK pin, sibling-wheel pin, and image tag.
+
+Also that a patch release keeps the series (X.Y) of every tool the steps run
+by default: a new one is a change of behaviour for every flow on the default
+image, so it needs a minor release.
+"""
 
 from __future__ import annotations
 
 import argparse
 import os
 import re
+import subprocess
 import tomllib
+from collections.abc import Callable
 
 from package_paths import (
+    BUNDLED_TOOLS,
     PACKAGE_DIRS,
     PLUGIN_DIRS,
+    ROOT,
     RUNNER_IMAGES,
     SDK_VERSION_FILE,
 )
@@ -56,6 +65,105 @@ def default_image_failure(image) -> str | None:
     if default is None or not default.group(1).startswith(f"{image.repository}:"):
         return f"{image.files[0]} must default to {image.repository}:X.Y"
     return None
+
+
+def tool_series(tool, text: str) -> str | None:
+    """The series (X.Y) of ``tool`` that ``text``, its source file, sets."""
+    match = re.search(tool.pattern, text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def tool_docs_failures(tool, series: str) -> list[str]:
+    """The files that should state ``<name> <series>`` and do not.
+
+    The whole series: a file stating 1.12 does not state 1.1.
+    """
+    stated = re.compile(re.escape(f"{tool.name} {series}") + r"(?!\d)")
+    return [
+        f"{path.relative_to(ROOT)} must state {tool.name} {series} (set in {tool.source})"
+        for path in tool.files
+        if not stated.search(path.read_text(encoding="utf-8"))
+    ]
+
+
+def previous_patch_tag(version: str, tags: list[str]) -> str | None:
+    """The newest release tag of ``version``'s minor before it; None for X.Y.0.
+
+    Also None for a version that is not X.Y.Z, which the other checks refuse.
+    """
+    match = re.fullmatch(r"(\d+\.\d+)\.(\d+)", version)
+    if match is None:
+        return None
+    minor, patch = match.group(1), int(match.group(2))
+    release = re.compile(r"v" + re.escape(minor) + r"\.(\d+)")
+    earlier = [
+        int(found.group(1))
+        for tag in tags
+        if (found := release.fullmatch(tag.strip())) and int(found.group(1)) < patch
+    ]
+    return f"v{minor}.{max(earlier)}" if earlier else None
+
+
+def tool_series_failures(
+    version: str, previous_tag: str | None, read_at: Callable[[str, str], str | None]
+) -> list[str]:
+    """Why ``version`` may not be released with the tools the tree sets.
+
+    ``previous_tag`` is the release it follows within its minor (None: there
+    is none to compare with), and ``read_at(tag, path)`` a file's text at a
+    tag, or None when the tag has no such file.
+    """
+    failures: list[str] = []
+    for tool in BUNDLED_TOOLS:
+        series = tool_series(tool, (ROOT / tool.source).read_text(encoding="utf-8"))
+        if series is None:
+            failures.append(f"{tool.source} no longer sets the {tool.name} version")
+            continue
+        if previous_tag is None:
+            continue
+        before_text = read_at(previous_tag, tool.source)
+        # A tool the previous release did not have is new, not moved.
+        before = tool_series(tool, before_text) if before_text is not None else None
+        if before is not None and before != series:
+            failures.append(
+                f"{tool.source} moves {tool.name} from {before} ({previous_tag}) to {series}, "
+                f"but {version} is a patch release: a new default tool version needs a "
+                "minor release, so commit that change as feat (CONTRIBUTING.md, Releasing)"
+            )
+    return failures
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - fixed arguments, no shell
+        ["git", "-C", str(ROOT), *args],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _read_at(tag: str, path: str) -> str | None:
+    """``path`` at ``tag``; None only when the tag's tree has no such file.
+
+    A tag or an object that cannot be read (a partial clone, say) is not a
+    missing file: it ends the check, or a tool could move unseen.
+    """
+    listed = _git("ls-tree", "--name-only", tag, "--", path)
+    if listed.returncode != 0:
+        raise SystemExit(f"Could not read {tag} to look for {path}: {listed.stderr.strip()}")
+    if not listed.stdout.strip():
+        return None
+    shown = _git("show", f"{tag}:{path}")
+    if shown.returncode != 0:
+        raise SystemExit(f"Could not read {path} at {tag}: {shown.stderr.strip()}")
+    return shown.stdout
+
+
+def _release_tags() -> list[str]:
+    listed = _git("tag", "--list", "v*")
+    if listed.returncode != 0:
+        raise SystemExit(f"Could not list the release tags: {listed.stderr.strip()}")
+    return listed.stdout.split()
 
 
 def _project_metadata(pyproject) -> dict:
@@ -107,6 +215,21 @@ def main() -> None:
         failure = default_image_failure(image)
         if failure:
             failures.append(failure)
+
+    patch = re.fullmatch(r"\d+\.\d+\.(\d+)", version)
+    previous_tag = previous_patch_tag(version, _release_tags())
+    if patch is not None and int(patch.group(1)) > 0 and previous_tag is None:
+        # Without the earlier release there is nothing to compare with: refuse
+        # rather than let a tool move unseen (a checkout without its tags).
+        failures.append(
+            f"found no earlier release tag of {version}'s minor to compare the tool "
+            "versions with; fetch the tags"
+        )
+    failures.extend(tool_series_failures(version, previous_tag, _read_at))
+    for tool in BUNDLED_TOOLS:
+        series = tool_series(tool, (ROOT / tool.source).read_text(encoding="utf-8"))
+        if series is not None:
+            failures.extend(tool_docs_failures(tool, series))
 
     if failures:
         raise SystemExit("\n".join(failures))

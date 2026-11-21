@@ -68,8 +68,10 @@ from .results import (
     CALLBACK_SOURCE,
     EXIT_CODE_MEANINGS,
     RESULTS_FILE,
+    VERSION_FILE,
     PlaybookResults,
     parse_results,
+    parse_version,
     render_host_report,
 )
 
@@ -303,7 +305,8 @@ class AnsiblePlaybookConfig(ContainerExecutionConfig):
         title="Execution image",
         description=(
             "Container image with ansible-playbook and the collections the playbook "
-            "needs. Any Ansible execution environment image works."
+            "needs. The default has ansible-core 2.19; the step output names the version "
+            "that ran (ansible_version). Any Ansible execution environment image works."
         ),
         json_schema_extra={"x_advanced": True, "x_col_span": 2},
     )
@@ -541,6 +544,13 @@ def build_run_script(
     if deadline is not None:
         lines += deadline_shell_lines(deadline)
         run = "bounded "
+    # Before anything can fail: the image's tag names a plugin release, not the
+    # ansible-core inside, and a custom image names whatever its author chose.
+    bound = "" if deadline is None else "bounded "
+    lines.append(
+        f"if ! {bound}ansible-playbook --version > {VERSION_FILE} 2>/dev/null; "
+        f"then rm -f {VERSION_FILE}; fi"
+    )
     if config.requirements_file.strip():
         requirements = posixpath.join(ATTACHMENTS_ROOT, config.requirements_file.strip())
         galaxy = f"ansible-galaxy install -r {shlex.quote(requirements)}"
@@ -637,6 +647,11 @@ def _explain_default_image_pull_failure(
 #: What the step puts in its output, for the flow editor's variable picker.
 _OUTPUT_FIELDS = (
     OutputField("exit_code", "Exit code of ansible-playbook", "int"),
+    OutputField(
+        "ansible_version",
+        "Version of ansible-core that ran, such as 2.19.13 (empty when it was not reported)",
+        "string",
+    ),
     OutputField("check_mode", "Whether the playbook ran in check mode", "bool"),
     OutputField("changed", "Whether any host changed (null when the play gave no results)", "bool"),
     OutputField("hosts", "Per-host task counts from the play recap", "object"),
@@ -970,8 +985,10 @@ class AnsiblePlaybookHandler(BaseHandler):
         failed = results.hosts_where("failures")
         unreachable = results.hosts_where("unreachable")
         exit_code = outcome.exit_code
+        ansible_version = parse_version(outcome.collected.get(VERSION_FILE))
         raw_output: dict[str, Any] = {
             "exit_code": exit_code,
+            "ansible_version": ansible_version,
             "check_mode": config.check_mode,
             # Unknown (null), never a guessed "no changes", without the recap: a
             # check-mode gate branching on it must not skip an approval.
@@ -1018,6 +1035,7 @@ class AnsiblePlaybookHandler(BaseHandler):
                 "exit_code": exit_code,
                 "target_devices": sum(len(devices) for devices in devices_by_role.values()),
                 "duration_seconds": outcome.duration_seconds,
+                "ansible_version": ansible_version,
                 "image": outcome.image,
                 "image_digest": outcome.image_digest,
                 "image_served": outcome.image_served,

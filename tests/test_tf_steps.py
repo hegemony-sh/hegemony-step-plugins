@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -42,9 +43,11 @@ from hegemony_steps_tf.apply import (
     NO_PLAN_MESSAGE,
     OUTPUTS_FILE,
     PLAN_CHANGED_MESSAGE,
+    PlanHandoff,
     TfApplyHandler,
     apply_failure,
     build_apply_script,
+    read_plan_handoff,
 )
 from hegemony_steps_tf.common import (
     BACKEND_CONFIG_FILE,
@@ -61,6 +64,7 @@ from hegemony_steps_tf.common import (
     SECRET_ENV_FILE,
     SECRET_VARS_FILE,
     STATE_ACCESS_MARGIN_SECONDS,
+    TOOL_VERSION_FILE,
     VARS_FILE,
     collect_failure,
     encryption_hcl,
@@ -70,6 +74,7 @@ from hegemony_steps_tf.common import (
     public_outputs,
     tool_deadline,
     tool_kill_after,
+    tool_version,
     typed_variable,
     workdir_for,
 )
@@ -1392,7 +1397,10 @@ async def test_apply_step_applies_the_saved_plan(monkeypatch):
             "pw": {"sensitive": True, "value": "hunter2"},
         }
     ).encode()
-    state = _install_docker(monkeypatch, out={"outputs.json": outputs})
+    state = _install_docker(
+        monkeypatch,
+        out={"outputs.json": outputs, "tool-version.json": b'{"terraform_version": "1.12.6"}'},
+    )
     services = _Services(_plan_output())
     result = await TfApplyHandler().execute(
         _ctx({"plan_step": "plan", "secret_env": {"TOKEN": "vault://a/tok"}}, services)
@@ -1400,8 +1408,10 @@ async def test_apply_step_applies_the_saved_plan(monkeypatch):
 
     assert result.success is True, result.error
     assert result.summary == "Applied: +1 ~0 -0"
+    assert result.metrics["tool_version"] == "1.12.6"
     assert result.output == {
         "applied": True,
+        "tool_version": "1.12.6",
         "outputs": {"svc": "telemetry"},
         "sensitive_outputs": ["pw"],
     }
@@ -1542,7 +1552,10 @@ async def test_apply_step_refuses_managed_state_without_a_name(monkeypatch):
 async def test_apply_step_skips_a_plan_without_changes(monkeypatch):
     state = _install_docker(monkeypatch, out={})
     plan = _plan_output(
-        has_changes=False, outputs={"vpc_id": "vpc-1"}, sensitive_outputs=["db_password"]
+        has_changes=False,
+        outputs={"vpc_id": "vpc-1"},
+        sensitive_outputs=["db_password"],
+        tool_version="1.12.6",
     )
     result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _Services(plan)))
     assert result.success is True
@@ -1550,9 +1563,12 @@ async def test_apply_step_skips_a_plan_without_changes(monkeypatch):
     # on the one that changed something.
     assert result.output == {
         "applied": False,
+        # No tool ran: the version the plan reported.
+        "tool_version": "1.12.6",
         "outputs": {"vpc_id": "vpc-1"},
         "sensitive_outputs": ["db_password"],
     }
+    assert result.metrics == {"tool_version": "1.12.6"}
     assert state["calls"] == []
 
 
@@ -2065,7 +2081,6 @@ async def test_plan_step_records_no_image_id_it_could_not_read(monkeypatch):
     Such a plan's apply is refused (see
     test_apply_step_refuses_a_plan_that_could_not_record_its_image_id).
     """
-    import dataclasses
 
     from hegemony_steps_tf import plan as plan_module
 
@@ -2085,6 +2100,107 @@ async def test_plan_step_records_no_image_id_it_could_not_read(monkeypatch):
     assert asked == [True]
     assert result.output["image_id"] == ""
     assert (result.metrics["image_id"], result.metrics["image_local_id"]) == ("", local_id)
+
+
+def _versioned(raw: bytes | None) -> Any:
+    collected = {TOOL_VERSION_FILE: raw} if raw is not None else {}
+    return dataclasses.replace(_job_result(0), collected=collected)
+
+
+@pytest.mark.parametrize(
+    ("raw", "version"),
+    [
+        (b'{"terraform_version": "1.12.6", "platform": "linux_amd64"}', "1.12.6"),
+        (b'{"terraform_version": "v1.13.0-rc1"}\n', "1.13.0-rc1"),
+        (b'{"terraform_version": "1.16.4+ent"}', "1.16.4+ent"),
+        # Never a guess: no file, no JSON, another shape, or not a version.
+        (None, ""),
+        (b"", ""),
+        (b"OpenTofu v1.12.6\n", ""),
+        (b'["1.12.6"]', ""),
+        (b'{"terraform_version": 1.12}', ""),
+        (b'{"terraform_version": "1.12.6; rm -rf /"}', ""),
+        (b'{"version": "1.12.6"}', ""),
+    ],
+)
+def test_the_tool_version_is_what_the_tool_reported_or_empty(raw, version):
+    assert tool_version(_versioned(raw)) == version
+
+
+def test_both_scripts_record_the_tool_version_first_and_never_fail_on_it():
+    config = TfPlanConfig.model_validate({"engine": "terraform", "state": "ephemeral"})
+    plan = build_plan_script(config, workdir=LOCAL_WORKDIR, has_vars=False, has_secret_vars=False)
+    apply = build_apply_script("opentofu", "/shared/tf/plan", "5m", "d" * 64)
+    for script, tool, first in (
+        (plan, "terraform", "rm -rf"),
+        (apply, "tofu", "if [ ! -f /shared"),
+    ):
+        line = (
+            f"if ! {tool} version -json > {TOOL_VERSION_FILE} 2>/dev/null; "
+            f"then rm -f {TOOL_VERSION_FILE}; fi"
+        )
+        lines = script.splitlines()
+        assert line in lines
+        # Before the step's own work, so a run that fails still names the version.
+        assert lines.index(line) < next(i for i, text in enumerate(lines) if text.startswith(first))
+        _assert_parses(script)
+    bounded = build_apply_script(
+        "opentofu", "/shared/tf/plan", "5m", "d" * 64, deadline=1_900_000_000
+    )
+    assert f"if ! bounded tofu version -json > {TOOL_VERSION_FILE}" in bounded
+
+
+@pytest.mark.asyncio
+async def test_a_plan_reports_the_tool_version_it_ran(monkeypatch):
+    _install_docker(
+        monkeypatch,
+        out={
+            "plan-exitcode": b"2",
+            "plan.txt": b"Plan: 1 to add, 0 to change, 0 to destroy.\n",
+            "tool-version.json": b'{"terraform_version": "1.12.6"}',
+            PLAN_JSON_FILE: _PLAN_JSON,
+        },
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+
+    assert result.success is True, result.error
+    assert result.output["tool_version"] == "1.12.6"
+    assert result.metrics["tool_version"] == "1.12.6"
+    # Whoever approves the plan reads the version on the plan itself.
+    plan = next(item for item in result.evidence if item["name"].startswith("plan_"))
+    assert plan["content_text"].endswith("Made by OpenTofu 1.12.6\n")
+    assert plan["content_json"]["tool_version"] == "1.12.6"
+    # The apply step takes it over for a plan it does not need to apply.
+    handoff = read_plan_handoff(
+        "plan",
+        {**result.output, "working_dir": "/shared/tf/plan", "image_id": "sha256:" + "6" * 64},
+    )
+    assert isinstance(handoff, PlanHandoff) and handoff.tool_version == "1.12.6"
+
+
+@pytest.mark.asyncio
+async def test_a_plan_without_a_reported_version_says_so_with_an_empty_one(monkeypatch):
+    _install_docker(
+        monkeypatch,
+        out={"plan-exitcode": b"2", "plan.txt": b"Plan: 1 to add.\n", PLAN_JSON_FILE: _PLAN_JSON},
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+
+    assert result.success is True, result.error
+    assert result.output["tool_version"] == ""
+    plan = next(item for item in result.evidence if item["name"].startswith("plan_"))
+    assert "Made by" not in plan["content_text"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_plan_still_names_the_version_that_failed(monkeypatch):
+    _install_docker(
+        monkeypatch, out={"tool-version.json": b'{"terraform_version": "1.12.6"}'}, exit_code=1
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+
+    assert result.success is False
+    assert result.metrics["tool_version"] == "1.12.6"
 
 
 def _declared(handler: type[BaseHandler]) -> set[str]:

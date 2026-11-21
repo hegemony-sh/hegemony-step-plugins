@@ -138,6 +138,9 @@ are always complete, and `results_trimmed` names what was left out.
 The output keys:
 
 - `steps.NODE_ID.output.exit_code`: the exit code of ansible-playbook.
+- `steps.NODE_ID.output.ansible_version`: the version of ansible-core that
+  ran, such as `2.19.13`, as `ansible-playbook --version` reported it before
+  the play (empty when it reported none). The step's metrics carry it too.
 - `steps.NODE_ID.output.check_mode`: whether the playbook ran in check mode.
 - `steps.NODE_ID.output.changed`: whether any host changed (null when unknown).
 - `steps.NODE_ID.output.hosts`: the per-host task counts from the play recap.
@@ -157,8 +160,14 @@ The output keys:
 ## Execution Image
 
 The default image, `ghcr.io/hegemony-sh/ansible-runner:0.50`, bundles
-ansible-core, ansible-pylibssh, ncclient, and the network collections the
-platform maps device platforms onto. It is built from `images/ansible-runner/`
+ansible-core 2.19, ansible-pylibssh, ncclient, and the network collections the
+platform maps device platforms onto. Its tag names a release of the plugins,
+not the ansible-core inside: every run reports the exact version as
+`steps.NODE_ID.output.ansible_version`, and the image carries it in its
+`sh.hegemony.ansible-core.version` label. A patch release of the plugins may
+bring a newer 2.19 patch release, never another series: that comes only with
+a minor release of the plugins, and its changelog names it. For another
+ansible-core version, set Execution image to an image that has it. It is built from `images/ansible-runner/`
 in the hegemony-step-plugins repository and published on ghcr.io with every
 release, tagged with the release version and its minor version; the step
 names the minor version of the wheel you run. The sandbox's Docker daemon

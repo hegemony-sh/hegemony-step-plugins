@@ -66,14 +66,26 @@ the saved plan before writing them anywhere.
 ## The Image
 
 OpenTofu runs in `ghcr.io/hegemony-sh/opentofu-runner:0.50` by default:
-OpenTofu at an exact version on Alpine Linux, with git and an SSH client for
+OpenTofu 1.12 on Alpine Linux, with git and an SSH client for
 module sources, built from `images/opentofu-runner` in the plugin repository.
 `tofu` is compiled there from the OpenTofu release's source, with Go libraries
 that have known vulnerabilities raised to fixed versions until an OpenTofu
 release carries them; the image lists the change. That tag names a minor version of the plugins and follows its
 newest patch release.
 Terraform runs in HashiCorp's `hashicorp/terraform` image at an exact
-version. Image replaces either; it needs a POSIX `sh` with `timeout` and
+version, Terraform 1.16 today.
+
+Neither default names the tool's version where a flow author sets it, so every
+run reports it: `steps.NODE_ID.output.tool_version` is the version the tool
+itself printed, such as `1.12.6`, and the plan artifact ends with it. The
+OpenTofu image also carries it in its `sh.hegemony.opentofu.version` label. A
+patch release of the plugins may bring a newer patch release of the same
+series (1.12, 1.16), never another series: a state written by a newer series
+cannot always be read by an older one, so a new series comes only with a
+minor release of the plugins, and its changelog names it. To stay on a
+version of your choice, set Image.
+
+Image replaces either default; it needs a POSIX `sh` with `timeout` and
 `sha256sum` (as BusyBox and coreutils have) and must run as root, since the step writes the
 run's shared workspace. An image in a registry that needs a login pulls with
 the organization's registry credential for that host, stored once by an
@@ -169,7 +181,9 @@ Every key, for the variable picker and later steps:
 `steps.NODE_ID.output.forget`, `steps.NODE_ID.output.resource_changes`,
 `steps.NODE_ID.output.resource_changes_truncated`,
 `steps.NODE_ID.output.output_changes`, `steps.NODE_ID.output.drift`,
-`steps.NODE_ID.output.engine`, `steps.NODE_ID.output.image`,
+`steps.NODE_ID.output.engine`, `steps.NODE_ID.output.tool_version` (the
+version that tool reported, empty when it reported none),
+`steps.NODE_ID.output.image`,
 `steps.NODE_ID.output.image_digest`, `steps.NODE_ID.output.image_id`,
 `steps.NODE_ID.output.cache_image` (the step's **Cache image** setting, which
 `tf.apply` reuses; it does not say whether a cache was used), `steps.NODE_ID.output.plan_sha256`, `steps.NODE_ID.output.state`
