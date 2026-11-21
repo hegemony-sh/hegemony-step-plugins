@@ -229,10 +229,14 @@ async def _send_connect(
     proxy: SocksProxy,
     dest_host: str,
     dest_port: int,
+    stage: list[str] | None = None,
 ) -> None:
     request = b"\x05\x01\x00" + await _dest_address(proxy, dest_host) + dest_port.to_bytes(2, "big")
     writer.write(request)
     await writer.drain()
+    if stage is not None:
+        # From here the proxy is dialing the target: a wait is the target's.
+        stage.append("target")
 
     version, reply, _reserved, atyp = await reader.readexactly(4)
     if version != 0x05:
@@ -266,8 +270,12 @@ async def open_socks_connection(
 
     Returns the tunneled (reader, writer) once CONNECT succeeds. Raises
     :class:`SocksError` on any handshake failure; the caller owns closing
-    the writer. The whole handshake shares one ``timeout`` budget.
+    the writer. The whole handshake shares one ``timeout`` budget. Running
+    out of it before the CONNECT request went out is the proxy's failure
+    (a ``SocksError``); after, while the proxy dials the target, it is the
+    target's (``TimeoutError``).
     """
+    stage: list[str] = []
 
     async def _handshake() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         try:
@@ -278,7 +286,7 @@ async def open_socks_connection(
             raise SocksError(f"cannot reach SOCKS proxy {proxy.host}:{proxy.port}: {exc}") from exc
         try:
             await _negotiate_auth(reader, writer, proxy)
-            await _send_connect(reader, writer, proxy, dest_host, dest_port)
+            await _send_connect(reader, writer, proxy, dest_host, dest_port, stage)
         except asyncio.IncompleteReadError as exc:
             writer.close()
             raise SocksError("SOCKS proxy closed the connection during the handshake") from exc
@@ -287,4 +295,11 @@ async def open_socks_connection(
             raise
         return reader, writer
 
-    return await asyncio.wait_for(_handshake(), timeout=timeout)
+    try:
+        return await asyncio.wait_for(_handshake(), timeout=timeout)
+    except TimeoutError:
+        if stage:
+            raise
+        raise SocksError(
+            f"SOCKS proxy {proxy.host}:{proxy.port} did not complete the handshake in time"
+        ) from None

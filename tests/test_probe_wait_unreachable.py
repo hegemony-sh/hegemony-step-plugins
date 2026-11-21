@@ -208,3 +208,31 @@ async def test_a_probe_with_no_answer_in_its_full_time_is_a_timeout():
     )
     assert result is not None
     assert result.ok is False and result.error_kind == "timeout"
+
+
+async def test_through_a_proxy_a_poll_that_runs_out_is_inconclusive():
+    """The probe gets a little less time, so it can blame the proxy or the
+    target itself; a poll that still runs out cannot say which stalled."""
+    import asyncio
+
+    from hegemony_steps_probe.waiting import poll_target
+
+    class _Recording(_Slow):
+        options: dict[str, Any] = {}
+
+        async def run_probe(self, check_type, address, options):
+            self.options = dict(options)
+            return await super().run_probe(check_type, address, options)
+
+    probes = _Recording(UP, delay=5)
+    deadline = asyncio.get_running_loop().time() + 30
+    result = await poll_target(
+        cast(HandlerServices, probes),
+        _config(connect_timeout_seconds=1, socks_proxy="socks5://127.0.0.1:1080"),
+        {"mgmt_host": "192.0.2.7"},
+        deadline,
+        proxy_stage=True,
+    )
+    assert probes.options["timeout_ms"] == 750
+    assert result is not None
+    assert result.error_kind == "socks_error"

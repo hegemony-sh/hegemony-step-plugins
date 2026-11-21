@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     from .wait_reachable import WaitReachableConfig
 
 
+#: How much sooner a probe through a SOCKS5 proxy must finish than its poll.
+_PROXY_GRACE_SECONDS = 0.25
+
 #: Failures that mean only that no answer came in time.
 NO_ANSWER_ERRORS = frozenset({"timeout", "no_response", "packet_loss"})
 
@@ -57,6 +60,8 @@ async def poll_target(
     config: WaitReachableConfig,
     device: dict[str, Any],
     deadline: float,
+    *,
+    proxy_stage: bool = False,
 ) -> ProbeResult | None:
     """Poll one target once; its probe result, or None when the poll was skipped.
 
@@ -66,8 +71,12 @@ async def poll_target(
     A poll the deadline cut short that got no answer at all is skipped (None)
     too: silence for less than Connect Timeout proves nothing, while a clear
     refusal does. A probe that does not answer in its full time is a failed
-    ``timeout`` result. run_probe applies the flow egress gate, so a denied target raises here on its first poll and
-    fails the step with the policy's reason. Raises ``CheckUnavailable``
+    ``timeout`` result. With ``proxy_stage``, a probe through a SOCKS5 proxy
+    gets a little less time than the poll, so it can tell a proxy that
+    stalled (a socks_error) from a target that did not answer, and a poll
+    that still runs out is a socks_error too: which end stalled is unknown. run_probe applies the flow egress gate, so a
+    denied target raises here on its first poll and fails the step with the
+    policy's reason. Raises ``CheckUnavailable``
     when the worker has no such check, and ``CheckMisconfigured`` when the
     probe refuses its options, which it would do on every poll.
     """
@@ -75,7 +84,11 @@ async def poll_target(
     timeout = min(config.connect_timeout_seconds, deadline - loop.time())
     if timeout <= 0:
         return None
-    options: dict[str, Any] = {"timeout_ms": max(1, int(timeout * 1000))}
+    socks_proxy = config.socks_proxy.strip()
+    probe_timeout = timeout
+    if proxy_stage and socks_proxy and timeout > 2 * _PROXY_GRACE_SECONDS:
+        probe_timeout = timeout - _PROXY_GRACE_SECONDS
+    options: dict[str, Any] = {"timeout_ms": max(1, int(probe_timeout * 1000))}
     port = poll_port(config, device)
     if port is not None:
         options["port"] = port
@@ -83,7 +96,6 @@ async def poll_target(
         options["url_path"] = config.url_path or "/health"
     elif config.check_type == "icmp_ping":
         options["count"] = 1
-    socks_proxy = config.socks_proxy.strip()
     if socks_proxy:
         options["socks_proxy"] = socks_proxy
     try:
@@ -93,7 +105,11 @@ async def poll_target(
         )
     except TimeoutError:
         result = ProbeResult(
-            ok=False, error_kind="timeout", error_detail=f"no answer within {timeout:g}s"
+            ok=False,
+            # Through a proxy, a poll the probe could not finish says nothing
+            # about which end stalled.
+            error_kind="socks_error" if proxy_stage and socks_proxy else "timeout",
+            error_detail=f"no answer within {timeout:g}s",
         )
     except KeyError:
         raise CheckUnavailable from None

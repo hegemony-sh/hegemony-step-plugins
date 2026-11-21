@@ -201,7 +201,7 @@ class WaitUnreachableHandler(BaseHandler):
             )
 
         async def _poll(device: dict[str, Any]) -> tuple[ProbeResult | None, float]:
-            result = await poll_target(services, config, device, deadline)
+            result = await poll_target(services, config, device, deadline, proxy_stage=True)
             return result, loop.time()
 
         while True:
