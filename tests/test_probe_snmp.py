@@ -315,9 +315,7 @@ def test_values_render_as_plain_json():
 
 
 async def test_values_past_the_output_budget_stay_in_the_evidence(agent_port, monkeypatch):
-    import hegemony_steps_probe.snmp_check as snmp_module
-
-    monkeypatch.setattr(snmp_module, "MAX_OUTPUT_VALUE_BYTES", 150)
+    monkeypatch.setattr("hegemony_steps_probe.snmp_check.MAX_OUTPUT_VALUE_BYTES", 150)
     config = _v2c(agent_port, oids=["1.3.6.1.2.1.1.1.0"])
     result = await SnmpProbeHandler().execute(
         _ctx(config, _Services(), ips=["127.0.0.1", "127.0.0.1"])

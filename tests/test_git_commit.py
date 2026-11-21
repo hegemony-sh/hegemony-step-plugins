@@ -23,18 +23,21 @@ from typing import Any, cast
 
 import pytest
 
-import hegemony_steps_git.commit as commit_module
 from hegemony_step_sdk import HandlerContext, HandlerServices
 from hegemony_step_sdk.docs import load_docs_bundle
 from hegemony_steps_container.runner import ContainerJob, ContainerJobResult
 from hegemony_steps_git.commit import (
     ASKPASS_SCRIPT,
+    CA_FILE,
     CHANGED_FILES_OUT,
     CHANGED_OUT,
     COMMIT_OUT,
+    DEFAULT_IMAGE,
     EXIT_NO_BRANCH,
+    EXIT_PUSH_REJECTED,
     EXIT_UNSAFE_PATH,
     MANIFEST_FILE,
+    MESSAGE_FILE,
     PASSWORD_FILE,
     RUN_SCRIPT,
     USERNAME_FILE,
@@ -396,7 +399,7 @@ def _outcome(exit_code: int = 0, collected: dict[str, bytes] | None = None, **ex
         stderr=extra.pop("stderr", ""),
         truncated=False,
         duration_seconds=1.0,
-        image=commit_module.DEFAULT_IMAGE,
+        image=DEFAULT_IMAGE,
         evidence=[{"kind": "container_output", "name": "container_output"}],
         skipped_artifacts=0,
         collected=collected or {},
@@ -412,7 +415,7 @@ def jobs(monkeypatch):
         recorded.append(job)
         return outcomes.pop(0)
 
-    monkeypatch.setattr(commit_module, "run_container_job", _fake)
+    monkeypatch.setattr("hegemony_steps_git.commit.run_container_job", _fake)
     return recorded, outcomes
 
 
@@ -455,15 +458,13 @@ async def test_the_step_stages_files_and_login_and_reports_the_commit(jobs):
     assert staged[USERNAME_FILE].content == "backup-bot"
     assert staged[ASKPASS_SCRIPT].mode == 0o755
     assert staged[MANIFEST_FILE].content == "0 configs/r1.cfg\n1 configs/r2.cfg\n"
-    assert (
-        staged[commit_module.MESSAGE_FILE].content == "Hegemony: Configuration backup run run-1\n"
-    )
+    assert staged[MESSAGE_FILE].content == "Hegemony: Configuration backup run run-1\n"
     # The token reaches git only through the staged file.
     assert TOKEN not in staged[RUN_SCRIPT].content
     assert TOKEN not in repr(job.config)
     assert job.config["entrypoint"] == "/bin/sh"
     assert job.config["command"] == [f"exec sh {RUN_SCRIPT}"]
-    assert job.config["image"] == commit_module.DEFAULT_IMAGE
+    assert job.config["image"] == DEFAULT_IMAGE
     assert job.config["env"]["GIT_AUTHOR_NAME"] == "Hegemony"
     assert job.handler_id == "git.commit"
     assert services.sources == ["git.commit"]
@@ -495,7 +496,7 @@ async def test_an_unreadable_result_fails_rather_than_guess(jobs):
     [
         (EXIT_NO_BRANCH, "", "turn on Create the branch"),
         (EXIT_UNSAFE_PATH, "", "symbolic link"),
-        (commit_module.EXIT_PUSH_REJECTED, "", "refused the push"),
+        (EXIT_PUSH_REJECTED, "", "refused the push"),
         (128, "fatal: Authentication failed for 'https://h/x.git/'", "could not log in"),
         (
             128,
@@ -544,12 +545,12 @@ async def test_trusted_cas_stage_the_bundle_when_the_organization_has_cas(jobs, 
     async def _org_pem(services):
         return "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
 
-    monkeypatch.setattr(commit_module, "org_trusted_ca_pem", _org_pem)
+    monkeypatch.setattr("hegemony_steps_git.commit.org_trusted_ca_pem", _org_pem)
     await GitCommitHandler().execute(
         _ctx(_valid(trusted_cas=True), _Services([_artifact("r1", "show run", "x")]))
     )
     staged = {item.path: item for item in recorded[0].files}
-    assert "MIIB" in str(staged[commit_module.CA_FILE].content)
+    assert "MIIB" in str(staged[CA_FILE].content)
     assert "GIT_SSL_CAINFO" in str(staged[RUN_SCRIPT].content)
 
 

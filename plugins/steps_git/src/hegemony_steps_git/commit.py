@@ -576,11 +576,11 @@ def build_script(
         '  rm -rf "$repo"',
         "  status=0",
         '  bounded git ls-remote --exit-code --heads -- "$url" "refs/heads/$branch" '
-        ">/dev/null || status=$?",
+        + ">/dev/null || status=$?",
         '  case "$status" in',
         "    0)",
         "      bounded git clone --quiet --depth 1 --single-branch --no-tags "
-        '--branch "$branch" -- "$url" "$repo"',
+        + '--branch "$branch" -- "$url" "$repo"',
         "      ;;",
         "    2)",
         '      if [ "$create_branch" != yes ]; then',
@@ -627,7 +627,7 @@ def build_script(
         '  git -C "$repo" commit --quiet --no-verify --no-gpg-sign -F "$root/message"',
         "  push=0",
         '  bounded git -C "$repo" push --porcelain origin "HEAD:refs/heads/$branch" '
-        '> "$work/push" 2>&1 || push=$?',
+        + '> "$work/push" 2>&1 || push=$?',
         '  if [ "$push" = 0 ]; then',
         '    echo yes > "$out/changed"',
         '    git -C "$repo" rev-parse HEAD > "$out/commit"',
@@ -637,7 +637,7 @@ def build_script(
         # A refusal of an update that is not a fast-forward: another run
         # pushed in between. Start over from the new branch head.
         '  if grep -Eq "^!.*\\[rejected\\]" "$work/push" '
-        f'&& [ "$attempt" -lt {PUSH_ATTEMPTS} ]; then',
+        + f'&& [ "$attempt" -lt {PUSH_ATTEMPTS} ]; then',
         "    attempt=$((attempt + 1))",
         '    echo "the branch moved while committing; trying again ($attempt)" >&2',
         "    continue",
