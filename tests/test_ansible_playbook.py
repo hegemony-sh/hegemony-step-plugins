@@ -1511,6 +1511,16 @@ def test_a_named_ansible_core_series_runs_its_own_tag_of_the_default_image():
     assert execution_image(DEFAULT_IMAGE, "2.21") == f"{DEFAULT_IMAGE}-core2.21"
     # The default series by name too: it stays when the default moves.
     assert execution_image(f" {DEFAULT_IMAGE} ", "2.19") == f"{DEFAULT_IMAGE}-core2.19"
+    # A flow saved with an earlier release's default image runs this release's
+    # image of the series it names.
+    earlier = DEFAULT_IMAGE.rsplit(":", 1)[0] + ":0.48"
+    assert earlier != DEFAULT_IMAGE
+    assert execution_image(earlier, "2.21") == f"{DEFAULT_IMAGE}-core2.21"
+    # Without a named series it stays what the flow says, as before.
+    assert execution_image(earlier) == earlier
+    # Only the plain X.Y tag is a default: a patch tag or a series tag is a choice.
+    assert execution_image(f"{earlier}.1", "2.21") == f"{earlier}.1"
+    assert execution_image(f"{earlier}-core2.19", "2.21") == f"{earlier}-core2.19"
     # An image of the author's own is never rewritten.
     assert execution_image("registry.example.com/ee:1", "default") == "registry.example.com/ee:1"
 
@@ -1535,6 +1545,26 @@ def test_a_named_ansible_core_series_runs_its_own_tag_of_the_default_image():
     # A series the image is not published for never reaches a pull.
     unknown = handler.validate_config({"playbook": "site.yml", "ansible_core_version": "2.17"})
     assert len(unknown) == 1 and "ansible_core_version" in unknown[0]
+
+
+@pytest.mark.asyncio
+async def test_a_flow_saved_with_an_earlier_default_image_can_name_a_series(monkeypatch):
+    earlier = DEFAULT_IMAGE.rsplit(":", 1)[0] + ":0.48"
+    config = {"playbook": "site.yml", "ansible_core_version": "2.21", "image": earlier}
+    assert AnsiblePlaybookHandler().validate_config(config) == []
+    # A pinned patch tag is the author's own choice, so both together are refused.
+    assert AnsiblePlaybookHandler().validate_config({**config, "image": f"{earlier}.1"}) == [
+        "set 'image' or 'ansible_core_version', not both: the image decides the version"
+    ]
+
+    recap = {"r1": {"ok": 1, "changed": 0, "failures": 0, "unreachable": 0}}
+    state = _install_docker(monkeypatch, collected=_results_json(recap), exit_code=0)
+    result = await AnsiblePlaybookHandler().execute(_ctx(config, [_device("r1")]))
+
+    assert result.success is True, result.error
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert f"{DEFAULT_IMAGE}-core2.21" in create
+    assert earlier not in create
 
 
 @pytest.mark.asyncio

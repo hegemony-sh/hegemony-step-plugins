@@ -178,7 +178,9 @@ minor release, and a step that names a withdrawn one fails its validation
 rather than run another version. Collections follow ansible-core: check that
 the ones your playbook uses support the series you pick. For any other
 ansible-core version, set Execution image to an image that has it; an image
-of your own replaces ansible-core version, so set only one of the two.
+of your own replaces ansible-core version, so set only one of the two. (A
+flow saved with an earlier release's default image is not such an image: with
+a series named, the step runs this release's image for that series.)
 
 The image is built from `images/ansible-runner/`
 in the hegemony-step-plugins repository and published on ghcr.io with every

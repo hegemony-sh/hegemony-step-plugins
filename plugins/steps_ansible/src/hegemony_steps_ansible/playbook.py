@@ -88,20 +88,37 @@ DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.51"
 AnsibleCoreVersion = Literal["default", "2.19", "2.21"]
 
 
+#: The default image of any release of the plugins: its plain X.Y tag. A flow
+#: saved from the step's form carries the default of the release it was saved
+#: with, which a later release no longer equals.
+_DEFAULT_IMAGE_OF_A_RELEASE = re.compile(re.escape(DEFAULT_IMAGE.rsplit(":", 1)[0]) + r":\d+\.\d+")
+
+
+def _is_a_default_image(image: str) -> bool:
+    return bool(_DEFAULT_IMAGE_OF_A_RELEASE.fullmatch(image))
+
+
 def execution_image(image: object, ansible_core_version: object = "default") -> str:
-    """The image the step runs: its own, else the default at the series asked for."""
+    """The image the step runs: its own, else the default at the series asked for.
+
+    A named series always runs this release's image for it, also when the
+    config still carries an earlier release's default image.
+    """
     version = str(ansible_core_version or "default")
     chosen = str(image or "").strip() or DEFAULT_IMAGE
-    if version != "default" and chosen == DEFAULT_IMAGE:
+    if version != "default" and _is_a_default_image(chosen):
         return f"{DEFAULT_IMAGE}-core{version}"
     return chosen
 
 
 def ansible_core_version_errors(config: dict[str, Any]) -> list[str]:
-    """A named ansible-core series next to an image of the author's own."""
+    """A named ansible-core series next to an image of the author's own.
+
+    The default image of any release is not one: see :func:`execution_image`.
+    """
     if str(config.get("ansible_core_version") or "default") == "default":
         return []
-    if execution_image(config.get("image")) != DEFAULT_IMAGE:
+    if not _is_a_default_image(execution_image(config.get("image"))):
         return ["set 'image' or 'ansible_core_version', not both: the image decides the version"]
     return []
 
