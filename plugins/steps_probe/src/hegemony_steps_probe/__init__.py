@@ -3,11 +3,12 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Unauthenticated probe step handlers (reachability, DNS, HTTP, TLS) for Hegemony.
+"""Probe step handlers (reachability, DNS, HTTP, TLS, SNMP) for Hegemony.
 
 Outside-observation probes: one-shot connectivity, DNS, HTTP and TLS
-certificate checks, and waits for targets to come up or go down. No device credentials
-involved.
+certificate checks, read-only SNMP queries, and waits for targets to come up
+or go down. No device login is involved; ``probe.snmp`` takes its SNMP
+credentials as secret references in its own settings.
 
 Registers under the ``hegemony.step_handlers`` entry-point group; the entry
 point name is the claimed handler-id namespace prefix (``probe``).
@@ -21,6 +22,7 @@ from hegemony_step_sdk import BaseHandler, StepHandlerRegistry
 from .connectivity import ConnectivityCheckHandler
 from .dns_check import DnsProbeHandler
 from .http_check import HttpProbeHandler
+from .snmp_check import SnmpProbeHandler
 from .tls_check import TlsProbeHandler
 from .wait_reachable import WaitReachableHandler
 from .wait_unreachable import WaitUnreachableHandler
@@ -29,6 +31,7 @@ ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
     ConnectivityCheckHandler,
     DnsProbeHandler,
     HttpProbeHandler,
+    SnmpProbeHandler,
     TlsProbeHandler,
     WaitReachableHandler,
     WaitUnreachableHandler,

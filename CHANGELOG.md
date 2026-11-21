@@ -1,3 +1,14 @@
+## [0.49.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.48.0...v0.49.0) (2026-11-21)
+
+### Features
+
+* **git:** add git.commit, which commits a step's evidence to a Git repository ([b2f7b8e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b2f7b8e8a639a686035e6caaaf11732065cfdd7d))
+* **probe:** add probe.snmp, a read-only SNMP get and walk step ([79e6f32](https://github.com/hegemony-sh/hegemony-step-plugins/commit/79e6f321cd3766f23ba1febea9c7522fc220793d))
+
+### Bug Fixes
+
+* **git,probe:** harden git.commit's environment and reports, keep SNMP Unicode text ([1058e23](https://github.com/hegemony-sh/hegemony-step-plugins/commit/1058e2385e1b6b96d9a0e54b316eda66ce169009))
+
 ## [0.48.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.47.0...v0.48.0) (2026-11-19)
 
 ### Features

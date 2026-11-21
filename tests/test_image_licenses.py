@@ -260,7 +260,7 @@ def test_published_images_are_read_from_a_literal_context_or_a_matrix(tmp_path):
         "          context: images/third\n"
     )
     assert gate.published_images(tmp_path) == ["first-runner", "second-runner", "third"]
-    assert gate.published_images(REPO_ROOT) == ["ansible-runner", "opentofu-runner"]
+    assert gate.published_images(REPO_ROOT) == ["ansible-runner", "git-runner", "opentofu-runner"]
 
 
 @pytest.mark.parametrize(

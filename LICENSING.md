@@ -91,11 +91,13 @@ repository reviews its own:
   licences (AGPL, SSPL, BUSL and the like) are warnings until accepted;
   `--strict` fails on them. The platform's licence process runs this script
   against the release it pins.
-- **Published images.** `ghcr.io/hegemony-sh/ansible-runner` and
-  `ghcr.io/hegemony-sh/opentofu-runner` contain no Hegemony code, but
-  Hegemony conveys everything in them. Each one's `THIRD-PARTY-NOTICES.md`
+- **Published images.** `ghcr.io/hegemony-sh/ansible-runner`,
+  `ghcr.io/hegemony-sh/opentofu-runner` and `ghcr.io/hegemony-sh/git-runner`
+  contain no Hegemony code, but Hegemony conveys everything in them. Each
+  one's `THIRD-PARTY-NOTICES.md`
   ([ansible-runner](images/ansible-runner/THIRD-PARTY-NOTICES.md),
-  [opentofu-runner](images/opentofu-runner/THIRD-PARTY-NOTICES.md))
+  [opentofu-runner](images/opentofu-runner/THIRD-PARTY-NOTICES.md),
+  [git-runner](images/git-runner/THIRD-PARTY-NOTICES.md))
   names every component with its licence, says where to get the source, and
   makes the written offer GPL-2.0 section 3(b) requires. Each image carries
   it at `/usr/share/doc/hegemony/`, with inventories of what that build

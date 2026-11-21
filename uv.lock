@@ -1,6 +1,10 @@
 version = 1
 revision = 3
 requires-python = ">=3.11"
+resolution-markers = [
+    "python_full_version >= '3.11.5'",
+    "python_full_version < '3.11.5'",
+]
 
 [manifest]
 members = [
@@ -12,6 +16,7 @@ members = [
     "hegemony-steps-evidence",
     "hegemony-steps-flow",
     "hegemony-steps-general",
+    "hegemony-steps-git",
     "hegemony-steps-http",
     "hegemony-steps-inventory",
     "hegemony-steps-monitor",
@@ -479,7 +484,7 @@ wheels = [
 
 [[package]]
 name = "hegemony-probe-net"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "probes/probe_net" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -535,7 +540,7 @@ fuzz = [
 
 [[package]]
 name = "hegemony-step-sdk"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "packages/step_sdk" }
 dependencies = [
     { name = "pydantic" },
@@ -546,7 +551,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.7" }]
 
 [[package]]
 name = "hegemony-steps-ansible"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_ansible" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -561,7 +566,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-container"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_container" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -576,7 +581,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-evidence"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_evidence" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -591,7 +596,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-flow"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_flow" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -606,7 +611,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-general"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_general" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -620,8 +625,23 @@ requires-dist = [
 ]
 
 [[package]]
+name = "hegemony-steps-git"
+version = "0.49.0"
+source = { editable = "plugins/steps_git" }
+dependencies = [
+    { name = "hegemony-step-sdk" },
+    { name = "hegemony-steps-container" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
+    { name = "hegemony-steps-container", editable = "plugins/steps_container" },
+]
+
+[[package]]
 name = "hegemony-steps-http"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_http" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -636,7 +656,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-inventory"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_inventory" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -647,7 +667,7 @@ requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
 
 [[package]]
 name = "hegemony-steps-monitor"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_monitor" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -658,7 +678,7 @@ requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
 
 [[package]]
 name = "hegemony-steps-netbox"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_netbox" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -675,7 +695,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-netcli"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_netcli" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -690,13 +710,15 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-probe"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_probe" }
 dependencies = [
     { name = "cryptography" },
     { name = "dnspython" },
     { name = "hegemony-step-sdk" },
     { name = "httpx" },
+    { name = "pysnmp", version = "7.1.32", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11.5'" },
+    { name = "pysnmp", version = "7.1.33", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11.5'" },
 ]
 
 [package.metadata]
@@ -705,11 +727,12 @@ requires-dist = [
     { name = "dnspython", specifier = ">=2.9.2" },
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "pysnmp", specifier = ">=7.1.31,<8" },
 ]
 
 [[package]]
 name = "hegemony-steps-secret"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_secret" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -720,7 +743,7 @@ requires-dist = [{ name = "hegemony-step-sdk", editable = "packages/step_sdk" }]
 
 [[package]]
 name = "hegemony-steps-shell"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_shell" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -735,7 +758,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-steps-tf"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "plugins/steps_tf" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -750,7 +773,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-transport-asyncssh"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "transports/transport_asyncssh" }
 dependencies = [
     { name = "asyncssh" },
@@ -767,7 +790,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-transport-netmiko"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "transports/transport_netmiko" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -786,7 +809,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-transport-scrapli"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "transports/transport_scrapli" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -803,7 +826,7 @@ requires-dist = [
 
 [[package]]
 name = "hegemony-transport-support"
-version = "0.48.0"
+version = "0.49.0"
 source = { editable = "packages/transport_support" }
 dependencies = [
     { name = "hegemony-step-sdk" },
@@ -1093,6 +1116,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pyasn1"
+version = "0.6.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/88/7e/3c0da41061a2021cac7cd524fd57092adbe5b515e8bf9005702e366802e2/pyasn1-0.6.5.tar.gz", hash = "sha256:6b11616a6bcf3a40e635f082bb232fa57b5e0dd7f517bd7ddd69ec3794508a47", size = 155152, upload-time = "2026-10-27T06:32:49.125Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/1f/3eefd5c84c35cae44549ce1c7f7e58f7945b34f5a6bce07a135438522073/pyasn1-0.6.5-py3-none-any.whl", hash = "sha256:4017b0fce125096b8573b39c989fdb1a4b19cf761e683398184550fea0e66587", size = 84807, upload-time = "2026-10-27T06:32:48.045Z" },
+]
+
+[[package]]
 name = "pycparser"
 version = "3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1282,6 +1314,36 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/1e/7d/ae3f0a63f41e4d2f6cb66a5b57197850f919f59e558159a4dd3a818f5082/pyserial-3.5.tar.gz", hash = "sha256:3c77e014170dfffbd816e6ffc205e9842efb10be9f58ec16d3e8675b4925cddb", size = 159125, upload-time = "2020-11-23T03:59:15.045Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl", hash = "sha256:c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0", size = 90585, upload-time = "2020-11-23T03:59:13.41Z" },
+]
+
+[[package]]
+name = "pysnmp"
+version = "7.1.32"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version < '3.11.5'",
+]
+dependencies = [
+    { name = "pyasn1", marker = "python_full_version < '3.11.5'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/27/57/f2fc981847cd5520b27abcb608ef7cdac477eda529ca59539467ba89939a/pysnmp-7.1.32.tar.gz", hash = "sha256:b256e83513110b9f18011ed897e23652a7314c286910dbca87ba848289449ae3", size = 270434, upload-time = "2026-11-07T12:58:10.928Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6b/25/35a93cf686ee0bcfae78862bf32886e4d03b096c09b1db79e7eddc1387a0/pysnmp-7.1.32-py3-none-any.whl", hash = "sha256:61cb6530194e4f3385d472df741c3f6071b3bae04935ef6b8e64e2e61a969f84", size = 357362, upload-time = "2026-11-07T12:58:09.756Z" },
+]
+
+[[package]]
+name = "pysnmp"
+version = "7.1.33"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.11.5'",
+]
+dependencies = [
+    { name = "pyasn1", marker = "python_full_version >= '3.11.5'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bf/87/fd716527e6f0822d978c9b2bd4f4435f2a2320089938b8051c3fd72898c4/pysnmp-7.1.33.tar.gz", hash = "sha256:bce415342dac9021823c7f98325989e03868f239e899776cd31e380900d32ea5", size = 270715, upload-time = "2026-11-16T01:17:02.22Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6d/60/ca62c932c986fa36b9006202d808d8b6ef9b8b47d98abccafb1c0eb04527/pysnmp-7.1.33-py3-none-any.whl", hash = "sha256:26f94496c4445cb728213964c13150552e7cc1702307cb49341e8fe88dfc4165", size = 357563, upload-time = "2026-11-16T01:17:00.785Z" },
 ]
 
 [[package]]

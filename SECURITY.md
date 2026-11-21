@@ -9,7 +9,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 Security reports are handled privately. Please do not open a public GitHub issue for vulnerabilities, suspected vulnerabilities, leaked secrets, or exploit details.
 
-This policy covers what this repository publishes: the step-handler SDK, the step-handler, device-transport and probe wheels, the `ansible-runner` and `opentofu-runner` images, and the build and release workflows. For a vulnerability in the Hegemony platform itself, follow the reporting instructions in the [platform's SECURITY.md](https://github.com/hegemony-sh/hegemony/blob/main/SECURITY.md).
+This policy covers what this repository publishes: the step-handler SDK, the step-handler, device-transport and probe wheels, the `ansible-runner`, `opentofu-runner` and `git-runner` images, and the build and release workflows. For a vulnerability in the Hegemony platform itself, follow the reporting instructions in the [platform's SECURITY.md](https://github.com/hegemony-sh/hegemony/blob/main/SECURITY.md).
 
 ## Supported versions
 
