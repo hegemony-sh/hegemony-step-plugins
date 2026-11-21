@@ -95,8 +95,11 @@ The wheels that reach outside the worker are limited in different ways:
   credentials, checked against the organization's trusted host keys.
 - `hegemony-steps-netconf` and `hegemony-steps-cisco-iosxe` (which needs
   `hegemony-steps-netconf`): the same as shell steps, on the NETCONF port
-  (830 by default), and the flow's egress policy. Configuration changes go
-  through the candidate datastore with a confirmed commit by default.
+  (830 by default), and the flow's egress policy. On a device with a
+  candidate datastore, configuration changes go through it with a confirmed
+  commit by default. A device without one (`netconf.edit_config` Target
+  `auto`) gets the change on running at once: no dry run and no confirmed
+  commit. `cisco.iosxe.config_replace` always needs the candidate.
 - `hegemony-steps-http` and `hegemony-steps-netbox` (which needs
   `hegemony-steps-http`): the flow's egress policy. A flow without one can
   reach any address the worker can, except loopback, link-local (cloud

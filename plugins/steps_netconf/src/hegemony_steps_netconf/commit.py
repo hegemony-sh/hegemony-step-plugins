@@ -15,6 +15,8 @@ from a new session (RFC 6241, :confirmed-commit:1.1).
 
 from __future__ import annotations
 
+import contextlib
+from collections import Counter
 from typing import Any
 
 from pydantic import Field
@@ -68,7 +70,8 @@ class ConfirmConfig(SettleConfig):
         title="Save to startup",
         description=(
             "After confirming, save running to startup: copy-config when the device has a "
-            "startup datastore, else Cisco's save-config RPC."
+            "startup datastore, else Cisco's save-config RPC. A change step with Save to "
+            "startup on is saved here even when this is off."
         ),
     )
 
@@ -84,10 +87,23 @@ def _device_entries(step_output: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(name): entry for name, entry in devices.items() if isinstance(entry, dict)}
 
 
-def _entry_for(device: dict[str, Any], entries: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+def _entry_for(
+    device: dict[str, Any], entries: dict[str, dict[str, Any]], *, shared_name: bool
+) -> dict[str, Any] | None:
+    """This device's entry, matched exactly; raise when the name could be another device's.
+
+    The change step keys a device by name, by ``name (id)`` when several
+    devices share the name, and by ``name #2`` for a second device with the
+    same name and no id. A persist id must never be sent to the wrong device.
+    """
     name = device_label(device)
     if device.get("id") and f"{name} ({device['id']})" in entries:
         return entries[f"{name} ({device['id']})"]
+    if shared_name or f"{name} #2" in entries:
+        raise NetconfError(
+            f"several devices are named {name!r}, so this device's result cannot be told "
+            "apart; give the devices distinct names or ids"
+        )
     return entries.get(name)
 
 
@@ -110,7 +126,9 @@ class _SettleHandler(BaseHandler):
     #: The settings model the step parses (config_model, typed for the code below).
     settings_model: type[SettleConfig] = SettleConfig
 
-    async def _settle(self, session: Any, persist_id: str, config: Any) -> dict[str, Any]:
+    async def _settle(
+        self, session: Any, persist_id: str, config: Any, entry: dict[str, Any]
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
@@ -137,9 +155,10 @@ class _SettleHandler(BaseHandler):
                 summary=f"Nothing to {self._verb}",
             )
         entries = _device_entries(step_output)
+        names = Counter(device_label(device) for device in devices)
 
         async def _work(device: dict[str, Any], outcome: DeviceOutcome) -> None:
-            entry = _entry_for(device, entries)
+            entry = _entry_for(device, entries, shared_name=names[device_label(device)] > 1)
             if entry is None:
                 raise NetconfError(f"step {change_step!r} has no result for this device")
             persist_id = str(entry.get("persist_id") or "") if entry.get("pending") else ""
@@ -155,13 +174,15 @@ class _SettleHandler(BaseHandler):
                 if not session.supports(CAP_CONFIRMED_11):
                     raise NetconfError("the device has no :confirmed-commit:1.1 capability")
                 try:
-                    outcome.output = await self._settle(session, persist_id, config)
+                    outcome.output = await self._settle(session, persist_id, config, entry)
                 except RpcFailed as exc:
                     raise NetconfError(
                         f"{exc}. The commit may already have been confirmed, cancelled, or "
                         "rolled back when its confirm timeout ran out"
                     ) from None
             outcome.output["persist_id"] = persist_id
+            if entry.get("save_requested"):
+                outcome.output["save_requested"] = True
             if outcome.output.get("save_error"):
                 raise NetconfError(
                     "the commit was confirmed, but saving it to startup failed: "
@@ -190,10 +211,35 @@ class NetconfCommitHandler(_SettleHandler):
     settings_model = ConfirmConfig
     _verb = "commit"
 
-    async def _settle(self, session: Any, persist_id: str, config: Any) -> dict[str, Any]:
-        await session.commit(persist_id=persist_id)
+    async def _settle(
+        self, session: Any, persist_id: str, config: Any, entry: dict[str, Any]
+    ) -> dict[str, Any]:
+        # A confirming commit commits whatever the candidate holds (RFC 6241
+        # 8.4), and another session may have staged edits since the change
+        # step unlocked it. Hold the candidate and confirm only when it is
+        # exactly the pending running configuration.
+        try:
+            await session.lock("candidate")
+        except RpcFailed as exc:
+            raise NetconfError(
+                f"another session holds the candidate ({exc}); not confirming while it may "
+                "stage other changes"
+            ) from None
+        try:
+            running = (await session.get_config("running")).data()
+            candidate = (await session.get_config("candidate")).data()
+            if candidate != running:
+                raise NetconfError(
+                    "the candidate holds changes that are not part of the pending commit "
+                    "(another session staged them); not confirming. Discard them on the "
+                    "device, or cancel the commit"
+                )
+            await session.commit(persist_id=persist_id)
+        finally:
+            with contextlib.suppress(Exception):
+                await session.unlock("candidate")
         result: dict[str, Any] = {"confirmed": True, "saved": ""}
-        if config.save_config:
+        if config.save_config or entry.get("save_requested"):
             try:
                 result["saved"] = await session.save_config()
             except Exception as exc:  # noqa: BLE001 - the commit is confirmed either way
@@ -211,6 +257,8 @@ class NetconfCancelCommitHandler(_SettleHandler):
     settings_model = SettleConfig
     _verb = "cancel-commit"
 
-    async def _settle(self, session: Any, persist_id: str, config: Any) -> dict[str, Any]:
+    async def _settle(
+        self, session: Any, persist_id: str, config: Any, entry: dict[str, Any]
+    ) -> dict[str, Any]:
         await session.cancel_commit(persist_id)
         return {"cancelled": True}

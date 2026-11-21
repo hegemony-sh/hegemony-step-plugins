@@ -50,7 +50,8 @@ CHANGE_OUTPUT_FIELDS = (
     OutputField(
         "devices",
         "Each device's result by name: ok, error, datastore, changed, committed, pending, "
-        "persist_id, validated, saved, save_error, diff and notes",
+        "persist_id, validated, saved, save_error, save_requested (saved when confirmed), "
+        "diff and notes",
         "object",
     ),
     OutputField("truncated", "Output texts cut short, as device.key", "list"),
@@ -112,7 +113,7 @@ class ChangeSettings(NetconfConnectionConfig):
         description=(
             "After the commit is final, save running to startup: copy-config when the device "
             "has a startup datastore, else Cisco's save-config RPC. A pending commit is saved "
-            "by the netconf.commit step that confirms it."
+            "by the netconf.commit step that confirms it, whatever that step's own setting."
         ),
     )
     max_parallel_devices: int = max_parallel_field(1)
@@ -208,6 +209,7 @@ def change_output(result: ChangeResult) -> dict[str, Any]:
         "validated": result.validated,
         "saved": result.saved,
         "save_error": result.save_error,
+        "save_requested": result.save_requested,
         "diff": result.diff,
         "notes": result.notes,
     }

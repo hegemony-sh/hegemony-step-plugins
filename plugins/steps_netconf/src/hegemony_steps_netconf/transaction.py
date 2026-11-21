@@ -76,6 +76,9 @@ class ChangeResult:
     saved: str = ""
     #: Why saving to startup failed after the change was made ("" if it did not).
     save_error: str = ""
+    #: Save to startup was asked for but waits for the commit to be confirmed:
+    #: the netconf.commit step that confirms it saves.
+    save_requested: bool = False
     diff: str = ""
     before: str = ""
     after: str = ""
@@ -164,7 +167,9 @@ async def change_candidate(
             result.notes.append("dry run: the candidate was discarded, nothing committed")
             return result
         await _commit(session, options, result, check)
-        if options.save_config and result.committed and not result.pending:
+        if options.save_config and result.pending:
+            result.save_requested = True
+        elif options.save_config and result.committed:
             await _save(session, result)
         return result
     except BaseException:

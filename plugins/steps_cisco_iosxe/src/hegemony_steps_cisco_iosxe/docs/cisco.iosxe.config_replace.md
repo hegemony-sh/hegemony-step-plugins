@@ -21,6 +21,7 @@ Configuration is the CLI text, as `show running-config` prints it;
 templates such as `{{ inputs.hostname }}` are filled in. For one file per
 device, leave it empty and set Configuration File to a flow attachment
 path: `{device}` in the path is the device's name (`configs/{device}.cfg`).
+The step refuses to start when two target devices resolve to the same file.
 
 Operation:
 
@@ -65,7 +66,8 @@ that changed adds `cli_output` evidence: `<device>:running-config diff`,
 
 - `steps.NODE_ID.output.devices`: each device's result by name: `ok`,
   `error`, `operation`, `datastore`, `changed`, `committed`, `pending`,
-  `persist_id`, `validated`, `saved`, `save_error`, `diff` and `notes`.
+  `persist_id`, `validated`, `saved`, `save_error`, `save_requested`, `diff` and
+  `notes`.
 - `steps.NODE_ID.output.truncated`: diffs cut short in the output (16 KiB a
   device, 64 KiB the step); the evidence keeps them whole.
 

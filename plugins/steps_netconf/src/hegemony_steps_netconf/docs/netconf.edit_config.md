@@ -70,7 +70,9 @@ diff, for devices with a large configuration. With a filter, an empty diff
 does not show that nothing changed outside it, so the step validates and
 commits the change all the same (and says so in `notes`). Save to startup uses
 copy-config when the device has a startup datastore, else Cisco's
-`save-config` RPC (IOS XE). Max Parallel Devices defaults to 1, so devices
+`save-config` RPC (IOS XE). With Commit "confirm in a later step" the save
+waits for the confirmation: the output sets `save_requested`, and the
+`netconf.commit` step saves after confirming. Max Parallel Devices defaults to 1, so devices
 change one after another. Port, timeouts and Allow legacy SSH work as in
 `netconf.get`.
 
@@ -83,8 +85,8 @@ that changed adds `cli_output` evidence: `<device>:netconf diff`,
 - `steps.NODE_ID.output.devices`: each device's result by name: `ok`,
   `error`, `datastore`, `changed`, `committed`, `pending` (a confirmed
   commit waits for `netconf.commit`), `persist_id`, `validated`, `saved`
-  (`copy-config` or `save-config` when saved), `save_error`, `diff` and
-  `notes`. When saving fails after the commit, the device fails with
+  (`copy-config` or `save-config` when saved), `save_error`,
+  `save_requested` (saved by `netconf.commit`), `diff` and `notes`. When saving fails after the commit, the device fails with
   `committed` true and `save_error` set: the change stands, unsaved.
 - `steps.NODE_ID.output.truncated`: diffs cut short in the output (16 KiB a
   device, 64 KiB the step); the evidence keeps them whole.

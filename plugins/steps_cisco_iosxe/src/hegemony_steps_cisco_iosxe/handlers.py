@@ -124,6 +124,27 @@ def _attachment_name(path: str, device: dict[str, Any]) -> str:
     return path.strip().replace("{device}", name)
 
 
+def _shared_attachment(path: str, devices: list[dict[str, Any]]) -> str | None:
+    """Why two devices would read the same per-device file, or None.
+
+    A ``{device}`` path is meant to give each device its own configuration;
+    two devices with the same (or the same sanitised) name would both get one
+    file, so a device could be replaced with another's configuration.
+    """
+    if "{device}" not in path:
+        return None
+    seen: dict[str, str] = {}
+    for device in devices:
+        name = _attachment_name(path, device)
+        if name in seen:
+            return (
+                f"devices {seen[name]!r} and {device_label(device)!r} both resolve to the "
+                f"attachment {name!r}; give the devices distinct names"
+            )
+        seen[name] = device_label(device)
+    return None
+
+
 def _find_attachment(attachments: list[dict[str, Any]], path: str) -> str | None:
     for item in attachments:
         if str(item.get("filename") or item.get("path") or "") == path:
@@ -161,6 +182,13 @@ class ConfigReplaceHandler(BaseHandler):
         options = config.change_options()
         attachments: list[dict[str, Any]] = []
         if config.config_attachment.strip():
+            clash = _shared_attachment(config.config_attachment, devices)
+            if clash:
+                return HandlerResult(
+                    success=False,
+                    error=clash,
+                    summary="Config validation failed",
+                )
             attachments = await ctx.require_services().fetch_run_attachments(ctx.run_id)
 
         async def _work(device: dict[str, Any], outcome: DeviceOutcome) -> None:

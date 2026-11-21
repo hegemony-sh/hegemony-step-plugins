@@ -77,6 +77,37 @@ async def test_the_client_speaks_both_framings(base10_only):
     await session.close()
 
 
+async def test_framing_follows_what_both_peers_advertise():
+    capabilities = tuple(c for c in ALL_CAPABILITIES if not c.endswith("base:1.1"))
+    device = FakeNetconfDevice.with_config(BASE, capabilities=capabilities)
+    session = NetconfSession(await device.open(), timeout=5)
+    await session.hello()
+    assert session._chunked is False
+    assert "<hostname>r1</hostname>" in (await session.get_config("running")).data().replace(
+        "ns0:", ""
+    )
+    await session.close()
+
+
+async def test_only_the_confirming_session_settles_a_commit_without_persist_id():
+    device = FakeNetconfDevice.with_config(BASE)
+    owner = NetconfSession(await device.open(), timeout=5)
+    await owner.hello()
+    await owner.edit_config("candidate", _hostname("r2"))
+    await owner.commit(confirmed=True, confirm_timeout=60)
+    other = NetconfSession(await device.open(), timeout=5)
+    await other.hello()
+    with pytest.raises(RpcFailed, match="another session's"):
+        await other.commit()
+    with pytest.raises(RpcFailed, match="another session's"):
+        await other.cancel_commit()
+    assert device.pending is not None
+    await owner.commit()
+    assert device.pending is None and _running_hostname(device) == "r2"
+    await other.close()
+    await owner.close()
+
+
 async def test_an_rpc_error_names_the_tag_and_message():
     device = FakeNetconfDevice.with_config(BASE)
     session = NetconfSession(await device.open(), timeout=5)
@@ -353,6 +384,84 @@ async def test_the_device_rolls_back_when_nobody_confirms():
     late = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
     assert not late.success
     assert "rolled back when its confirm timeout ran out" in (late.error or "")
+
+
+async def test_save_to_startup_waits_for_the_later_confirmation():
+    device = FakeNetconfDevice.with_config(BASE)
+    services = FakeServices({"r1": device})
+    result = await NetconfEditConfigHandler().execute(
+        _ctx(
+            {"config": _hostname("r2"), "commit_mode": "later", "save_config": True},
+            services,
+        )
+    )
+    assert result.success, result.error
+    entry = result.output["devices"]["r1"]
+    assert entry["pending"] and entry["save_requested"] and not entry["saved"]
+    assert device.saved == 0
+    services.step_outputs = {"change": {"output": result.output}}
+    # The confirming step's own Save to startup is off: the change step's request holds.
+    confirmed = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
+    assert confirmed.success, confirmed.error
+    assert confirmed.output["devices"]["r1"]["saved"] == "save-config"
+    assert device.saved == 1
+
+
+async def test_confirming_refuses_edits_another_session_staged():
+    device = FakeNetconfDevice.with_config(BASE)
+    _, services = await _pending_change(device)
+    other = NetconfSession(await device.open(), timeout=5)
+    await other.hello()
+    await other.edit_config("candidate", _hostname("rogue"))
+    result = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
+    assert not result.success
+    assert "not part of the pending commit" in (result.error or "")
+    assert device.pending is not None
+    assert _running_hostname(device) == "r2"
+    assert "candidate" not in device.locks or device.locks["candidate"] == other.session_id
+    await other.close()
+
+
+async def test_confirming_refuses_while_another_session_holds_the_candidate():
+    device = FakeNetconfDevice.with_config(BASE)
+    _, services = await _pending_change(device)
+    other = NetconfSession(await device.open(), timeout=5)
+    await other.hello()
+    await other.lock("candidate")
+    result = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
+    assert not result.success
+    assert "another session holds the candidate" in (result.error or "")
+    assert device.pending is not None
+    await other.close()
+
+
+async def test_a_shared_name_never_gets_another_devices_persist_id():
+    device = FakeNetconfDevice.with_config(BASE)
+    services = FakeServices({"edge": device})
+    services.step_outputs = {
+        "change": {
+            "output": {
+                "devices": {
+                    "edge": {"ok": True, "pending": True, "persist_id": "first"},
+                    "edge #2": {"ok": True, "pending": True, "persist_id": "second"},
+                }
+            }
+        }
+    }
+    ctx = HandlerContext(
+        run_id="run-1",
+        flow_id="flow-1",
+        step_run_id="sr-2",
+        step_id="confirm",
+        config={"change_step": "change"},
+        target_devices_by_role={"core": [{"name": "edge", "mgmt_host": "192.0.2.9"}]},
+        target_roles=["core"],
+        services=cast(HandlerServices, services),
+    )
+    result = await NetconfCommitHandler().execute(ctx)
+    assert not result.success
+    assert "several devices are named 'edge'" in (result.error or "")
+    assert services.opened == []
 
 
 async def test_confirm_later_needs_confirmed_commit_1_1():

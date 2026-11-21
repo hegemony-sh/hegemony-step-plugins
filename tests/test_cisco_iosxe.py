@@ -192,3 +192,16 @@ async def test_an_empty_attachment_is_never_sent_as_a_full_replace():
     assert "is empty" in (result.error or "")
     assert device.sessions_opened == 0
     assert device.running_cli == RUNNING
+
+
+async def test_two_devices_never_share_one_per_device_file():
+    device = _device()
+    services = FakeServices({"r/1": device, "r_1": device})
+    services.attachments = [{"filename": "configs/r_1.cfg", "content": TARGET}]
+    result = await ConfigReplaceHandler().execute(
+        _ctx({"config_attachment": "configs/{device}.cfg"}, services, names=("r/1", "r_1"))
+    )
+    assert not result.success
+    assert "both resolve to the attachment 'configs/r_1.cfg'" in (result.error or "")
+    assert device.sessions_opened == 0
+    assert device.running_cli == RUNNING

@@ -262,8 +262,9 @@ class FakeChannel:
             hello = await messages.__anext__()
         except StopAsyncIteration:
             return
+        # Chunked framing only when both peers advertise base:1.1 (RFC 6242).
         client_11 = "base:1.1" in hello
-        self._chunked = client_11 and not device.base10_only
+        self._chunked = client_11 and any(cap.endswith("base:1.1") for cap in capabilities)
         try:
             async for text in messages:
                 device.requests.append(text)
@@ -363,11 +364,19 @@ class FakeChannel:
                 return self._error(device.fail_commit, "commit refused")
             persist_id = op.findtext(f"{{{BASE_NS}}}persist-id")
             confirmed = op.find(f"{{{BASE_NS}}}confirmed") is not None
+            pending = device.pending
             if persist_id is not None:
-                if device.pending is None or device.pending.persist != persist_id:
+                if pending is None or pending.persist != persist_id:
                     return self._error("invalid-value", "no confirmed commit with that persist-id")
+                # Confirming commits the candidate, whatever it now holds.
                 device.pending = None
+                device.running = copy.deepcopy(device.candidate)
+                device.running_cli = device.candidate_cli
                 return ok
+            if pending is not None and not pending.persist and pending.session != self.session_id:
+                # Without a persist id only the session that made the confirmed
+                # commit may follow it up (RFC 6241 8.4).
+                return self._error("operation-failed", "the confirmed commit is another session's")
             if confirmed:
                 if device.pending is None:
                     device.pending = Pending(
@@ -386,6 +395,8 @@ class FakeChannel:
             persist_id = op.findtext(f"{{{BASE_NS}}}persist-id")
             if device.pending is None or (persist_id or "") != device.pending.persist:
                 return self._error("invalid-value", "no confirmed commit to cancel")
+            if not persist_id and device.pending.session != self.session_id:
+                return self._error("operation-failed", "the confirmed commit is another session's")
             device._rollback()
             return ok
         if name == "save-config":
