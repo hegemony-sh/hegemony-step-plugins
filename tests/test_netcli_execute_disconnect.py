@@ -323,3 +323,127 @@ async def test_scrapli_reports_only_a_session_the_device_closed(
 
     assert result.disconnected is disconnected
     assert result.exit_code == -1
+
+
+# --- review follow-ups: what is not a device disconnect ---------------------------------------
+
+
+class _Registry:
+    """Cancellation registry stand-in."""
+
+    def __init__(self, cancelled: bool) -> None:
+        self.cancelled = cancelled
+
+    def register(self, key, connection) -> None:
+        pass
+
+    def unregister(self, key, connection) -> None:
+        pass
+
+    def is_cancelled(self, key) -> bool:
+        return self.cancelled
+
+
+def _netmiko() -> SSHTransport:
+    transport = SSHTransport(
+        DeviceConnectionSpec(
+            host=HOST, port=22, username=USERNAME, password=PASSWORD, platform="ios-xe"
+        ),
+        host_key_verifier=checks_off(),
+    )
+    transport.configure_cli_prompts(RELOAD_PROMPTS)
+    return transport
+
+
+@pytest.mark.parametrize(
+    ("cancelled", "output", "disconnected", "exit_code"),
+    [
+        (False, "Reload requested", True, -1),
+        (True, "Reload requested", False, -1),  # the run's cancellation closed it
+        (False, "% Invalid input detected at '^' marker.", True, 1),  # a device error first
+    ],
+)
+def test_netmiko_reports_a_device_close_only(
+    monkeypatch, cancelled, output, disconnected, exit_code
+):
+    from hegemony_transport_netmiko import transport as netmiko_transport
+
+    transport = _netmiko()
+    monkeypatch.setattr(transport, "_cancellation_registry", _Registry(cancelled))
+
+    def _closed(connection, command, prompts):
+        raise netmiko_transport._SessionClosed(output)
+
+    monkeypatch.setattr(transport, "_send_with_prompts", _closed)
+    result = transport._run_exec_command(object(), "reload")
+
+    assert result.disconnected is disconnected
+    assert result.exit_code == exit_code
+
+
+def test_netmiko_keeps_a_read_error_on_an_open_session_a_failure():
+    from types import SimpleNamespace
+
+    transport = _netmiko()
+    transport._cancellation_registry = _Registry(False)  # type: ignore[assignment]
+
+    def _broken_read():
+        raise OSError("read failed")
+
+    open_channel = SimpleNamespace(
+        closed=False, eof_received=False, transport=SimpleNamespace(is_active=lambda: True)
+    )
+    connection = SimpleNamespace(
+        find_prompt=lambda: "r1#",
+        write_channel=lambda data: None,
+        read_channel=_broken_read,
+        RETURN="\n",
+        remote_conn=open_channel,
+    )
+    result = transport._run_exec_command(connection, "reload")
+
+    assert result.disconnected is False
+    assert "read failed" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_scrapli_does_not_take_a_cancelled_run_for_a_reload(monkeypatch):
+    transport = ScrapliTransport(
+        DeviceConnectionSpec(
+            host=HOST, port=22, username=USERNAME, password=PASSWORD, platform="ios-xe"
+        ),
+        host_key_verifier=checks_off(),
+    )
+    transport.configure_cli_prompts(RELOAD_PROMPTS)
+    monkeypatch.setattr(transport, "_cancellation_registry", _Registry(True))
+
+    async def _read(connection, timeout=None):
+        return None
+
+    monkeypatch.setattr(transport, "_read_channel_chunk", _read)
+    result = await transport._send_exec_command(_QuietScrapliConnection(alive=False), "reload")
+
+    assert result.disconnected is False
+
+
+@pytest.mark.asyncio
+async def test_a_device_error_before_the_close_fails_the_step():
+    transport = _ScriptedTransport(
+        [
+            _Result(
+                "reload",
+                "% Invalid input",
+                exit_code=1,
+                error="% Invalid input",
+                disconnected=True,
+            )
+        ]
+    )
+    result = await ExecuteCLIActionHandler().execute(
+        _ctx(
+            {"commands": ["reload"], "allow_disconnect_after_last_command": True},
+            _RealServices(transport),
+        )
+    )
+    assert result.success is False
+    assert result.output["disconnected"] == []

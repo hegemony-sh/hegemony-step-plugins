@@ -408,6 +408,23 @@ def _session_open(connection: Any) -> bool:
         return True
 
 
+def _closed_result(command: str, output: str) -> ScrapliResult:
+    """The result of a command during which the device closed the session.
+
+    ``disconnected`` stops the commands after it either way. A device error
+    in what it printed first keeps it a failed command (exit code 1), which
+    the step never accepts as an allowed disconnect; otherwise exit code -1.
+    """
+    cli_error = _detect_cli_error(output) if command.strip() else None
+    return ScrapliResult(
+        command=command,
+        output=output,
+        exit_code=1 if cli_error else -1,
+        error=cli_error or "The device closed the session",
+        disconnected=True,
+    )
+
+
 def _is_startup_copy(command: str) -> bool:
     """'copy <source> startup-config', the destination in any abbreviation."""
     words = command.lower().split()
@@ -948,20 +965,16 @@ class ScrapliTransport:
                 result = self._result_from_response(command, await connection.send_command(command))
         except Exception as e:
             # scrapli closes the session itself when its own timeout runs
-            # out, so a timeout is never the device closing it.
-            if isinstance(e, _SessionClosed) or (
+            # out, and cancelling the run closes it too: neither is the
+            # device closing it.
+            closed = isinstance(e, _SessionClosed) or (
                 not isinstance(e, ScrapliTimeout)
                 and not self._scrapli_closed
                 and not _session_open(connection)
-            ):
+            )
+            if closed and not self._cancellation_registry.is_cancelled(self.step_run_id):
                 logger.warning(f"{self.host} closed the session during a command")
-                return ScrapliResult(
-                    command=command,
-                    output=getattr(e, "output", ""),
-                    exit_code=-1,
-                    error="The device closed the session",
-                    disconnected=True,
-                )
+                return _closed_result(command, getattr(e, "output", ""))
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             error = str(e)
             if isinstance(e, (ScrapliTimeout, CliPromptError)):

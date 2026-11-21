@@ -143,7 +143,9 @@ def _allowed_disconnect(results: Sequence[Any], commands: list[str]) -> int | No
     are only Enter, and the transport reports them as skipped once the
     session closed. The transport must have marked that result
     ``disconnected``, which it does only when the session closed while the
-    command ran: a CLI error or a timeout on an open session is not one.
+    command ran: a CLI error or a timeout on an open session is not one. A
+    device error printed before the session closed keeps the command failed
+    (the transport gives it exit code 1, not -1).
     """
     last_command = next((cmd.strip() for cmd in reversed(commands) if cmd.strip()), "")
     for index in range(len(results) - 1, -1, -1):
@@ -152,7 +154,9 @@ def _allowed_disconnect(results: Sequence[Any], commands: list[str]) -> int | No
             continue
         if result.command.strip() != last_command:
             return None
-        return index if getattr(result, "disconnected", False) is True else None
+        if getattr(result, "disconnected", False) is True and result.exit_code == -1:
+            return index
+        return None
     return None
 
 

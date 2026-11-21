@@ -647,6 +647,24 @@ def _session_open(connection: Any) -> bool:
     return True
 
 
+def _closed_result(command: str, output: str, latency_ms: float) -> SSHResult:
+    """The result of a command during which the device closed the session.
+
+    ``disconnected`` stops the commands after it either way. A device error
+    in what it printed first keeps it a failed command (exit code 1), which
+    the step never accepts as an allowed disconnect; otherwise exit code -1.
+    """
+    cli_error = _detect_cli_error(output) if command.strip() else None
+    return SSHResult(
+        command=command,
+        output=output,
+        exit_code=1 if cli_error else -1,
+        error=cli_error or "The device closed the session",
+        latency_ms=latency_ms,
+        disconnected=True,
+    )
+
+
 def _is_startup_copy(command: str) -> bool:
     """'copy <source> startup-config', the destination in any abbreviation."""
     words = command.lower().split()
@@ -1190,16 +1208,11 @@ class SSHTransport:
                 )
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
-            if isinstance(e, _SessionClosed) or not _session_open(connection):
+            closed = isinstance(e, _SessionClosed) or not _session_open(connection)
+            # Cancelling the run closes the session too; that is no reload.
+            if closed and not self._cancellation_registry.is_cancelled(self.step_run_id):
                 logger.warning(f"{self.host} closed the session during a command")
-                return SSHResult(
-                    command=command,
-                    output=getattr(e, "output", ""),
-                    exit_code=-1,
-                    error="The device closed the session",
-                    latency_ms=latency_ms,
-                    disconnected=True,
-                )
+                return _closed_result(command, getattr(e, "output", ""), latency_ms)
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             error = self._exception_error(e)
             if isinstance(e, (ReadTimeout, CliPromptError)):
@@ -1263,7 +1276,11 @@ class SSHTransport:
             try:
                 chunk = connection.read_channel()
             except (OSError, EOFError) as exc:
-                raise _SessionClosed(output) from exc
+                # A read error is the device closing the session only when
+                # the session is closed; otherwise it fails the command.
+                if not _session_open(connection):
+                    raise _SessionClosed(output) from exc
+                raise
             if not chunk and not _session_open(connection):
                 raise _SessionClosed(output)
             if chunk:
