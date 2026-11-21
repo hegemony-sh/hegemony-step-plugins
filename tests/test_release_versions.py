@@ -153,6 +153,7 @@ def test_every_runner_image_is_a_step_default_named_by_the_current_minor_version
     assert [image.repository for image in paths.RUNNER_IMAGES] == [
         "ghcr.io/hegemony-sh/ansible-runner",
         "ghcr.io/hegemony-sh/opentofu-runner",
+        "ghcr.io/hegemony-sh/git-runner",
     ]
     failures = [
         failure

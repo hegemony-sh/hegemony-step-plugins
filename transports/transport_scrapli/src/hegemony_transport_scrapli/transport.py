@@ -243,6 +243,8 @@ class ScrapliResult:
     exit_code: int
     error: str | None = None
     latency_ms: float = 0.0
+    #: The device closed the session while this command ran (a reload).
+    disconnected: bool = False
 
 
 # Map inventory platform strings to scrapli core platform names.
@@ -369,6 +371,58 @@ _STARTUP_COPY_PROMPTS = (
 #: Error of a result for a command not run because an earlier one may have left
 #: the device at a question: its text would be taken as the answer.
 _LEFT_WAITING_ERROR = "Skipped: an earlier command may have left the device waiting at a question"
+_CLOSED_ERROR = "Skipped: the device closed the session"
+
+
+class _SessionClosed(Exception):
+    """The device closed the session while a command ran; ``output`` is what it sent first."""
+
+    def __init__(self, output: str) -> None:
+        super().__init__("The device closed the session")
+        self.output = output
+
+
+def _session_open(connection: Any) -> bool:
+    """Whether the SSH session is still open, from scrapli's own state.
+
+    The device closing the session leaves the transport's output stream at
+    EOF; scrapli's ``isalive`` notices only later. Both read state and write
+    nothing to the device. Only a real True or False counts: a check that
+    cannot run proves nothing, and a session that went silent without
+    closing (the network dropped it) still counts as open.
+    """
+    stdout = getattr(getattr(connection, "transport", None), "stdout", None)
+    at_eof = getattr(stdout, "at_eof", None)
+    if callable(at_eof):
+        try:
+            if at_eof() is True:
+                return False
+        except Exception:  # noqa: BLE001 - a check that cannot run proves nothing
+            pass
+    isalive = getattr(connection, "isalive", None)
+    if not callable(isalive):
+        return True
+    try:
+        return isalive() is not False
+    except Exception:  # noqa: BLE001 - a check that cannot run proves nothing
+        return True
+
+
+def _closed_result(command: str, output: str) -> ScrapliResult:
+    """The result of a command during which the device closed the session.
+
+    ``disconnected`` stops the commands after it either way. A device error
+    in what it printed first keeps it a failed command (exit code 1), which
+    the step never accepts as an allowed disconnect; otherwise exit code -1.
+    """
+    cli_error = _detect_cli_error(output) if command.strip() else None
+    return ScrapliResult(
+        command=command,
+        output=output,
+        exit_code=1 if cli_error else -1,
+        error=cli_error or "The device closed the session",
+        disconnected=True,
+    )
 
 
 def _is_startup_copy(command: str) -> bool:
@@ -482,6 +536,15 @@ class ScrapliTransport:
     def configure_cli_prompts(self, prompts: Sequence[CliPrompt]) -> None:
         """Set the questions the step's commands may ask, and what to answer."""
         self._cli_prompts = tuple(prompts)
+
+    #: Feature flag: a result is ``disconnected`` when the device closed the
+    #: session while that exec command ran, such as on a reload.
+    supports_disconnect_reports = True
+    #: Set when scrapli's own read timeout closed the session; cleared for
+    #: each connection opened.
+    _scrapli_closed = False
+    #: Whether the running exec command was written to the device.
+    _command_sent = False
 
     def _legacy(self, *, jump_host: bool) -> bool:
         """Whether a hop may use legacy SSH: the step setting, or that hop's inventory flag."""
@@ -772,6 +835,8 @@ class ScrapliTransport:
 
     async def _open_connection(self):
         """Construct and open a scrapli connection (via the bastion when set)."""
+        # A timeout that closed an earlier connection says nothing about this one.
+        self._scrapli_closed = False
         assert AsyncScrapli is not None  # Validated in __init__
         tunnel = None
         device_timeout = None
@@ -893,6 +958,10 @@ class ScrapliTransport:
 
     async def _send_exec_command(self, connection, command: str) -> ScrapliResult:
         """Run one command at privilege-exec; a CLI error pattern gives exit code 1."""
+        # Only a session that closes after the command went out can be the
+        # command's doing (a reload); one that closed before it, such as in
+        # acquire_priv, is not.
+        self._command_sent = False
         try:
             if prompts := prompts_for(command, self._cli_prompts):
                 if _is_startup_copy(command):
@@ -902,8 +971,24 @@ class ScrapliTransport:
             elif _is_startup_copy(command):
                 result = await self._send_startup_copy(connection, command)
             else:
+                # send_command drops what it read when it raises, so a device
+                # error printed before the session closed would be lost: a
+                # close here is never reported as the command's disconnect.
+                # A command that may end the session goes through the prompt
+                # path (a prompts entry whose pattern matches it), which keeps
+                # all of its output.
+                self._command_sent = False
                 result = self._result_from_response(command, await connection.send_command(command))
         except Exception as e:
+            # Every close the prompt path can attribute to the device raises
+            # _SessionClosed with the output read so far (not one scrapli's
+            # own timeout caused); any other error, also on a session that
+            # closed meanwhile, stays a failure. Cancelling the run closes
+            # the session too, which is no reload either.
+            closed = self._command_sent and isinstance(e, _SessionClosed)
+            if closed and not self._cancellation_registry.is_cancelled(self.step_run_id):
+                logger.warning(f"{self.host} closed the session during a command")
+                return _closed_result(command, getattr(e, "output", ""))
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
             error = str(e)
             if isinstance(e, (ScrapliTimeout, CliPromptError)):
@@ -939,6 +1024,7 @@ class ScrapliTransport:
         # write below does not, so do it here.
         await connection.acquire_priv(connection.default_desired_privilege_level)
         connection.channel.write(command + "\n")
+        self._command_sent = True
         output = ""
         # Where the output after the latest answer starts: the question just
         # answered is not read as a new one.
@@ -954,6 +1040,11 @@ class ScrapliTransport:
                 connection, timeout=max(min(_TIMING_POLL_SECONDS, remaining), 0.01)
             )
             if chunk is None:
+                # Only the device closing the session is a disconnect: not
+                # scrapli's own timeout, nor a read error on a session that
+                # is still open.
+                if not self._scrapli_closed and not _session_open(connection):
+                    raise _SessionClosed(output)
                 raise CliPromptError(f"The connection closed; {waiting_at(output)}")
             if chunk:
                 output += chunk
@@ -962,7 +1053,13 @@ class ScrapliTransport:
                     break
                 answer = None if time.monotonic() >= deadline else dialogue.answer_for(recent)
                 if answer is not None:
-                    connection.channel.write(answer + "\n")
+                    try:
+                        connection.channel.write(answer + "\n")
+                    except Exception as exc:
+                        # Keep what the device printed, a device error included.
+                        if not self._scrapli_closed and not _session_open(connection):
+                            raise _SessionClosed(output) from exc
+                        raise
                     since_answer = len(output)
                     deadline = time.monotonic() + self.command_timeout
                     continue
@@ -1114,6 +1211,13 @@ class ScrapliTransport:
                         )
                         break
                     results.append(await self._send_exec_command(connection, command))
+                    if results[-1].disconnected:
+                        results.extend(
+                            _skipped(cmd, _CLOSED_ERROR)
+                            for cmd in commands[index + 1 :]
+                            if cmd.strip()
+                        )
+                        break
 
         except ScrapliAuthenticationFailed as e:
             logger.error(f"Authentication failed to {self.host}: {e}")
@@ -1199,6 +1303,7 @@ class ScrapliTransport:
         except ScrapliTimeout as read_err:
             # scrapli's own timeout closed the connection: nothing more comes.
             logger.warning(f"Channel read timed out and scrapli closed it: {read_err}")
+            self._scrapli_closed = True
             return None
         except Exception as read_err:
             logger.warning(f"Error reading channel: {read_err}")

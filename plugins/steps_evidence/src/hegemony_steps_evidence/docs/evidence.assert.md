@@ -44,6 +44,26 @@ selected - so under the default, a filter that matches nothing cannot
 pass vacuously. Setting Minimum Lines to 0 removes that floor and lets
 an empty selection pass.
 
+Extract (regex), when set, makes the operator compare only part of the
+content: the regex's first group, or its whole match when it has no group,
+found in the whole output or in each selected line. This lets the ordering
+operators read a number out of a longer text. To check that a target's
+flash has room for a file, extract the free space from `show flash` and
+compare it with the file's size:
+
+```yaml
+command: show flash
+extract: '([0-9]+) bytes free'
+operator: ge
+expected: '{{ inputs.firmware.size_bytes + 65536 }}'
+```
+
+Content the regex does not match fails, with an error that says so, so a
+missing value never passes Does Not Contain or Not Equals. An invalid
+regex fails the step. The extracted value (up to 500 characters) is
+recorded in the evidence as `extracted` in whole-output scope. Extract
+reads the first million characters, like the regex operators.
+
 Custom Message, when set, replaces the generated pass summary and the
 generated failure error with your own wording.
 

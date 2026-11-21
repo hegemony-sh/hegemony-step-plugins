@@ -27,6 +27,7 @@ PACKAGE_DIRS = (
     ROOT / "plugins" / "steps_secret",
     ROOT / "plugins" / "steps_inventory",
     ROOT / "plugins" / "steps_netbox",
+    ROOT / "plugins" / "steps_git",
     ROOT / "probes" / "probe_net",
     ROOT / "transports" / "transport_netmiko",
     ROOT / "transports" / "transport_scrapli",
@@ -59,6 +60,7 @@ class RunnerImage:
 
 _ANSIBLE = ROOT / "plugins" / "steps_ansible"
 _TF = ROOT / "plugins" / "steps_tf"
+_GIT = ROOT / "plugins" / "steps_git"
 _ANSIBLE_DOCS = (
     _ANSIBLE / "src" / "hegemony_steps_ansible" / "playbook.py",
     _ANSIBLE / "src" / "hegemony_steps_ansible" / "docs" / "ansible.playbook.md",
@@ -134,6 +136,16 @@ RUNNER_IMAGES = (
             _TF / "src" / "hegemony_steps_tf" / "docs" / "tf.plan.md",
             _TF / "README.md",
             ROOT / "images" / "opentofu-runner" / "Dockerfile",
+        ),
+    ),
+    RunnerImage(
+        repository="ghcr.io/hegemony-sh/git-runner",
+        default_pattern=r'^DEFAULT_IMAGE = "([^"]+)"$',
+        files=(
+            _GIT / "src" / "hegemony_steps_git" / "commit.py",
+            _GIT / "src" / "hegemony_steps_git" / "docs" / "git.commit.md",
+            _GIT / "README.md",
+            ROOT / "images" / "git-runner" / "Dockerfile",
         ),
     ),
 )

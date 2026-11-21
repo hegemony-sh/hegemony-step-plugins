@@ -23,7 +23,7 @@ import httpx
 
 from hegemony_step_sdk import BaseProbe, ProbeResult
 
-from .socks import SocksError, open_socks_connection, parse_socks_proxy
+from .socks import SocksError, SocksTargetError, open_socks_connection, parse_socks_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,9 @@ class HttpHealthProbe(BaseProbe):
             return ProbeResult(
                 ok=False,
                 metrics={"connect_ms": round(elapsed, 3)},
-                error_kind="socks_error",
+                # The proxy reached its end but not the target: report the
+                # target's failure, as without a proxy.
+                error_kind=exc.error_kind if isinstance(exc, SocksTargetError) else "socks_error",
                 error_detail=str(exc),
             )
         except httpx.TimeoutException:
