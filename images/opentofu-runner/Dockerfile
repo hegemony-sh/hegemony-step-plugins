@@ -53,13 +53,13 @@
 
 # Before the first FROM, so both stages can read it: the first builds this
 # version, the last names it in a label.
-ARG OPENTOFU_VERSION=1.12.6
+ARG OPENTOFU_VERSION=1.12.12
 
 FROM golang:1.26.10-bookworm@sha256:5de7c99eb78ca5e515a4c340235d0955ec5964a5071c492c15503d7c267da473 AS tofu
 
 ARG OPENTOFU_VERSION
-# The commit the v1.12.6 tag names; the build refuses any other.
-ARG OPENTOFU_COMMIT=b4305e5a5dd2fb79a27897ae30784a181d3a26cb
+# The commit the v1.12.12 tag names; the build refuses any other.
+ARG OPENTOFU_COMMIT=4e626d547ec0c2a145dc15603bb34bf94e5c6f55
 # First fixed versions of the modules the scan flags (THIRD-PARTY-NOTICES.md);
 # the modules they need move with them.
 ARG GO_MODULE_RAISES="github.com/go-jose/go-jose/v4@v4.1.6 github.com/klauspost/compress@v1.18.7 go.opentelemetry.io/otel/sdk@v1.44.0 golang.org/x/crypto@v0.58.0 golang.org/x/mod@v0.41.0 golang.org/x/net@v0.62.0 golang.org/x/text@v0.43.0 google.golang.org/grpc@v1.83.2 oras.land/oras-go/v2@v2.6.2"

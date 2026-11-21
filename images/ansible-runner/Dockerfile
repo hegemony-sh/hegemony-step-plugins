@@ -33,7 +33,7 @@
 # proposes the new digest when the tag moves (.github/renovate.json).
 FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
 
-ARG ANSIBLE_CORE_VERSION=2.19.13
+ARG ANSIBLE_CORE_VERSION=2.19.15
 LABEL sh.hegemony.ansible-core.version="${ANSIBLE_CORE_VERSION}"
 
 # The base image carries Debian's fixes only once it is rebuilt, so upgrade its
