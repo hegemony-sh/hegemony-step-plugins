@@ -106,6 +106,29 @@ class Reply:
         """The content of the reply's ``<data>`` element as the device wrote it ("" if none)."""
         return element_content(self.text, "data")
 
+    def pretty_data(self) -> str:
+        """``data()`` indented, with the prefixes the device declared above it kept."""
+        return pretty(self.data(), inherited_prefixes(self.text, "rpc-reply", "data"))
+
+
+_PREFIX_DECLARATION = re.compile(r"""xmlns:([A-Za-z_][\w.-]*)\s*=\s*(["'])(.*?)\2""")
+
+
+def inherited_prefixes(text: str, *names: str) -> dict[str, str]:
+    """Prefixed namespace declarations on the opening tags of ``names`` (outermost first).
+
+    A device may declare a model's prefix on ``<rpc-reply>`` or ``<data>``
+    and use it inside; the extracted content needs those declarations back to
+    be well-formed on its own.
+    """
+    found: dict[str, str] = {}
+    for name in names:
+        opening = re.search(rf"<(?:[A-Za-z_][\w.-]*:)?{name}(\s[^>]*)?/?>", text)
+        if opening and opening.group(1):
+            for prefix, _quote, uri in _PREFIX_DECLARATION.findall(opening.group(1)):
+                found[prefix] = uri
+    return found
+
 
 def local_name(tag: str) -> str:
     """``{ns}name`` -> ``name``."""
@@ -150,18 +173,35 @@ def element_content(text: str, name: str) -> str:
     return text[opening.end() : closing.start()]
 
 
-def pretty(text: str) -> str:
-    """``text`` (an XML fragment) indented one element per line, for diffs and evidence."""
+def pretty(text: str, namespaces: dict[str, str] | None = None) -> str:
+    """``text`` (an XML fragment) indented one element per line, for diffs and evidence.
+
+    ``namespaces`` are prefix declarations from above the fragment
+    (:func:`inherited_prefixes`); each top element that uses no declaration of
+    its own for a prefix gets it, so the result stands on its own.
+    """
     if not text.strip():
         return ""
+    namespaces = namespaces or {}
+    declarations = "".join(
+        f' xmlns:{prefix}="{escape(uri, {chr(34): "&quot;"})}"'
+        for prefix, uri in namespaces.items()
+    )
     try:
-        document = minidom.parseString(f"<hegemony-fragment>{text}</hegemony-fragment>")
+        document = minidom.parseString(
+            f"<hegemony-fragment{declarations}>{text}</hegemony-fragment>"
+        )
     except Exception:  # noqa: BLE001 - not well-formed: show it as it came
         return text.strip() + "\n"
     root = document.documentElement
     if root is None:
         return text.strip() + "\n"
     _strip_blank_text(root)
+    for node in root.childNodes:
+        if node.nodeType == node.ELEMENT_NODE:
+            for prefix, uri in namespaces.items():
+                if not node.hasAttribute(f"xmlns:{prefix}"):
+                    node.setAttribute(f"xmlns:{prefix}", uri)
     lines = []
     for node in root.childNodes:
         lines.append(node.toprettyxml(indent="  "))
@@ -341,12 +381,26 @@ class NetconfSession:
         """
         self._message_id += 1
         message_id = str(self._message_id)
-        await self._send(f'<rpc xmlns="{BASE_NS}" message-id="{message_id}">{body}</rpc>')
         limit = self.timeout if timeout is None else timeout
         name = operation or _operation_name(body)
+        # One deadline for the whole request: sending (a device that stops
+        # reading stalls the write) and every message read until the reply.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + limit
+        try:
+            await asyncio.wait_for(
+                self._send(f'<rpc xmlns="{BASE_NS}" message-id="{message_id}">{body}</rpc>'),
+                timeout=limit,
+            )
+        except TimeoutError:
+            raise NetconfError(
+                f"{name}: the device did not accept the request within {limit:g} s"
+            ) from None
         while True:
             try:
-                text = await asyncio.wait_for(self._receive(), timeout=limit)
+                text = await asyncio.wait_for(
+                    self._receive(), timeout=max(0.0, deadline - loop.time())
+                )
             except TimeoutError:
                 raise NetconfError(f"{name}: no reply within {limit:g} s") from None
             root = parse_xml(text, what=f"the reply to {name}")
@@ -370,10 +424,15 @@ class NetconfSession:
         if self._closed:
             return
         self._closed = True
-        with contextlib.suppress(Exception):  # the channel closes either way
-            await self.rpc("<close-session/>", timeout=min(self.timeout, 10.0))
+        # Bounded as a whole (the request has its own deadline too), so a
+        # stalled device cannot keep the channel, and its locks, open.
         with contextlib.suppress(Exception):
-            await self._channel.close()
+            await asyncio.wait_for(
+                self.rpc("<close-session/>", timeout=min(self.timeout, 10.0)),
+                timeout=min(self.timeout, 10.0) + 1.0,
+            )
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self._channel.close(), timeout=10.0)
 
     # --- operations -----------------------------------------------------
 

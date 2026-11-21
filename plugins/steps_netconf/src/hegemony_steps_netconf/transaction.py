@@ -28,6 +28,7 @@ share the whole sequence.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import difflib
 import secrets
@@ -45,6 +46,10 @@ from .client import (
 )
 
 CommitMode = Literal["check", "later", "direct"]
+
+#: Time kept before the confirm timeout for the confirmation to reach the
+#: device (at most a quarter of the timeout).
+CONFIRM_MARGIN_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -110,8 +115,14 @@ async def change_candidate(
     read: Callable[[str], Awaitable[str]],
     options: ChangeOptions,
     check: Callable[[], Awaitable[None]],
+    diff_complete: bool = True,
 ) -> ChangeResult:
-    """Run the change on the candidate datastore (see the module docstring)."""
+    """Run the change on the candidate datastore (see the module docstring).
+
+    ``diff_complete`` is False when ``read`` returns only part of the
+    configuration (a diff filter): an empty diff then proves nothing, so the
+    change is validated and committed all the same.
+    """
     if not session.supports(CAP_CANDIDATE):
         raise NetconfError("the device has no candidate datastore (:candidate capability)")
     if not options.dry_run:
@@ -134,10 +145,15 @@ async def change_candidate(
             result.before, result.after, before_name="running", after_name="candidate"
         )
         result.changed = bool(result.diff)
-        if not result.changed:
+        if not result.changed and diff_complete:
             await session.discard_changes()
             result.notes.append("the change leaves the configuration as it is: nothing committed")
             return result
+        if not result.changed:
+            result.notes.append(
+                "the filtered diff shows no difference; the part outside the filter may "
+                "differ, so the change is committed as asked"
+            )
         if options.validate and session.can_validate:
             await session.validate("candidate")
             result.validated = True
@@ -180,9 +196,22 @@ async def _commit(
             "or the device restores the previous configuration"
         )
         return
+    loop = asyncio.get_running_loop()
+    # Counted from before the request, so the step's clock runs ahead of the
+    # device's; the margin leaves the confirmation time to arrive.
+    started = loop.time()
+    margin = min(CONFIRM_MARGIN_SECONDS, timeout / 4)
     await session.commit(confirmed=True, confirm_timeout=timeout)
     try:
-        await check()
+        budget = timeout - margin - (loop.time() - started)
+        if budget <= 0:
+            raise TimeoutError("the confirmed commit itself used up the confirm timeout")
+        try:
+            await asyncio.wait_for(check(), timeout=budget)
+        except TimeoutError:
+            raise TimeoutError(
+                f"the check did not finish within the confirm timeout of {timeout} s"
+            ) from None
     except Exception as exc:
         # Roll back now rather than wait out the timeout. Without
         # :confirmed-commit:1.1 there is no cancel-commit; closing this
@@ -194,6 +223,13 @@ async def _commit(
             "after the confirmed commit the device did not accept a second NETCONF "
             f"session ({exc}); the change was rolled back"
         ) from exc
+    if loop.time() - started >= timeout - margin:
+        # Too late to confirm: the device may already have restored the old
+        # configuration, and a plain commit now would not confirm the change.
+        raise CheckFailed(
+            f"the confirm timeout of {timeout} s ran out during the check; the device "
+            "restores the previous configuration, so the change was not confirmed"
+        )
     await session.commit()
     result.committed = True
 

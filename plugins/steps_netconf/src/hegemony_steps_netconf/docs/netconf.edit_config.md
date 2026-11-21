@@ -48,10 +48,12 @@ one, else running. On the candidate the step:
 Commit:
 
 - **Confirm in this step** (the default): a confirmed commit; the step then
-  opens a second NETCONF session to the device. When it opens, the step
-  confirms the commit. When it does not, the step cancels the commit (or
-  ends its session, which rolls it back on devices without
-  `:confirmed-commit:1.1`) and fails. Needs `:confirmed-commit`.
+  opens a second NETCONF session to the device. When it opens in time, the
+  step confirms the commit. When it does not, or not before Confirm Timeout
+  less a short margin (10 s, or a quarter of the timeout), the step cancels
+  the commit (or ends its session, which rolls it back on devices without
+  `:confirmed-commit:1.1`), never confirms it late, and fails. Needs
+  `:confirmed-commit`.
 - **Confirm in a later step**: a confirmed commit left pending under a
   persist id, for a `netconf.commit` step to confirm (after checks or an
   approval) or `netconf.cancel_commit` to roll back. The device restores the
@@ -64,7 +66,9 @@ applies at once with `rollback-on-error` when the device offers it: no dry
 run, no confirmed commit, and the diff shows running before and after.
 
 Diff Filter (advanced) is a subtree filter limiting what is read for the
-diff, for devices with a large configuration. Save to startup uses
+diff, for devices with a large configuration. With a filter, an empty diff
+does not show that nothing changed outside it, so the step validates and
+commits the change all the same (and says so in `notes`). Save to startup uses
 copy-config when the device has a startup datastore, else Cisco's
 `save-config` RPC (IOS XE). Max Parallel Devices defaults to 1, so devices
 change one after another. Port, timeouts and Allow legacy SSH work as in

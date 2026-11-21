@@ -28,7 +28,6 @@ from .client import (
     NetconfSession,
     check_fragment,
     filter_xml,
-    pretty,
 )
 from .common import (
     DeviceOutcome,
@@ -293,7 +292,7 @@ class NetconfEditConfigHandler(BaseHandler):
                 )
 
                 async def _read(source: str) -> str:
-                    return pretty((await session.get_config(source, diff_filter)).data())
+                    return (await session.get_config(source, diff_filter)).pretty_data()
 
                 async def _apply() -> None:
                     await session.edit_config(
@@ -310,6 +309,7 @@ class NetconfEditConfigHandler(BaseHandler):
                         read=_read,
                         options=options,
                         check=check_opener(ctx, device, config),
+                        diff_complete=not diff_filter,
                     )
                 else:
                     result = await change_running(

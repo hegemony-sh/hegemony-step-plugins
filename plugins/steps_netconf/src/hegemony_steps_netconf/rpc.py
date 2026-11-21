@@ -22,7 +22,7 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
-from .client import NetconfError, check_fragment, local_name, pretty
+from .client import NetconfError, check_fragment, inherited_prefixes, local_name, pretty
 from .common import (
     DeviceOutcome,
     NetconfConnectionConfig,
@@ -113,7 +113,7 @@ class NetconfRpcHandler(BaseHandler):
             outcome.text_keys = ("reply",)
             async with netconf_session(ctx, device, config) as session:
                 reply = await session.rpc(config.rpc, operation=operation)
-            content = "".join(pretty(_inner(reply.text)).splitlines(keepends=True))
+            content = pretty(_inner(reply.text), inherited_prefixes(reply.text, "rpc-reply"))
             outcome.output = {
                 "reply": content,
                 "warnings": [warning.describe() for warning in reply.warnings],

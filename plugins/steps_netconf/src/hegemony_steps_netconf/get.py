@@ -21,7 +21,7 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
-from .client import CAP_CANDIDATE, CAP_STARTUP, CAP_XPATH, NetconfError, filter_xml, pretty
+from .client import CAP_CANDIDATE, CAP_STARTUP, CAP_XPATH, NetconfError, filter_xml
 from .common import (
     DeviceOutcome,
     NetconfConnectionConfig,
@@ -137,7 +137,7 @@ class NetconfGetHandler(BaseHandler):
                     if needs and not session.supports(needs):
                         raise NetconfError(f"the device has no {config.source} datastore")
                     reply = await session.get_config(config.source, filter_body)
-            data = pretty(reply.data())
+            data = reply.pretty_data()
             outcome.output = {"data": data, "source": config.source}
             outcome.evidence.append(
                 text_evidence(

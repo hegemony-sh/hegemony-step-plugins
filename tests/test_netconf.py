@@ -370,9 +370,12 @@ async def test_settling_needs_a_change_step_with_a_pending_commit():
     services = FakeServices({"r1": FakeNetconfDevice.with_config(BASE)})
     missing = await NetconfCommitHandler().execute(_ctx({"change_step": "nope"}, services))
     assert not missing.success and "has no output" in (missing.error or "")
-    services.step_outputs = {"change": {"output": {"devices": {"r1": {"pending": False}}}}}
+    services.step_outputs = {"change": {"output": {"devices": {"r2": {"pending": True}}}}}
     none = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
-    assert not none.success and "left no pending commit" in (none.error or "")
+    assert not none.success and "has no result for this device" in (none.error or "")
+    services.step_outputs = {"change": {"output": {"devices": {"r1": {"pending": False}}}}}
+    nothing = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
+    assert nothing.success and nothing.output["devices"]["r1"]["skipped"] is True
     unset = await NetconfCommitHandler().execute(_ctx({}, services))
     assert not unset.success and "'change_step' is required" in (unset.error or "")
 
@@ -440,3 +443,130 @@ def test_the_docs_page_names_every_declared_output_field(handler):
     text = load_docs_bundle("hegemony_steps_netconf")[handler.handler_id]
     for field in handler.output_fields:
         assert f"output.{field.name}`" in text, field.name
+
+
+# --- Review fixes ------------------------------------------------------------
+
+
+async def test_a_diff_filter_that_hides_the_change_still_commits_it():
+    device = FakeNetconfDevice.with_config(BASE + '<other xmlns="urn:example:other"/>')
+    result = await NetconfEditConfigHandler().execute(
+        _ctx(
+            {"config": _hostname("r2"), "diff_filter": '<other xmlns="urn:example:other"/>'},
+            FakeServices({"r1": device}),
+        )
+    )
+    entry = result.output["devices"]["r1"]
+    assert result.success, result.error
+    assert entry["diff"] == "" and entry["committed"]
+    assert any("filtered diff shows no difference" in note for note in entry["notes"])
+    assert _running_hostname(device) == "r2"
+
+
+async def test_settling_skips_devices_the_change_left_unchanged():
+    changed = FakeNetconfDevice.with_config(BASE)
+    unchanged = FakeNetconfDevice.with_config(BASE)
+    services = FakeServices({"r1": changed, "r2": unchanged})
+    # r2 already holds the configuration the step asks for.
+    unchanged = FakeNetconfDevice.with_config(
+        _hostname("r2").replace("</native>", "<domain>lab</domain></native>")
+    )
+    services.devices["r2"] = unchanged
+    result = await NetconfEditConfigHandler().execute(
+        _ctx({"config": _hostname("r2"), "commit_mode": "later"}, services, names=("r1", "r2"))
+    )
+    assert result.output["devices"]["r1"]["pending"]
+    assert not result.output["devices"]["r2"]["changed"]
+    services.step_outputs = {"change": {"output": result.output}}
+
+    confirmed = await NetconfCommitHandler().execute(
+        _ctx({"change_step": "change"}, services, names=("r1", "r2"))
+    )
+    assert confirmed.success, confirmed.error
+    assert confirmed.output["devices"]["r1"]["confirmed"] is True
+    assert confirmed.output["devices"]["r2"]["skipped"] is True
+    assert unchanged.sessions_opened == 1  # only the change step's session
+
+
+async def test_settling_fails_a_device_the_change_step_failed_on():
+    services = FakeServices({"r1": FakeNetconfDevice.with_config(BASE)})
+    services.step_outputs = {"change": {"output": {"devices": {"r1": {"ok": False, "error": "x"}}}}}
+    result = await NetconfCancelCommitHandler().execute(_ctx({"change_step": "change"}, services))
+    assert not result.success
+    assert "failed on this device" in (result.error or "")
+
+
+def test_prefixes_declared_above_the_data_are_kept():
+    reply = (
+        '<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" xmlns:m="urn:example:m" '
+        'message-id="1"><data xmlns:n="urn:example:n"><m:system><n:x>1</n:x></m:system>'
+        "</data></rpc-reply>"
+    )
+    from hegemony_steps_netconf.client import Reply, inherited_prefixes
+
+    assert inherited_prefixes(reply, "rpc-reply", "data") == {
+        "m": "urn:example:m",
+        "n": "urn:example:n",
+    }
+    text = Reply(parse_xml(reply, what="reply"), reply).pretty_data()
+    assert 'xmlns:m="urn:example:m"' in text and 'xmlns:n="urn:example:n"' in text
+    # The fragment stands on its own: it is valid edit_config input.
+    assert check_fragment(text, what="data")
+
+
+async def test_the_check_is_bounded_by_the_confirm_timeout(monkeypatch):
+    import asyncio
+
+    from hegemony_steps_netconf import transaction
+
+    monkeypatch.setattr(transaction, "CONFIRM_MARGIN_SECONDS", 0.2)
+    device = FakeNetconfDevice.with_config(BASE)
+    session = NetconfSession(await device.open(), timeout=5)
+    await session.hello()
+
+    async def slow_check() -> None:
+        await asyncio.sleep(5)
+
+    async def read(source: str) -> str:
+        return (await session.get_config(source)).pretty_data()
+
+    async def apply() -> None:
+        await session.edit_config("candidate", _hostname("r2"))
+
+    with pytest.raises(transaction.CheckFailed, match="confirm timeout of 1 s"):
+        await transaction.change_candidate(
+            session,
+            apply=apply,
+            read=read,
+            options=transaction.ChangeOptions(confirm_timeout_seconds=1),
+            check=slow_check,
+        )
+    # Cancelled, never confirmed with a plain commit.
+    commits = [r for r in device.requests if "<commit" in r]
+    assert len(commits) == 1 and "<confirmed/>" in commits[0]
+    assert _running_hostname(device) == "r1"
+    await session.close()
+
+
+async def test_a_stalled_write_times_out_and_close_still_returns():
+    import asyncio
+
+    class _Stalled:
+        closed = False
+
+        async def write(self, data: bytes) -> None:
+            await asyncio.sleep(60)
+
+        async def read(self, max_bytes: int = 65536) -> bytes:
+            await asyncio.sleep(60)
+            return b""
+
+        async def close(self) -> None:
+            self.closed = True
+
+    channel = _Stalled()
+    session = NetconfSession(channel, timeout=0.2)
+    with pytest.raises(NetconfError, match="did not accept the request"):
+        await session.rpc("<get/>")
+    await asyncio.wait_for(session.close(), timeout=5)
+    assert channel.closed

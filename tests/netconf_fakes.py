@@ -329,6 +329,11 @@ class FakeChannel:
                 "candidate": device.candidate,
                 "startup": device.startup,
             }[source]
+            # A subtree filter keeps the top-level nodes it names.
+            subtree = op.find(f"{{{BASE_NS}}}filter")
+            if subtree is not None and len(subtree):
+                wanted = {item.tag for item in subtree}
+                store = [item for item in store if item.tag in wanted]
             return (f"<data>{_xml(store)}</data>", False)
         if name == "get":
             return (f"<data>{_xml(device.running)}<state>up</state></data>", False)

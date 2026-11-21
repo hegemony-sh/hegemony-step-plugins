@@ -73,28 +73,22 @@ class ConfirmConfig(SettleConfig):
     )
 
 
-def _pending_ids(step_output: dict[str, Any]) -> dict[str, str]:
-    """Device name -> persist id, from a change step's output."""
+def _device_entries(step_output: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Device name -> that device's entry in a change step's output."""
     output = (
         step_output.get("output") if isinstance(step_output.get("output"), dict) else step_output
     )
     devices = output.get("devices") if isinstance(output, dict) else None
     if not isinstance(devices, dict):
         return {}
-    pending = {}
-    for name, entry in devices.items():
-        if isinstance(entry, dict) and entry.get("pending") and entry.get("persist_id"):
-            pending[str(name)] = str(entry["persist_id"])
-    return pending
+    return {str(name): entry for name, entry in devices.items() if isinstance(entry, dict)}
 
 
-def _persist_id_for(device: dict[str, Any], pending: dict[str, str]) -> str | None:
+def _entry_for(device: dict[str, Any], entries: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
     name = device_label(device)
-    if name in pending:
-        return pending[name]
-    if device.get("id"):
-        return pending.get(f"{name} ({device['id']})")
-    return None
+    if device.get("id") and f"{name} ({device['id']})" in entries:
+        return entries[f"{name} ({device['id']})"]
+    return entries.get(name)
 
 
 class _SettleHandler(BaseHandler):
@@ -105,7 +99,10 @@ class _SettleHandler(BaseHandler):
     targeting = HandlerTargeting(ips=False)
     output_fields = (
         OutputField(
-            "devices", "Each device's result by name: ok, error, persist_id and saved", "object"
+            "devices",
+            "Each device's result by name: ok, error, persist_id, skipped (nothing was "
+            "pending) and the outcome",
+            "object",
         ),
         OutputField("truncated", "Output texts cut short, as device.key", "list"),
     )
@@ -139,12 +136,21 @@ class _SettleHandler(BaseHandler):
                 error=f"step {change_step!r} has no output in this run",
                 summary=f"Nothing to {self._verb}",
             )
-        pending = _pending_ids(step_output)
+        entries = _device_entries(step_output)
 
         async def _work(device: dict[str, Any], outcome: DeviceOutcome) -> None:
-            persist_id = _persist_id_for(device, pending)
+            entry = _entry_for(device, entries)
+            if entry is None:
+                raise NetconfError(f"step {change_step!r} has no result for this device")
+            persist_id = str(entry.get("persist_id") or "") if entry.get("pending") else ""
             if not persist_id:
-                raise NetconfError(f"step {change_step!r} left no pending commit on this device")
+                if entry.get("ok") is False:
+                    raise NetconfError(
+                        f"step {change_step!r} failed on this device, so no commit is pending"
+                    )
+                # Unchanged (or committed at once): there is nothing to settle.
+                outcome.output = {"skipped": True}
+                return
             async with netconf_session(ctx, device, config) as session:
                 if not session.supports(CAP_CONFIRMED_11):
                     raise NetconfError("the device has no :confirmed-commit:1.1 capability")

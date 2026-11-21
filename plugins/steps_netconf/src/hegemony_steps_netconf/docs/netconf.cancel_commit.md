@@ -27,13 +27,15 @@ timeouts, Allow legacy SSH and Max Parallel Devices (default 10) work as in
 The summary reads `netconf cancel-commit: N/M devices`.
 
 - `steps.NODE_ID.output.devices`: each device's result by name: `ok`,
-  `error`, `persist_id` and `cancelled`.
+  `error`, `persist_id`, `skipped` and `cancelled`.
 - `steps.NODE_ID.output.truncated`: always empty for this step.
 
 ## When It Fails
 
 The step fails when Change Step is not set or has no output in this run.
-A device fails when the change step left no pending commit on it, when it
+A device the change step left unchanged (or committed at once) has nothing
+pending and is skipped, with `skipped` true. A device fails when the change
+step has no result for it or failed on it, when it
 lacks `:confirmed-commit:1.1`, when it cannot be reached, and when it
 refuses the persist id because the commit was already confirmed, cancelled
 or rolled back.
