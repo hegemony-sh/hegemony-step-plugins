@@ -971,9 +971,13 @@ class ScrapliTransport:
             elif _is_startup_copy(command):
                 result = await self._send_startup_copy(connection, command)
             else:
-                # send_command writes the command itself; the best this can
-                # tell is that the session was open when it was handed over.
-                self._command_sent = _session_open(connection)
+                # send_command drops what it read when it raises, so a device
+                # error printed before the session closed would be lost: a
+                # close here is never reported as the command's disconnect.
+                # A command that may end the session goes through the prompt
+                # path (a prompts entry whose pattern matches it), which keeps
+                # all of its output.
+                self._command_sent = False
                 result = self._result_from_response(command, await connection.send_command(command))
         except Exception as e:
             # scrapli closes the session itself when its own timeout runs

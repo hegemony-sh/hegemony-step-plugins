@@ -118,17 +118,20 @@ allow_disconnect_after_last_command: true
 Only the last command that is not blank may end the session; blank lines
 after it are skipped once it closed. A session that closes during an
 earlier command still fails, and the commands after it are skipped. The
-command must still be answered up to the point the device goes down: list
-its questions under `prompts`, as with any other command.
+command must have an entry under `prompts` whose `command` pattern matches
+it, as a `reload` needs for its `[confirm]` anyway: only then does the step
+read the command's whole output itself, so it can see a device error
+printed just before the session closed. A command that asks nothing can
+still use the setting with an entry that matches it; its question never
+comes, so the entry is never used. Without such an entry the closed session
+fails the command.
 
 The setting accepts only a session the device closed. A command that fails
 with a device error, also one the device printed just before it closed the
 session, or that times out while the session stays open (the device
 stopped answering without closing it, or waits at a question nobody
 listed), still fails, as does a session closed because the run was
-cancelled. A device that closes the session cleanly shows it
-at once while the command answers questions; otherwise the closed session
-may only be noticed when Command timeout runs out. The setting does not
+cancelled. A device that closes the session cleanly shows it at once. The setting does not
 check that the device really reloads: follow the step with
 `probe.wait_unreachable` and then `probe.wait_reachable`. It needs the
 netmiko or scrapli transport; with another transport the step fails rather
@@ -154,9 +157,7 @@ commands across all devices, capped at 4096 characters — and
 `steps.NODE_ID.output.disconnected`, the devices that closed the session
 during the last command while Allow disconnect after the last command was
 on (empty otherwise). The evidence of that command says so, with
-`disconnected` set and the output the device sent before it closed; with
-the netmiko transport that output is kept only for a command that answers
-questions under `prompts`, which a `reload` does. Full outputs are
+`disconnected` set and the output the device sent before it closed. Full outputs are
 preserved in the `cli_output` evidence artifacts described above, which also
 record the device, the command(s), the exit code, and any error text. A
 device that throws an error contributes an "Error" artifact with the message

@@ -170,6 +170,10 @@ async def _session(process: asyncssh.SSHServerProcess) -> None:
             await _copy_dialogue(process, command)
         elif command.startswith("delete "):
             await _delete_dialogue(process, command)
+        elif command == "bad-reload":
+            # A device error, then the session closes.
+            process.stdout.write("% Invalid input detected at '^' marker.\r\n")
+            break
         elif command == "reload":
             # IOS confirms, says so, and closes the session as it goes down.
             process.stdout.write("Proceed with reload? [confirm]")

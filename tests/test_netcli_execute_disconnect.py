@@ -518,3 +518,28 @@ async def test_scrapli_forgets_an_earlier_connections_timeout(monkeypatch):
     with pytest.raises(Exception):  # noqa: B017 - only the reset before opening matters
         await transport._open_connection()
     assert transport._scrapli_closed is False
+
+
+@pytest.mark.asyncio
+async def test_without_a_prompts_entry_a_close_is_never_the_commands(servers, transport_id):
+    """send_command drops what it read when the session closes, so the step
+    could not see a device error: the close fails the command."""
+    transport = await _transport(servers, transport_id, timeout=2.0)
+
+    results = await transport.execute_commands(["bad-reload"])
+
+    assert results[0].disconnected is False
+
+
+@pytest.mark.asyncio
+async def test_a_prompts_entry_keeps_a_device_error_printed_before_the_close(servers, transport_id):
+    transport = await _transport(servers, transport_id)
+    # The question never comes; the entry only routes the command through
+    # the read loop that keeps its output.
+    transport.configure_cli_prompts([CliPrompt(command=r"^bad-reload", expect=r"\[confirm\]")])
+
+    results = await transport.execute_commands(["bad-reload"])
+
+    assert results[0].disconnected is True
+    assert results[0].exit_code == 1
+    assert "Invalid input" in results[0].output
