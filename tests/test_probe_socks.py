@@ -38,8 +38,17 @@ class _FakeSocks5Server:
         upstream_response: bytes | None = None,
         force_no_auth: bool = False,
         hang_after_connect: bool = False,
+        connect_reply: int = 0x00,
+        hang_at: str | None = None,
     ):
         self.require_auth = require_auth
+        # The CONNECT reply code; non-zero models a proxy that could not
+        # reach the target (0x05 connection refused, 0x04 host unreachable).
+        self.connect_reply = connect_reply
+        # "greeting": never answer the method selection (a stalled proxy);
+        # "connect": take the CONNECT and never reply (a target that does
+        # not answer the proxy).
+        self.hang_at = hang_at
         # Accept the CONNECT then withhold any response (and never close),
         # modelling a slow/withholding target so the probe's own timeout is
         # exercised rather than an EOF.
@@ -90,6 +99,9 @@ class _FakeSocks5Server:
             version, nmethods = await reader.readexactly(2)
             methods = await reader.readexactly(nmethods)
             assert version == 0x05
+            if self.hang_at == "greeting":
+                await asyncio.sleep(2)
+                return
             if self.force_no_auth:
                 writer.write(b"\x05\x00")
                 await writer.drain()
@@ -128,10 +140,21 @@ class _FakeSocks5Server:
                 raise AssertionError(f"unexpected ATYP {atyp:#x}")
             port = int.from_bytes(await reader.readexactly(2), "big")
             self.requested = (host, port)
+            if self.hang_at == "connect":
+                await asyncio.sleep(2)
+                return
 
-            # Success reply with a dummy bound address.
-            writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+            if self.hang_at == "bound":
+                # Success, then the bound address never comes.
+                writer.write(b"\x05\x00\x00\x01")
+                await writer.drain()
+                await asyncio.sleep(2)
+                return
+            # The reply with a dummy bound address.
+            writer.write(bytes([0x05, self.connect_reply]) + b"\x00\x01\x00\x00\x00\x00\x00\x00")
             await writer.drain()
+            if self.connect_reply:
+                return
 
             if self.hang_after_connect:
                 await asyncio.sleep(30)
@@ -597,3 +620,63 @@ async def test_tunneled_http_shares_one_timeout_budget():
 
     assert seen["handshake"] == 5.0
     assert seen["exchange"] == 2.0
+
+
+@pytest.mark.parametrize(
+    ("reply", "kind"),
+    [(0x05, "connection_refused"), (0x04, "no_route"), (0x03, "network_unreachable")],
+)
+@pytest.mark.parametrize("probe_class", [TcpConnectProbe, HttpHealthProbe])
+async def test_a_target_the_proxy_cannot_reach_fails_as_it_would_without_one(
+    probe_class, reply, kind
+):
+    """The proxy works and says the target failed: that is the target's failure,
+    not a socks_error, so probe.wait_unreachable can count it as down."""
+    server = _FakeSocks5Server(connect_reply=reply)
+    await server.start()
+    try:
+        result = await probe_class().execute(
+            "10.9.9.9",
+            {"port": 22, "timeout_ms": 3000, "socks_proxy": f"socks5://127.0.0.1:{server.port}"},
+        )
+    finally:
+        await server.stop()
+    assert result.ok is False
+    assert result.error_kind == kind
+    assert "SOCKS5 CONNECT failed" in (result.error_detail or "")
+
+
+async def test_a_general_proxy_failure_stays_a_socks_error():
+    server = _FakeSocks5Server(connect_reply=0x01)
+    await server.start()
+    try:
+        result = await TcpConnectProbe().execute(
+            "10.9.9.9",
+            {"port": 22, "timeout_ms": 3000, "socks_proxy": f"socks5://127.0.0.1:{server.port}"},
+        )
+    finally:
+        await server.stop()
+    assert result.error_kind == "socks_error"
+
+
+@pytest.mark.parametrize("probe_class", [TcpConnectProbe, HttpHealthProbe])
+@pytest.mark.parametrize(
+    ("hang_at", "kind"),
+    [("greeting", "socks_error"), ("connect", "timeout"), ("bound", "socks_error")],
+)
+async def test_a_stall_is_the_proxys_before_the_connect_and_the_targets_after(
+    probe_class, hang_at, kind
+):
+    """A proxy that stalls in its own handshake is a socks_error, never a
+    target timeout, so probe.wait_unreachable cannot count a live target down."""
+    server = _FakeSocks5Server(hang_at=hang_at)
+    await server.start()
+    try:
+        result = await probe_class().execute(
+            "10.9.9.9",
+            {"port": 22, "timeout_ms": 500, "socks_proxy": f"socks5://127.0.0.1:{server.port}"},
+        )
+    finally:
+        await server.stop()
+    assert result.ok is False
+    assert result.error_kind == kind

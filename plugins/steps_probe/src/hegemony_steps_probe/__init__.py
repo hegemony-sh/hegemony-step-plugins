@@ -6,9 +6,9 @@
 """Probe step handlers (reachability, DNS, HTTP, TLS, SNMP) for Hegemony.
 
 Outside-observation probes: one-shot connectivity, DNS, HTTP and TLS
-certificate checks, read-only SNMP queries, and stable-reachability waits.
-No device login is involved; ``probe.snmp`` takes its SNMP credentials as
-secret references in its own settings.
+certificate checks, read-only SNMP queries, and waits for targets to come up
+or go down. No device login is involved; ``probe.snmp`` takes its SNMP
+credentials as secret references in its own settings.
 
 Registers under the ``hegemony.step_handlers`` entry-point group; the entry
 point name is the claimed handler-id namespace prefix (``probe``).
@@ -25,6 +25,7 @@ from .http_check import HttpProbeHandler
 from .snmp_check import SnmpProbeHandler
 from .tls_check import TlsProbeHandler
 from .wait_reachable import WaitReachableHandler
+from .wait_unreachable import WaitUnreachableHandler
 
 ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
     ConnectivityCheckHandler,
@@ -33,6 +34,7 @@ ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
     SnmpProbeHandler,
     TlsProbeHandler,
     WaitReachableHandler,
+    WaitUnreachableHandler,
 )
 
 

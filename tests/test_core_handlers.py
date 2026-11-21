@@ -41,6 +41,7 @@ WHEELS = [
         {
             "probe.connectivity",
             "probe.wait_reachable",
+            "probe.wait_unreachable",
             "probe.http",
             "probe.dns",
             "probe.snmp",
@@ -368,12 +369,14 @@ async def test_probe_handlers_fail_the_same_way_without_any_target():
     from hegemony_steps_probe.dns_check import DnsProbeHandler
     from hegemony_steps_probe.http_check import HttpProbeHandler
     from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+    from hegemony_steps_probe.wait_unreachable import WaitUnreachableHandler
 
     for handler in (
         ConnectivityCheckHandler(),
         DnsProbeHandler(),
         HttpProbeHandler(),
         WaitReachableHandler(),
+        WaitUnreachableHandler(),
     ):
         result = await handler.execute(_ip_target_ctx({}, []))
         assert result.success is False, handler.handler_id

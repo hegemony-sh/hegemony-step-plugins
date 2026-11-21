@@ -34,6 +34,19 @@ class SocksError(Exception):
     """
 
 
+class SocksTargetError(SocksError):
+    """The proxy works, but it could not reach the target (a CONNECT reply).
+
+    The probes report it as they would the same failure without a proxy
+    (``error_kind``), not as a ``socks_error``: the proxy itself is fine, so
+    callers such as ``probe.wait_unreachable`` can count the target as down.
+    """
+
+    def __init__(self, message: str, error_kind: str) -> None:
+        super().__init__(message)
+        self.error_kind = error_kind
+
+
 #: RFC 1929 length-prefixes each field with a single byte.
 _CREDENTIALS_TOO_LONG = (
     "socks_proxy credentials do not fit SOCKS5 username/password auth "
@@ -111,6 +124,15 @@ _SOCKS_REPLY_ERRORS = {
     0x06: "TTL expired",
     0x07: "command not supported",
     0x08: "address type not supported",
+}
+
+#: CONNECT replies that say the target, not the proxy, failed, and the
+#: error_kind the same failure has without a proxy.
+_TARGET_REPLY_KINDS = {
+    0x03: "network_unreachable",
+    0x04: "no_route",
+    0x05: "connection_refused",
+    0x06: "timeout",
 }
 
 
@@ -207,18 +229,26 @@ async def _send_connect(
     proxy: SocksProxy,
     dest_host: str,
     dest_port: int,
+    stage: list[str] | None = None,
 ) -> None:
     request = b"\x05\x01\x00" + await _dest_address(proxy, dest_host) + dest_port.to_bytes(2, "big")
     writer.write(request)
     await writer.drain()
+    if stage is not None:
+        # From here the proxy is dialing the target: a wait is the target's.
+        stage.append("target")
 
     version, reply, _reserved, atyp = await reader.readexactly(4)
     if version != 0x05:
         raise SocksError("malformed SOCKS5 CONNECT reply")
     if reply != 0x00:
-        raise SocksError(
-            "SOCKS5 CONNECT failed: " + _SOCKS_REPLY_ERRORS.get(reply, f"reply {reply:#x}")
-        )
+        message = "SOCKS5 CONNECT failed: " + _SOCKS_REPLY_ERRORS.get(reply, f"reply {reply:#x}")
+        if reply in _TARGET_REPLY_KINDS:
+            raise SocksTargetError(message, _TARGET_REPLY_KINDS[reply])
+        raise SocksError(message)
+    if stage is not None:
+        # The target answered; the rest of the reply is the proxy's to send.
+        stage.clear()
     # Drain the bound address so the stream is positioned at tunneled data.
     if atyp == 0x01:
         await reader.readexactly(4)
@@ -243,8 +273,13 @@ async def open_socks_connection(
 
     Returns the tunneled (reader, writer) once CONNECT succeeds. Raises
     :class:`SocksError` on any handshake failure; the caller owns closing
-    the writer. The whole handshake shares one ``timeout`` budget.
+    the writer. The whole handshake shares one ``timeout`` budget. Running
+    out of it before the CONNECT request went out is the proxy's failure
+    (a ``SocksError``); after, while the proxy dials the target, it is the
+    target's (a ``SocksTargetError`` of kind ``timeout``), so every probe
+    reports it the same way.
     """
+    stage: list[str] = []
 
     async def _handshake() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         try:
@@ -255,7 +290,7 @@ async def open_socks_connection(
             raise SocksError(f"cannot reach SOCKS proxy {proxy.host}:{proxy.port}: {exc}") from exc
         try:
             await _negotiate_auth(reader, writer, proxy)
-            await _send_connect(reader, writer, proxy, dest_host, dest_port)
+            await _send_connect(reader, writer, proxy, dest_host, dest_port, stage)
         except asyncio.IncompleteReadError as exc:
             writer.close()
             raise SocksError("SOCKS proxy closed the connection during the handshake") from exc
@@ -264,4 +299,14 @@ async def open_socks_connection(
             raise
         return reader, writer
 
-    return await asyncio.wait_for(_handshake(), timeout=timeout)
+    try:
+        return await asyncio.wait_for(_handshake(), timeout=timeout)
+    except TimeoutError:
+        if stage:
+            raise SocksTargetError(
+                f"SOCKS5 CONNECT: the target did not answer the proxy within {timeout:g}s",
+                "timeout",
+            ) from None
+        raise SocksError(
+            f"SOCKS proxy {proxy.host}:{proxy.port} did not complete the handshake in time"
+        ) from None
