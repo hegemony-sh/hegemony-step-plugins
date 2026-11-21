@@ -153,6 +153,26 @@ def _merge(store: list[ET.Element], new: list[ET.Element]) -> list[ET.Element]:
     return result
 
 
+_CHUNK_HEADER = re.compile(rb"\n#([1-9][0-9]{0,9})\n")
+
+
+def _take_chunked(buffer: bytes) -> tuple[bytes, bytes] | None:
+    """``(message, rest)`` when ``buffer`` starts with a whole chunked message, else None."""
+    parts: list[bytes] = []
+    position = 0
+    while True:
+        if buffer.startswith(b"\n##\n", position):
+            return b"".join(parts), buffer[position + 4 :]
+        header = _CHUNK_HEADER.match(buffer, position)
+        if header is None:
+            return None
+        end = header.end() + int(header.group(1))
+        if end > len(buffer):
+            return None
+        parts.append(buffer[header.end() : end])
+        position = end
+
+
 class FakeChannel:
     """The byte stream of one session, served by the fake device."""
 
@@ -209,22 +229,9 @@ class FakeChannel:
         buffer = b""
         while True:
             if self._chunked:
-                match = re.match(rb"((?:\n#\d+\n[\s\S]*?)+)\n##\n", buffer)
-                message = None
-                if match:
-                    raw, rest = match.group(1), buffer[match.end() :]
-                    parts, position = [], 0
-                    while position < len(raw):
-                        header = re.match(rb"\n#(\d+)\n", raw[position:])
-                        if not header:
-                            break
-                        size = int(header.group(1))
-                        start = position + header.end()
-                        parts.append(raw[start : start + size])
-                        position = start + size
-                    if position == len(raw):
-                        message, buffer = b"".join(parts), rest
-                if message is not None:
+                taken = _take_chunked(buffer)
+                if taken is not None:
+                    message, buffer = taken
                     yield message.decode()
                     continue
             else:
