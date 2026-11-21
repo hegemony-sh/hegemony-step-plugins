@@ -10,6 +10,7 @@ from __future__ import annotations
 import fnmatch
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -173,6 +174,70 @@ def _asset_matches(path: str, pattern: str) -> bool:
     """A simple glob as @semantic-release/git reads it: ``*`` stays in one segment."""
     parts, globs = path.split("/"), pattern.split("/")
     return len(parts) == len(globs) and all(map(fnmatch.fnmatchcase, parts, globs))
+
+
+def test_every_file_that_names_a_default_tool_states_the_series_its_source_sets():
+    # The image tags name plugin releases, so the docs, the READMEs and the
+    # Image fields' help say which tool series the default runs.
+    verifier = _script("verify_release_version")
+    paths = _script("package_paths")
+
+    assert [tool.name for tool in paths.BUNDLED_TOOLS] == ["ansible-core", "OpenTofu", "Terraform"]
+    for tool in paths.BUNDLED_TOOLS:
+        series = verifier.tool_series(tool, (paths.ROOT / tool.source).read_text(encoding="utf-8"))
+        assert series is not None, tool.source
+        assert verifier.tool_docs_failures(tool, series) == []
+        # And the check does fail for a series nothing states.
+        assert len(verifier.tool_docs_failures(tool, "0.0")) == len(tool.files)
+
+
+@pytest.mark.parametrize(
+    ("version", "tags", "previous"),
+    [
+        ("0.48.2", ["v0.48.0", "v0.48.1", "v0.47.9", "v0.48.3"], "v0.48.1"),
+        # semantic-release never skips, but a deleted tag must not hide a move.
+        ("0.48.5", ["v0.48.0", "v0.48.2"], "v0.48.2"),
+        ("0.48.10", ["v0.48.9", "v0.48.1"], "v0.48.9"),
+        ("0.49.0", ["v0.48.0", "v0.48.1"], None),
+        ("0.48.1", ["v0.4.0", "v0.480.0", "v0.48.0-rc1"], None),
+        ("not-a-version", ["v0.48.0"], None),
+    ],
+)
+def test_a_patch_release_is_compared_with_the_release_before_it(version, tags, previous):
+    assert _script("verify_release_version").previous_patch_tag(version, tags) == previous
+
+
+def test_a_patch_release_may_not_move_a_default_tool_to_another_series():
+    verifier = _script("verify_release_version")
+    paths = _script("package_paths")
+    current = {
+        tool.source: (paths.ROOT / tool.source).read_text(encoding="utf-8")
+        for tool in paths.BUNDLED_TOOLS
+    }
+
+    def same(tag: str, path: str) -> str | None:
+        return current[path]
+
+    def older_tofu(tag: str, path: str) -> str | None:
+        text = current[path]
+        return re.sub(r"(ARG OPENTOFU_VERSION=)\d+\.\d+\.", r"\g<1>1.0.", text)
+
+    def newer_patches(tag: str, path: str) -> str | None:
+        # 2.19.13 to 2.19.99: a patch release of the tool is no new series.
+        return re.sub(r"(_VERSION=\d+\.\d+\.)\d+", r"\g<1>99", current[path])
+
+    assert verifier.tool_series_failures("0.48.1", "v0.48.0", same) == []
+    assert verifier.tool_series_failures("0.48.1", "v0.48.0", newer_patches) == []
+    # A tool the previous release did not have yet is new, not moved.
+    assert verifier.tool_series_failures("0.48.1", "v0.48.0", lambda tag, path: None) == []
+    # A minor release has no release to keep to.
+    assert verifier.tool_series_failures("0.49.0", None, older_tofu) == []
+
+    failures = verifier.tool_series_failures("0.48.1", "v0.48.0", older_tofu)
+    assert len(failures) == 1
+    assert "moves OpenTofu from 1.0 (v0.48.0) to " in failures[0]
+    assert "0.48.1 is a patch release" in failures[0]
+    assert "feat" in failures[0]
 
 
 def test_the_release_commit_carries_every_file_set_version_writes():

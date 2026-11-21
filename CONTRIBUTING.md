@@ -202,6 +202,21 @@ step any more: do not bump versions or push `v*` tags by hand.
 | breaking change (any type with `!`, such as `feat!:` or `refactor!:`, or a `BREAKING CHANGE:` footer) | **minor, while the major is 0** |
 | `chore`, `docs`, `ci`, `test`, `refactor`, `build`, `style` | none |
 
+A change of the series (the `X.Y`) of a tool the steps run by default is a
+`feat`, whatever else the commit does: ansible-core
+(`images/ansible-runner/Dockerfile`), OpenTofu
+(`images/opentofu-runner/Dockerfile`) and Terraform (`DEFAULT_IMAGES` in
+`plugins/steps_tf/src/hegemony_steps_tf/common.py`). Flows on the default
+image get the new tool with the upgrade, so it must be a minor release with
+its own changelog line, such as `feat(tf): build the runner image on
+OpenTofu 1.13`. `scripts/verify_release_version.py` refuses a patch release
+whose tools differ in series from the previous release of that minor; if a
+release fails on it, push a `feat` commit that names the change. A newer
+patch release of the same series (1.12.6 to 1.12.7) may ship as a `fix`. The
+files that state a series (the steps' docs, READMEs and Image field help) are
+checked against the one that sets it, by the same script and by
+`tests/test_release_versions.py`.
+
 The 0.x rule is the `"breaking": true` entry in `.releaserc.json`'s
 `releaseRules`; once the packages reach 1.0, change its `release` to
 `major`. Deleting it is not enough: the analyzer applies every rule that

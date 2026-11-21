@@ -59,6 +59,60 @@ class RunnerImage:
 
 _ANSIBLE = ROOT / "plugins" / "steps_ansible"
 _TF = ROOT / "plugins" / "steps_tf"
+_ANSIBLE_DOCS = (
+    _ANSIBLE / "src" / "hegemony_steps_ansible" / "playbook.py",
+    _ANSIBLE / "src" / "hegemony_steps_ansible" / "docs" / "ansible.playbook.md",
+    _ANSIBLE / "README.md",
+    ROOT / "images" / "ansible-runner" / "Dockerfile",
+)
+_TF_DOCS = (
+    _TF / "src" / "hegemony_steps_tf" / "plan.py",
+    _TF / "src" / "hegemony_steps_tf" / "docs" / "tf.plan.md",
+    _TF / "README.md",
+)
+
+
+@dataclass(frozen=True)
+class BundledTool:
+    """A tool a step runs by default, and where its version is set.
+
+    The image tags name plugin releases, so the tool's series (its X.Y) is
+    stated wherever a flow author reads about the default, as ``<name> X.Y``.
+    A patch release of the plugins keeps the series; a new one needs a minor
+    release (scripts/verify_release_version.py checks both).
+    """
+
+    #: The tool as the docs name it.
+    name: str
+    #: The file that sets the version, relative to the repository root, so it
+    #: can be read at a release tag too.
+    source: str
+    #: The line of ``source`` that sets it; group 1 is the series, X.Y.
+    pattern: str
+    #: Every file that states the series as ``<name> X.Y``.
+    files: tuple[Path, ...]
+
+
+BUNDLED_TOOLS = (
+    BundledTool(
+        name="ansible-core",
+        source="images/ansible-runner/Dockerfile",
+        pattern=r"^ARG ANSIBLE_CORE_VERSION=(\d+\.\d+)\.",
+        files=_ANSIBLE_DOCS,
+    ),
+    BundledTool(
+        name="OpenTofu",
+        source="images/opentofu-runner/Dockerfile",
+        pattern=r"^ARG OPENTOFU_VERSION=(\d+\.\d+)\.",
+        files=(*_TF_DOCS, ROOT / "images" / "opentofu-runner" / "Dockerfile"),
+    ),
+    BundledTool(
+        name="Terraform",
+        source="plugins/steps_tf/src/hegemony_steps_tf/common.py",
+        pattern=r'^    "terraform": "hashicorp/terraform:(\d+\.\d+)\.',
+        files=_TF_DOCS,
+    ),
+)
 
 RUNNER_IMAGES = (
     RunnerImage(
