@@ -653,14 +653,17 @@ async def test_a_general_proxy_failure_stays_a_socks_error():
     assert result.error_kind == "socks_error"
 
 
+@pytest.mark.parametrize("probe_class", [TcpConnectProbe, HttpHealthProbe])
 @pytest.mark.parametrize(("hang_at", "kind"), [("greeting", "socks_error"), ("connect", "timeout")])
-async def test_a_stall_is_the_proxys_before_the_connect_and_the_targets_after(hang_at, kind):
+async def test_a_stall_is_the_proxys_before_the_connect_and_the_targets_after(
+    probe_class, hang_at, kind
+):
     """A proxy that stalls in its own handshake is a socks_error, never a
     target timeout, so probe.wait_unreachable cannot count a live target down."""
     server = _FakeSocks5Server(hang_at=hang_at)
     await server.start()
     try:
-        result = await TcpConnectProbe().execute(
+        result = await probe_class().execute(
             "10.9.9.9",
             {"port": 22, "timeout_ms": 500, "socks_proxy": f"socks5://127.0.0.1:{server.port}"},
         )

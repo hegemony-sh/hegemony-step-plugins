@@ -273,7 +273,8 @@ async def open_socks_connection(
     the writer. The whole handshake shares one ``timeout`` budget. Running
     out of it before the CONNECT request went out is the proxy's failure
     (a ``SocksError``); after, while the proxy dials the target, it is the
-    target's (``TimeoutError``).
+    target's (a ``SocksTargetError`` of kind ``timeout``), so every probe
+    reports it the same way.
     """
     stage: list[str] = []
 
@@ -299,7 +300,10 @@ async def open_socks_connection(
         return await asyncio.wait_for(_handshake(), timeout=timeout)
     except TimeoutError:
         if stage:
-            raise
+            raise SocksTargetError(
+                f"SOCKS5 CONNECT: the target did not answer the proxy within {timeout:g}s",
+                "timeout",
+            ) from None
         raise SocksError(
             f"SOCKS proxy {proxy.host}:{proxy.port} did not complete the handshake in time"
         ) from None
