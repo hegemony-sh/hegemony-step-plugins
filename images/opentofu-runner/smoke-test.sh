@@ -12,6 +12,11 @@
 set -eu
 test "$(id -u)" = 0
 tofu version
+# The workflow names the version the variant must have (variants.json).
+if [ -n "${EXPECT_VERSION:-}" ]; then
+  tofu version | head -n 1 | grep -qxF "OpenTofu v${EXPECT_VERSION}" \
+    || { echo "expected OpenTofu ${EXPECT_VERSION}"; exit 1; }
+fi
 for b in git ssh timeout; do command -v "$b" >/dev/null || { echo "missing $b"; exit 1; }; done
 timeout -s TERM -k 1 5 true
 test -s /etc/ssl/certs/ca-certificates.crt

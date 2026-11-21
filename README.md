@@ -151,7 +151,9 @@ command fetches it from GitHub.
 The runner images (`ghcr.io/hegemony-sh/ansible-runner`,
 `ghcr.io/hegemony-sh/opentofu-runner` and `ghcr.io/hegemony-sh/git-runner`)
 are signed by the Images workflow from the release tag, and carry the same
-kind of provenance. Both checks
+kind of provenance. The Ansible and OpenTofu images are also published per
+tool series (`ansible-runner:X.Y.Z-core2.21`, `opentofu-runner:X.Y.Z-tofu1.13`),
+which the steps' version settings name; those tags verify the same way. Both checks
 below accept only that workflow run at a release tag:
 
 ```bash

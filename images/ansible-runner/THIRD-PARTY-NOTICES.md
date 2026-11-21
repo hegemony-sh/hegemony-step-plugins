@@ -62,6 +62,11 @@ LGPL-2.1-or-later programs alongside MIT, BSD and Apache-2.0 ones.
 
 ### Python packages this image installs
 
+The Images workflow builds the Dockerfile once for each ansible-core series in
+[`variants.json`](variants.json) and tags the result with the series
+(`X.Y.Z-core2.21`). These notices cover each of them; the inventories written
+at build time, listed above, say exactly what a given image holds.
+
 | Package | Licence | Used for |
 | --- | --- | --- |
 | `ansible-core` | GPL-3.0-or-later | `ansible-playbook` itself |
