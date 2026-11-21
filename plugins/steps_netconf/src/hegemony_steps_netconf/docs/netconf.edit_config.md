@@ -68,7 +68,8 @@ run, no confirmed commit, and the diff shows running before and after.
 Diff Filter (advanced) is a subtree filter limiting what is read for the
 diff, for devices with a large configuration. With a filter, an empty diff
 does not show that nothing changed outside it, so the step validates and
-commits the change all the same (and says so in `notes`). Save to startup uses
+commits the change all the same, counts it as changed, and says so in
+`notes`. Save to startup uses
 copy-config when the device has a startup datastore, else Cisco's
 `save-config` RPC (IOS XE). With Commit "confirm in a later step" the save
 waits for the confirmation: the output sets `save_requested`, and the

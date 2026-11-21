@@ -568,6 +568,9 @@ async def test_a_diff_filter_that_hides_the_change_still_commits_it():
     entry = result.output["devices"]["r1"]
     assert result.success, result.error
     assert entry["diff"] == "" and entry["committed"]
+    # Unknown outside the filter, so counted as changed, never as "0 changed".
+    assert entry["changed"] is True
+    assert "1 changed" in result.summary
     assert any("filtered diff shows no difference" in note for note in entry["notes"])
     assert _running_hostname(device) == "r2"
 
@@ -770,6 +773,8 @@ async def test_running_with_a_diff_filter_counts_the_change_as_made():
     entry = result.output["devices"]["r1"]
     assert result.success, result.error
     assert entry["committed"] and entry["saved"] == "save-config"
+    assert entry["changed"] is True
+    assert "1 changed" in result.summary
     assert device.saved == 1
 
 

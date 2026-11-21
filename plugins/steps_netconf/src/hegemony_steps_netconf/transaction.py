@@ -155,9 +155,11 @@ async def change_candidate(
             result.notes.append("the change leaves the configuration as it is: nothing committed")
             return result
         if not result.changed:
+            # Unknown, so counted as changed: the part outside the filter may differ.
+            result.changed = True
             result.notes.append(
                 "the filtered diff shows no difference; the part outside the filter may "
-                "differ, so the change is committed as asked"
+                "differ, so the change is committed as asked and counted as changed"
             )
         if options.validate and session.can_validate:
             await session.validate("candidate")
@@ -278,12 +280,14 @@ async def change_running(
             result.before, result.after, before_name="running (before)", after_name="running"
         )
         result.changed = bool(result.diff)
-        result.committed = result.changed or not diff_complete
         if not result.changed and not diff_complete:
+            # Unknown, so counted as changed (and saved): the part outside the filter may differ.
+            result.changed = True
             result.notes.append(
                 "the filtered diff shows no difference; the part outside the filter may "
-                "have changed"
+                "have changed, so the change is counted as changed"
             )
+        result.committed = result.changed
         if not session.supports(CAP_ROLLBACK_ON_ERROR):
             result.notes.append(
                 "the device has no :rollback-on-error, so a failed edit may have applied in part"
