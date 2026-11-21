@@ -66,7 +66,7 @@ ARG GO=1.26
 # them, and a build pulls only the one GO names. All base images are pinned by
 # digest, so a build uses exactly the reviewed image; Renovate proposes the
 # new digest when a tag moves (.github/renovate.json).
-FROM golang:1.26.10-bookworm@sha256:5de7c99eb78ca5e515a4c340235d0955ec5964a5071c492c15503d7c267da473 AS go-1.26
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS go-1.26
 FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS go-1.27
 
 FROM go-${GO} AS tofu
