@@ -310,6 +310,11 @@ def test_values_render_as_plain_json():
     assert render_value(rfc1902.IpAddress("192.0.2.1")) == ("IpAddress", "192.0.2.1")
     assert render_value(rfc1902.OctetString(b"\x00\x1b\x21")) == ("OctetString", "0x001b21")
     assert render_value(rfc1902.OctetString("r1.example")) == ("OctetString", "r1.example")
+    assert render_value(rfc1902.OctetString("München\tlab".encode())) == (
+        "OctetString",
+        "München\tlab",
+    )
+    assert render_value(rfc1902.OctetString(b"a\x07b")) == ("OctetString", "0x610762")
     kind, long_text = render_value(rfc1902.OctetString("x" * 5000))
     assert len(long_text) == 1024 and long_text.endswith("\u2026")
 

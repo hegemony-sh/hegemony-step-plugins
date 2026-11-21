@@ -414,6 +414,49 @@ def newest_captures(artifacts: list[dict[str, Any]], step_id: str) -> list[dict[
     return list(best.values())
 
 
+def _device_key(meta: dict[str, Any]) -> str | None:
+    """The device an artifact's record names: its id, else its name."""
+    for field_name in ("device_id", "device_name"):
+        value = meta.get(field_name)
+        if isinstance(value, str) and value:
+            return f"{field_name}:{value}"
+    return None
+
+
+_UNDATED = datetime.min.replace(tzinfo=UTC)
+
+
+def _order(artifact: dict[str, Any], position: int) -> tuple[int, datetime, int]:
+    """Sort key for "newer": dated after undated, then by date, then by list position."""
+    created = _created_at(artifact)
+    return (0, _UNDATED, position) if created is None else (1, created, position)
+
+
+def newest_device_failures(
+    artifacts: list[dict[str, Any]], step_id: str
+) -> dict[str, tuple[tuple[int, datetime, int], str]]:
+    """Each device's newest device-wide failure (an error with no command), with its order key.
+
+    ``netcli.collect_evidence`` records a device it could not reach as one
+    ``error`` artifact without a command, so it never shares a capture key
+    with the device's command outputs.
+    """
+    failures: dict[str, tuple[tuple[int, datetime, int], str]] = {}
+    for position, artifact in enumerate(artifacts):
+        meta = _metadata(artifact)
+        if artifact.get("step_id") != step_id or artifact.get("kind") != "error":
+            continue
+        if isinstance(meta.get("command"), str):
+            continue
+        device = _device_key(meta)
+        if device is None:
+            continue
+        key = _order(artifact, position)
+        if device not in failures or key >= failures[device][0]:
+            failures[device] = (key, str(meta.get("error") or "the capture failed"))
+    return failures
+
+
 def _label(artifact: dict[str, Any]) -> str:
     meta = _metadata(artifact)
     if isinstance(meta.get("command"), str):
@@ -459,9 +502,19 @@ def select_files(artifacts: list[dict[str, Any]], step_id: str, template: str) -
     selection = Selection()
     total = 0
     owners: dict[str, str] = {}
+    positions = {id(artifact): position for position, artifact in enumerate(artifacts)}
+    device_failures = newest_device_failures(artifacts, step_id)
     for artifact in newest_captures(artifacts, step_id):
         label = _label(artifact)
         failure = _failure(artifact)
+        meta = _metadata(artifact)
+        device = _device_key(meta)
+        if failure is None and isinstance(meta.get("command"), str) and device in device_failures:
+            # The device failed after this capture was read (a later loop
+            # iteration or retry): keep the repository's file as it is.
+            failed_at, reason = device_failures[device]
+            if failed_at > _order(artifact, positions[id(artifact)]):
+                failure = f"a later attempt failed: {reason}"
         if failure:
             selection.skipped.append(f"{label}: {failure}")
             continue
@@ -548,7 +601,19 @@ def build_script(
         'export HOME="$work/home"',
         'mkdir -p "$HOME"',
         # No prompt, no system or global config, no hooks, no credential store.
+        # The step's own Environment Variables reach this shell too: drop every
+        # GIT_* variable but the commit identity, so none can undo what follows
+        # (GIT_CONFIG_PARAMETERS, GIT_SSL_NO_VERIFY, GIT_ALLOW_PROTOCOL, ...).
+        'for name in $(env | sed -n "s/^\\(GIT_[A-Za-z0-9_]*\\)=.*/\\1/p"); do',
+        '  case "$name" in',
+        "    GIT_AUTHOR_NAME|GIT_AUTHOR_EMAIL|GIT_COMMITTER_NAME|GIT_COMMITTER_EMAIL) ;;",
+        '    *) unset "$name" ;;',
+        "  esac",
+        "done",
+        "unset SSH_ASKPASS",
         "export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null",
+        # Paths are file names, never patterns (:(glob), *, ...).
+        "export GIT_LITERAL_PATHSPECS=1",
         "export GIT_PROTOCOL_FROM_USER=0",
         # Settings every git call gets, also under `timeout`, which cannot run
         # a shell function: no hooks, no fsmonitor, HTTPS only, no stored
@@ -862,6 +927,18 @@ class GitCommitHandler(BaseHandler):
             if changed
             else []
         )
+        if changed and (not commit or not changed_files):
+            # A push happened, but its report is incomplete: never guess.
+            return HandlerResult(
+                success=False,
+                summary="git commit result unknown",
+                error=(
+                    "the push succeeded but the commit or the changed files could not be read "
+                    "from the container"
+                ),
+                metrics=metrics,
+                evidence=evidence,
+            )
         metrics["files_changed"] = len(changed_files)
         evidence.append(
             {

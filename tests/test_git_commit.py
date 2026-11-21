@@ -233,6 +233,7 @@ def _run(
     branch: str = "main",
     create_branch: bool = False,
     message: str = "backup\n",
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Stage the step's files under a temporary root and run the script there."""
     root = tmp_path / f"root-{time.monotonic_ns()}"
@@ -257,6 +258,7 @@ def _run(
     )
     (root / "run.sh").write_text(script)
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")} | ENV
+    env |= extra_env or {}
     result = subprocess.run(
         ["/bin/sh", str(root / "run.sh")], env=env, capture_output=True, text=True, timeout=60
     )
@@ -566,3 +568,62 @@ def test_the_docs_page_names_every_declared_output_field():
     text = load_docs_bundle("hegemony_steps_git")["git.commit"]
     for field in GitCommitHandler.output_fields:
         assert f"output.{field.name}`" in text, field.name
+
+
+def test_git_variables_from_the_step_environment_cannot_undo_the_settings(tmp_path, remote):
+    # Each of these would break or weaken the run if it reached git.
+    hostile = {
+        "GIT_DIR": str(tmp_path / "elsewhere"),
+        "GIT_INDEX_FILE": str(tmp_path / "index"),
+        "GIT_SSL_NO_VERIFY": "1",
+        "GIT_ALLOW_PROTOCOL": "ext",
+        "GIT_CONFIG_PARAMETERS": "'core.hookspath'='/tmp' 'credential.helper'='store'",
+    }
+    result, out = _run(tmp_path, f"file://{remote}", {"r1.cfg": "x\n"}, extra_env=hostile)
+    assert result.returncode == 0, result.stderr
+    assert (out / "changed").read_text().strip() == "yes"
+    author = _git("--git-dir", str(remote), "log", "-1", "--format=%an <%ae>", "main").strip()
+    assert author == "Hegemony <hegemony@localhost>"
+
+
+def test_paths_are_staged_literally_not_as_patterns(tmp_path, remote):
+    # ":(top)r1.cfg" as a pathspec would mean r1.cfg, which does not exist.
+    result, _ = _run(tmp_path, f"file://{remote}", {":(top)r1.cfg": "x\n"})
+    assert result.returncode == 0, result.stderr
+    tree = _git("--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main").splitlines()
+    assert ":(top)r1.cfg" in tree
+
+
+def test_a_device_that_failed_after_its_capture_keeps_its_old_file():
+    artifacts = [
+        _artifact("r1", "show run", "first read", created="2026-11-20T10:00:00Z"),
+        {
+            "step_id": "collect",
+            "name": "r1:connection_error",
+            "kind": "error",
+            "created_at": "2026-11-20T11:00:00Z",
+            "content_json": {"device_id": "id-r1", "device_name": "r1", "error": "timed out"},
+        },
+        _artifact("r2", "show run", "r2 read", created="2026-11-20T11:00:00Z"),
+        {
+            "step_id": "collect",
+            "name": "r2:connection_error",
+            "kind": "error",
+            "created_at": "2026-11-20T10:00:00Z",
+            "content_json": {"device_id": "id-r2", "device_name": "r2", "error": "refused"},
+        },
+    ]
+    selection = select_files(artifacts, "collect", "{device}.cfg")
+    # r1 failed after its capture: skipped. r2 recovered after its failure: written.
+    assert selection.files == {"r2.cfg": "r2 read"}
+    assert "r1:show run: a later attempt failed: timed out" in selection.skipped
+
+
+async def test_a_push_with_an_incomplete_report_fails_rather_than_guess(jobs):
+    _, outcomes = jobs
+    outcomes.append(_outcome(collected={CHANGED_OUT: b"yes\n", COMMIT_OUT: b"\n"}))
+    result = await GitCommitHandler().execute(
+        _ctx(_valid(), _Services([_artifact("r1", "show run", "x")]))
+    )
+    assert not result.success
+    assert "could not be read" in (result.error or "")

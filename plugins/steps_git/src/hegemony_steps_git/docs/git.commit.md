@@ -35,7 +35,9 @@ Evidence Step chooses the earlier step whose evidence is committed. The
 step takes that step's newest artifact per device and command, so a loop
 or a retry commits what was read last. A capture that failed (an
 unreachable device, a command the device refused) is skipped and listed in
-the output, and its file in the repository is left as it was. Artifacts
+the output, and its file in the repository is left as it was. So is a
+capture the device failed after (it answered in one loop iteration and was
+unreachable in a later one): the step does not commit an older read. Artifacts
 without text (uploaded files) are skipped too.
 
 Path (default `{device}/{command}.txt`) says where each artifact goes in the
@@ -66,7 +68,9 @@ egress rules work as in `container.run`.
 When another run pushes to the branch between this step's clone and its
 push, the step starts again from the new branch head, up to three times.
 Git runs with hooks, system and global configuration and credential
-helpers off, and talks only HTTPS. A symbolic link in the repository on a
+helpers off, and talks only HTTPS; `GIT_*` variables set in Environment
+Variables are dropped, except the commit identity, so none can undo that.
+Paths are given to git literally, never as patterns. A symbolic link in the repository on a
 path the step writes fails the step instead of being followed.
 
 ## Output
@@ -104,5 +108,5 @@ certificate or cannot reach it (each named in the error), when the
 repository has a symbolic link or a folder where a file is written, and
 when the server refuses the push, or the branch kept moving through three
 tries. Nothing is committed in any of these cases. When the step's result
-cannot be read from the container, the step fails rather than guess
-whether the push happened.
+cannot be read from the container, or a push is reported without its
+commit or changed files, the step fails rather than guess.

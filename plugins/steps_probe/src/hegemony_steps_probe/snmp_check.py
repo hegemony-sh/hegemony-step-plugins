@@ -79,7 +79,8 @@ MIN_V3_KEY_CHARS = 8
 _OID_RE = re.compile(r"^\.?(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))+$")
 _BARE_SECRET_REF_RE = re.compile(r"^[a-z][a-z0-9+.-]*://[^\s'\"{}\\]+$")
 _TEMPLATE_RE = re.compile(r"\{\{|\{%")
-_PRINTABLE = frozenset(string.printable)
+#: Whitespace kept in a text value, next to every printable character.
+_WHITESPACE = frozenset(string.whitespace)
 
 AuthProtocol = Literal["none", "sha", "sha224", "sha256", "sha384", "sha512"]
 PrivProtocol = Literal[
@@ -409,7 +410,7 @@ def render_value(value: Any) -> tuple[str, Any]:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             text = None
-        if text is not None and all(char in _PRINTABLE for char in text):
+        if text is not None and all(char.isprintable() or char in _WHITESPACE for char in text):
             rendered = text
         else:
             rendered = "0x" + raw.hex()
