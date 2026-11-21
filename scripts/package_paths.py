@@ -93,6 +93,13 @@ class BundledTool:
     pattern: str
     #: Every file that states the series as ``<name> X.Y``.
     files: tuple[Path, ...]
+    #: The series the tool's image is published for, when a step can choose:
+    #: images/<name>/variants.json, relative to the repository root.
+    variants: str | None = None
+    #: The files that state every one of those series, the first of them the
+    #: step's own choice (a ``Literal["default", ...]``, named by ``choice``).
+    variant_files: tuple[Path, ...] = ()
+    choice: str = ""
 
 
 BUNDLED_TOOLS = (
@@ -101,12 +108,18 @@ BUNDLED_TOOLS = (
         source="images/ansible-runner/Dockerfile",
         pattern=r"^ARG ANSIBLE_CORE_VERSION=(\d+\.\d+)\.",
         files=_ANSIBLE_DOCS,
+        variants="images/ansible-runner/variants.json",
+        variant_files=_ANSIBLE_DOCS[:2],
+        choice="AnsibleCoreVersion",
     ),
     BundledTool(
         name="OpenTofu",
         source="images/opentofu-runner/Dockerfile",
         pattern=r"^ARG OPENTOFU_VERSION=(\d+\.\d+)\.",
         files=(*_TF_DOCS, ROOT / "images" / "opentofu-runner" / "Dockerfile"),
+        variants="images/opentofu-runner/variants.json",
+        variant_files=(_TF / "src" / "hegemony_steps_tf" / "common.py", *_TF_DOCS[:2]),
+        choice="OpenTofuVersion",
     ),
     BundledTool(
         name="Terraform",

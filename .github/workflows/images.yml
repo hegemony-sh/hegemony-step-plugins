@@ -7,6 +7,12 @@
 # images/<name>: ansible-runner (ansible.playbook), opentofu-runner (tf.plan
 # and tf.apply with OpenTofu) and git-runner (git.commit). scripts/package_paths.py lists the same images.
 #
+# ansible-runner and opentofu-runner are built once per tool series in
+# images/<name>/variants.json, each with that entry's build arguments. The
+# default series gets the tags described below; every series, the default
+# too, also gets X.Y.Z-<tag><series> and X.Y-<tag><series> (0.51-tofu1.13),
+# which the steps' version settings name.
+#
 # Publishing the GitHub Release vX.Y.Z (the Release workflow does, with
 # RELEASE_TOKEN) publishes X.Y.Z and X.Y from its tag. Not the tag push: the
 # tagged release commit says [skip ci], which stops every push-triggered run,
@@ -56,7 +62,7 @@ concurrency:
 
 jobs:
   image:
-    name: ${{ matrix.image }}
+    name: ${{ matrix.name || matrix.image }}
     # Runner selection as in ci.yml (CI_RUNNER, else GitHub-hosted); read the
     # note there before the repository takes pull requests from forks: a pull
     # request that changes an image builds and runs that image on this runner.
@@ -88,11 +94,29 @@ jobs:
             # IMAGE:X.Y.
             default_file: plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py
             default_line: 'DEFAULT_IMAGE = "{image}"'
+            # The tool series this entry builds, from images/<name>/variants.json.
+            # The default series is the image the plain tags name; every
+            # series, the default too, is also tagged X.Y.Z-<tag><series> and
+            # X.Y-<tag><series> (0.51-core2.19), which a step's version
+            # setting names. tests/test_release_versions.py checks these
+            # entries against variants.json.
+            variant: "2.19"
+          - image: ansible-runner
+            name: ansible-runner (ansible-core 2.21)
+            description: Execution image of the Hegemony ansible.playbook step with ansible-core 2.21
+            licenses: GPL-3.0-or-later AND GPL-2.0-only AND GPL-2.0-or-later AND LGPL-2.1-or-later AND Python-2.0 AND Apache-2.0 AND MIT AND BSD-3-Clause AND MPL-2.0 AND SSH-OpenSSH
+            variant: "2.21"
           - image: opentofu-runner
             description: Default OpenTofu image of the Hegemony tf.plan and tf.apply steps
             licenses: MPL-2.0 AND BSD-3-Clause AND Apache-2.0 AND MIT AND GPL-2.0-only AND GPL-2.0-or-later AND SSH-OpenSSH
             default_file: plugins/steps_tf/src/hegemony_steps_tf/common.py
             default_line: '    "opentofu": "{image}",'
+            variant: "1.12"
+          - image: opentofu-runner
+            name: opentofu-runner (OpenTofu 1.13)
+            description: OpenTofu 1.13 image of the Hegemony tf.plan and tf.apply steps
+            licenses: MPL-2.0 AND BSD-3-Clause AND Apache-2.0 AND MIT AND GPL-2.0-only AND GPL-2.0-or-later AND SSH-OpenSSH
+            variant: "1.13"
           - image: git-runner
             description: Default execution image of the Hegemony git.commit step
             licenses: GPL-2.0-only AND GPL-2.0-or-later AND MIT AND MPL-2.0 AND Apache-2.0
@@ -100,6 +124,10 @@ jobs:
             default_line: 'DEFAULT_IMAGE = "{image}"'
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+      # A pull request's image in the runner's daemon. The self-hosted runners
+      # share one daemon and the variants of an image build side by side, so
+      # the tag carries the run and the variant.
+      PR_IMAGE: ${{ matrix.image }}:pr-${{ github.run_id }}-${{ github.run_attempt }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }}
     steps:
       - name: Resolve the release
         id: release
@@ -146,7 +174,7 @@ jobs:
       # The tag's own step must name this minor version, or the release would
       # publish an image its wheels never pull.
       - name: Check the step names this release's image
-        if: steps.release.outputs.publish == 'true'
+        if: steps.release.outputs.publish == 'true' && matrix.default_file
         env:
           EXPECTED: ${{ env.IMAGE }}:${{ steps.release.outputs.minor }}
           DEFAULT_FILE: ${{ matrix.default_file }}
@@ -158,6 +186,48 @@ jobs:
             echo "::error::${DEFAULT_FILE} has no line: ${line}"
             exit 1
           fi
+
+      # The variant's build arguments and tag suffix, from variants.json. An
+      # image without variants (no matrix.variant) builds with its Dockerfile's
+      # defaults and gets the plain tags only.
+      - name: Variant
+        id: variant
+        env:
+          NAME: ${{ matrix.image }}
+          VARIANT: ${{ matrix.variant }}
+          DEFAULT_FILE: ${{ matrix.default_file }}
+        run: |
+          set -euo pipefail
+          if [ -z "$VARIANT" ]; then
+            echo "plain=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 - "images/${NAME}/variants.json" "$VARIANT" "$DEFAULT_FILE" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, re, sys
+
+          path, variant, default_file = sys.argv[1:4]
+          data = json.load(open(path, encoding="utf-8"))
+          args = data["variants"].get(variant)
+          if args is None:
+              sys.exit(f"::error::{path} has no variant {variant}")
+          is_default = variant == data["default"]
+          # The entry that carries the step's default line is the default series.
+          if is_default != bool(default_file):
+              sys.exit(f"::error::{path} names {data['default']} as the default series")
+          for key, value in args.items():
+              if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or "\n" in value:
+                  sys.exit(f"::error::{path}: bad build argument {key}")
+          suffix = f"{data['tag']}{variant}"
+          if not re.fullmatch(r"[a-z]+[0-9]+\.[0-9]+", suffix):
+              sys.exit(f"::error::{path}: bad tag suffix {suffix}")
+          print(f"plain={'true' if is_default else 'false'}")
+          print(f"suffix={suffix}")
+          print(f"version={args[data['version_arg']]}")
+          print("build_args<<EOF")
+          for key, value in args.items():
+              print(f"{key}={value}")
+          print("EOF")
+          PY
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
@@ -189,8 +259,9 @@ jobs:
         uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
         with:
           context: images/${{ matrix.image }}
+          build-args: ${{ steps.variant.outputs.build_args }}
           labels: ${{ steps.labels.outputs.labels }}
-          tags: ${{ matrix.image }}:pr-${{ github.run_id }}-${{ github.run_attempt }}
+          tags: ${{ env.PR_IMAGE }}
           load: true
           push: false
 
@@ -209,6 +280,7 @@ jobs:
         uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6
         with:
           context: images/${{ matrix.image }}
+          build-args: ${{ steps.variant.outputs.build_args }}
           labels: ${{ steps.labels.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           # Explicit, so the pushed digest is always an index that the
@@ -220,22 +292,23 @@ jobs:
         env:
           PUBLISH: ${{ steps.release.outputs.publish }}
           DIGEST: ${{ steps.build.outputs.digest }}
-          NAME: ${{ matrix.image }}
-          RUN: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           if [ "$PUBLISH" = "true" ]; then
             echo "image=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
           else
-            echo "image=${NAME}:pr-${RUN}" >> "$GITHUB_OUTPUT"
+            echo "image=${PR_IMAGE}" >> "$GITHUB_OUTPUT"
           fi
 
       # What the steps rely on, checked inside the image before any tag names
-      # it: images/<name>/smoke-test.sh, run by the image's /bin/sh.
+      # it: images/<name>/smoke-test.sh, run by the image's /bin/sh. For a
+      # variant it also checks the tool has the version variants.json names,
+      # so a build that ignored its build arguments never gets a variant's tag.
       - name: Smoke test
         env:
           IMAGE_REF: ${{ steps.ref.outputs.image }}
           NAME: ${{ matrix.image }}
-        run: docker run --rm -i "$IMAGE_REF" -s < "images/${NAME}/smoke-test.sh"
+          EXPECT_VERSION: ${{ steps.variant.outputs.version }}
+        run: docker run --rm -i -e EXPECT_VERSION "$IMAGE_REF" -s < "images/${NAME}/smoke-test.sh"
 
       # Gates the promotion: a CRITICAL/HIGH finding with a fixed version
       # upstream fails the job before any tag names the image. It fails a pull
@@ -301,6 +374,10 @@ jobs:
           MINOR: ${{ steps.release.outputs.minor }}
           REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
+          # The plain tags (X.Y.Z, X.Y) name the default series only; every
+          # variant also gets its own (X.Y.Z-<suffix>, X.Y-<suffix>).
+          PLAIN: ${{ steps.variant.outputs.plain }}
+          SUFFIX: ${{ steps.variant.outputs.suffix }}
         run: |
           set -euo pipefail
           latest="$(
@@ -313,15 +390,26 @@ jobs:
           print(f"{minor}.{max(patches)}" if patches else "")
           ' "$MINOR"
           )"
-          tags=("${IMAGE}:${VERSION}")
-          if [ "$latest" = "$VERSION" ]; then
-            tags+=("${IMAGE}:${MINOR}")
-          elif [ -z "$latest" ]; then
+          names=()
+          if [ "$PLAIN" = "true" ]; then names+=(""); fi
+          if [ -n "$SUFFIX" ]; then names+=("-${SUFFIX}"); fi
+          if [ "${#names[@]}" -eq 0 ]; then
+            echo "::error::no tag to give the image"
+            exit 1
+          fi
+          if [ -z "$latest" ]; then
             echo "::error::found no release tag v${MINOR}.N"
             exit 1
-          else
-            echo "::notice::${VERSION} is not the newest ${MINOR} release (${latest}): ${IMAGE}:${MINOR} stays"
           fi
+          tags=()
+          for name in "${names[@]}"; do
+            tags+=("${IMAGE}:${VERSION}${name}")
+            if [ "$latest" = "$VERSION" ]; then
+              tags+=("${IMAGE}:${MINOR}${name}")
+            else
+              echo "::notice::${VERSION} is not the newest ${MINOR} release (${latest}): ${IMAGE}:${MINOR}${name} stays"
+            fi
+          done
           args=()
           for tag in "${tags[@]}"; do args+=(--tag "$tag"); done
           docker buildx imagetools create "${args[@]}" "${IMAGE}@${DIGEST}"
@@ -338,7 +426,4 @@ jobs:
       # which outlives the job on a self-hosted runner.
       - name: Remove the pull request image
         if: ${{ always() && steps.release.outputs.publish != 'true' }}
-        env:
-          NAME: ${{ matrix.image }}
-          RUN: ${{ github.run_id }}-${{ github.run_attempt }}
-        run: docker image rm "${NAME}:pr-${RUN}" >/dev/null 2>&1 || true
+        run: docker image rm "$PR_IMAGE" >/dev/null 2>&1 || true

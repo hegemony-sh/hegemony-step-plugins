@@ -7,12 +7,14 @@
 
 Also that a patch release keeps the series (X.Y) of every tool the steps run
 by default: a new one is a change of behaviour for every flow on the default
-image, so it needs a minor release.
+image, so it needs a minor release. Likewise it keeps every series a step can
+choose: a flow that names one would have no image after the upgrade.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -133,6 +135,78 @@ def tool_series_failures(
     return failures
 
 
+def variant_series(tool, text: str) -> tuple[str, list[str]] | None:
+    """The default series and every series ``text``, the tool's variants.json, publishes."""
+    try:
+        data = json.loads(text)
+        return str(data["default"]), sorted(str(series) for series in data["variants"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def variant_failures(tool) -> list[str]:
+    """Why the tool's variants disagree with its Dockerfile, its step or its docs."""
+    if tool.variants is None:
+        return []
+    read = variant_series(tool, (ROOT / tool.variants).read_text(encoding="utf-8"))
+    if read is None:
+        return [f"{tool.variants} must name a default and its variants"]
+    default, series = read
+    failures: list[str] = []
+    if default not in series:
+        failures.append(f"{tool.variants} names the default {default}, which it does not publish")
+    built = tool_series(tool, (ROOT / tool.source).read_text(encoding="utf-8"))
+    if built != default:
+        failures.append(
+            f"{tool.source} builds {tool.name} {built} by default, "
+            f"but {tool.variants} names {default}"
+        )
+    choice = re.search(
+        rf"^{re.escape(tool.choice)} = Literal\[([^\]]*)\]$",
+        tool.variant_files[0].read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    offered = re.findall(r'"([^"]*)"', choice.group(1)) if choice else []
+    if offered != ["default", *series]:
+        failures.append(
+            f"{tool.variant_files[0].relative_to(ROOT)} must offer exactly the series of "
+            f"{tool.variants}: {tool.choice} = Literal[{', '.join(['default', *series])}]"
+        )
+    for one in series:
+        stated = re.compile(r"(?<![\d.])" + re.escape(one) + r"(?![\d.]\d)")
+        failures.extend(
+            f"{path.relative_to(ROOT)} must name the {tool.name} series {one} "
+            f"({tool.variants} publishes it)"
+            for path in tool.variant_files
+            if not stated.search(path.read_text(encoding="utf-8"))
+        )
+    return failures
+
+
+def dropped_variant_failures(
+    version: str, previous_tag: str | None, read_at: Callable[[str, str], str | None]
+) -> list[str]:
+    """The series a step could choose in ``previous_tag`` that this patch release drops."""
+    failures: list[str] = []
+    for tool in BUNDLED_TOOLS:
+        if tool.variants is None or previous_tag is None:
+            continue
+        before_text = read_at(previous_tag, tool.variants)
+        before = variant_series(tool, before_text) if before_text is not None else None
+        now = variant_series(tool, (ROOT / tool.variants).read_text(encoding="utf-8"))
+        if before is None or now is None:
+            # No choice in the previous release; variant_failures reports a broken file.
+            continue
+        failures.extend(
+            f"{tool.variants} no longer publishes {tool.name} {series} ({previous_tag} did), "
+            f"but {version} is a patch release: flows that name the series would have no "
+            "image, so dropping one needs a minor release (CONTRIBUTING.md, Releasing)"
+            for series in before[1]
+            if series not in now[1]
+        )
+    return failures
+
+
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - fixed arguments, no shell
         ["git", "-C", str(ROOT), *args],  # noqa: S607
@@ -226,7 +300,9 @@ def main() -> None:
             "versions with; fetch the tags"
         )
     failures.extend(tool_series_failures(version, previous_tag, _read_at))
+    failures.extend(dropped_variant_failures(version, previous_tag, _read_at))
     for tool in BUNDLED_TOOLS:
+        failures.extend(variant_failures(tool))
         series = tool_series(tool, (ROOT / tool.source).read_text(encoding="utf-8"))
         if series is not None:
             failures.extend(tool_docs_failures(tool, series))

@@ -1,0 +1,14 @@
+{
+  "tool": "ansible-core",
+  "tag": "core",
+  "version_arg": "ANSIBLE_CORE_VERSION",
+  "default": "2.19",
+  "variants": {
+    "2.19": {
+      "ANSIBLE_CORE_VERSION": "2.19.15"
+    },
+    "2.21": {
+      "ANSIBLE_CORE_VERSION": "2.21.6"
+    }
+  }
+}
