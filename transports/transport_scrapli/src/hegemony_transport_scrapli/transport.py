@@ -980,17 +980,12 @@ class ScrapliTransport:
                 self._command_sent = False
                 result = self._result_from_response(command, await connection.send_command(command))
         except Exception as e:
-            # scrapli closes the session itself when its own timeout runs
-            # out, and cancelling the run closes it too: neither is the
-            # device closing it.
-            closed = self._command_sent and (
-                isinstance(e, _SessionClosed)
-                or (
-                    not isinstance(e, ScrapliTimeout)
-                    and not self._scrapli_closed
-                    and not _session_open(connection)
-                )
-            )
+            # Every close the prompt path can attribute to the device raises
+            # _SessionClosed with the output read so far (not one scrapli's
+            # own timeout caused); any other error, also on a session that
+            # closed meanwhile, stays a failure. Cancelling the run closes
+            # the session too, which is no reload either.
+            closed = self._command_sent and isinstance(e, _SessionClosed)
             if closed and not self._cancellation_registry.is_cancelled(self.step_run_id):
                 logger.warning(f"{self.host} closed the session during a command")
                 return _closed_result(command, getattr(e, "output", ""))

@@ -1220,9 +1220,10 @@ class SSHTransport:
                 )
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
-            closed = self._command_sent and (
-                isinstance(e, _SessionClosed) or not _session_open(connection)
-            )
+            # Every close the prompt path can attribute to the command raises
+            # _SessionClosed with the output read so far; any other error,
+            # also on a session that closed meanwhile, stays a failure.
+            closed = self._command_sent and isinstance(e, _SessionClosed)
             # Cancelling the run closes the session too; that is no reload.
             if closed and not self._cancellation_registry.is_cancelled(self.step_run_id):
                 logger.warning(f"{self.host} closed the session during a command")

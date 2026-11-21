@@ -601,3 +601,49 @@ async def test_scrapli_keeps_a_device_error_when_the_answer_cannot_be_written(mo
     assert result.disconnected is True
     assert result.exit_code == 1
     assert "Invalid input" in result.output
+
+
+def test_netmiko_keeps_a_repeated_question_a_failure_when_the_session_then_closes(monkeypatch):
+    """A dialogue error is no disconnect, also when the session closed meanwhile."""
+    from hegemony_step_sdk.cli_prompts import CliPromptError
+
+    transport = _netmiko()
+    monkeypatch.setattr(transport, "_cancellation_registry", _Registry(False))
+
+    def _asked_again(connection, command, prompts):
+        transport._command_sent = True
+        raise CliPromptError("The device asked again: Proceed with reload? [confirm]")
+
+    monkeypatch.setattr(transport, "_send_with_prompts", _asked_again)
+    closed = SimpleNamespace(
+        remote_conn=SimpleNamespace(closed=True, eof_received=True, transport=None)
+    )
+    result = transport._run_exec_command(closed, "reload")
+
+    assert result.disconnected is False
+    assert "asked again" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_scrapli_keeps_a_repeated_question_a_failure_when_the_session_then_closes(
+    monkeypatch,
+):
+    from hegemony_step_sdk.cli_prompts import CliPromptError
+
+    transport = ScrapliTransport(
+        DeviceConnectionSpec(
+            host=HOST, port=22, username=USERNAME, password=PASSWORD, platform="ios-xe"
+        ),
+        host_key_verifier=checks_off(),
+    )
+    transport.configure_cli_prompts(RELOAD_PROMPTS)
+    monkeypatch.setattr(transport, "_cancellation_registry", _Registry(False))
+
+    async def _asked_again(connection, command, prompts):
+        transport._command_sent = True
+        raise CliPromptError("The device asked again: Proceed with reload? [confirm]")
+
+    monkeypatch.setattr(transport, "_send_with_prompts", _asked_again)
+    result = await transport._send_exec_command(_QuietScrapliConnection(alive=False), "reload")
+
+    assert result.disconnected is False
