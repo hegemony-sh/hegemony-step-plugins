@@ -37,7 +37,14 @@ WHEELS = [
     (
         hegemony_steps_probe,
         "probe",
-        {"probe.connectivity", "probe.wait_reachable", "probe.http", "probe.dns", "probe.tls"},
+        {
+            "probe.connectivity",
+            "probe.wait_reachable",
+            "probe.http",
+            "probe.dns",
+            "probe.snmp",
+            "probe.tls",
+        },
     ),
     (
         hegemony_steps_netcli,
