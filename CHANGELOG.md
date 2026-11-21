@@ -1,3 +1,24 @@
+## [0.50.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.49.0...v0.50.0) (2026-11-21)
+
+### Features
+
+* **evidence:** compare an extracted part of the content in evidence.assert ([52dbb45](https://github.com/hegemony-sh/hegemony-step-plugins/commit/52dbb451d5efbb144bf0da9e2f0f9d9f2a2abd87))
+* **netcli:** allow netcli.execute's last command to end the session ([25da9bb](https://github.com/hegemony-sh/hegemony-step-plugins/commit/25da9bbb1ea78e881417aee59e1dceb3f8fe0c03))
+* **probe:** add probe.wait_unreachable to wait for targets to go down ([efda758](https://github.com/hegemony-sh/hegemony-step-plugins/commit/efda75878093723c13880d3bffac5e84568f9d34))
+
+### Bug Fixes
+
+* **netcli:** allow a disconnect only where the whole output is read ([755a32d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/755a32dfb767dc3c31156fe6c44dbdc1cc1f343f))
+* **netcli:** count a closed session only after the command went out ([e224433](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e22443327cf894207a9770a963fc66edf34e04fb))
+* **netcli:** count only a closed-session error as a disconnect ([f103352](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f10335286865dd02375e63089d4918f4e1c9a818))
+* **netcli:** keep cancellations, device errors and read errors failures ([8c2c781](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8c2c781f3d0ef607e851cc8e3210f8777fa4c87a))
+* **netcli:** keep the output when an answer meets a closed session ([6d6f1cf](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6d6f1cf484bf8c2d47d2bb906b1aa7475a6e95c7))
+* **netcli:** report only a session the device closed from scrapli ([a52482c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a52482c5ed91b839cdf1ff4f508a01aa5c052a85))
+* **probe:** blame the proxy for a stall after CONNECT succeeded ([a97efe6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a97efe6840d893b1e4b9f8d1ccb5d781ccefc2e9))
+* **probe:** count a target down only on real evidence ([f4ccf73](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f4ccf73de7509139f98c1d6319c9f730e55657c2))
+* **probe:** never blame the target for a stalled SOCKS proxy ([5d620f4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/5d620f4f17fa278211b4cf14b289715f459387a1))
+* **probe:** report a target that never answers the proxy as a timeout ([253ac99](https://github.com/hegemony-sh/hegemony-step-plugins/commit/253ac9901fb72c4af8ca77c8680101384b52d76e))
+
 ## [0.49.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.48.0...v0.49.0) (2026-11-21)
 
 ### Features
