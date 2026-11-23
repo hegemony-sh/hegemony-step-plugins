@@ -1398,6 +1398,23 @@ def test_a_non_ascii_prefix_declared_above_the_data_is_kept():
     assert inherited_prefixes(reply, "rpc-reply", "data")["\u00e9"] == "urn:e"
 
 
+def test_non_ascii_prefixes_on_the_enclosing_tags_are_read():
+    from hegemony_steps_netconf.client import canonical_xml, inherited_prefixes
+
+    def reply(uri: str) -> str:
+        return (
+            '<\u00e9:rpc-reply xmlns:\u00e9="urn:ietf:params:xml:ns:netconf:base:1.0" '
+            f'xmlns:\u03b1="{uri}" message-id="1"><\u00e9:data><\u03b1:top/></\u00e9:data>'
+            "</\u00e9:rpc-reply>"
+        )
+
+    found = inherited_prefixes(reply("urn:a"), "rpc-reply", "data")
+    assert found["\u03b1"] == "urn:a"
+    one = canonical_xml("<\u03b1:top/>", inherited_prefixes(reply("urn:a"), "rpc-reply", "data"))
+    two = canonical_xml("<\u03b1:top/>", inherited_prefixes(reply("urn:b"), "rpc-reply", "data"))
+    assert one is not None and two is not None and one != two
+
+
 def test_only_namespace_declarations_bind_inherited_prefixes():
     from hegemony_steps_netconf.client import inherited_prefixes
 
