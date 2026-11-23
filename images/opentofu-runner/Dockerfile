@@ -32,7 +32,7 @@
 # release tag vX.Y.Z as ghcr.io/hegemony-sh/opentofu-runner:X.Y.Z and :X.Y. The
 # steps' default names X.Y (DEFAULT_IMAGES in
 # plugins/steps_tf/src/hegemony_steps_tf/common.py), currently
-# ghcr.io/hegemony-sh/opentofu-runner:0.52. That tag names a plugin release, not
+# ghcr.io/hegemony-sh/opentofu-runner:0.53. That tag names a plugin release, not
 # the OpenTofu inside: the image's sh.hegemony.opentofu.version label names it,
 # and so does every run (the steps' tool_version output). A patch release of
 # the plugins stays on OpenTofu 1.12; another series needs a minor release, so
