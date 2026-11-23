@@ -22,6 +22,7 @@ platform lacks the methods.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 if TYPE_CHECKING:
     from .contract import HandlerContext
@@ -62,8 +63,13 @@ async def fetch_notification_destination(
 
     None covers an unknown, disabled or other organization's destination alike.
     The mapping holds ``id``, ``name``, ``type`` and ``config_json``. Raises
-    :class:`PlatformRequestError` when the platform does not answer.
+    :class:`PlatformRequestError` when the platform does not answer. An id
+    that is not a UUID answers None: it could change the request's path.
     """
+    try:
+        destination_id = str(UUID(str(destination_id)))
+    except ValueError:
+        return None
     services = ctx.require_services()
     method = _host_method(services, "fetch_notification_destination")
     if method is not None:

@@ -86,16 +86,17 @@ class _OlderHost:
         return self.response
 
 
-DESTINATION = {"id": "d1", "name": "Ops", "type": "webhook", "config_json": {}}
+D1 = "3f6b2c1e-0000-4000-8000-0000000000d1"
+DESTINATION = {"id": D1, "name": "Ops", "type": "webhook", "config_json": {}}
 
 
 class TestNamedMethods:
     async def test_destination(self) -> None:
         host = _NamedMethods(DESTINATION)
-        assert await run_access.fetch_notification_destination(_ctx(host), "d1") == DESTINATION
+        assert await run_access.fetch_notification_destination(_ctx(host), D1) == DESTINATION
 
     async def test_no_destination(self) -> None:
-        assert await run_access.fetch_notification_destination(_ctx(_NamedMethods()), "d1") is None
+        assert await run_access.fetch_notification_destination(_ctx(_NamedMethods()), D1) is None
 
     async def test_event_carries_the_steps_phase(self) -> None:
         host = _NamedMethods()
@@ -108,16 +109,16 @@ class TestNamedMethods:
 class TestOlderHost:
     async def test_destination(self) -> None:
         host = _OlderHost(_Response(200, DESTINATION))
-        assert await run_access.fetch_notification_destination(_ctx(host), "d1") == DESTINATION
-        assert host.requests == [("GET", "/internal/notification-destinations/d1", None)]
+        assert await run_access.fetch_notification_destination(_ctx(host), D1) == DESTINATION
+        assert host.requests == [("GET", f"/internal/notification-destinations/{D1}", None)]
 
     async def test_unknown_destination(self) -> None:
         host = _OlderHost(_Response(404))
-        assert await run_access.fetch_notification_destination(_ctx(host), "d1") is None
+        assert await run_access.fetch_notification_destination(_ctx(host), D1) is None
 
     async def test_destination_error(self) -> None:
         with pytest.raises(PlatformRequestError) as exc:
-            await run_access.fetch_notification_destination(_ctx(_OlderHost(_Response(500))), "d1")
+            await run_access.fetch_notification_destination(_ctx(_OlderHost(_Response(500))), D1)
         assert exc.value.status_code == 500
 
     async def test_event(self) -> None:
@@ -155,8 +156,8 @@ class TestOlderHostSubclassingTheProtocol:
 
     async def test_destination_uses_the_fallback(self) -> None:
         host = self._Host(_Response(200, DESTINATION))
-        assert await run_access.fetch_notification_destination(_ctx(host), "d1") == DESTINATION
-        assert host.older.requests == [("GET", "/internal/notification-destinations/d1", None)]
+        assert await run_access.fetch_notification_destination(_ctx(host), D1) == DESTINATION
+        assert host.older.requests == [("GET", f"/internal/notification-destinations/{D1}", None)]
 
     async def test_event_uses_the_fallback(self) -> None:
         host = self._Host(_Response(201))
@@ -169,7 +170,7 @@ class TestNotifyUsesRunAccess:
         from hegemony_steps_flow.notify import SendNotificationHandler
 
         ctx = _ctx(_NamedMethods(None))
-        ctx.config = {"destination_id": "d1"}
+        ctx.config = {"destination_id": D1}
         result = await SendNotificationHandler().execute(ctx)
         assert result.success is False
         assert result.error == "Notification destination not found or disabled"
@@ -226,3 +227,14 @@ def test_no_plugin_calls_the_internal_api_itself() -> None:
                 ):
                     offenders.append(f"{path.relative_to(REPO)}:{node.lineno} f'{first.value}…'")
     assert offenders == [], "use the services' named methods or hegemony_step_sdk.run_access"
+
+
+@pytest.mark.parametrize(
+    "destination_id", ["../../../runs/x/notification-destinations/y", "d1", ""]
+)
+async def test_an_id_that_is_not_a_uuid_makes_no_request(destination_id: str) -> None:
+    """A path in the id could change the request's route, on any host."""
+    named, older = _NamedMethods(DESTINATION), _OlderHost(_Response(200, DESTINATION))
+    assert await run_access.fetch_notification_destination(_ctx(named), destination_id) is None
+    assert await run_access.fetch_notification_destination(_ctx(older), destination_id) is None
+    assert older.requests == []
