@@ -143,6 +143,8 @@ async def test_a_pending_replace_is_confirmed_by_netconf_commit():
         _ctx({"config": TARGET, "commit_mode": "later", "confirm_timeout_seconds": 300}, services)
     )
     assert result.success and result.output["devices"]["r1"]["pending"]
+    # A first attempt makes the confirmed commit without a pending check.
+    assert not any("<persist-id>" in request for request in device.requests)
     services.step_outputs = {"acr": {"output": result.output}}
     confirmed = await NetconfCommitHandler().execute(_ctx({"change_step": "acr"}, services))
     assert confirmed.success, confirmed.error

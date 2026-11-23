@@ -243,6 +243,7 @@ class ConfigReplaceHandler(BaseHandler):
                         check=check_opener(ctx, device, config),
                         diff_complete=False,
                         persist_id=persist_id_for(ctx, device),
+                        check_pending=ctx.attempt > 1,
                     )
                 except CommitUncertain as exc:
                     outcome.output = {**uncertain_output(exc), "operation": config.operation}
