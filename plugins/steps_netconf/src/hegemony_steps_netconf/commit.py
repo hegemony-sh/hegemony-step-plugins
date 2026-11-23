@@ -31,7 +31,7 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
-from .client import CAP_CONFIRMED_11, NetconfError, RpcFailed, RpcTimeout
+from .client import CAP_CONFIRMED_11, NetconfError, RpcFailed
 from .common import (
     DeviceOutcome,
     NetconfConnectionConfig,
@@ -194,9 +194,16 @@ class _SettleHandler(BaseHandler):
                 try:
                     outcome.output = await self._settle(session, persist_id, config, entry)
                 except RpcFailed as exc:
+                    saving = getattr(config, "save_config", False) or entry.get("save_requested")
+                    hint = (
+                        ". If an earlier attempt confirmed it, running is not saved yet: save "
+                        "it to startup (netconf.rpc with save-config or copy-config)"
+                        if saving and self._verb == "commit"
+                        else ""
+                    )
                     raise NetconfError(
                         f"{exc}. The commit may already have been confirmed, cancelled, or "
-                        "rolled back when its confirm timeout ran out"
+                        f"rolled back when its confirm timeout ran out{hint}"
                     ) from None
             outcome.output["persist_id"] = persist_id
             if entry.get("save_requested"):
@@ -257,7 +264,9 @@ class NetconfCommitHandler(_SettleHandler):
                 )
             try:
                 await session.commit(persist_id=persist_id)
-            except RpcTimeout as exc:
+            except RpcFailed:
+                raise  # refused: reported below with what it can mean
+            except Exception as exc:
                 raise NetconfError(
                     f"{exc}; the device may already have confirmed the commit, so check its "
                     "configuration before running the step again"

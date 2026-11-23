@@ -22,13 +22,17 @@ NETCONF session and sends `<commit>` with that persist id (RFC 6241,
 A confirming commit commits whatever the candidate holds, so the step first
 locks the candidate and confirms only when it matches running (the pending
 change). The two are compared in a canonical form: layout, attribute order
-and prefix spelling on elements do not count, while a leaf's value does:
-its text exactly, spaces included, and for a `prefix:name` value also the
-namespace its prefix names. Without the schema a value's type is unknown, so
-`i:foo` and `j:foo` count as different even when `i` and `j` name one
-namespace: the step refuses rather than confirm a change it cannot rule out. Edits another session staged since the
+and prefix spelling on elements do not count, while a leaf's value does: its
+text exactly, spaces included, text in mixed content, and the namespaces a
+value may refer to (the default namespace for a bare name, and the binding
+of each prefix it uses, as in an identityref or an instance identifier).
+Without the schema a value's type is unknown, so `i:foo` and `j:foo` count
+as different even when `i` and `j` name one namespace: the step refuses
+rather than confirm a change it cannot rule out. Edits another session staged since the
 change step stop it. When the device does not answer the confirmation in
-time, the step fails and says the commit may already be confirmed.
+time, the step fails and says the commit may already be confirmed. When the
+device refuses the persist id and a save was asked, the error also says to
+save running to startup in case an earlier attempt confirmed it.
 
 Save to startup saves running to startup after confirming: copy-config when
 the device has a startup datastore, else Cisco's `save-config` RPC. A

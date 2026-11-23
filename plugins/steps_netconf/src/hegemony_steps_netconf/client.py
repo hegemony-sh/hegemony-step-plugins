@@ -131,7 +131,7 @@ class Reply:
         return canonical_xml(data, inherited_prefixes(self.text, "rpc-reply", "data")) or data
 
 
-_PREFIX_DECLARATION = re.compile(r"""xmlns:([A-Za-z_][\w.-]*)\s*=\s*(["'])(.*?)\2""")
+_PREFIX_DECLARATION = re.compile(r"""xmlns:([^\W\d][\w.-]*)\s*=\s*(["'])(.*?)\2""")
 _DEFAULT_DECLARATION = re.compile(r"""(?:^|\s)xmlns\s*=\s*(["'])(.*?)\1""")
 
 
@@ -157,7 +157,10 @@ def inherited_prefixes(text: str, *names: str) -> dict[str, str]:
     return found
 
 
-_QNAME_VALUE = re.compile(r"^([A-Za-z_][\w.-]*):([A-Za-z_][\w.-]*)$")
+#: A value that could be an unprefixed identityref (it takes the default namespace).
+_BARE_NAME = re.compile(r"^[^\W\d][\w.-]*$")
+#: Every ``prefix:`` in a value: a QName, or each step of an instance identifier.
+_VALUE_PREFIX = re.compile(r"(?<![\w.-])([^\W\d][\w.-]*):(?=[^\W\d])")
 
 
 def canonical_xml(text: str, namespaces: dict[str, str] | None = None) -> str | None:
@@ -186,7 +189,8 @@ def canonical_xml(text: str, namespaces: dict[str, str] | None = None) -> str | 
             if event == "start-ns" and isinstance(item, tuple) and len(item) == 2:
                 declared[str(item[0])] = str(item[1])
             elif event == "start" and isinstance(item, ET.Element):
-                scopes.append({**scopes[-1], **declared})
+                # A new map only where declarations change the scope.
+                scopes.append({**scopes[-1], **declared} if declared else scopes[-1])
                 declared = {}
                 in_scope[id(item)] = scopes[-1]
                 root = item if root is None else root
@@ -198,21 +202,34 @@ def canonical_xml(text: str, namespaces: dict[str, str] | None = None) -> str | 
         return None
 
     def value(element: ET.Element) -> str:
-        # The text exactly as written; a prefix:name value also carries the
-        # namespace its prefix names. Without the schema a value's type is
-        # unknown, so it is never equated by namespace alone: i:foo and j:foo
-        # differ even when i and j name one namespace (comparing fails
-        # closed), and i:foo under two bindings of i differs too.
+        # The text exactly as written, with the namespaces it may refer to:
+        # the default namespace (an unprefixed identityref takes it) and the
+        # binding of every prefix the text uses (a QName, an instance
+        # identifier's steps). Without the schema a value's type is unknown,
+        # so values are never equated by namespace alone: i:foo and j:foo
+        # differ even when i and j name one namespace (comparing fails closed).
         text_value = element.text or ""
-        match = _QNAME_VALUE.match(text_value)
-        if match and match.group(1) in in_scope[id(element)]:
-            return f"{text_value!r}@{{{in_scope[id(element)][match.group(1)]}}}"
-        return repr(text_value)
+        scope = in_scope[id(element)]
+        bindings: dict[str, str] = {}
+        if _BARE_NAME.match(text_value):
+            bindings[""] = scope.get("", "")
+        for prefix in _VALUE_PREFIX.findall(text_value):
+            bindings[prefix] = scope.get(prefix, "?")
+        return f"{text_value!r}@{sorted(bindings.items())!r}"
+
+    def tail(element: ET.Element) -> str:
+        # Text after a child is data only in mixed content; indentation is not.
+        text_value = element.tail or ""
+        return repr(text_value) if text_value.strip() else ""
 
     def form(element: ET.Element) -> str:
         attributes = "".join(f" {key}={value!r}" for key, value in sorted(element.attrib.items()))
-        children = "".join(form(child) for child in element)
-        return f"<{element.tag}{attributes}>{children if len(element) else value(element)}</>"
+        if not len(element):
+            return f"<{element.tag}{attributes}>{value(element)}</>"
+        own = element.text or ""
+        lead = repr(own) if own.strip() else ""
+        children = "".join(form(child) + tail(child) for child in element)
+        return f"<{element.tag}{attributes}>{lead}{children}</>"
 
     return "".join(form(child) for child in root)
 
@@ -250,14 +267,27 @@ def element_content(text: str, name: str) -> str:
     Slices the reply text instead of re-serializing the parsed tree, so the
     device's own namespace prefixes and layout reach the step's evidence.
     """
-    opening = re.search(rf"<(?:[A-Za-z_][\w.-]*:)?{name}(\s[^>]*)?(/?)>", text)
+    opening = re.search(rf"<(?:[^\W\d][\w.-]*:)?{name}(\s[^>]*)?(/?)>", text)
     if opening is None or opening.group(2) == "/":
         return ""
-    closings = list(re.finditer(rf"</(?:[A-Za-z_][\w.-]*:)?{name}\s*>", text))
-    closing = closings[-1] if closings else None
-    if closing is None or closing.start() < opening.end():
-        return ""
-    return text[opening.end() : closing.start()]
+    # Walk the tags after it, skipping comments, CDATA and processing
+    # instructions, to the end tag that closes this element.
+    token = re.compile(
+        rf"<!--.*?-->|<!\[CDATA\[.*?\]\]>|<\?.*?\?>"
+        rf"|<(/?)(?:[^\W\d][\w.-]*:)?{name}(?=[\s/>])[^>]*?(/?)>",
+        re.DOTALL,
+    )
+    depth = 1
+    for match in token.finditer(text, opening.end()):
+        if match.group(0).startswith(("<!--", "<![CDATA[", "<?")):
+            continue
+        if match.group(1):
+            depth -= 1
+            if depth == 0:
+                return text[opening.end() : match.start()]
+        elif not match.group(2):
+            depth += 1
+    return ""
 
 
 def pretty(text: str, namespaces: dict[str, str] | None = None) -> str:
@@ -288,8 +318,8 @@ def pretty(text: str, namespaces: dict[str, str] | None = None) -> str:
     for node in root.childNodes:
         if node.nodeType == node.ELEMENT_NODE:
             for prefix, uri in namespaces.items():
-                if prefix == "" and not _uses_default_namespace(node):
-                    continue  # every element is prefixed: the default is not in play
+                # The default namespace too, even on a fully prefixed fragment:
+                # an unprefixed identityref value takes it.
                 if not node.hasAttribute(_xmlns(prefix)):
                     node.setAttribute(_xmlns(prefix), uri)
     lines = []
@@ -300,19 +330,6 @@ def pretty(text: str, namespaces: dict[str, str] | None = None) -> str:
 
 def _xmlns(prefix: str) -> str:
     return f"xmlns:{prefix}" if prefix else "xmlns"
-
-
-def _uses_default_namespace(node: Any) -> bool:
-    """Whether an unprefixed element in ``node``'s tree takes the inherited default namespace."""
-    if node.hasAttribute("xmlns"):
-        return False
-    if ":" not in node.tagName:
-        return True
-    return any(
-        _uses_default_namespace(child)
-        for child in node.childNodes
-        if child.nodeType == child.ELEMENT_NODE
-    )
 
 
 def _strip_blank_text(node: Any) -> None:
@@ -409,6 +426,8 @@ class NetconfSession:
         self._closed = False
         #: Why the session can no longer frame messages ("" while it can).
         self._broken = ""
+        #: Whether the hello exchange completed (close-session needs it).
+        self._negotiated = False
 
     # --- capabilities ---------------------------------------------------
 
@@ -514,6 +533,7 @@ class NetconfSession:
         if not (self.supports(CAP_BASE_10) or self.supports(CAP_BASE_11)):
             raise NetconfError("the device's hello names no NETCONF base capability")
         self._chunked = self.supports(CAP_BASE_11)
+        self._negotiated = True
 
     async def rpc(self, body: str, *, operation: str = "", timeout: float | None = None) -> Reply:
         """Send ``<rpc>body</rpc>`` and return its reply.
@@ -586,7 +606,7 @@ class NetconfSession:
         # stalled device cannot keep the channel, and its locks, open; the
         # channel is closed even when the step is cancelled meanwhile.
         try:
-            if not self._broken:
+            if self._negotiated and not self._broken:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(
                         self.rpc("<close-session/>", timeout=min(self.timeout, 10.0)),
