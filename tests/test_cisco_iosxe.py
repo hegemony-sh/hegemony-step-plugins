@@ -14,6 +14,7 @@ import pytest
 from hegemony_step_sdk import HandlerContext, HandlerServices
 from hegemony_step_sdk.docs import load_docs_bundle
 from hegemony_steps_cisco_iosxe import ALL_HANDLERS
+from hegemony_steps_cisco_iosxe.acr import MAX_CLIS_CHARS
 from hegemony_steps_cisco_iosxe.handlers import ConfigReplaceHandler, GetConfigHandler
 from hegemony_steps_netconf.commit import NetconfCommitHandler
 from tests.cisco_iosxe_fakes import ALL_CAPABILITIES, CLI_RPC_NS, FakeIosXeDevice, FakeServices
@@ -61,6 +62,7 @@ async def test_full_replace_shows_the_diff_and_confirms_after_the_check():
         "r1:running-config diff",
         "r1:running-config before",
         "r1:running-config candidate",
+        "r1:acr result",
     ]
     assert result.summary == "ACR full-replace: 1 changed, 1 committed of 1 devices"
 
@@ -206,3 +208,65 @@ async def test_two_devices_never_share_one_per_device_file():
     assert "both resolve to the attachment 'configs/r_1.cfg'" in (result.error or "")
     assert device.sessions_opened == 0
     assert device.running_cli == RUNNING
+
+
+async def test_acr_success_is_never_read_from_the_result_text():
+    refused = _device(trans_result="Configuration unsuccessful")
+    result = await ConfigReplaceHandler().execute(
+        _ctx({"config": TARGET + "bogus\n"}, FakeServices({"r1": refused}))
+    )
+    assert not result.success
+    assert "% Invalid input" in (result.error or "")
+
+    device = _device(trans_result="Configuration applied, 3 lines")
+    applied = await ConfigReplaceHandler().execute(
+        _ctx({"config": TARGET}, FakeServices({"r1": device}))
+    )
+    assert applied.success, applied.error
+    assert applied.output["devices"]["r1"]["acr_result"] == "Configuration applied, 3 lines"
+    acr = [item for item in applied.evidence if item["name"] == "r1:acr result"]
+    assert acr and acr[0]["content_text"] == "Configuration applied, 3 lines"
+
+
+async def test_an_empty_modelled_diff_still_commits_the_replace():
+    # Modelled CLI leaves out wireless, app-hosting and telemetry: equal modelled
+    # text does not show that the replace changes nothing.
+    device = _device()
+    result = await ConfigReplaceHandler().execute(
+        _ctx({"config": RUNNING, "commit_mode": "direct"}, FakeServices({"r1": device}))
+    )
+    assert result.success, result.error
+    entry = result.output["devices"]["r1"]
+    assert entry["diff"] == "" and entry["committed"] and entry["changed"]
+    assert any("covers only part of the configuration" in note for note in entry["notes"])
+    assert any("<commit>" in request or "<commit/>" in request for request in device.requests)
+
+
+def test_the_configuration_is_limited_in_characters_not_bytes():
+    handler = ConfigReplaceHandler()
+    at_limit = "\u00e9" * MAX_CLIS_CHARS  # two bytes each in UTF-8
+    assert not handler.validate_config({"config": at_limit})
+    errors = handler.validate_config({"config": at_limit + "x"})
+    assert any(f"at most {MAX_CLIS_CHARS}" in error for error in errors), errors
+
+
+async def test_a_release_without_the_operation_leaf_needs_17_15():
+    device = _device(operation_leaf=False)
+    result = await ConfigReplaceHandler().execute(
+        _ctx({"config": TARGET}, FakeServices({"r1": device}))
+    )
+    assert not result.success
+    assert "needs IOS XE 17.15 or later" in (result.error or "")
+    assert device.running_cli == RUNNING
+
+
+async def test_the_model_listed_only_in_the_yang_library_is_found():
+    device = _device(cli_rpc_in_hello=False)
+    assert not any(CLI_RPC_NS in capability for capability in device.capabilities)
+    services = FakeServices({"r1": device})
+    result = await ConfigReplaceHandler().execute(_ctx({"config": TARGET}, services))
+    assert result.success, result.error
+    assert device.running_cli == TARGET
+    read = await GetConfigHandler().execute(_ctx({}, services))
+    assert read.success, read.error
+    assert read.output["devices"]["r1"]["config"] == TARGET

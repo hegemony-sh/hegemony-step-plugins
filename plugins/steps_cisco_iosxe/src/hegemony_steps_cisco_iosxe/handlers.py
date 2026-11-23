@@ -30,6 +30,7 @@ from hegemony_steps_netconf.common import (
     max_parallel_field,
     netconf_session,
     no_targets,
+    persist_id_for,
     run_per_device,
     text_evidence,
     unavailable,
@@ -45,10 +46,8 @@ from hegemony_steps_netconf.edit_config import (
 )
 from hegemony_steps_netconf.transaction import change_candidate
 
-from .acr import apply_cli_config, read_cli_config, require_acr
+from .acr import MAX_CLIS_CHARS, apply_cli_config, read_cli_config, require_acr
 
-#: Largest configuration the step sends (CLI text).
-MAX_CONFIG_BYTES = 8 * 1024 * 1024
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -68,8 +67,9 @@ class ConfigReplaceConfig(ChangeSettings):
         default="",
         title="Configuration",
         description=(
-            "The configuration as CLI text, as show running-config prints it. Templates such "
-            "as {{ inputs.hostname }} are filled in. Leave empty to use Configuration File."
+            "The configuration as CLI text, as show running-config prints it, at most "
+            "524288 characters. Templates such as {{ inputs.hostname }} are filled in. "
+            "Leave empty to use Configuration File."
         ),
         json_schema_extra={
             "x_widget": "textarea",
@@ -114,8 +114,11 @@ class ConfigReplaceConfig(ChangeSettings):
         error = _attachment_path_error(self.config_attachment)
         if error:
             raise ValueError(error)
-        if len(self.config.encode()) > MAX_CONFIG_BYTES:
-            raise ValueError(f"'config' is larger than {MAX_CONFIG_BYTES // (1024 * 1024)} MiB")
+        if len(self.config) > MAX_CLIS_CHARS:
+            raise ValueError(
+                f"'config' has {len(self.config)} characters; IOS XE accepts at most "
+                f"{MAX_CLIS_CHARS}"
+            )
         return self
 
 
@@ -169,7 +172,15 @@ class ConfigReplaceHandler(BaseHandler):
     targeting = HandlerTargeting(ips=False)
     config_model = ConfigReplaceConfig
     default_config = {"operation": "full-replace", "commit_mode": "check"}
-    output_fields = CHANGE_OUTPUT_FIELDS
+    output_fields = (
+        OutputField(
+            "devices",
+            CHANGE_OUTPUT_FIELDS[0].description
+            + "; also operation and acr_result (the device's result text for the replace)",
+            "object",
+        ),
+        *CHANGE_OUTPUT_FIELDS[1:],
+    )
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         devices = ctx.get_target_devices()
@@ -202,29 +213,45 @@ class ConfigReplaceHandler(BaseHandler):
                 if not found.strip():
                     # A full replace with nothing would remove the whole configuration.
                     raise ValueError(f"the attachment {path!r} is empty")
-                if len(found.encode()) > MAX_CONFIG_BYTES:
+                if len(found) > MAX_CLIS_CHARS:
                     raise ValueError(
-                        f"{path!r} is larger than {MAX_CONFIG_BYTES // (1024 * 1024)} MiB"
+                        f"{path!r} has {len(found)} characters; IOS XE accepts at most "
+                        f"{MAX_CLIS_CHARS}"
                     )
                 clis = found
+            acr_result = ""
             async with netconf_session(ctx, device, config) as session:
-                require_acr(session)
+                await require_acr(session)
 
                 async def _read(datastore: str) -> str:
                     return await read_cli_config(session, datastore)
 
                 async def _apply() -> None:
-                    await apply_cli_config(session, clis, config.operation)
+                    nonlocal acr_result
+                    acr_result = await apply_cli_config(session, clis, config.operation)
 
+                # get-modelled-config-clis returns modelled CLI only (no
+                # wireless, app-hosting or telemetry), so an empty diff does
+                # not show that the replace changes nothing.
                 result = await change_candidate(
                     session,
                     apply=_apply,
                     read=_read,
                     options=options,
                     check=check_opener(ctx, device, config),
+                    diff_complete=False,
+                    persist_id=persist_id_for(ctx, device),
                 )
-            outcome.output = {**change_output(result), "operation": config.operation}
+            outcome.output = {
+                **change_output(result),
+                "operation": config.operation,
+                "acr_result": acr_result,
+            }
             outcome.evidence.extend(change_evidence(device, result, what="running-config"))
+            if acr_result:
+                outcome.evidence.append(
+                    text_evidence(device, "acr result", acr_result, command="config-ios-cli-trans")
+                )
             raise_if_unsaved(result)
 
         try:

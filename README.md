@@ -76,7 +76,7 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_inventory` | `inventory.` | sync — sync an inventory provider of the run's organization now |
   | `plugins/steps_git` | `git.` | commit — commit an earlier step's evidence (configuration backups) to a Git repository over HTTPS, only when it changed (built on `container.run`'s runner) |
   | `plugins/steps_netconf` | `netconf.` | get, edit_config, commit, cancel_commit, rpc — NETCONF (RFC 6241): read, change as one transaction (candidate, diff, validate, dry run, confirmed commit), settle a pending commit, any other operation |
-  | `plugins/steps_cisco_iosxe` | `cisco.iosxe.` | config_replace, get_config — IOS XE Atomic Configuration Replace and configuration as CLI text, over NETCONF (needs `hegemony-steps-netconf`) |
+  | `plugins/steps_cisco_iosxe` | `cisco.iosxe.` | config_replace, get_config — IOS XE Atomic Configuration Replace and modelled configuration as CLI text (not a full backup), over NETCONF (needs `hegemony-steps-netconf`) |
   | `plugins/steps_netbox` | `netbox.` | request, ipam.allocate/release, render_config — NetBox objects, IP address management and config rendering (needs `hegemony-steps-http`) |
 
 Device transports (`transports/`: netmiko, scrapli, asyncssh) and the network

@@ -21,10 +21,14 @@ Handlers:
   still manageable, or left pending for `netconf.commit`. A dry run shows the
   diff and discards it.
 - `cisco.iosxe.get_config` — read the modelled running or candidate
-  configuration as CLI text, for a diff, an assertion or a backup with
-  `git.commit`.
+  configuration as CLI text, for a diff or an assertion. It is not a full
+  backup: modelled CLI only, without wireless, app-hosting or telemetry
+  configuration.
 
-ACR needs `netconf-yang`, `netconf-yang feature candidate-datastore`,
+What a full replace does to configuration the model leaves out (wireless,
+app-hosting, telemetry, banners) has not been verified on a device yet.
+
+ACR needs IOS XE 17.15 or later (for the operation leaf), `netconf-yang`, `netconf-yang feature candidate-datastore`,
 `yang-interfaces feature atomic-config` and `yang-interfaces feature
 deprecated disable` on the device. Cisco introduced it in 2025 for Catalyst
 9300 and 9500 as an early-field-trial feature (Cisco Live DEVNET-2385).

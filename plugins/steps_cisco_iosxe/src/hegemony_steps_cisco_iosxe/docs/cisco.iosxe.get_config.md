@@ -10,14 +10,19 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 `cisco.iosxe.get_config` reads an IOS XE device's running or candidate
 configuration as CLI text over NETCONF, with Cisco's
 `get-modelled-config-clis` RPC. Use it as the starting point of an Atomic
-Config Replace, to compare configurations with `evidence.compare`, or to back
-them up with `git.commit`.
+Config Replace, or to compare configurations with `evidence.compare`.
+
+It is not a full backup: it returns modelled CLI only, and Cisco's model
+leaves out wireless, app-hosting and telemetry configuration. A file that
+`git.commit` stores from it is a record of the modelled configuration, not
+something to restore a device from on its own.
 
 ## Using It
 
 Datastore is running (the default) or candidate. The text holds the
 configuration IOS XE models in YANG; configuration it does not model is not
-returned. The device needs the `Cisco-IOS-XE-cli-rpc` model (`netconf-yang`;
+returned. The device needs the `Cisco-IOS-XE-cli-rpc` model, found in the
+hello or in the device's YANG library (`netconf-yang`;
 the candidate needs `netconf-yang feature candidate-datastore`). Max
 Parallel Devices defaults to 10. Port, timeouts and Allow legacy SSH work as
 in `netconf.get`.
