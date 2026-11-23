@@ -29,6 +29,24 @@ if TYPE_CHECKING:
 _TIMEOUT_SECONDS = 30.0
 
 
+def _host_method(services: object, name: str) -> Any:
+    """The host's own implementation of ``name``, or None when it has none.
+
+    A host that subclasses :class:`HandlerServices` without implementing a
+    newer method inherits the protocol's empty stub, which returns None:
+    that counts as missing, so the fallback is used.
+    """
+    from .services import HandlerServices
+
+    method = getattr(services, name, None)
+    if not callable(method):
+        return None
+    stub = getattr(HandlerServices, name, None)
+    if stub is not None and getattr(method, "__func__", None) is stub:
+        return None
+    return method
+
+
 class PlatformRequestError(RuntimeError):
     """The platform could not answer a step's request; ``status_code`` when it said why."""
 
@@ -47,8 +65,8 @@ async def fetch_notification_destination(
     :class:`PlatformRequestError` when the platform does not answer.
     """
     services = ctx.require_services()
-    method = getattr(services, "fetch_notification_destination", None)
-    if callable(method):
+    method = _host_method(services, "fetch_notification_destination")
+    if method is not None:
         return await method(destination_id)
     async with services.open_api_client(timeout=_TIMEOUT_SECONDS) as client:
         response = await client.get(f"/internal/notification-destinations/{destination_id}")
@@ -76,8 +94,8 @@ async def emit_run_event(
     """
     services = ctx.require_services()
     phase = ctx.tags.get("phase", "")
-    method = getattr(services, "emit_run_event", None)
-    if callable(method):
+    method = _host_method(services, "emit_run_event")
+    if method is not None:
         await method(message, kind=kind, attrs=attrs or {}, phase=phase)
         return
     async with services.open_api_client(timeout=_TIMEOUT_SECONDS) as client:

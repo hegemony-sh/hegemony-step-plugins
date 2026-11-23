@@ -143,6 +143,27 @@ class TestOlderHost:
             await run_access.emit_run_event(_ctx(_OlderHost(_Response(403))), "sent")
 
 
+class TestOlderHostSubclassingTheProtocol:
+    """A host that subclasses HandlerServices inherits empty stubs for newer methods."""
+
+    class _Host(HandlerServices):  # type: ignore[misc]
+        def __init__(self, response: _Response) -> None:
+            self.older = _OlderHost(response)
+
+        def open_api_client(self, *, timeout: float = 30.0) -> Any:
+            return self.older
+
+    async def test_destination_uses_the_fallback(self) -> None:
+        host = self._Host(_Response(200, DESTINATION))
+        assert await run_access.fetch_notification_destination(_ctx(host), "d1") == DESTINATION
+        assert host.older.requests == [("GET", "/internal/notification-destinations/d1", None)]
+
+    async def test_event_uses_the_fallback(self) -> None:
+        host = self._Host(_Response(201))
+        await run_access.emit_run_event(_ctx(host), "sent")
+        assert [r[:2] for r in host.older.requests] == [("POST", "/internal/runs/run-1/events")]
+
+
 class TestNotifyUsesRunAccess:
     async def test_an_unknown_destination_fails_the_step(self) -> None:
         from hegemony_steps_flow.notify import SendNotificationHandler
