@@ -86,6 +86,8 @@ class FakeNetconfDevice:
     base10_only: bool = False
     #: Operations to act on but never answer (a reply lost in transit).
     stall: frozenset[str] = frozenset()
+    #: Operations to act on, then drop the session without answering.
+    drop_after: frozenset[str] = frozenset()
     #: Format the candidate's get-config reply differently from running's.
     reformat_candidate: bool = False
     #: Module namespaces the YANG library (RFC 8525) lists beside the hello's.
@@ -310,6 +312,8 @@ class FakeChannel:
                 body, closing = self._handle(operation)
                 if _local(operation.tag) in device.stall:
                     continue
+                if _local(operation.tag) in device.drop_after:
+                    break
                 await self._send(
                     f'<rpc-reply xmlns="{BASE_NS}" message-id="{message_id}">{body}</rpc-reply>'
                 )

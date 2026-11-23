@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -115,17 +116,19 @@ class Reply:
         return pretty(self.data(), inherited_prefixes(self.text, "rpc-reply", "data"))
 
     def canonical_data(self) -> str:
-        """``data()`` in canonical XML (C14N 2.0), for comparing two datastores.
+        """``data()`` as a canonical form, for comparing two datastores.
 
-        Indentation, attribute order, prefix choice and empty-element style
-        do not count, so two reads of equal configurations compare equal
-        however the device formats each reply.
+        Indentation between elements, attribute order, prefix choice and
+        empty-element style do not count, so two reads of equal
+        configurations compare equal however the device formats each reply.
+        What a value means does count: a leaf's text is kept exactly (spaces
+        included), and a ``prefix:name`` value whose prefix is declared is
+        compared by its namespace, not by the prefix spelling. Data that does
+        not parse is returned as it came, so it compares equal only when
+        identical.
         """
-        text = self.pretty_data()
-        try:
-            return ET.canonicalize(f"<data>{text}</data>", strip_text=True, rewrite_prefixes=True)
-        except ET.ParseError:
-            return text
+        data = self.data()
+        return canonical_xml(data, inherited_prefixes(self.text, "rpc-reply", "data")) or data
 
 
 _PREFIX_DECLARATION = re.compile(r"""xmlns:([A-Za-z_][\w.-]*)\s*=\s*(["'])(.*?)\2""")
@@ -144,12 +147,69 @@ def inherited_prefixes(text: str, *names: str) -> dict[str, str]:
     for name in names:
         opening = re.search(rf"<(?:[A-Za-z_][\w.-]*:)?{name}(\s[^>]*)?/?>", text)
         if opening and opening.group(1):
+            # Attribute values as written: references decoded, so the caller
+            # escaping them again gives back the same namespace.
             for prefix, _quote, uri in _PREFIX_DECLARATION.findall(opening.group(1)):
-                found[prefix] = uri
+                found[prefix] = html.unescape(uri)
             default = _DEFAULT_DECLARATION.search(opening.group(1))
             if default:
-                found[""] = default.group(2)
+                found[""] = html.unescape(default.group(2))
     return found
+
+
+_QNAME_VALUE = re.compile(r"^([A-Za-z_][\w.-]*):([A-Za-z_][\w.-]*)$")
+
+
+def canonical_xml(text: str, namespaces: dict[str, str] | None = None) -> str | None:
+    """A canonical form of an XML fragment, or None when it does not parse.
+
+    Elements by namespace and local name, attributes sorted, whitespace
+    between elements dropped, leaf text kept exactly, and leaf values of
+    the form ``prefix:name`` (YANG identityrefs, instance identifiers)
+    resolved to ``{namespace}name`` when the prefix is in scope.
+    """
+    declarations = "".join(
+        f' {_xmlns(prefix)}="{escape(uri, {chr(34): "&quot;"})}"'
+        for prefix, uri in (namespaces or {}).items()
+    )
+    parser = ET.XMLPullParser(events=("start-ns", "start", "end"))
+    scopes: list[dict[str, str]] = [{}]
+    declared: dict[str, str] = {}
+    in_scope: dict[int, dict[str, str]] = {}
+    root: ET.Element | None = None
+    try:
+        parser.feed(f"<hegemony-fragment{declarations}>{text}</hegemony-fragment>")
+        parser.close()
+        # (event, item) pairs; typed loosely, as the stubs differ on their shape.
+        events: list[Any] = list(parser.read_events())
+        for event, item in events:
+            if event == "start-ns" and isinstance(item, tuple) and len(item) == 2:
+                declared[str(item[0])] = str(item[1])
+            elif event == "start" and isinstance(item, ET.Element):
+                scopes.append({**scopes[-1], **declared})
+                declared = {}
+                in_scope[id(item)] = scopes[-1]
+                root = item if root is None else root
+            elif event == "end":
+                scopes.pop()
+    except ET.ParseError:
+        return None
+    if root is None:
+        return None
+
+    def value(element: ET.Element) -> str:
+        text_value = element.text or ""
+        match = _QNAME_VALUE.match(text_value)
+        if match and match.group(1) in in_scope[id(element)]:
+            return "{" + in_scope[id(element)][match.group(1)] + "}" + match.group(2)
+        return text_value
+
+    def form(element: ET.Element) -> str:
+        attributes = "".join(f" {key}={value!r}" for key, value in sorted(element.attrib.items()))
+        children = "".join(form(child) for child in element)
+        return f"<{element.tag}{attributes}>{children if len(element) else repr(value(element))}</>"
+
+    return "".join(form(child) for child in root)
 
 
 def local_name(tag: str) -> str:
