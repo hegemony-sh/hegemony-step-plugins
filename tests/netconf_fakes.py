@@ -316,6 +316,12 @@ class FakeChannel:
                 message_id = root.get("message-id", "")
                 operation = root[0]
                 body, closing = self._handle(operation)
+                if (
+                    _local(operation.tag) == "commit"
+                    and body == "<ok/>"
+                    and device.fail_commit_after
+                ):
+                    device.fail_commit_after -= 1  # only a commit that succeeded counts
                 targeted = not device.only_if or device.only_if in text
                 if targeted and _local(operation.tag) in device.stall:
                     continue
@@ -351,7 +357,7 @@ class FakeChannel:
         return ""
 
     def _error(self, tag: str, message: str = "", path: str = "") -> tuple[str, bool]:
-        error_path = f"<error-path>{path}</error-path>" if path else ""
+        error_path = f"<error-path>{escape(path)}</error-path>" if path else ""
         return (
             "<rpc-error><error-type>application</error-type>"
             f"<error-tag>{tag}</error-tag><error-severity>error</error-severity>"
@@ -376,6 +382,15 @@ class FakeChannel:
             if name == "lock":
                 if owner is not None and owner != self.session_id:
                     return self._error("lock-denied", f"{target} is locked by session {owner}")
+                pending = device.pending
+                if (
+                    target == "running"
+                    and pending is not None
+                    and (pending.persist or pending.session != self.session_id)
+                ):
+                    # Not while another session's confirmed commit is ongoing
+                    # (RFC 6241 7.5); a persisted one belongs to no session.
+                    return self._error("lock-denied", "a confirmed commit is pending")
                 if target == "candidate" and device.candidate_dirty() and not device.lenient_locks:
                     return self._error(
                         "lock-denied", "the candidate has changes not committed or discarded"
@@ -445,9 +460,7 @@ class FakeChannel:
                 return self._error("invalid-value", "candidate does not validate")
             return ok
         if name == "commit":
-            if device.fail_commit and device.fail_commit_after:
-                device.fail_commit_after -= 1
-            elif device.fail_commit:
+            if device.fail_commit and not device.fail_commit_after:
                 return self._error(device.fail_commit, "commit refused", device.fail_commit_path)
             locked = self._locked_by_other("running", "candidate")
             if locked:

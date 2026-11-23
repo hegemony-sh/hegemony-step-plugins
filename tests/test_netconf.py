@@ -1280,6 +1280,49 @@ async def test_a_closed_session_error_says_why_when_the_host_knows():
         await session._fill()
 
 
+async def test_a_retry_recovers_a_pending_commit_although_running_cannot_be_locked():
+    # A device refuses to lock running while a confirmed commit is pending
+    # (RFC 6241 7.5): the retry checks under the candidate lock alone.
+    device = FakeNetconfDevice.with_config(BASE)
+    config = {"config": _hostname("r2"), "commit_mode": "later"}
+    first = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    persist_id = first.output["devices"]["r1"]["persist_id"]
+    retry = await NetconfEditConfigHandler().execute(
+        _ctx(config, FakeServices({"r1": device}), attempt=2)
+    )
+    assert retry.success, retry.error
+    entry = retry.output["devices"]["r1"]
+    assert entry["pending"] is True and entry["persist_id"] == persist_id
+    assert not any("<running/></target></lock>" in r for r in device.requests[-12:])
+
+
+async def test_an_uncertain_commit_keeps_the_save_request():
+    device = FakeNetconfDevice.with_config(
+        BASE, drop_after=frozenset({"commit"}), only_if="</persist></commit>"
+    )
+    result = await NetconfEditConfigHandler().execute(
+        _ctx(
+            {"config": _hostname("r2"), "commit_mode": "later", "save_config": True},
+            FakeServices({"r1": device}),
+        )
+    )
+    entry = result.output["devices"]["r1"]
+    assert entry["commit_uncertain"] is True and entry["save_requested"] is True
+    assert device.saved == 0
+
+
+def test_tags_inside_comments_and_quoted_values_are_not_tags():
+    from hegemony_steps_netconf.client import element_content, inherited_prefixes
+
+    reply = (
+        '<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1">'
+        '<!-- <data xmlns:p="urn:wrong"/> --><data xmlns:p="urn:right">'
+        '<p:top><data label="a>b"/><p:x/></p:top></data></rpc-reply>'
+    )
+    assert inherited_prefixes(reply, "rpc-reply", "data")["p"] == "urn:right"
+    assert element_content(reply, "data") == '<p:top><data label="a>b"/><p:x/></p:top>'
+
+
 async def test_a_first_attempt_sends_no_pending_check():
     # A first attempt cannot have left a commit pending, so it does not ask:
     # its outcome never depends on how a server answers an unknown persist id.
@@ -1355,8 +1398,10 @@ async def test_a_retry_whose_check_gets_no_answer_keeps_the_persist_id():
     assert "earlier attempt" in (retry.error or "")
 
 
-@pytest.mark.parametrize("locked", ["running", "candidate"])
-async def test_a_persist_id_confirmation_waits_for_another_sessions_lock(locked):
+async def test_a_persist_id_confirmation_waits_for_another_sessions_lock():
+    # Only the candidate: no session can lock running while the confirmed
+    # commit is pending (RFC 6241 7.5), and the fake refuses it.
+    locked = "candidate"
     device = FakeNetconfDevice.with_config(BASE)
     first, _ = await _pending_change(device)
     persist_id = first.output["devices"]["r1"]["persist_id"]
@@ -1569,6 +1614,7 @@ async def test_a_retry_saves_what_an_earlier_attempt_applied_but_could_not_save(
         _ctx(
             {"config": _hostname("r2"), "commit_mode": "direct", "save_config": True},
             FakeServices({"r1": device}),
+            attempt=2,
         )
     )
     assert result.success, result.error
@@ -1590,10 +1636,23 @@ async def test_a_refused_confirmation_says_to_save_when_a_save_was_asked():
 async def test_close_before_the_hello_sends_no_close_session():
     device = FakeNetconfDevice.with_config(BASE)
     channel = await device.open()
-    session = NetconfSession(channel, timeout=5)
+    written: list[bytes] = []
+
+    class Recording:
+        async def write(self, data: bytes) -> None:
+            written.append(data)
+            await channel.write(data)
+
+        async def read(self, max_bytes: int = 65536) -> bytes:
+            return await channel.read(max_bytes)
+
+        async def close(self) -> None:
+            await channel.close()
+
+    session = NetconfSession(Recording(), timeout=5)
     await session.close()
     assert channel.closed
-    assert not any("close-session" in request for request in device.requests)
+    assert written == []  # not even a close-session: the hello never happened
 
 
 async def test_a_final_commit_whose_session_drops_says_it_may_have_happened():
