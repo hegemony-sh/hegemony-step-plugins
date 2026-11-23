@@ -131,6 +131,8 @@ class Reply:
         return canonical_xml(data, inherited_prefixes(self.text, "rpc-reply", "data")) or data
 
 
+#: An opening tag's attributes: a quoted value may hold ``>`` or ``/>``.
+_ATTRIBUTES = r"""(\s(?:[^>"'/]|/(?!>)|"[^"]*"|'[^']*')*)?"""
 #: One attribute of an opening tag; matched in order, so a value is never read as a name.
 _ATTRIBUTE = re.compile(r"""\s+([^\s=/>]+)\s*=\s*(["'])(.*?)\2""", re.DOTALL)
 #: A prefix declaration's attribute name.
@@ -147,7 +149,7 @@ def inherited_prefixes(text: str, *names: str) -> dict[str, str]:
     """
     found: dict[str, str] = {}
     for name in names:
-        opening = re.search(rf"<(?:[^\W\d][\w.-]*:)?{name}(\s[^>]*)?/?>", text)
+        opening = re.search(rf"<(?:[^\W\d][\w.-]*:)?{name}{_ATTRIBUTES}/?>", text)
         if opening and opening.group(1):
             # Attribute values as written: references decoded, so the caller
             # escaping them again gives back the same namespace.
@@ -224,12 +226,17 @@ def canonical_xml(text: str, namespaces: dict[str, str] | None = None) -> str | 
         attributes = "".join(f" {key}={value!r}" for key, value in sorted(element.attrib.items()))
         if not len(element):
             return f"<{element.tag}{attributes}>{value(element)}</>"
-        # Text between children is indentation in element-only content, and
-        # dropped; once any of it is more than whitespace the content is mixed
-        # and every piece is data, whitespace included.
+        # Text between children is data in mixed content: once any piece is
+        # more than whitespace, every piece is kept, whitespace included.
+        # Otherwise only line-broken whitespace is taken for indentation and
+        # dropped; whitespace without a line break (a space after a child)
+        # may be data, and is kept, so comparing fails closed.
         pieces = [element.text or ""] + [child.tail or "" for child in element]
         mixed = any(piece.strip() for piece in pieces)
-        keep = repr if mixed else (lambda _piece: "")
+
+        def keep(piece: str) -> str:
+            return repr(piece) if mixed or (piece and "\n" not in piece) else ""
+
         children = "".join(form(child) + keep(child.tail or "") for child in element)
         return f"<{element.tag}{attributes}>{keep(element.text or '')}{children}</>"
 
@@ -269,7 +276,7 @@ def element_content(text: str, name: str) -> str:
     Slices the reply text instead of re-serializing the parsed tree, so the
     device's own namespace prefixes and layout reach the step's evidence.
     """
-    opening = re.search(rf"<(?:[^\W\d][\w.-]*:)?{name}(\s[^>]*)?(/?)>", text)
+    opening = re.search(rf"<(?:[^\W\d][\w.-]*:)?{name}{_ATTRIBUTES}(/?)>", text)
     if opening is None or opening.group(2) == "/":
         return ""
     # Walk the tags after it, skipping comments, CDATA and processing

@@ -1382,6 +1382,8 @@ def test_the_canonical_form_fails_closed_on_namespaces_a_value_may_use():
     assert _canonical('<p xmlns="urn:x"><r>1</r></p>') == _canonical(
         '<p xmlns="urn:x">\n  <r>1</r>\n</p>'
     )
+    # Whitespace without a line break may be data: it counts.
+    assert _canonical('<p xmlns="urn:x"><rule/> </p>') != _canonical('<p xmlns="urn:x"><rule/></p>')
     # In mixed content whitespace is data too.
     assert _canonical('<p xmlns="urn:x">allow<rule/> </p>') != _canonical(
         '<p xmlns="urn:x">allow<rule/></p>'
@@ -1413,6 +1415,18 @@ def test_non_ascii_prefixes_on_the_enclosing_tags_are_read():
     one = canonical_xml("<\u03b1:top/>", inherited_prefixes(reply("urn:a"), "rpc-reply", "data"))
     two = canonical_xml("<\u03b1:top/>", inherited_prefixes(reply("urn:b"), "rpc-reply", "data"))
     assert one is not None and two is not None and one != two
+
+
+def test_a_gt_inside_an_attribute_value_does_not_end_the_tag():
+    from hegemony_steps_netconf.client import element_content, inherited_prefixes
+
+    reply = (
+        '<nc:rpc-reply xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" '
+        'xmlns:a="urn:metadata" a:note="a>b/>c" xmlns:p="urn:model:a" message-id="1">'
+        "<nc:data a:x='1>2'><p:top/></nc:data></nc:rpc-reply>"
+    )
+    assert inherited_prefixes(reply, "rpc-reply", "data")["p"] == "urn:model:a"
+    assert element_content(reply, "data") == "<p:top/>"
 
 
 def test_only_namespace_declarations_bind_inherited_prefixes():
