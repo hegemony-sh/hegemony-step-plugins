@@ -256,8 +256,9 @@ class RunContainerConfig(BaseModel):
         description=(
             "Keep a copy of the pulled image in the platform registry, under this "
             "organization, and use it on later runs. A tag is still checked against the "
-            "image's registry by digest, and the copy serves when that registry is "
-            "unreachable. Turn off for an image that must come straight from its registry "
+            "image's registry by digest, and a copy runs only once checked to be the image "
+            "that digest names, so not while that registry is unreachable. Turn off for an "
+            "image that must come straight from its registry "
             "every time. No effect when the platform runs no registry."
         ),
     )
@@ -3420,10 +3421,12 @@ class RunContainerHandler(BaseHandler):
         can be pushed over. The copy's own digest differs from the upstream one
         (a copy keeps one platform, in the daemon's manifest format), but its
         image ID is the config digest the upstream manifest names for that
-        platform. False only for a copy shown to be another image; a check
-        that cannot be made (upstream unreachable or refusing, the daemon not
-        saying) leaves a warning and trusts the copy, as the cache does
-        whenever upstream is down.
+        platform. True only for a copy shown to be the image: a check that
+        cannot be made (upstream unreachable or refusing, the daemon not
+        saying, a platform upstream has no image for) is no verdict, and the
+        copy is refused like one shown to be another image. Any step of the
+        organization can push over the key tag, and an image made to fail the
+        check (a platform upstream does not serve) must not be run for it.
         """
         problem = ""
         identity = _ImageIdentity()
@@ -3463,8 +3466,8 @@ class RunContainerHandler(BaseHandler):
                         problem = f"its registry names no {platform} image for {upstream_digest}"
         if problem:
             await emit(
-                f"Could not check the cached copy of {image} against its registry "
-                f"({problem}); running the copy",
+                f"Could not check the cached copy {copy} against the image {upstream_digest} "
+                f"names ({problem}). Not running it; pulling {image} from its registry",
                 attrs={
                     "milestone": "image_cache_unverified",
                     "image": image,
@@ -3472,7 +3475,7 @@ class RunContainerHandler(BaseHandler):
                     "reason": problem,
                 },
             )
-            return True, identity
+            return False, identity
         if image_id == expected:
             await emit(
                 f"The cached copy of {image} is the image {upstream_digest} names "
@@ -3556,8 +3559,11 @@ class RunContainerHandler(BaseHandler):
         for a copy of that digest under the step's own namespace and then the
         read-only ones, and pull the copy when there is one. A missing copy
         means pulling that digest from upstream and saving a copy of it
-        (:meth:`_store_copy`). An unreachable upstream falls back to the last
-        copy by tag, with a warning; an upstream that refuses the check gets
+        (:meth:`_store_copy`). A copy runs only once checked to be the image
+        (:meth:`_copy_matches_upstream`), since its key tag can be pushed
+        over. An unreachable upstream means no copy is used, since none can be
+        checked: the plain pull, which then fails like it would without the
+        cache, with a note; an upstream that refuses the check gets
         the plain pull, with no copy served or saved, since a refusal may mean
         access was withdrawn; an unreachable platform registry means a plain
         upstream pull, with a note. Every registry lookup is bounded by what
@@ -3634,9 +3640,17 @@ class RunContainerHandler(BaseHandler):
             # None: the tag does not exist upstream; the pull below says so.
         key_tag = cache_key_tag(upstream_digest) if upstream_digest else None
 
-        # 2. A copy of that digest, or, with upstream unreachable, the last copy
-        # under the tag.
-        lookup_tag = key_tag or (reference.tag if upstream_problem else None)
+        # 2. A copy of that digest. With upstream unreachable there is none to
+        # look for: the last copy under the tag could be anything any step of
+        # the organization pushed there, and nothing is left to check it by.
+        if upstream_problem is not None:
+            await emit(
+                f"{reference.host} is unreachable ({upstream_problem}); a cached copy of "
+                f"{image} cannot be checked against it, so none is used. Pulling it from "
+                "its registry",
+                attrs={"milestone": "image_cache_skip", "image": image, "reason": upstream_problem},
+            )
+        lookup_tag = key_tag
         cache_problem: str | None = None
         copy: str | None = None
         if lookup_tag:
@@ -3656,23 +3670,11 @@ class RunContainerHandler(BaseHandler):
                 if found is not None:
                     copy = plan.copy_reference(repo, lookup_tag)
                     break
-        if copy is not None:
-            if upstream_problem:
-                await emit(
-                    f"{reference.host} is unreachable ({upstream_problem}); using the cached "
-                    f"copy of {image} from the platform registry",
-                    attrs={
-                        "milestone": "image_cache_stale",
-                        "image": image,
-                        "copy": copy,
-                        "reason": upstream_problem,
-                    },
-                )
-            else:
-                await emit(
-                    f"Using the cached copy of {image} from the platform registry",
-                    attrs={"milestone": "image_cache_hit", "image": image, "copy": copy},
-                )
+        if copy is not None and upstream_digest:
+            await emit(
+                f"Using the cached copy of {image} from the platform registry",
+                attrs={"milestone": "image_cache_hit", "image": image, "copy": copy},
+            )
             pulled = await self._pull_image(
                 docker_bin=docker_bin,
                 image=copy,
@@ -3695,9 +3697,14 @@ class RunContainerHandler(BaseHandler):
                         "reason": cache_problem,
                     },
                 )
-            elif upstream_problem is not None or not upstream_digest:
-                # Upstream is down: the copy under the tag stands in, as the
-                # warning above says; there is nothing to check it against.
+            elif pulled.digest == upstream_digest:
+                # The copy is the upstream manifest itself (a copy made by a
+                # tool that keeps digests): the same digest is the same content.
+                await emit(
+                    f"The cached copy of {image} is the image {upstream_digest} names "
+                    "(the same digest)",
+                    attrs={"milestone": "image_cache_verified", "image": image, "copy": copy},
+                )
                 return AcquiredImage(
                     served=copy, source="cache", cached=False, digest=pulled.digest
                 )

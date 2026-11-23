@@ -319,8 +319,19 @@ from hegemony_steps_container.pull_progress import EnginePullError, PullOutcome 
 from hegemony_steps_container.run import RunContainerHandler  # noqa: E402
 from hegemony_steps_container.runner import ContainerJob, run_container_job  # noqa: E402
 
-UPSTREAM_DIGEST = "sha256:" + "11" * 32
-KEY_TAG = "sha256_" + "11" * 32
+# Upstream alpine:3.20, a single-platform image; a copy is that image when its
+# image ID (configuration digest) is UPSTREAM_CONFIG.
+UPSTREAM_CONFIG = "sha256:" + "42" * 32
+UPSTREAM_MANIFEST = json.dumps(
+    {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"digest": UPSTREAM_CONFIG},
+        "layers": [],
+    }
+).encode()
+UPSTREAM_DIGEST = "sha256:" + hashlib.sha256(UPSTREAM_MANIFEST).hexdigest()
+KEY_TAG = cache_key_tag(UPSTREAM_DIGEST)
 PINNED = f"alpine@{UPSTREAM_DIGEST}"
 OWN_REPO = "orgs/acme/docker.io/library/alpine"
 GLOBAL_REPO = "global/docker.io/library/alpine"
@@ -437,6 +448,9 @@ def _install(
     ``push_returncode``, or ``push_results`` one by one when given.
     """
     registries = _Registries()
+    registries.manifests[("https://registry-1.docker.io", "library/alpine", UPSTREAM_DIGEST)] = (
+        httpx.Response(200, content=UPSTREAM_MANIFEST)
+    )
     monkeypatch.setattr("hegemony_steps_container.run._registry_transport", registries.transport)
 
     pulled: list[str] = []
@@ -665,7 +679,11 @@ async def test_a_miss_pulls_upstream_and_saves_a_copy_under_both_tags(monkeypatc
 
 
 async def test_a_hit_in_the_own_namespace_runs_the_copy(monkeypatch) -> None:
-    registries, captured = _install(monkeypatch)
+    registries, captured = _install(
+        monkeypatch,
+        pull_digests={f"{OWN_COPY}:{KEY_TAG}": "sha256:" + "cc" * 32},
+        copy_identity=f"{UPSTREAM_CONFIG} linux/amd64",
+    )
     registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
         UPSTREAM_DIGEST
     )
@@ -700,7 +718,9 @@ async def test_a_hit_runs_by_the_digest_its_own_pull_reported(monkeypatch) -> No
     """The daemon is not asked afterwards: another pull of the tag could have moved it."""
     pulled_digest = "sha256:" + "dd" * 32
     registries, captured = _install(
-        monkeypatch, pull_digests={f"{OWN_COPY}:{KEY_TAG}": pulled_digest}
+        monkeypatch,
+        pull_digests={f"{OWN_COPY}:{KEY_TAG}": pulled_digest},
+        copy_identity=f"{UPSTREAM_CONFIG} linux/amd64",
     )
     registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
         UPSTREAM_DIGEST
@@ -721,7 +741,7 @@ async def test_a_hit_runs_by_the_digest_its_own_pull_reported(monkeypatch) -> No
 async def test_a_copy_in_the_global_namespace_serves_when_the_own_one_is_missing(
     monkeypatch,
 ) -> None:
-    registries, captured = _install(monkeypatch)
+    registries, captured = _install(monkeypatch, copy_identity=f"{UPSTREAM_CONFIG} linux/amd64")
     registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
         UPSTREAM_DIGEST
     )
@@ -737,8 +757,9 @@ async def test_a_copy_in_the_global_namespace_serves_when_the_own_one_is_missing
     assert result.metrics["image_source"] == "cache"
 
 
-async def test_upstream_unreachable_falls_back_to_the_last_copy_by_tag(monkeypatch) -> None:
-    registries, captured = _install(monkeypatch)
+async def test_upstream_unreachable_never_runs_a_copy_by_tag(monkeypatch) -> None:
+    """The copy under the tag could be anything a step pushed there: nothing checks it."""
+    registries, captured = _install(monkeypatch, copy_identity=f"{UPSTREAM_CONFIG} linux/amd64")
     registries.unreachable.add("https://registry-1.docker.io")
     registries.manifests[("http://registry.hegemony.internal", OWN_REPO, "3.20")] = (
         "sha256:" + "44" * 32
@@ -747,11 +768,13 @@ async def test_upstream_unreachable_falls_back_to_the_last_copy_by_tag(monkeypat
 
     result = await RunContainerHandler().execute(_handler_ctx(events))
     assert result.success is True
-    assert captured["pulled"] == [f"{OWN_COPY}:3.20"]
+    assert captured["pulled"] == ["alpine:3.20"]
+    assert not any("registry.hegemony.internal" in url for _m, url in registries.requests)
     assert _docker(captured, "push") == []
-    stale = next(attrs for _m, attrs in events if attrs.get("milestone") == "image_cache_stale")
-    assert "connection refused" in stale["reason"]
-    assert result.metrics["image_source"] == "cache"
+    [(message, attrs)] = [(m, a) for m, a in events if a.get("milestone") == "image_cache_skip"]
+    assert "cannot be checked" in message and "connection refused" in attrs["reason"]
+    assert "image_cache_stale" not in _milestones(events)
+    assert result.metrics["image_source"] == "upstream"
 
 
 async def test_upstream_unreachable_without_a_copy_pulls_upstream_without_saving(
@@ -950,7 +973,11 @@ async def test_no_time_left_skips_saving_the_copy(monkeypatch) -> None:
 
 
 async def test_a_job_served_from_the_cache_records_the_copy_digest(monkeypatch) -> None:
-    registries, captured = _install(monkeypatch)
+    registries, captured = _install(
+        monkeypatch,
+        pull_digests={f"{OWN_COPY}:{KEY_TAG}": "sha256:" + "cc" * 32},
+        copy_identity=f"{UPSTREAM_CONFIG} linux/amd64",
+    )
     registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
         UPSTREAM_DIGEST
     )
@@ -971,7 +998,7 @@ async def test_a_job_served_from_the_cache_records_the_copy_digest(monkeypatch) 
     assert outcome.image_digest in _create_argv(captured)
 
 
-IMAGE_ID = "sha256:" + "42" * 32
+IMAGE_ID = UPSTREAM_CONFIG
 
 
 def _cache_hit(registries) -> None:
@@ -1186,8 +1213,8 @@ async def test_a_copy_pulled_without_a_digest_runs_by_the_checked_image_id(monke
     assert not any("{{json .RepoDigests}}" in cmd for cmd, _env in captured["run"])
 
 
-async def test_a_copy_that_cannot_be_checked_runs_with_a_warning(monkeypatch) -> None:
-    """A digest-pinned image whose registry is down at the check: the copy stands in."""
+async def test_a_copy_that_cannot_be_checked_is_not_run(monkeypatch) -> None:
+    """A digest-pinned image whose registry is down at the check: the copy is no stand-in."""
     registries, captured = _install(monkeypatch, copy_identity=f"{CONFIG_AMD64} linux/amd64")
     index = _upstream_index(registries)
     registries.unreachable.add(HUB)
@@ -1197,10 +1224,53 @@ async def test_a_copy_that_cannot_be_checked_runs_with_a_warning(monkeypatch) ->
         _handler_ctx(events, config={"image": f"alpine@{index}", "command": ["true"]})
     )
     assert result.success is True, result.error
-    assert result.metrics["image_source"] == "cache"
-    assert "image_cache_unverified" in _milestones(events)
+    assert result.metrics["image_source"] == "upstream"
     [message] = [m for m, a in events if a.get("milestone") == "image_cache_unverified"]
-    assert "running the copy" in message
+    assert "Not running it" in message
+    assert captured["pulled"] == [f"{OWN_COPY}:{cache_key_tag(index)}", f"alpine@{index}"]
+    assert f"{OWN_COPY}:{cache_key_tag(index)}" not in _create_argv(captured)
+
+
+async def test_a_copy_of_a_platform_upstream_does_not_serve_is_not_run(monkeypatch) -> None:
+    """A copy can be made to fail the check (a platform upstream has no image for).
+
+    That must not get it run unchecked: it is refused like any copy that is
+    not shown to be the image.
+    """
+    registries, captured = _install(
+        monkeypatch, copy_identity=f"{'sha256:' + 'ee' * 32} linux/s390x"
+    )
+    index = _upstream_index(registries)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    [attrs] = [a for _m, a in events if a.get("milestone") == "image_cache_unverified"]
+    assert "linux/s390x" in attrs["reason"]
+    assert result.metrics["image_source"] == "upstream"
+    assert captured["pulled"][-1] == f"alpine@{index}"
+    assert f"{OWN_COPY}:{cache_key_tag(index)}" not in _create_argv(captured)
+
+
+async def test_a_copy_pulled_by_the_upstream_digest_itself_runs_without_asking_upstream(
+    monkeypatch,
+) -> None:
+    """The same digest is the same content: no check against upstream is needed."""
+    registries, captured = _install(
+        monkeypatch, pull_digests={f"{OWN_COPY}:{KEY_TAG}": UPSTREAM_DIGEST}
+    )
+    registries.unreachable.add(HUB)
+    registries.manifests[(PLATFORM_REGISTRY, OWN_REPO, KEY_TAG)] = UPSTREAM_DIGEST
+    events: list = []
+
+    result = await RunContainerHandler().execute(
+        _handler_ctx(events, config={"image": PINNED, "command": ["true"]})
+    )
+    assert result.success is True, result.error
+    assert result.metrics["image_source"] == "cache"
+    assert "image_cache_verified" in _milestones(events)
+    assert not any(url.startswith(HUB) for _m, url in registries.requests)
+    assert f"{OWN_COPY}@{UPSTREAM_DIGEST}" in _create_argv(captured)
 
 
 async def test_an_upstream_manifest_that_does_not_match_its_digest_is_not_trusted() -> None:

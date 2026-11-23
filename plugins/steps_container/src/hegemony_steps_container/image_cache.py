@@ -10,11 +10,15 @@ When the host serves an :class:`~hegemony_step_sdk.ImageCache`, a step whose
 platform registry, under its organization's namespace, and later runs pull
 that copy instead of going back to the image's own registry. The copy is
 named after the upstream reference — ``<namespace>/<host>/<repository>`` —
-and tagged twice: with the upstream tag, for people and for the offline
-fallback, and with ``sha256_<upstream digest>``, the key a later run looks up
-after asking upstream which digest the tag points at today. A copy is a
+and tagged twice: with the upstream tag, for people, and with
+``sha256_<upstream digest>``, the key a later run looks up after asking
+upstream which digest the tag points at today. A copy is usually a
 single-platform image with a digest of its own, so the upstream digest can
-only be found by that tag, never by ``@digest``.
+only be found by that tag, never by ``@digest``. Any step of the
+organization can push over either tag, so neither vouches for the copy: a
+copy is used only once its configuration digest is shown to be the one the
+upstream digest names (or its digest is the upstream digest itself), and
+never in place of an upstream that cannot be asked.
 
 This module holds the pure parts: reference parsing and copy naming, the
 registry HTTP calls (one ``HEAD`` per manifest, with the anonymous, Basic and
@@ -315,6 +319,19 @@ class RegistryClient:
         cannot be used, or answers with content that does not match its digest,
         and :class:`RegistryDenied` when it refuses the login.
         """
+        image = await self.platform_image(repo, digest, platform)
+        return image[1] if image else None
+
+    async def platform_image(self, repo: str, digest: str, platform: str) -> tuple[str, str] | None:
+        """``repo@digest``'s image for ``platform``: its manifest digest and its config digest.
+
+        The manifest digest is ``digest`` itself for a single-platform image,
+        and the index entry for ``platform`` when ``digest`` names an index; a
+        reference pinned to it names exactly the image whose configuration was
+        read, whatever entry a client would pick from the index. Every
+        manifest is checked against the digest it was asked by. None, and the
+        errors raised, as for :meth:`config_digest`.
+        """
         headers: dict[str, str] = {"Accept": MANIFEST_ACCEPT}
         try:
             async with httpx.AsyncClient(
@@ -327,12 +344,15 @@ class RegistryClient:
                     entry = _platform_entry(manifest["manifests"], platform)
                     if entry is None:
                         return None
-                    manifest = await self._manifest(client, repo, entry, headers)
+                    digest = entry
+                    manifest = await self._manifest(client, repo, digest, headers)
                     if manifest is None:
                         return None
                 config = manifest.get("config")
                 found = config.get("digest") if isinstance(config, dict) else None
-                return found if isinstance(found, str) and _DIGEST.match(found) else None
+                if isinstance(found, str) and _DIGEST.match(found):
+                    return digest, found
+                return None
         except httpx.HTTPError as exc:
             raise RegistryUnavailable(f"{self._base_url}: {exc}"[:200]) from exc
 

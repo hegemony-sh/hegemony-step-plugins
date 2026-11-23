@@ -13,6 +13,7 @@ a plain log on its output and the metadata file with the pushed digest.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -57,6 +58,7 @@ from hegemony_steps_container.build import (
     same_registry_host,
     tag_error,
 )
+from hegemony_steps_container.image_cache import cache_key_tag
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
 from hegemony_steps_container.streams import MAX_LIVE_OUTPUT_BYTES
 
@@ -423,6 +425,14 @@ if args[:2] == ["buildx", "version"]:
         print("docker: 'buildx' is not a docker command.", file=sys.stderr)
         sys.exit(1)
     print("github.com/docker/buildx v0.37.2 2d379c0")
+    sys.exit(0)
+
+if args[:1] == ["version"]:
+    platform = os.environ.get("FAKE_DOCKER_PLATFORM", "linux/amd64")
+    if not platform:
+        print("Cannot connect to the Docker daemon", file=sys.stderr)
+        sys.exit(1)
+    print(platform)
     sys.exit(0)
 
 if args[:2] == ["image", "rm"]:
@@ -1191,11 +1201,50 @@ CACHE = ImageCache(
     read_namespaces=("global",),
 )
 UPSTREAM = "https://registry-1.docker.io"
-UPSTREAM_DIGEST = "sha256:" + "11" * 32
-COPY_DIGEST = "sha256:" + "22" * 32
-KEY_TAG = "sha256_" + "11" * 32
+CONFIG_AMD64 = "sha256:" + "a1" * 32
+CONFIG_ARM64 = "sha256:" + "a2" * 32
 OWN_REPO = "orgs/acme/docker.io/library/alpine"
 GLOBAL_REPO = "global/docker.io/library/alpine"
+
+
+def _document(document: dict[str, Any]) -> tuple[str, bytes]:
+    """A manifest's digest and body."""
+    body = json.dumps(document).encode()
+    return "sha256:" + hashlib.sha256(body).hexdigest(), body
+
+
+def _image_manifest(config: str, media_type: str = "application/vnd.oci.image.manifest.v1+json"):
+    return _document({"schemaVersion": 2, "mediaType": media_type, "config": {"digest": config}})
+
+
+def _image_index(entries: dict[str, str]) -> tuple[str, bytes]:
+    """An index of ``{platform: manifest digest}``, with an attestation entry."""
+    manifests: list[dict[str, Any]] = [
+        {
+            "digest": digest,
+            "platform": dict(zip(("os", "architecture"), platform.split("/"), strict=True)),
+        }
+        for platform, digest in entries.items()
+    ]
+    manifests.append(
+        {"digest": "sha256:" + "a3" * 32, "platform": {"os": "unknown", "architecture": "unknown"}}
+    )
+    return _document(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": manifests,
+        }
+    )
+
+
+# Upstream alpine:3.20, one platform; its copy is the same image in the
+# daemon's manifest format, so a digest of its own.
+UPSTREAM_DIGEST, UPSTREAM_BODY = _image_manifest(CONFIG_AMD64)
+COPY_DIGEST, COPY_BODY = _image_manifest(
+    CONFIG_AMD64, "application/vnd.docker.distribution.manifest.v2+json"
+)
+KEY_TAG = cache_key_tag(UPSTREAM_DIGEST)
 
 
 class _Registries:
@@ -1206,6 +1255,12 @@ class _Registries:
         self.manifests: dict[tuple[str, str, str], Any] = {}
         self.unreachable: set[str] = set()
         self.requests: list[str] = []
+
+    def serve(self, base_url: str, repo: str, body: bytes) -> str:
+        """Serve ``body`` as ``repo``'s manifest by its digest; return the digest."""
+        digest = "sha256:" + hashlib.sha256(body).hexdigest()
+        self.manifests[(base_url, repo, digest)] = httpx.Response(200, content=body)
+        return digest
 
     def transport(self, base_url: str) -> httpx.MockTransport:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -1238,6 +1293,9 @@ def registries(monkeypatch) -> _Registries:
         AsyncMock(side_effect=EnginePullUnsupported("off in tests")),
     )
     fake.manifests[(UPSTREAM, "library/alpine", "3.20")] = UPSTREAM_DIGEST
+    fake.serve(UPSTREAM, "library/alpine", UPSTREAM_BODY)
+    for repo in (OWN_REPO, GLOBAL_REPO):
+        fake.serve(CACHE.api_url, repo, COPY_BODY)
     return fake
 
 
@@ -1349,20 +1407,204 @@ async def test_a_global_copy_serves_when_the_organization_has_none(fake_docker, 
     assert _docker_verbs(fake_docker, "push") == []
 
 
+def _milestone(events: list[tuple[str, dict]], name: str) -> list[tuple[str, dict]]:
+    return [(message, attrs) for message, attrs in events if attrs.get("milestone") == name]
+
+
 @pytest.mark.asyncio
-async def test_an_unreachable_registry_falls_back_to_the_last_copy_by_tag(
+async def test_an_unreachable_registry_never_falls_back_to_a_copy_by_tag(
     fake_docker, registries
 ) -> None:
+    """Without the digest the tag names today, nothing tells the image from a pushed-over tag."""
     registries.unreachable.add(UPSTREAM)
-    registries.manifests[(CACHE.api_url, OWN_REPO, "3.20")] = COPY_DIGEST
+    bad_digest = registries.serve(
+        CACHE.api_url, OWN_REPO, _image_manifest("sha256:" + "ee" * 32)[1]
+    )
+    registries.manifests[(CACHE.api_url, OWN_REPO, "3.20")] = bad_digest
     events: list[tuple[str, dict]] = []
     result = await BuildImageHandler().execute(_cached_build(fake_docker, events))
 
     assert result.success, result.error
-    assert _contexts(fake_docker) == [
-        f"alpine:3.20=docker-image://{REGISTRY}/{OWN_REPO}@{COPY_DIGEST}"
+    assert _contexts(fake_docker) == []
+    assert not any(url.startswith(CACHE.api_url) for url in registries.requests)
+    [(message, _attrs)] = _milestone(events, "base_image_cache_skip")
+    assert "docker.io is unreachable" in message and "can be checked" in message
+    assert _milestone(events, "base_image_cache_stale") == []
+    assert _base_records(result) == [
+        {"image": "alpine:3.20", "served": "", "source": "upstream", "cached": False}
     ]
-    assert "base_image_cache_stale" in [attrs.get("milestone") for _m, attrs in events]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_another_image_under_the_key_tag_is_refused(
+    fake_docker, registries
+) -> None:
+    """The key tag for upstream digest A points at B, another image: B is never built on."""
+    bad_digest = registries.serve(
+        CACHE.api_url, OWN_REPO, _image_manifest("sha256:" + "ee" * 32)[1]
+    )
+
+    def pushed_over_until_saved() -> str:
+        return COPY_DIGEST if _docker_verbs(fake_docker, "push") else bad_digest
+
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = pushed_over_until_saved
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, events))
+
+    assert result.success, result.error
+    [(message, attrs)] = _milestone(events, "base_image_cache_mismatch")
+    assert f"is not the image {UPSTREAM_DIGEST} names" in message
+    assert attrs["copy_digest"] == bad_digest and CONFIG_AMD64 in attrs["reason"]
+    assert _milestone(events, "base_image_cache_hit") == []
+    # The upstream digest is pulled and a true copy saved over the bad one.
+    assert _docker_verbs(fake_docker, "pull") == [["pull", f"alpine@{UPSTREAM_DIGEST}"]]
+    assert ["push", f"{REGISTRY}/{OWN_REPO}:{KEY_TAG}"] in _docker_verbs(fake_docker, "push")
+    copy = f"{REGISTRY}/{OWN_REPO}@{COPY_DIGEST}"
+    assert _contexts(fake_docker) == [f"alpine:3.20=docker-image://{copy}"]
+    assert _base_records(result) == [
+        {"image": "alpine:3.20", "served": copy, "source": "cache", "cached": True}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_pushed_over_again_after_saving_is_refused(fake_docker, registries) -> None:
+    """The copy just saved is checked too: its tag may have moved since the push."""
+    bad_digest = registries.serve(
+        CACHE.api_url, OWN_REPO, _image_manifest("sha256:" + "ee" * 32)[1]
+    )
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = bad_digest
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, events))
+
+    assert result.success, result.error
+    assert len(_milestone(events, "base_image_cache_mismatch")) == 2
+    [(message, _attrs)] = _milestone(events, "base_image_cache_skip")
+    assert "the copy just saved was refused" in message
+    # BuildKit pulls the image from its own registry.
+    assert _contexts(fake_docker) == []
+    assert _base_records(result) == [
+        {"image": "alpine:3.20", "served": "", "source": "upstream", "cached": False}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_copy_that_cannot_be_checked_is_not_built_on(
+    fake_docker, registries, monkeypatch
+) -> None:
+    monkeypatch.setenv("FAKE_DOCKER_PLATFORM", "")
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = COPY_DIGEST
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, events))
+
+    assert result.success, result.error
+    unverified = _milestone(events, "base_image_cache_unverified")
+    assert unverified and "did not say its platform" in unverified[0][0]
+    assert _milestone(events, "base_image_cache_hit") == []
+    assert _contexts(fake_docker) == []
+
+
+# Upstream alpine:3.20 as a multi-platform index.
+AMD64_DIGEST, AMD64_BODY = _image_manifest(CONFIG_AMD64)
+ARM64_DIGEST, ARM64_BODY = _image_manifest(CONFIG_ARM64)
+INDEX_DIGEST, INDEX_BODY = _image_index({"linux/amd64": AMD64_DIGEST, "linux/arm64": ARM64_DIGEST})
+# What ``docker push`` of the pulled index may write: the platform's image in
+# the daemon's format (classic store), or an index of its own holding only
+# the platform that was pulled (containerd store).
+DOCKER_AMD64_DIGEST, DOCKER_AMD64_BODY = _image_manifest(
+    CONFIG_AMD64, "application/vnd.docker.distribution.manifest.v2+json"
+)
+OWN_INDEX_DIGEST, OWN_INDEX_BODY = _image_index({"linux/amd64": DOCKER_AMD64_DIGEST})
+
+
+def _multi_platform(registries: _Registries) -> None:
+    registries.manifests[(UPSTREAM, "library/alpine", "3.20")] = INDEX_DIGEST
+    for body in (INDEX_BODY, AMD64_BODY, ARM64_BODY):
+        registries.serve(UPSTREAM, "library/alpine", body)
+    for body in (INDEX_BODY, AMD64_BODY, ARM64_BODY, DOCKER_AMD64_BODY, OWN_INDEX_BODY):
+        registries.serve(CACHE.api_url, OWN_REPO, body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("platform", "copy_digest", "built_on"),
+    [
+        # The platform's image rewritten by the daemon: a digest of its own.
+        ("linux/amd64", DOCKER_AMD64_DIGEST, DOCKER_AMD64_DIGEST),
+        # The upstream platform manifest unchanged.
+        ("linux/amd64", AMD64_DIGEST, AMD64_DIGEST),
+        # The upstream index itself: the same digest is the same content.
+        ("linux/amd64", INDEX_DIGEST, INDEX_DIGEST),
+        # An index of the copy's own: pinned to the entry that was checked.
+        ("linux/amd64", OWN_INDEX_DIGEST, DOCKER_AMD64_DIGEST),
+        # An arm64 sandbox (its index entry names no variant: v8 is the default).
+        ("linux/arm64", ARM64_DIGEST, ARM64_DIGEST),
+    ],
+)
+async def test_a_copy_of_a_multi_platform_image_is_checked_for_the_sandboxs_platform(
+    fake_docker, registries, monkeypatch, platform: str, copy_digest: str, built_on: str
+) -> None:
+    monkeypatch.setenv("FAKE_DOCKER_PLATFORM", platform)
+    _multi_platform(registries)
+    registries.manifests[(CACHE.api_url, OWN_REPO, cache_key_tag(INDEX_DIGEST))] = copy_digest
+    events: list[tuple[str, dict]] = []
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, events))
+
+    assert result.success, result.error
+    copy = f"{REGISTRY}/{OWN_REPO}@{built_on}"
+    assert _contexts(fake_docker) == [f"alpine:3.20=docker-image://{copy}"]
+    [(_message, hit)] = _milestone(events, "base_image_cache_hit")
+    assert hit["copy"] == copy
+    assert _docker_verbs(fake_docker, "pull") == [] and _docker_verbs(fake_docker, "push") == []
+
+
+@pytest.mark.asyncio
+async def test_another_platforms_image_of_the_same_index_is_refused(
+    fake_docker, registries
+) -> None:
+    """The arm64 image under the key tag, on an amd64 sandbox: upstream's, but not this image."""
+    _multi_platform(registries)
+    registries.manifests[(CACHE.api_url, OWN_REPO, cache_key_tag(INDEX_DIGEST))] = ARM64_DIGEST
+    events: list[tuple[str, dict]] = []
+    await BuildImageHandler().execute(_cached_build(fake_docker, events))
+
+    [(_message, attrs), *_] = _milestone(events, "base_image_cache_mismatch")
+    assert attrs["copy_digest"] == ARM64_DIGEST
+    assert f"{REGISTRY}/{OWN_REPO}@{ARM64_DIGEST}" not in " ".join(_contexts(fake_docker))
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_image_with_its_registry_down_takes_only_a_copy_of_the_same_digest(
+    fake_docker, registries
+) -> None:
+    """Offline, a copy is shown to be the image only by carrying its very digest."""
+    registries.unreachable.add(UPSTREAM)
+    registries.serve(CACHE.api_url, OWN_REPO, UPSTREAM_BODY)
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = UPSTREAM_DIGEST
+    events: list[tuple[str, dict]] = []
+    dockerfile = f"FROM alpine@{UPSTREAM_DIGEST}\nRUN echo hello\n"
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, events, dockerfile))
+
+    assert result.success, result.error
+    copy = f"{REGISTRY}/{OWN_REPO}@{UPSTREAM_DIGEST}"
+    assert _contexts(fake_docker) == [f"alpine@{UPSTREAM_DIGEST}=docker-image://{copy}"]
+    assert not any(url.startswith(UPSTREAM) for url in registries.requests)
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_image_with_its_registry_down_refuses_a_copy_it_cannot_check(
+    fake_docker, registries
+) -> None:
+    registries.unreachable.add(UPSTREAM)
+    registries.manifests[(CACHE.api_url, OWN_REPO, KEY_TAG)] = COPY_DIGEST
+    events: list[tuple[str, dict]] = []
+    dockerfile = f"FROM alpine@{UPSTREAM_DIGEST}\nRUN echo hello\n"
+    result = await BuildImageHandler().execute(_cached_build(fake_docker, events, dockerfile))
+
+    assert result.success, result.error
+    unverified = _milestone(events, "base_image_cache_unverified")
+    assert unverified and "its registry could not say" in unverified[0][1]["reason"]
+    assert _milestone(events, "base_image_cache_hit") == []
+    assert _contexts(fake_docker) == []
 
 
 @pytest.mark.asyncio
@@ -1376,7 +1618,7 @@ async def test_an_unreachable_registry_falls_back_to_the_last_copy_by_tag(
             "refused the manifest check",
         ),
         (lambda r: r.unreachable.add(CACHE.api_url), "the platform registry is unavailable"),
-        (lambda r: r.unreachable.add(UPSTREAM), "has no copy of it"),
+        (lambda r: r.unreachable.add(UPSTREAM), "can be checked to be the image"),
     ],
 )
 async def test_a_base_image_the_cache_cannot_serve_comes_from_its_registry(
