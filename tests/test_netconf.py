@@ -1303,6 +1303,20 @@ async def test_a_retry_refused_for_another_reason_keeps_the_persist_id():
     assert entry["commit_uncertain"] is True and entry["persist_id"] == persist_id
 
 
+async def test_a_retry_refused_over_another_parameter_keeps_the_persist_id():
+    # invalid-value about the confirm timeout says nothing about the persist id.
+    device = FakeNetconfDevice.with_config(BASE)
+    config = {"config": _hostname("r2"), "commit_mode": "later"}
+    first = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    persist_id = first.output["devices"]["r1"]["persist_id"]
+    device.fail_commit = "invalid-value"
+    device.fail_commit_path = "/rpc/commit/confirm-timeout"
+    retry = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    assert not retry.success
+    entry = retry.output["devices"]["r1"]
+    assert entry["commit_uncertain"] is True and entry["persist_id"] == persist_id
+
+
 class _ChannelFailsAfterCommit:
     """A channel whose read raises (not end of stream) once a commit was sent."""
 
@@ -1368,6 +1382,10 @@ def test_the_canonical_form_fails_closed_on_namespaces_a_value_may_use():
     assert _canonical('<p xmlns="urn:x"><r>1</r></p>') == _canonical(
         '<p xmlns="urn:x">\n  <r>1</r>\n</p>'
     )
+    # In mixed content whitespace is data too.
+    assert _canonical('<p xmlns="urn:x">allow<rule/> </p>') != _canonical(
+        '<p xmlns="urn:x">allow<rule/></p>'
+    )
 
 
 def test_a_non_ascii_prefix_declared_above_the_data_is_kept():
@@ -1378,6 +1396,22 @@ def test_a_non_ascii_prefix_declared_above_the_data_is_kept():
         'message-id="1"><data><\u00e9:top/></data></rpc-reply>'
     )
     assert inherited_prefixes(reply, "rpc-reply", "data")["\u00e9"] == "urn:e"
+
+
+def test_only_namespace_declarations_bind_inherited_prefixes():
+    from hegemony_steps_netconf.client import inherited_prefixes
+
+    # notxmlns:p is an attribute in another namespace, and text inside a
+    # value is not an attribute: neither rebinds p.
+    reply = (
+        '<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1">'
+        '<nc:data xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" xmlns:p="urn:model:a" '
+        'xmlns:notxmlns="urn:metadata" notxmlns:p="urn:override" '
+        "notxmlns:q='a xmlns:p=\"urn:in-a-value\"'><p:top/></nc:data></rpc-reply>"
+    )
+    found = inherited_prefixes(reply, "rpc-reply", "data")
+    assert found["p"] == "urn:model:a"
+    assert found[""] == "urn:ietf:params:xml:ns:netconf:base:1.0"
 
 
 async def test_a_filtered_retry_finds_the_commit_an_earlier_attempt_left_pending():
