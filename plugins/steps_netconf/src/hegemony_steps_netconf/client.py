@@ -229,7 +229,7 @@ def canonical_xml(text: str, namespaces: dict[str, str] | None = None) -> str | 
         # and every piece is data, whitespace included.
         pieces = [element.text or ""] + [child.tail or "" for child in element]
         mixed = any(piece.strip() for piece in pieces)
-        keep = (lambda piece: repr(piece)) if mixed else (lambda _piece: "")
+        keep = repr if mixed else (lambda _piece: "")
         children = "".join(form(child) + keep(child.tail or "") for child in element)
         return f"<{element.tag}{attributes}>{keep(element.text or '')}{children}</>"
 
