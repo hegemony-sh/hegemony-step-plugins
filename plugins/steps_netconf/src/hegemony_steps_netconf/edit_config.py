@@ -42,7 +42,13 @@ from .common import (
     text_evidence,
     unavailable,
 )
-from .transaction import ChangeOptions, ChangeResult, change_candidate, change_running
+from .transaction import (
+    ChangeOptions,
+    ChangeResult,
+    CommitUncertain,
+    change_candidate,
+    change_running,
+)
 
 HANDLER_ID = "netconf.edit_config"
 
@@ -52,7 +58,8 @@ CHANGE_OUTPUT_FIELDS = (
         "devices",
         "Each device's result by name: ok, error, datastore, changed, committed, pending, "
         "persist_id, validated, saved, save_error, save_requested (saved when confirmed), "
-        "diff and notes",
+        "commit_uncertain (a confirmed commit got no reply; it may be pending under "
+        "persist_id), device_id, diff and notes",
         "object",
     ),
     OutputField("truncated", "Output texts cut short, as device.key", "list"),
@@ -218,6 +225,15 @@ def change_output(result: ChangeResult) -> dict[str, Any]:
     }
 
 
+def uncertain_output(exc: CommitUncertain) -> dict[str, Any]:
+    """A device's output entry when its confirmed commit got no reply.
+
+    The step fails on the device, but the entry keeps the persist id, so a
+    netconf.commit or netconf.cancel_commit step can still settle the commit.
+    """
+    return {"commit_uncertain": True, "pending": False, "persist_id": exc.persist_id}
+
+
 def change_evidence(
     device: dict[str, Any], result: ChangeResult, *, what: str
 ) -> list[dict[str, Any]]:
@@ -317,15 +333,19 @@ class NetconfEditConfigHandler(BaseHandler):
                     )
 
                 if use_candidate:
-                    result = await change_candidate(
-                        session,
-                        apply=_apply,
-                        read=_read,
-                        options=options,
-                        check=check_opener(ctx, device, config),
-                        diff_complete=not diff_filter,
-                        persist_id=persist_id_for(ctx, device),
-                    )
+                    try:
+                        result = await change_candidate(
+                            session,
+                            apply=_apply,
+                            read=_read,
+                            options=options,
+                            check=check_opener(ctx, device, config),
+                            diff_complete=not diff_filter,
+                            persist_id=persist_id_for(ctx, device),
+                        )
+                    except CommitUncertain as exc:
+                        outcome.output = uncertain_output(exc)
+                        raise
                 else:
                     result = await change_running(
                         session,

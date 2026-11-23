@@ -33,7 +33,7 @@ from hegemony_steps_netconf.commit import NetconfCancelCommitHandler, NetconfCom
 from hegemony_steps_netconf.edit_config import NetconfEditConfigHandler
 from hegemony_steps_netconf.get import NetconfGetHandler
 from hegemony_steps_netconf.rpc import NetconfRpcHandler
-from tests.netconf_fakes import ALL_CAPABILITIES, FakeNetconfDevice, FakeServices
+from tests.netconf_fakes import ALL_CAPABILITIES, FakeNetconfDevice, FakeServices, Pending
 
 NATIVE = "urn:example:native"
 BASE = f'<native xmlns="{NATIVE}"><hostname>r1</hostname><domain>lab</domain></native>'
@@ -220,7 +220,8 @@ async def test_get_state_and_a_missing_datastore():
     )
     services = FakeServices({"r1": device})
     state = await NetconfGetHandler().execute(_ctx({"source": "state"}, services))
-    assert "<state>up</state>" in state.output["devices"]["r1"]["data"]
+    # The fake's <state> inherits the reply's default (base) namespace, and keeps it.
+    assert ">up</state>" in state.output["devices"]["r1"]["data"]
     startup = await NetconfGetHandler().execute(_ctx({"source": "startup"}, services))
     assert not startup.success
     assert "no startup datastore" in (startup.error or "")
@@ -256,8 +257,11 @@ async def test_edit_confirms_after_a_second_session_and_reports_the_diff():
     assert "+  <ns0:hostname>r2</ns0:hostname>" in entry["diff"]
     assert _running_hostname(device) == "r2"
     assert device.pending is None
-    # The change session, then the "still manageable" check.
+    # The change session, then the "still manageable" check, which opens after
+    # the confirmed commit put r2 in running.
     assert device.sessions_opened == 2
+    assert "r1" in device.running_at_open[0] and "r2" not in device.running_at_open[0]
+    assert ">r2<" in device.running_at_open[1]
     assert not device.locks
     names = [item["name"] for item in result.evidence]
     assert names == ["r1:netconf diff", "r1:netconf before", "r1:netconf candidate"]
@@ -468,7 +472,23 @@ async def test_save_to_startup_waits_for_the_later_confirmation():
 
 
 async def test_confirming_refuses_edits_another_session_staged():
+    # RFC 6241 7.5: the candidate lock is refused while it holds uncommitted edits.
     device = FakeNetconfDevice.with_config(BASE)
+    _, services = await _pending_change(device)
+    other = NetconfSession(await device.open(), timeout=5)
+    await other.hello()
+    await other.edit_config("candidate", _hostname("rogue"))
+    result = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
+    assert not result.success
+    assert "has changes staged in it" in (result.error or "")
+    assert device.pending is not None
+    assert _running_hostname(device) == "r2"
+    await other.close()
+
+
+async def test_confirming_compares_the_candidate_where_the_lock_is_granted_anyway():
+    # A server that grants the lock over staged edits: the comparison refuses.
+    device = FakeNetconfDevice.with_config(BASE, lenient_locks=True)
     _, services = await _pending_change(device)
     other = NetconfSession(await device.open(), timeout=5)
     await other.hello()
@@ -490,7 +510,7 @@ async def test_confirming_refuses_while_another_session_holds_the_candidate():
     await other.lock("candidate")
     result = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
     assert not result.success
-    assert "another session holds the candidate" in (result.error or "")
+    assert "another session holds it" in (result.error or "")
     assert device.pending is not None
     await other.close()
 
@@ -539,10 +559,14 @@ async def test_settling_needs_a_change_step_with_a_pending_commit():
     services = FakeServices({"r1": FakeNetconfDevice.with_config(BASE)})
     missing = await NetconfCommitHandler().execute(_ctx({"change_step": "nope"}, services))
     assert not missing.success and "has no output" in (missing.error or "")
-    services.step_outputs = {"change": {"output": {"devices": {"r2": {"pending": True}}}}}
+    services.step_outputs = {
+        "change": {"output": {"devices": {"r2": {"pending": True, "device_id": "id-r2"}}}}
+    }
     none = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
     assert not none.success and "has no result for this device" in (none.error or "")
-    services.step_outputs = {"change": {"output": {"devices": {"r1": {"pending": False}}}}}
+    services.step_outputs = {
+        "change": {"output": {"devices": {"r1": {"pending": False, "device_id": "id-r1"}}}}
+    }
     nothing = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
     assert nothing.success and nothing.output["devices"]["r1"]["skipped"] is True
     unset = await NetconfCommitHandler().execute(_ctx({}, services))
@@ -662,7 +686,9 @@ async def test_settling_skips_devices_the_change_left_unchanged():
 
 async def test_settling_fails_a_device_the_change_step_failed_on():
     services = FakeServices({"r1": FakeNetconfDevice.with_config(BASE)})
-    services.step_outputs = {"change": {"output": {"devices": {"r1": {"ok": False, "error": "x"}}}}}
+    services.step_outputs = {
+        "change": {"output": {"devices": {"r1": {"ok": False, "error": "x", "device_id": "id-r1"}}}}
+    }
     result = await NetconfCancelCommitHandler().execute(_ctx({"change_step": "change"}, services))
     assert not result.success
     assert "failed on this device" in (result.error or "")
@@ -679,11 +705,38 @@ def test_prefixes_declared_above_the_data_are_kept():
     assert inherited_prefixes(reply, "rpc-reply", "data") == {
         "m": "urn:example:m",
         "n": "urn:example:n",
+        "": "urn:ietf:params:xml:ns:netconf:base:1.0",
     }
     text = Reply(parse_xml(reply, what="reply"), reply).pretty_data()
     assert 'xmlns:m="urn:example:m"' in text and 'xmlns:n="urn:example:n"' in text
     # The fragment stands on its own: it is valid edit_config input.
     assert check_fragment(text, what="data")
+
+
+def test_a_default_namespace_declared_above_the_data_is_kept():
+    from hegemony_steps_netconf.client import Reply
+
+    def data(namespace: str) -> str:
+        reply = (
+            f'<nc:rpc-reply xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1">'
+            f'<nc:data xmlns="{namespace}"><top><leaf>1</leaf></top></nc:data></nc:rpc-reply>'
+        )
+        return Reply(parse_xml(reply, what="reply"), reply).pretty_data()
+
+    text = data("urn:example:a")
+    assert text.startswith("<top ") and 'xmlns="urn:example:a"' in text.splitlines()[0]
+    [top] = check_fragment(text, what="data")
+    assert top.tag == "{urn:example:a}top"
+    # Same text, other namespace: a different configuration, so a different diff.
+    assert data("urn:example:b") != text
+    # A top element with its own default declaration keeps it unchanged.
+    own = (
+        '<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1">'
+        '<data><top xmlns="urn:example:c"/></data></rpc-reply>'
+    )
+    assert (
+        Reply(parse_xml(own, what="reply"), own).pretty_data() == '<top xmlns="urn:example:c"/>\n'
+    )
 
 
 async def test_the_check_is_bounded_by_the_confirm_timeout(monkeypatch):
@@ -860,7 +913,13 @@ async def test_xpath_filters_declare_their_namespaces():
         )
     )
     assert result.success, result.error
-    assert f'xmlns:n="{NATIVE}"' in next(r for r in device.requests if "get-config" in r)
+    request = next(r for r in device.requests if "get-config" in r)
+    assert f'xmlns:n="{NATIVE}"' in request
+    sent = parse_xml(request, what="request").find(
+        ".//{urn:ietf:params:xml:ns:netconf:base:1.0}filter"
+    )
+    assert sent is not None
+    assert (sent.get("type"), sent.get("select")) == ("xpath", "/n:native")
     errors = NetconfGetHandler().validate_config(
         {"filter_type": "xpath", "filter": "/a", "namespaces": {"1bad": "u"}}
     )
@@ -1011,3 +1070,124 @@ async def test_a_confirmation_without_a_reply_says_it_may_have_happened():
     )
     assert not result.success
     assert "may already have confirmed" in (result.error or "")
+
+
+async def test_saving_after_confirming_holds_the_candidate_lock():
+    device = FakeNetconfDevice.with_config(BASE)
+    _, services = await _pending_change(device)
+    confirmed = await NetconfCommitHandler().execute(
+        _ctx({"change_step": "change", "save_config": True}, services)
+    )
+    assert confirmed.success, confirmed.error
+    assert device.saved_while_locked == [True]
+    assert not device.locks
+
+
+def _settle_ctx(services: FakeServices, device: dict[str, Any]) -> HandlerContext:
+    return HandlerContext(
+        run_id="run-1",
+        flow_id="flow-1",
+        step_run_id="sr-2",
+        step_id="confirm",
+        config={"change_step": "change"},
+        target_devices_by_role={"core": [device]},
+        target_roles=["core"],
+        services=cast(HandlerServices, services),
+    )
+
+
+async def test_a_device_is_matched_by_its_id_not_by_a_display_key():
+    # Device a is named "edge"; another device, b, is named "edge (a)".
+    device = FakeNetconfDevice.with_config(BASE)
+    device.pending = Pending(backup=device.snapshot(), persist="p-a", session=99)
+    services = FakeServices({"edge": device})
+    services.step_outputs = {
+        "change": {
+            "output": {
+                "devices": {
+                    "edge": {"ok": True, "pending": True, "persist_id": "p-a", "device_id": "a"},
+                    "edge (a)": {"ok": True, "pending": False, "device_id": "b"},
+                }
+            }
+        }
+    }
+    result = await NetconfCommitHandler().execute(
+        _settle_ctx(services, {"id": "a", "name": "edge", "mgmt_host": "192.0.2.9"})
+    )
+    assert result.success, result.error
+    assert result.output["devices"]["edge"]["persist_id"] == "p-a"
+    assert device.pending is None
+
+
+async def test_a_result_recorded_for_another_device_is_never_settled():
+    services = FakeServices({"edge": FakeNetconfDevice.with_config(BASE)})
+    services.step_outputs = {
+        "change": {
+            "output": {
+                "devices": {
+                    "edge": {"ok": True, "pending": True, "persist_id": "p", "device_id": "old"}
+                }
+            }
+        }
+    }
+    result = await NetconfCommitHandler().execute(
+        _settle_ctx(services, {"id": "new", "name": "edge", "mgmt_host": "192.0.2.9"})
+    )
+    assert not result.success
+    assert "recorded for another device" in (result.error or "")
+    assert services.opened == []
+
+
+async def test_a_lost_commit_reply_keeps_the_persist_id_for_a_cancel():
+    device = FakeNetconfDevice.with_config(BASE, stall=frozenset({"commit"}))
+    services = FakeServices({"r1": device})
+    result = await NetconfEditConfigHandler().execute(
+        _ctx(
+            {"config": _hostname("r2"), "commit_mode": "later", "rpc_timeout_seconds": 1},
+            services,
+        )
+    )
+    assert not result.success
+    entry = result.output["devices"]["r1"]
+    assert entry["commit_uncertain"] is True and entry["persist_id"]
+    assert "may be pending" in (result.error or "")
+    # The device did take the commit: a cancel step finds and rolls it back.
+    assert device.pending is not None and device.pending.persist == entry["persist_id"]
+    device.stall = frozenset()
+    services.step_outputs = {"change": {"output": result.output}}
+    cancelled = await NetconfCancelCommitHandler().execute(
+        _ctx({"change_step": "change"}, services)
+    )
+    assert cancelled.success, cancelled.error
+    assert device.pending is None and _running_hostname(device) == "r1"
+
+
+async def test_a_persisted_commit_is_followed_up_only_with_its_persist_id():
+    device = FakeNetconfDevice.with_config(BASE)
+    await _pending_change(device)
+    other = NetconfSession(await device.open(), timeout=5)
+    await other.hello()
+    await other.edit_config("candidate", _hostname("r3"))
+    with pytest.raises(RpcFailed, match="give persist-id"):
+        await other.commit()
+    assert device.pending is not None and _running_hostname(device) == "r2"
+    await other.close()
+
+
+async def test_a_locked_datastore_refuses_another_sessions_edit_and_commit():
+    device = FakeNetconfDevice.with_config(BASE)
+    owner = NetconfSession(await device.open(), timeout=5)
+    other = NetconfSession(await device.open(), timeout=5)
+    await owner.hello()
+    await other.hello()
+    await owner.lock("candidate")
+    with pytest.raises(RpcFailed, match="in-use"):
+        await other.edit_config("candidate", _hostname("rogue"))
+    with pytest.raises(RpcFailed, match="in-use"):
+        await other.commit()
+    await owner.edit_config("candidate", _hostname("r2"))
+    await owner.commit()
+    assert _running_hostname(device) == "r2"
+    await owner.unlock("candidate")
+    await other.close()
+    await owner.close()

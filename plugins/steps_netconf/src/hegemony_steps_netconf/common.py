@@ -255,7 +255,12 @@ def build_result(
         base = key
         while key in devices:
             key, number = f"{base} #{number}", number + 1
-        entry = {**outcome.output, "ok": outcome.ok, "error": outcome.error}
+        entry = {
+            **outcome.output,
+            "device_id": outcome.device.get("id"),
+            "ok": outcome.ok,
+            "error": outcome.error,
+        }
         for text_key in outcome.text_keys:
             text = entry.get(text_key)
             if not isinstance(text, str):

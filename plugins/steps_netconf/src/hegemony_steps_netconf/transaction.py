@@ -91,6 +91,18 @@ class CheckFailed(NetconfError):
     """The device did not answer a second NETCONF session after a confirmed commit."""
 
 
+class CommitUncertain(NetconfError):
+    """A confirmed commit with a persist id got no reply: it may be pending on the device.
+
+    ``persist_id`` lets a netconf.commit or netconf.cancel_commit step settle
+    it anyway (the device refuses the id when nothing is pending).
+    """
+
+    def __init__(self, message: str, persist_id: str) -> None:
+        super().__init__(message)
+        self.persist_id = persist_id
+
+
 def unified_diff(before: str, after: str, *, before_name: str, after_name: str) -> str:
     """A unified diff of two texts ("" when they are equal)."""
     return "".join(
@@ -255,10 +267,11 @@ async def _commit(
         try:
             await session.commit(confirmed=True, confirm_timeout=timeout, persist=result.persist_id)
         except RpcTimeout as exc:
-            raise NetconfError(
+            raise CommitUncertain(
                 f"{exc}; the commit may be pending on the device under persist id "
                 f"{result.persist_id}: confirm or cancel it, or let it roll back after "
-                f"{timeout} s"
+                f"{timeout} s",
+                result.persist_id,
             ) from None
         result.pending = True
         result.notes.append(
