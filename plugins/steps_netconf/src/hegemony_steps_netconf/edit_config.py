@@ -37,6 +37,7 @@ from .common import (
     max_parallel_field,
     netconf_session,
     no_targets,
+    persist_id_for,
     run_per_device,
     text_evidence,
     unavailable,
@@ -321,6 +322,7 @@ class NetconfEditConfigHandler(BaseHandler):
                         options=options,
                         check=check_opener(ctx, device, config),
                         diff_complete=not diff_filter,
+                        persist_id=persist_id_for(ctx, device),
                     )
                 else:
                     result = await change_running(

@@ -114,6 +114,19 @@ class Reply:
         """``data()`` indented, with the prefixes the device declared above it kept."""
         return pretty(self.data(), inherited_prefixes(self.text, "rpc-reply", "data"))
 
+    def canonical_data(self) -> str:
+        """``data()`` in canonical XML (C14N 2.0), for comparing two datastores.
+
+        Indentation, attribute order, prefix choice and empty-element style
+        do not count, so two reads of equal configurations compare equal
+        however the device formats each reply.
+        """
+        text = self.pretty_data()
+        try:
+            return ET.canonicalize(f"<data>{text}</data>", strip_text=True, rewrite_prefixes=True)
+        except ET.ParseError:
+            return text
+
 
 _PREFIX_DECLARATION = re.compile(r"""xmlns:([A-Za-z_][\w.-]*)\s*=\s*(["'])(.*?)\2""")
 

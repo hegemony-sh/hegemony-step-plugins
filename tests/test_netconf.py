@@ -899,3 +899,115 @@ async def test_an_omitted_operation_is_a_config_error():
         _ctx({}, FakeServices({"r1": FakeNetconfDevice.with_config(BASE)}))
     )
     assert not result.success and "'rpc' is required" in (result.error or "")
+
+
+async def test_running_without_rollback_on_error_says_a_failed_edit_may_be_partial():
+    capabilities = tuple(
+        c for c in ALL_CAPABILITIES if "candidate" not in c and "rollback-on-error" not in c
+    )
+    device = FakeNetconfDevice.with_config(
+        BASE, capabilities=capabilities, fail_edit="invalid-value"
+    )
+    result = await NetconfEditConfigHandler().execute(
+        _ctx({"config": _hostname("r2")}, FakeServices({"r1": device}))
+    )
+    assert not result.success
+    assert "edit refused" in (result.error or "")
+    assert "may have applied in part" in (result.error or "")
+
+    ok_device = FakeNetconfDevice.with_config(BASE, capabilities=capabilities)
+    ok = await NetconfEditConfigHandler().execute(
+        _ctx({"config": _hostname("r2")}, FakeServices({"r1": ok_device}))
+    )
+    assert ok.success, ok.error
+    assert not any("rollback-on-error" in note for note in ok.output["devices"]["r1"]["notes"])
+
+
+async def test_confirming_compares_the_datastores_in_canonical_form():
+    device = FakeNetconfDevice.with_config(BASE, reformat_candidate=True)
+    _, services = await _pending_change(device)
+    result = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
+    assert result.success, result.error
+    assert device.pending is None and _running_hostname(device) == "r2"
+
+
+async def test_the_persist_id_is_the_same_on_every_attempt():
+    first = FakeNetconfDevice.with_config(BASE)
+    second = FakeNetconfDevice.with_config(BASE)
+    config = {"config": _hostname("r2"), "commit_mode": "later"}
+    one = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": first})))
+    two = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": second})))
+    persist_id = one.output["devices"]["r1"]["persist_id"]
+    assert persist_id.startswith("hegemony-")
+    assert two.output["devices"]["r1"]["persist_id"] == persist_id
+    other_run = HandlerContext(
+        run_id="run-2",
+        flow_id="flow-1",
+        step_run_id="sr-1",
+        step_id="change",
+        config=config,
+        target_devices_by_role={"core": [_device("r1")]},
+        target_roles=["core"],
+        services=cast(HandlerServices, FakeServices({"r1": FakeNetconfDevice.with_config(BASE)})),
+    )
+    three = await NetconfEditConfigHandler().execute(other_run)
+    assert three.output["devices"]["r1"]["persist_id"] != persist_id
+
+
+async def test_a_retried_step_finds_the_commit_an_earlier_attempt_left_pending():
+    device = FakeNetconfDevice.with_config(BASE)
+    config = {"config": _hostname("r2"), "commit_mode": "later", "save_config": True}
+    first = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    assert first.success, first.error
+    persist_id = first.output["devices"]["r1"]["persist_id"]
+    assert device.pending is not None and device.pending.extended == 0
+
+    # The worker crashed after the commit: the activity runs the step again.
+    retry = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    assert retry.success, retry.error
+    entry = retry.output["devices"]["r1"]
+    assert entry["pending"] is True and entry["persist_id"] == persist_id
+    assert entry["save_requested"] is True
+    assert any("earlier attempt" in note for note in entry["notes"])
+    assert device.pending is not None and device.pending.extended == 1
+
+    services = FakeServices({"r1": device})
+    services.step_outputs = {"change": {"output": retry.output}}
+    confirmed = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
+    assert confirmed.success, confirmed.error
+    assert device.pending is None and _running_hostname(device) == "r2" and device.saved == 1
+
+
+async def test_an_unchanged_retry_with_nothing_pending_reports_nothing_pending():
+    device = FakeNetconfDevice.with_config(_hostname("r2"))
+    result = await NetconfEditConfigHandler().execute(
+        _ctx({"config": _hostname("r2"), "commit_mode": "later"}, FakeServices({"r1": device}))
+    )
+    assert result.success, result.error
+    entry = result.output["devices"]["r1"]
+    assert entry["pending"] is False and entry["persist_id"] == ""
+    assert any("nothing committed" in note for note in entry["notes"])
+    assert device.pending is None
+
+
+async def test_a_final_commit_without_a_reply_says_it_may_have_happened():
+    device = FakeNetconfDevice.with_config(BASE, stall=frozenset({"commit"}))
+    result = await NetconfEditConfigHandler().execute(
+        _ctx(
+            {"config": _hostname("r2"), "commit_mode": "direct", "rpc_timeout_seconds": 1},
+            FakeServices({"r1": device}),
+        )
+    )
+    assert not result.success
+    assert "may already have committed" in (result.error or "")
+
+
+async def test_a_confirmation_without_a_reply_says_it_may_have_happened():
+    device = FakeNetconfDevice.with_config(BASE)
+    _, services = await _pending_change(device)
+    device.stall = frozenset({"commit"})
+    result = await NetconfCommitHandler().execute(
+        _ctx({"change_step": "change", "rpc_timeout_seconds": 1}, services)
+    )
+    assert not result.success
+    assert "may already have confirmed" in (result.error or "")

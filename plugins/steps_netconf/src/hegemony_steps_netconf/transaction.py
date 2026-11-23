@@ -43,6 +43,8 @@ from .client import (
     CAP_WRITABLE_RUNNING,
     NetconfError,
     NetconfSession,
+    RpcFailed,
+    RpcTimeout,
 )
 
 CommitMode = Literal["check", "later", "direct"]
@@ -121,8 +123,14 @@ async def change_candidate(
     options: ChangeOptions,
     check: Callable[[], Awaitable[None]],
     diff_complete: bool = True,
+    persist_id: str = "",
 ) -> ChangeResult:
     """Run the change on the candidate datastore (see the module docstring).
+
+    ``persist_id`` is the id a "confirm in a later step" commit is made
+    under. A caller passes one that is the same on every attempt of the step
+    for the device, so that a retried step finds the commit an earlier
+    attempt left pending (its diff is then empty) instead of losing it.
 
     ``diff_complete`` is False when ``read`` returns only part of the
     configuration (a diff filter): an empty diff then proves nothing, so the
@@ -152,6 +160,13 @@ async def change_candidate(
         result.changed = bool(result.diff)
         if not result.changed and diff_complete:
             await session.discard_changes()
+            if (
+                not options.dry_run
+                and options.commit_mode == "later"
+                and persist_id
+                and await _still_pending(session, options, result, persist_id)
+            ):
+                return result
             result.notes.append("the change leaves the configuration as it is: nothing committed")
             return result
         if not result.changed:
@@ -168,7 +183,7 @@ async def change_candidate(
             await session.discard_changes()
             result.notes.append("dry run: the candidate was discarded, nothing committed")
             return result
-        await _commit(session, options, result, check)
+        await _commit(session, options, result, check, persist_id)
         if options.save_config and result.pending:
             result.save_requested = True
         elif options.save_config and result.committed:
@@ -185,20 +200,65 @@ async def change_candidate(
                 await session.unlock(target)
 
 
+async def _still_pending(
+    session: NetconfSession, options: ChangeOptions, result: ChangeResult, persist_id: str
+) -> bool:
+    """Whether an earlier attempt of this step left its commit pending under ``persist_id``.
+
+    A follow-up confirmed commit with that persist id (RFC 6241 8.4) succeeds
+    only while the commit is pending, and restarts its confirm timeout; the
+    candidate it commits equals running here, so it changes nothing else.
+    """
+    timeout = options.confirm_timeout_seconds
+    try:
+        await session.commit(
+            confirmed=True, confirm_timeout=timeout, persist=persist_id, persist_id=persist_id
+        )
+    except RpcFailed:
+        return False
+    result.pending = True
+    result.persist_id = persist_id
+    result.save_requested = options.save_config
+    result.notes.append(
+        "an earlier attempt of this step left this change pending under the same persist "
+        f"id; its confirm timeout restarted: confirm it with netconf.commit within {timeout} s"
+    )
+    return True
+
+
+async def _final_commit(session: NetconfSession) -> None:
+    """The commit that makes the change final; a timeout may hide that it happened."""
+    try:
+        await session.commit()
+    except RpcTimeout as exc:
+        raise NetconfError(
+            f"{exc}; the device may already have committed the change, so check its "
+            "configuration before running the step again"
+        ) from None
+
+
 async def _commit(
     session: NetconfSession,
     options: ChangeOptions,
     result: ChangeResult,
     check: Callable[[], Awaitable[None]],
+    persist_id: str = "",
 ) -> None:
     timeout = options.confirm_timeout_seconds
     if options.commit_mode == "direct":
-        await session.commit()
+        await _final_commit(session)
         result.committed = True
         return
     if options.commit_mode == "later":
-        result.persist_id = secrets.token_urlsafe(18)
-        await session.commit(confirmed=True, confirm_timeout=timeout, persist=result.persist_id)
+        result.persist_id = persist_id or secrets.token_urlsafe(18)
+        try:
+            await session.commit(confirmed=True, confirm_timeout=timeout, persist=result.persist_id)
+        except RpcTimeout as exc:
+            raise NetconfError(
+                f"{exc}; the commit may be pending on the device under persist id "
+                f"{result.persist_id}: confirm or cancel it, or let it roll back after "
+                f"{timeout} s"
+            ) from None
         result.pending = True
         result.notes.append(
             f"confirmed commit pending: confirm it with netconf.commit within {timeout} s, "
@@ -239,7 +299,7 @@ async def _commit(
             f"the confirm timeout of {timeout} s ran out during the check; the device "
             "restores the previous configuration, so the change was not confirmed"
         )
-    await session.commit()
+    await _final_commit(session)
     result.committed = True
 
 
@@ -274,7 +334,15 @@ async def change_running(
         await session.lock("running")
         locked = True
         result.before = await read("running")
-        await apply()
+        try:
+            await apply()
+        except NetconfError as exc:
+            if session.supports(CAP_ROLLBACK_ON_ERROR):
+                raise
+            raise NetconfError(
+                f"{exc}. The device has no :rollback-on-error, so the failed edit may "
+                "have applied in part: check its running configuration"
+            ) from exc
         result.after = await read("running")
         result.diff = unified_diff(
             result.before, result.after, before_name="running (before)", after_name="running"
@@ -288,10 +356,6 @@ async def change_running(
                 "have changed, so the change is counted as changed"
             )
         result.committed = result.changed
-        if not session.supports(CAP_ROLLBACK_ON_ERROR):
-            result.notes.append(
-                "the device has no :rollback-on-error, so a failed edit may have applied in part"
-            )
         if options.save_config and result.committed:
             await _save(session, result)
         return result

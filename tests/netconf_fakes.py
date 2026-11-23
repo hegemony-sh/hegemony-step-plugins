@@ -64,6 +64,8 @@ class Pending:
     backup: Any
     persist: str = ""
     session: int = 0
+    #: Follow-up confirmed commits received (each restarts the timeout).
+    extended: int = 0
 
 
 @dataclass
@@ -83,6 +85,8 @@ class FakeNetconfDevice:
     base10_only: bool = False
     #: Operations to act on but never answer (a reply lost in transit).
     stall: frozenset[str] = frozenset()
+    #: Format the candidate's get-config reply differently from running's.
+    reformat_candidate: bool = False
 
     candidate: list[ET.Element] = field(default_factory=list)
     locks: dict[str, int] = field(default_factory=dict)
@@ -353,6 +357,14 @@ class FakeChannel:
             if subtree is not None and len(subtree):
                 wanted = {item.tag for item in subtree}
                 store = [item for item in store if item.tag in wanted]
+            if source == "candidate" and device.reformat_candidate:
+                # Same configuration, another layout: indented, a prefix, attributes.
+                wrapped = ET.Element("wrap")
+                wrapped.extend(copy.deepcopy(store))
+                ET.indent(wrapped)
+                text = "".join(ET.tostring(item, encoding="unicode") for item in wrapped)
+                text = re.sub(r"\bns(\d+)(?=[:=])", r"cand\1", text)
+                return (f"<data>\n{text}\n</data>", False)
             return (f"<data>{_xml(store)}</data>", False)
         if name == "get":
             return (f"<data>{_xml(device.running)}<state>up</state></data>", False)
@@ -386,6 +398,12 @@ class FakeChannel:
             if persist_id is not None:
                 if pending is None or pending.persist != persist_id:
                     return self._error("invalid-value", "no confirmed commit with that persist-id")
+                if confirmed:
+                    # A follow-up confirmed commit: still pending, timeout restarted.
+                    pending.persist = op.findtext(f"{{{BASE_NS}}}persist") or ""
+                    pending.extended += 1
+                    device.commit_candidate()
+                    return ok
                 # Confirming commits the candidate, whatever it now holds.
                 device.pending = None
                 device.commit_candidate()

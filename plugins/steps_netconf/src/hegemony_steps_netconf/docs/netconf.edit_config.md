@@ -58,7 +58,13 @@ Commit:
   persist id, for a `netconf.commit` step to confirm (after checks or an
   approval) or `netconf.cancel_commit` to roll back. The device restores the
   previous configuration on its own after Confirm Timeout (sec) (default
-  600). Needs `:confirmed-commit:1.1`.
+  600). Needs `:confirmed-commit:1.1`. The persist id comes from the run,
+  the step run and the device, so it is the same when the platform runs the
+  step again (a worker restart). A step run again finds the change already
+  in running, so its diff is empty: it then sends a follow-up confirmed
+  commit under the same persist id. When that succeeds, the device is
+  reported as pending again and its confirm timeout restarts; when the
+  device refuses it, nothing is pending.
 - **Commit directly**: a plain commit.
 
 On running (a device without a candidate, or Datastore running) the change
@@ -102,3 +108,10 @@ refuses the edit, the validation or the commit (the step error quotes its
 `rpc-error`), when it lacks what Commit or Datastore needs, and when the
 second session after a confirmed commit does not open. Every failure before
 the commit discards the candidate, so nothing half-applied is left behind.
+On running without `:rollback-on-error`, a failed edit may have applied in
+part, and the step error says so.
+
+When the device does not answer the final commit in time, the step fails
+and says the device may already have committed the change: check the
+device before running the step again. After any request times out the
+session is not used again.
