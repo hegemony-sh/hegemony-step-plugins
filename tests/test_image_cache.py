@@ -1573,6 +1573,22 @@ def test_32_bit_arm_without_a_variant_matches_nothing() -> None:
     assert _platform_entry(entries, "linux/arm/v7") == v7
 
 
+@pytest.mark.parametrize(
+    "duplicate",
+    [
+        {"os": "linux", "architecture": "amd64", "variant": "v1"},
+        {"os": "linux", "architecture": "amd64"},
+    ],
+)
+def test_an_index_with_two_entries_for_the_platform_matches_nothing(duplicate) -> None:
+    """amd64/v1 and plain amd64 are one platform to containerd: which runs is unknown."""
+    entries = [
+        {"digest": "sha256:" + "0d" * 32, "platform": duplicate},
+        {"digest": "sha256:" + "0e" * 32, "platform": {"os": "linux", "architecture": "amd64"}},
+    ]
+    assert _platform_entry(entries, "linux/amd64") is None
+
+
 def test_a_missing_variant_does_not_match_another_one() -> None:
     entries = [
         {

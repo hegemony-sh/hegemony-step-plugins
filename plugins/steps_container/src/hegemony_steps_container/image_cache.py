@@ -430,7 +430,7 @@ class RegistryClient:
 
 # The variant an architecture means when none is named (containerd's platform
 # normalisation).
-_DEFAULT_VARIANTS = {"arm64": "v8", "arm": "v7"}
+_DEFAULT_VARIANTS = {"amd64": "v1", "arm64": "v8", "arm": "v7"}
 
 
 def _platform_entry(entries: list, platform: str) -> str | None:
@@ -441,7 +441,8 @@ def _platform_entry(entries: list, platform: str) -> str | None:
     (``v8`` for arm64, ``v7`` for arm): an arm64 image's configuration often
     names no variant while its index entry says ``v8``. Otherwise an entry
     without a variant matches a platform with one only when no entry names
-    that variant.
+    that variant. An index with more than one entry for the platform answers
+    None: the daemon could run another entry than the one checked.
 
     32-bit ARM without a variant matches nothing: ``docker version`` reports
     no variant for an ARM sandbox, and v6 and v7 images differ, so assuming
@@ -454,7 +455,8 @@ def _platform_entry(entries: list, platform: str) -> str | None:
         return None
     default = _DEFAULT_VARIANTS.get(arch, "")
     wanted = variant or default
-    loose: str | None = None
+    exact: list[str] = []
+    loose: list[str] = []
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("digest"), str):
             continue
@@ -466,10 +468,15 @@ def _platform_entry(entries: list, platform: str) -> str | None:
         if not _DIGEST.match(entry["digest"]):
             continue
         if (spec.get("variant") or default) == wanted:
-            return entry["digest"]
-        if not spec.get("variant") and loose is None:
-            loose = entry["digest"]
-    return loose
+            exact.append(entry["digest"])
+        elif not spec.get("variant"):
+            loose.append(entry["digest"])
+    # More than one entry for the platform (amd64/v1 and plain amd64 are one
+    # platform to containerd): which one the daemon runs is not known, so the
+    # entry checked might not be the one that runs. No verdict.
+    if exact:
+        return exact[0] if len(exact) == 1 else None
+    return loose[0] if len(loose) == 1 else None
 
 
 __all__ = [
