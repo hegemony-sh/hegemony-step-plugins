@@ -78,8 +78,8 @@ and `<device>:acr result` holds the device's result text for the replace.
 
 - `steps.NODE_ID.output.devices`: each device's result by name: `ok`,
   `error`, `operation`, `acr_result`, `datastore`, `changed`, `committed`, `pending`,
-  `persist_id`, `validated`, `saved`, `save_error`, `save_requested`, `diff` and
-  `notes`.
+  `persist_id`, `validated`, `saved`, `save_error`, `save_requested`,
+  `commit_uncertain`, `device_id`, `diff` and `notes`.
 - `steps.NODE_ID.output.truncated`: diffs cut short in the output (16 KiB a
   device, 64 KiB the step); the evidence keeps them whole.
 

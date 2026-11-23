@@ -43,8 +43,9 @@ from hegemony_steps_netconf.edit_config import (
     change_summary,
     check_opener,
     raise_if_unsaved,
+    uncertain_output,
 )
-from hegemony_steps_netconf.transaction import change_candidate
+from hegemony_steps_netconf.transaction import CommitUncertain, change_candidate
 
 from .acr import MAX_CLIS_CHARS, apply_cli_config, read_cli_config, require_acr
 
@@ -233,15 +234,19 @@ class ConfigReplaceHandler(BaseHandler):
                 # get-modelled-config-clis returns modelled CLI only (no
                 # wireless, app-hosting or telemetry), so an empty diff does
                 # not show that the replace changes nothing.
-                result = await change_candidate(
-                    session,
-                    apply=_apply,
-                    read=_read,
-                    options=options,
-                    check=check_opener(ctx, device, config),
-                    diff_complete=False,
-                    persist_id=persist_id_for(ctx, device),
-                )
+                try:
+                    result = await change_candidate(
+                        session,
+                        apply=_apply,
+                        read=_read,
+                        options=options,
+                        check=check_opener(ctx, device, config),
+                        diff_complete=False,
+                        persist_id=persist_id_for(ctx, device),
+                    )
+                except CommitUncertain as exc:
+                    outcome.output = {**uncertain_output(exc), "operation": config.operation}
+                    raise
             outcome.output = {
                 **change_output(result),
                 "operation": config.operation,

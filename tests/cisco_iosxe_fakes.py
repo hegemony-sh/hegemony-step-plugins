@@ -64,6 +64,9 @@ class FakeIosXeDevice(FakeNetconfDevice):
         super().commit_candidate()
         self.running_cli = self.candidate_cli
 
+    def candidate_dirty(self) -> bool:
+        return super().candidate_dirty() or self.candidate_cli != self.running_cli
+
     def snapshot(self) -> Any:
         return (super().snapshot(), self.running_cli)
 
