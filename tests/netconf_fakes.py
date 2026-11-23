@@ -83,6 +83,8 @@ class FakeNetconfDevice:
     fail_commit: str = ""
     #: An ``error-path`` for the ``fail_commit`` error.
     fail_commit_path: str = ""
+    #: Commits that still succeed before ``fail_commit`` applies (None: none do).
+    fail_commit_after: int | None = None
     #: Speak base:1.0 framing only.
     base10_only: bool = False
     #: Operations to act on but never answer (a reply lost in transit).
@@ -429,7 +431,9 @@ class FakeChannel:
                 return self._error("invalid-value", "candidate does not validate")
             return ok
         if name == "commit":
-            if device.fail_commit:
+            if device.fail_commit and device.fail_commit_after:
+                device.fail_commit_after -= 1
+            elif device.fail_commit:
                 return self._error(device.fail_commit, "commit refused", device.fail_commit_path)
             locked = self._locked_by_other("running", "candidate")
             if locked:

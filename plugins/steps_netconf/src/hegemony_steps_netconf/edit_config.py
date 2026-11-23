@@ -342,6 +342,7 @@ class NetconfEditConfigHandler(BaseHandler):
                             check=check_opener(ctx, device, config),
                             diff_complete=not diff_filter,
                             persist_id=persist_id_for(ctx, device),
+                            check_pending=ctx.attempt > 1,
                         )
                     except CommitUncertain as exc:
                         outcome.output = uncertain_output(exc)
