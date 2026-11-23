@@ -123,6 +123,6 @@ When the device does not answer the final commit in time, the step fails
 and says the device may already have committed the change: check the
 device before running the step again. After any request times out the
 session is not used again. When the confirmed commit of "confirm in a later
-step" gets no reply, the device fails with `commit_uncertain` true and the
+step" gets no reply (a timeout or a dropped session), the device fails with `commit_uncertain` true and the
 `persist_id` kept, so a `netconf.commit` or `netconf.cancel_commit` step can
 still settle it (the device refuses the id when nothing is pending).

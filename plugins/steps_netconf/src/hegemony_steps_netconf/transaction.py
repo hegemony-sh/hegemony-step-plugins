@@ -228,7 +228,15 @@ async def _still_pending(
             confirmed=True, confirm_timeout=timeout, persist=persist_id, persist_id=persist_id
         )
     except RpcFailed:
-        return False
+        return False  # the device refused the id: nothing is pending under it
+    except NetconfError as exc:
+        # No answer (a timeout, a dropped session): the earlier commit may
+        # still be pending, so the id is kept for a settle step.
+        raise CommitUncertain(
+            f"{exc}; a commit from an earlier attempt may be pending under persist id "
+            f"{persist_id}: confirm or cancel it, or let it roll back",
+            persist_id,
+        ) from exc
     result.pending = True
     result.persist_id = persist_id
     result.save_requested = options.save_config
@@ -266,7 +274,11 @@ async def _commit(
         result.persist_id = persist_id or secrets.token_urlsafe(18)
         try:
             await session.commit(confirmed=True, confirm_timeout=timeout, persist=result.persist_id)
-        except RpcTimeout as exc:
+        except RpcFailed:
+            raise  # refused: nothing was committed
+        except NetconfError as exc:
+            # No answer (a timeout, a dropped session, broken framing): the
+            # device may have taken the commit, so the id is kept.
             raise CommitUncertain(
                 f"{exc}; the commit may be pending on the device under persist id "
                 f"{result.persist_id}: confirm or cancel it, or let it roll back after "

@@ -1191,3 +1191,88 @@ async def test_a_locked_datastore_refuses_another_sessions_edit_and_commit():
     await owner.unlock("candidate")
     await other.close()
     await owner.close()
+
+
+def test_escaped_namespace_values_are_not_escaped_twice():
+    from hegemony_steps_netconf.client import Reply
+
+    reply = (
+        '<nc:rpc-reply xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" '
+        'xmlns:p="urn:p?a=1&amp;b=2" message-id="1">'
+        '<nc:data xmlns="urn:d?x=&quot;y&quot;"><top><p:leaf>1</p:leaf></top></nc:data>'
+        "</nc:rpc-reply>"
+    )
+    [top] = check_fragment(Reply(parse_xml(reply, what="reply"), reply).pretty_data(), what="d")
+    assert top.tag == '{urn:d?x="y"}top'
+    assert top[0].tag == "{urn:p?a=1&b=2}leaf"
+
+
+def _canonical(fragment: str) -> str | None:
+    from hegemony_steps_netconf.client import canonical_xml
+
+    return canonical_xml(fragment)
+
+
+def test_the_canonical_form_keeps_what_a_value_means():
+    # Layout and prefix spelling do not count.
+    assert _canonical('<a xmlns="urn:x"><b>1</b></a>') == _canonical(
+        '<n:a xmlns:n="urn:x">\n  <n:b>1</n:b>\n</n:a>'
+    )
+    # A leaf's spaces are its value.
+    assert _canonical('<a xmlns="urn:x"><b> hello </b></a>') != _canonical(
+        '<a xmlns="urn:x"><b>hello</b></a>'
+    )
+    # A prefix:name value is compared by the namespace its prefix names.
+    one = '<a xmlns="urn:x" xmlns:i="urn:one"><k>i:foo</k></a>'
+    two = '<a xmlns="urn:x" xmlns:i="urn:two"><k>i:foo</k></a>'
+    same = '<a xmlns="urn:x" xmlns:j="urn:one"><k>j:foo</k></a>'
+    assert _canonical(one) != _canonical(two)
+    assert _canonical(one) == _canonical(same)
+    assert _canonical("<a>") is None
+
+
+async def test_a_dropped_session_after_the_commit_keeps_the_persist_id():
+    device = FakeNetconfDevice.with_config(BASE, drop_after=frozenset({"commit"}))
+    result = await NetconfEditConfigHandler().execute(
+        _ctx({"config": _hostname("r2"), "commit_mode": "later"}, FakeServices({"r1": device}))
+    )
+    assert not result.success
+    entry = result.output["devices"]["r1"]
+    assert entry["commit_uncertain"] is True and entry["persist_id"]
+    assert device.pending is not None and device.pending.persist == entry["persist_id"]
+
+
+async def test_a_retry_whose_check_gets_no_answer_keeps_the_persist_id():
+    device = FakeNetconfDevice.with_config(BASE)
+    config = {"config": _hostname("r2"), "commit_mode": "later", "rpc_timeout_seconds": 1}
+    first = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    assert first.success, first.error
+    persist_id = first.output["devices"]["r1"]["persist_id"]
+    device.stall = frozenset({"commit"})
+    retry = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    assert not retry.success
+    entry = retry.output["devices"]["r1"]
+    assert entry["commit_uncertain"] is True and entry["persist_id"] == persist_id
+    assert "earlier attempt" in (retry.error or "")
+
+
+@pytest.mark.parametrize("locked", ["running", "candidate"])
+async def test_a_persist_id_confirmation_waits_for_another_sessions_lock(locked):
+    device = FakeNetconfDevice.with_config(BASE)
+    first, _ = await _pending_change(device)
+    persist_id = first.output["devices"]["r1"]["persist_id"]
+    holder = NetconfSession(await device.open(), timeout=5)
+    other = NetconfSession(await device.open(), timeout=5)
+    await holder.hello()
+    await other.hello()
+    await holder.lock(locked)
+    with pytest.raises(RpcFailed, match="in-use"):
+        await other.commit(persist_id=persist_id)
+    assert device.pending is not None and _running_hostname(device) == "r2"
+    await holder.unlock(locked)
+    await other.commit(persist_id=persist_id)
+    assert device.pending is None and _running_hostname(device) == "r2"
+    device.expire()
+    assert _running_hostname(device) == "r2"
+    await other.close()
+    await holder.close()
