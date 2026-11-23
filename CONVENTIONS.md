@@ -41,8 +41,12 @@ platforms, transports, and libraries multiply.
    transport — its config is payload-shaped, so it is a different handler in
    a different namespace.
 3. **Vendor-platform namespaces** — only for workflows whose semantics are
-   themselves platform-specific: none today; `cisco.iosxe`, `cisco.nxos`,
-   `arista.eos` as they appear. Vendor first, platform second.
+   themselves platform-specific: `cisco.iosxe` today (Atomic Configuration
+   Replace, whose input is IOS XE's own CLI-RPC model); `cisco.nxos`,
+   `arista.eos` as they appear. Vendor first, platform second. A vendor
+   wheel that speaks a paradigm's protocol builds on that paradigm's wheel
+   (`cisco.iosxe` on `netconf`'s client and transaction) and depends on it
+   at the same version.
 
 4. **Tool namespaces** — handlers that drive one external tool whose own
    concepts shape the config schema (a playbook, a plan file): `ansible`,

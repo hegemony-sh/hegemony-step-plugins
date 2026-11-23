@@ -9,8 +9,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 `netconf.commit` confirms the confirmed commit an earlier change step left
 pending, so the change stays. Put it after the checks (or the approval) that
-follow a change step (such as `netconf.edit_config`) whose Commit is
-"Confirm in a later step".
+follow a `netconf.edit_config` or `cisco.iosxe.config_replace` step whose
+Commit is "Confirm in a later step".
 
 ## Using It
 

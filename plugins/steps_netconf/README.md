@@ -30,8 +30,9 @@ Handlers:
 The platform opens the SSH session (`services.open_netconf`) with the
 device's SSH credentials, the flow's egress policy, the organization's
 trusted host keys and the device's jump host; this wheel speaks NETCONF on it
-(`hegemony_steps_netconf.client`). Vendor wheels can build on that client and
-on the change transaction (`hegemony_steps_netconf.transaction`).
+(`hegemony_steps_netconf.client`). Vendor wheels such as
+`hegemony-steps-cisco-iosxe` build on that client and on the change
+transaction (`hegemony_steps_netconf.transaction`).
 
 Namespace prefix (= entry-point name): `netconf.` — see the repo-level
 `CONVENTIONS.md` for the naming rules. Each handler has its page under

@@ -76,6 +76,7 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_inventory` | `inventory.` | sync — sync an inventory provider of the run's organization now |
   | `plugins/steps_git` | `git.` | commit — commit an earlier step's evidence (configuration backups) to a Git repository over HTTPS, only when it changed (built on `container.run`'s runner) |
   | `plugins/steps_netconf` | `netconf.` | get, edit_config, commit, cancel_commit, rpc — NETCONF (RFC 6241): read, change as one transaction (candidate, diff, validate, dry run, confirmed commit), settle a pending commit, any other operation |
+  | `plugins/steps_cisco_iosxe` | `cisco.iosxe.` | config_replace, get_config — IOS XE Atomic Configuration Replace and configuration as CLI text, over NETCONF (needs `hegemony-steps-netconf`) |
   | `plugins/steps_netbox` | `netbox.` | request, ipam.allocate/release, render_config — NetBox objects, IP address management and config rendering (needs `hegemony-steps-http`) |
 
 Device transports (`transports/`: netmiko, scrapli, asyncssh) and the network
@@ -92,12 +93,13 @@ The wheels that reach outside the worker are limited in different ways:
 
 - `hegemony-steps-shell`: only devices whose access config holds SSH
   credentials, checked against the organization's trusted host keys.
-- `hegemony-steps-netconf`: the same as shell steps, on the NETCONF port
+- `hegemony-steps-netconf` and `hegemony-steps-cisco-iosxe` (which needs
+  `hegemony-steps-netconf`): the same as shell steps, on the NETCONF port
   (830 by default), and the flow's egress policy. On a device with a
   candidate datastore, configuration changes go through it with a confirmed
   commit by default. A device without one (`netconf.edit_config` Target
   `auto`) gets the change on running at once: no dry run and no confirmed
-  commit.
+  commit. `cisco.iosxe.config_replace` always needs the candidate.
 - `hegemony-steps-http` and `hegemony-steps-netbox` (which needs
   `hegemony-steps-http`): the flow's egress policy. A flow without one can
   reach any address the worker can, except loopback, link-local (cloud
@@ -118,7 +120,8 @@ own; the platform's images already carry the rest.
 A wheel pins `hegemony-step-sdk` to its own exact version, and the SDK is not
 on an index, so name the SDK wheel of the same release in the same command,
 together with any wheel that the wheels you install depend on
-(`hegemony-steps-netbox` needs `hegemony-steps-http`; `hegemony-steps-ansible`,
+(`hegemony-steps-netbox` needs `hegemony-steps-http`; `hegemony-steps-cisco-iosxe`
+needs `hegemony-steps-netconf`; `hegemony-steps-ansible`,
 `hegemony-steps-tf` and `hegemony-steps-git` need `hegemony-steps-container`):
 
 ```bash

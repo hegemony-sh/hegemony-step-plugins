@@ -17,6 +17,7 @@ from typing import Any, cast
 
 import pytest
 
+import hegemony_steps_cisco_iosxe
 import hegemony_steps_container
 import hegemony_steps_evidence
 import hegemony_steps_flow
@@ -73,6 +74,11 @@ WHEELS = [
             "netconf.cancel_commit",
             "netconf.rpc",
         },
+    ),
+    (
+        hegemony_steps_cisco_iosxe,
+        "cisco.iosxe",
+        {"cisco.iosxe.config_replace", "cisco.iosxe.get_config"},
     ),
     (
         hegemony_steps_netbox,
