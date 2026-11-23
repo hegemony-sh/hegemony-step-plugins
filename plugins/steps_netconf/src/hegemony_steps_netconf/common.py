@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -138,6 +139,27 @@ async def netconf_session(
         await session.close()
 
 
+def persist_id_for(ctx: HandlerContext, device: dict[str, Any]) -> str:
+    """The persist id of this step's confirmed commit on ``device``.
+
+    Derived from the run, the step run and the device, so it is the same on
+    every attempt of the step: the platform creates the step run once and an
+    activity retry (a crashed worker, a lost connection) reuses it. A retried
+    step can then find, extend and report the commit an earlier attempt left
+    pending, instead of leaving one nobody can confirm.
+    """
+    parts = (
+        ctx.run_id or "",
+        ctx.step_run_id or "",
+        str(device.get("id") or ""),
+        device_label(device),
+        str(device.get("mgmt_host") or ""),
+    )
+    if not (ctx.run_id or ctx.step_run_id):
+        return ""  # no stable identity: the transaction makes a random one
+    return "hegemony-" + hashlib.sha256("\x1f".join(parts).encode()).hexdigest()[:32]
+
+
 def device_label(device: dict[str, Any]) -> str:
     return str(device.get("name") or device.get("mgmt_host") or device.get("id") or "unknown")
 
@@ -179,8 +201,10 @@ async def run_per_device(
 ) -> list[DeviceOutcome]:
     """Run ``work`` for every device; a failure is recorded on its outcome.
 
-    A refusal by the flow's egress policy, or a platform without NETCONF,
-    propagates and fails the step, as for the other device steps.
+    A refusal by the flow's egress policy is recorded on that device's
+    outcome too, so the devices done before it keep their results (a pending
+    commit's persist id among them). Only a platform without NETCONF
+    (``SessionUnavailable``) propagates and fails the whole step.
     """
 
     async def _one(device: dict[str, Any]) -> DeviceOutcome:

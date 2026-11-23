@@ -16,14 +16,21 @@ off is rolled back by the device itself.
 ## Using It
 
 Configuration is the XML that goes inside `<config>`: one or more top nodes,
-each with its namespace. Templates such as `{{ inputs.hostname }}` are filled
-in before the step runs.
+each with its namespace. Templates such as `{{ inputs.hostname | e }}` are
+filled in before the step runs.
 
 ```xml
 <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-  <hostname>{{ inputs.hostname }}</hostname>
+  <hostname>{{ inputs.hostname | e }}</hostname>
 </native>
 ```
+
+Escape every template value you place in the XML with the `e` filter:
+`{{ inputs.description | e }}`. It turns `<`, `>`, `&`, `'` and `"` into XML
+entities. Without it, a value such as `x</description><shutdown/><description>`
+closes the element it belongs in and adds a `<shutdown/>` node to the
+configuration. Write `| e` on every value, also ones you expect to be plain,
+such as a hostname.
 
 Default Operation is merge (add and change), replace (every node in
 Configuration ends up exactly as written: with a model's whole tree it
@@ -58,7 +65,13 @@ Commit:
   persist id, for a `netconf.commit` step to confirm (after checks or an
   approval) or `netconf.cancel_commit` to roll back. The device restores the
   previous configuration on its own after Confirm Timeout (sec) (default
-  600). Needs `:confirmed-commit:1.1`.
+  600). Needs `:confirmed-commit:1.1`. The persist id comes from the run,
+  the step run and the device, so it is the same when the platform runs the
+  step again (a worker restart). A step run again finds the change already
+  in running, so its diff is empty: it then sends a follow-up confirmed
+  commit under the same persist id. When that succeeds, the device is
+  reported as pending again and its confirm timeout restarts; when the
+  device refuses it, nothing is pending.
 - **Commit directly**: a plain commit.
 
 On running (a device without a candidate, or Datastore running) the change
@@ -102,3 +115,10 @@ refuses the edit, the validation or the commit (the step error quotes its
 `rpc-error`), when it lacks what Commit or Datastore needs, and when the
 second session after a confirmed commit does not open. Every failure before
 the commit discards the candidate, so nothing half-applied is left behind.
+On running without `:rollback-on-error`, a failed edit may have applied in
+part, and the step error says so.
+
+When the device does not answer the final commit in time, the step fails
+and says the device may already have committed the change: check the
+device before running the step again. After any request times out the
+session is not used again.

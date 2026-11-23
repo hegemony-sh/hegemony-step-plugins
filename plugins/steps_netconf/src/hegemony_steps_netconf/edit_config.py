@@ -37,6 +37,7 @@ from .common import (
     max_parallel_field,
     netconf_session,
     no_targets,
+    persist_id_for,
     run_per_device,
     text_evidence,
     unavailable,
@@ -136,7 +137,9 @@ class NetconfEditConfig(ChangeSettings):
         title="Configuration",
         description=(
             "The configuration to apply: the XML that goes inside <config>, with each top "
-            "node's namespace. Templates such as {{ inputs.vlan }} are filled in."
+            "node's namespace. Templates such as {{ inputs.vlan }} are filled in; escape "
+            "each value placed in XML with the e filter ({{ inputs.description | e }}), so "
+            "a value holding < or & cannot add or end elements."
         ),
         json_schema_extra={
             "x_widget": "textarea",
@@ -144,7 +147,7 @@ class NetconfEditConfig(ChangeSettings):
             "x_col_span": 2,
             "x_placeholder": (
                 '<native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">\n'
-                "  <hostname>r1</hostname>\n</native>"
+                "  <hostname>{{ inputs.hostname | e }}</hostname>\n</native>"
             ),
         },
     )
@@ -321,6 +324,7 @@ class NetconfEditConfigHandler(BaseHandler):
                         options=options,
                         check=check_opener(ctx, device, config),
                         diff_complete=not diff_filter,
+                        persist_id=persist_id_for(ctx, device),
                     )
                 else:
                     result = await change_running(

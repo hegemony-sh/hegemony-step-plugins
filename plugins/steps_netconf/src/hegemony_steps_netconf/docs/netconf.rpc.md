@@ -21,6 +21,13 @@ save the running configuration on IOS XE:
 <save-config xmlns="http://cisco.com/yang/cisco-ia"/>
 ```
 
+Escape every template value you place in the XML with the `e` filter:
+`{{ inputs.description | e }}`. It turns `<`, `>`, `&`, `'` and `"` into XML
+entities. Without it, a value such as `x</description><shutdown/><description>`
+closes the element it belongs in and adds a `<shutdown/>` node to the
+operation. Write `| e` on every value, also ones you expect to be plain,
+such as a hostname.
+
 `hello`, `close-session` and `kill-session` are refused: the step manages
 its session itself. The operation runs as written, with no lock, diff or
 rollback; use `netconf.edit_config` for configuration changes. Max Parallel

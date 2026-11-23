@@ -21,7 +21,10 @@ NETCONF session and sends `<commit>` with that persist id (RFC 6241,
 
 A confirming commit commits whatever the candidate holds, so the step first
 locks the candidate and confirms only when it matches running (the pending
-change). Edits another session staged since the change step stop it.
+change). The two are compared as canonical XML, so layout, attribute order
+and namespace prefixes do not count. Edits another session staged since the
+change step stop it. When the device does not answer the confirmation in
+time, the step fails and says the commit may already be confirmed.
 
 Save to startup saves running to startup after confirming: copy-config when
 the device has a startup datastore, else Cisco's `save-config` RPC. A

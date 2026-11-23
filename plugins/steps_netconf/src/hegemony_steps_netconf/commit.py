@@ -31,7 +31,7 @@ from hegemony_step_sdk import (
     StepKind,
 )
 
-from .client import CAP_CONFIRMED_11, NetconfError, RpcFailed
+from .client import CAP_CONFIRMED_11, NetconfError, RpcFailed, RpcTimeout
 from .common import (
     DeviceOutcome,
     NetconfConnectionConfig,
@@ -226,15 +226,23 @@ class NetconfCommitHandler(_SettleHandler):
                 "stage other changes"
             ) from None
         try:
-            running = (await session.get_config("running")).data()
-            candidate = (await session.get_config("candidate")).data()
+            # Compared in canonical form: a device may format the two
+            # datastores differently even when they hold the same configuration.
+            running = (await session.get_config("running")).canonical_data()
+            candidate = (await session.get_config("candidate")).canonical_data()
             if candidate != running:
                 raise NetconfError(
                     "the candidate holds changes that are not part of the pending commit "
                     "(another session staged them); not confirming. Discard them on the "
                     "device, or cancel the commit"
                 )
-            await session.commit(persist_id=persist_id)
+            try:
+                await session.commit(persist_id=persist_id)
+            except RpcTimeout as exc:
+                raise NetconfError(
+                    f"{exc}; the device may already have confirmed the commit, so check its "
+                    "configuration before running the step again"
+                ) from None
         finally:
             with contextlib.suppress(Exception):
                 await session.unlock("candidate")
