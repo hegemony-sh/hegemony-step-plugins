@@ -147,7 +147,7 @@ def inherited_prefixes(text: str, *names: str) -> dict[str, str]:
     """
     found: dict[str, str] = {}
     for name in names:
-        opening = re.search(rf"<(?:[A-Za-z_][\w.-]*:)?{name}(\s[^>]*)?/?>", text)
+        opening = re.search(rf"<(?:[^\W\d][\w.-]*:)?{name}(\s[^>]*)?/?>", text)
         if opening and opening.group(1):
             # Attribute values as written: references decoded, so the caller
             # escaping them again gives back the same namespace.
