@@ -272,3 +272,18 @@ async def test_the_model_listed_only_in_the_yang_library_is_found():
     read = await GetConfigHandler().execute(_ctx({}, services))
     assert read.success, read.error
     assert read.output["devices"]["r1"]["config"] == TARGET
+
+
+def test_a_warning_in_the_reply_is_not_read_as_the_acr_error():
+    from xml.etree import ElementTree as ET
+
+    from hegemony_steps_cisco_iosxe.acr import _result
+
+    base = "urn:ietf:params:xml:ns:netconf:base:1.0"
+    reply = ET.fromstring(
+        f'<rpc-reply xmlns="{base}"><rpc-error><error-type>application</error-type>'
+        "<error-tag>operation-failed</error-tag><error-severity>warning</error-severity>"
+        "<error-message>deprecated command</error-message></rpc-error>"
+        f'<result xmlns="{CLI_RPC_NS}">applied</result></rpc-reply>'
+    )
+    assert _result(reply) == ("applied", "")

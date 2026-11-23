@@ -159,12 +159,14 @@ def _names_operation_leaf(exc: RpcFailed) -> bool:
 
 
 def _result(reply: ET.Element) -> tuple[str, str]:
-    """The ``result`` and ``error-message`` leaves of a cli-rpc reply."""
-    result = error = ""
-    for node in reply.iter():
-        name = local_name(node.tag)
-        if name == "result" and not result:
-            result = node.text or ""
-        elif name == "error-message" and not error:
-            error = (node.text or "").strip()
+    """The ``result`` and ``error-message`` leaves of a cli-rpc reply.
+
+    Matched by namespace as well as name: a warning's ``<rpc-error>`` (which
+    ``rpc()`` lets through) has a base-namespace ``<error-message>`` that is
+    not the model's leaf.
+    """
+    result_node = reply.find(f".//{{{CLI_RPC_NS}}}result")
+    error_node = reply.find(f".//{{{CLI_RPC_NS}}}error-message")
+    result = "" if result_node is None else result_node.text or ""
+    error = "" if error_node is None else (error_node.text or "").strip()
     return result, error
