@@ -246,7 +246,10 @@ class ConfigReplaceHandler(BaseHandler):
                         check_pending=ctx.attempt > 1,
                     )
                 except CommitUncertain as exc:
-                    outcome.output = {**uncertain_output(exc), "operation": config.operation}
+                    outcome.output = {
+                        **uncertain_output(exc, save_requested=options.save_config),
+                        "operation": config.operation,
+                    }
                     raise
             outcome.output = {
                 **change_output(result),
