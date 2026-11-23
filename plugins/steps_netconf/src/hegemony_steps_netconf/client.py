@@ -135,21 +135,38 @@ class Reply:
 _ATTRIBUTES = r"""(\s(?:[^>"'/]|/(?!>)|"[^"]*"|'[^']*')*)?"""
 #: The same, not captured, for tags inside a pattern of their own.
 _ATTRIBUTES_NC = r"""(?:\s(?:[^>"'/]|/(?!>)|"[^"]*"|'[^']*')*)?"""
-#: Text that is not markup: a tag written inside one is not a tag.
-_NOT_MARKUP = re.compile(r"<!--.*?-->|<!\[CDATA\[.*?\]\]>|<\?.*?\?>", re.DOTALL)
 
 
-def _opening_tag(text: str, name: str) -> re.Match[str] | None:
-    """The first real ``<name ...>`` or ``<prefix:name ...>`` tag in ``text``.
+#: Any tag, or markup whose text holds no tags (comments, CDATA, processing
+#: instructions, declarations).
+_ANY_TAG = re.compile(
+    r"<!--.*?-->|<!\[CDATA\[.*?\]\]>|<\?.*?\?>|<![^>]*>"
+    rf"|<(/?)([^\s/>!?]+){_ATTRIBUTES_NC}(/?)>",
+    re.DOTALL,
+)
 
-    A tag written inside a comment, a CDATA section or a processing
-    instruction is skipped.
+
+def _opening_tag(text: str, name: str, depth: int) -> re.Match[str] | None:
+    """The first real ``<name ...>`` tag at ``depth`` (0 for the root element).
+
+    Tags are walked in order with their nesting, so a tag written inside a
+    comment, a CDATA section or a processing instruction, or an element of
+    that name deeper in the reply (inside an ``<error-info>``, say), is not
+    taken for it. The match has the attributes as group 1 and the ``/`` of
+    an empty element as group 2.
     """
-    skipped = [match.span() for match in _NOT_MARKUP.finditer(text)]
     pattern = re.compile(rf"<(?:[^\W\d][\w.-]*:)?{re.escape(name)}{_ATTRIBUTES}(/?)>")
-    for match in pattern.finditer(text):
-        if not any(start <= match.start() < end for start, end in skipped):
-            return match
+    level = 0
+    for token in _ANY_TAG.finditer(text):
+        if token.group(2) is None:
+            continue  # a comment, CDATA, a processing instruction or a declaration
+        if token.group(1):
+            level -= 1
+            continue
+        if level == depth and token.group(2).rsplit(":", 1)[-1] == name:
+            return pattern.match(text, token.start())
+        if not token.group(3):
+            level += 1
     return None
 
 
@@ -162,14 +179,16 @@ _PREFIX_DECLARATION = re.compile(r"^xmlns:([^\W\d][\w.-]*)$")
 def inherited_prefixes(text: str, *names: str) -> dict[str, str]:
     """Namespace declarations on the opening tags of ``names`` (outermost first).
 
+    ``names`` is a path from the root: the root element, then a child of it.
+
     A device may declare a model's prefix, or the default namespace, on
     ``<rpc-reply>`` or ``<data>`` and rely on it inside; the extracted content
     needs those declarations back to mean the same on its own. The default
     namespace is under the key ``""``; the innermost declaration wins.
     """
     found: dict[str, str] = {}
-    for name in names:
-        opening = _opening_tag(text, name)
+    for depth, name in enumerate(names):
+        opening = _opening_tag(text, name, depth)
         if opening and opening.group(1):
             # Attribute values as written: references decoded, so the caller
             # escaping them again gives back the same namespace.
@@ -290,13 +309,13 @@ def check_fragment(text: str, *, what: str) -> list[ET.Element]:
     return list(wrapped)
 
 
-def element_content(text: str, name: str) -> str:
-    """The raw content of the first top-level ``<name>`` child of a reply, prefixes kept.
+def element_content(text: str, name: str, depth: int = 1) -> str:
+    """The raw content of the first ``<name>`` at ``depth`` (a child of the root), prefixes kept.
 
     Slices the reply text instead of re-serializing the parsed tree, so the
     device's own namespace prefixes and layout reach the step's evidence.
     """
-    opening = _opening_tag(text, name)
+    opening = _opening_tag(text, name, depth)
     if opening is None or opening.group(2) == "/":
         return ""
     # Walk the tags after it, skipping comments, CDATA and processing
