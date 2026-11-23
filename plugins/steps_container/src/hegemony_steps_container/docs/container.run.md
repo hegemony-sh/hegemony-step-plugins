@@ -67,8 +67,10 @@ namespace, named after the image's own registry and repository. Later runs
 ask the image's registry only which digest the tag points at today (one
 manifest request, plus whatever login round trip that registry asks for;
 Docker Hub does not count these requests against its pull limits) and pull
-the copy when it matches, or the newest copy under the tag when that registry
-is unreachable; the step's events say which. A new digest is pulled from the
+the copy when it matches. With that registry unreachable no copy is used,
+since nothing is left to check one against (a copy under the tag could be
+anything a step of the organization pushed there): the image is pulled from
+its registry as without the cache, and the step's events say why. A new digest is pulled from the
 image's registry by that digest, so the copy holds exactly what was checked
 even if the tag moves meanwhile, and saved as a copy in turn, without ever
 failing the step when the save cannot happen. A copy is filed under a tag
@@ -78,12 +80,14 @@ digest, the content checked against it) and compares the configuration digest
 it names for the sandbox's platform with the image ID of the copy as this
 step pulled it (by the digest its pull reported, or the ID it read when the
 pull reported none, which the container then runs by; never the tag, which
-another step can move meanwhile). A copy that is
-another image is not run: the step pulls the image from its registry and
-saves a true copy over it (`image_cache_mismatch` in its events). When the
-check cannot be made (the registry is unreachable, refuses the login, or does
-not answer within 30 seconds) the copy runs and the events say so
-(`image_cache_unverified`). A registry that refuses the
+another step can move meanwhile). A copy whose pull reported the upstream
+digest itself needs no check: the same digest is the same content. A copy
+that is another image is not run: the step pulls the image from its registry
+and saves a true copy over it (`image_cache_mismatch` in its events). Nor is
+a copy the check cannot be made for (the registry is unreachable, refuses the
+login, or does not answer within 30 seconds; the copy's image ID cannot be
+read; the image's registry has no image for the copy's platform): the step
+pulls the image from its registry the same way (`image_cache_unverified`). A registry that refuses the
 check's login gets the plain pull instead, with no copy served or saved: a
 refusal may mean access was withdrawn. An image from a registry whose name
 has no dot and is not `localhost` (`myregistry:5000`) is pulled from it and
