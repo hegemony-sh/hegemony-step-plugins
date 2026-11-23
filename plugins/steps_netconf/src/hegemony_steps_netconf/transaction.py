@@ -223,6 +223,21 @@ async def change_candidate(
 _NOTHING_PENDING_TAGS = ("invalid-value", "unknown-element", "bad-element", "missing-element")
 
 
+def _refuses_the_persist_id(exc: RpcFailed) -> bool:
+    """Whether every error refuses the persist id itself, not another parameter.
+
+    The tags also report other bad parameters (RFC 6241 appendix A), such as
+    a confirm timeout the device does not accept; an error whose path names
+    something else, or whose message is about the timeout, leaves the
+    outcome open.
+    """
+    return bool(exc.errors) and all(
+        error.tag in _NOTHING_PENDING_TAGS
+        and ("persist-id" in error.path if error.path else "timeout" not in error.message.lower())
+        for error in exc.errors
+    )
+
+
 async def _still_pending(
     session: NetconfSession, options: ChangeOptions, result: ChangeResult, persist_id: str
 ) -> bool:
@@ -238,7 +253,7 @@ async def _still_pending(
             confirmed=True, confirm_timeout=timeout, persist=persist_id, persist_id=persist_id
         )
     except RpcFailed as exc:
-        if exc.has_tag(*_NOTHING_PENDING_TAGS):
+        if _refuses_the_persist_id(exc):
             return False  # the device refused the id: nothing is pending under it
         # Refused for another reason (operation-failed, in-use...): the
         # earlier commit may still be pending, so the id is kept.

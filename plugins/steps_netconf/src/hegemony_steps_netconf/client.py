@@ -131,8 +131,10 @@ class Reply:
         return canonical_xml(data, inherited_prefixes(self.text, "rpc-reply", "data")) or data
 
 
-_PREFIX_DECLARATION = re.compile(r"""xmlns:([^\W\d][\w.-]*)\s*=\s*(["'])(.*?)\2""")
-_DEFAULT_DECLARATION = re.compile(r"""(?:^|\s)xmlns\s*=\s*(["'])(.*?)\1""")
+#: One attribute of an opening tag; matched in order, so a value is never read as a name.
+_ATTRIBUTE = re.compile(r"""\s+([^\s=/>]+)\s*=\s*(["'])(.*?)\2""", re.DOTALL)
+#: A prefix declaration's attribute name.
+_PREFIX_DECLARATION = re.compile(r"^xmlns:([^\W\d][\w.-]*)$")
 
 
 def inherited_prefixes(text: str, *names: str) -> dict[str, str]:
@@ -149,11 +151,12 @@ def inherited_prefixes(text: str, *names: str) -> dict[str, str]:
         if opening and opening.group(1):
             # Attribute values as written: references decoded, so the caller
             # escaping them again gives back the same namespace.
-            for prefix, _quote, uri in _PREFIX_DECLARATION.findall(opening.group(1)):
-                found[prefix] = html.unescape(uri)
-            default = _DEFAULT_DECLARATION.search(opening.group(1))
-            if default:
-                found[""] = html.unescape(default.group(2))
+            for attribute, _quote, uri in _ATTRIBUTE.findall(opening.group(1)):
+                declared = _PREFIX_DECLARATION.match(attribute)
+                if declared:
+                    found[declared.group(1)] = html.unescape(uri)
+                elif attribute == "xmlns":
+                    found[""] = html.unescape(uri)
     return found
 
 
@@ -217,19 +220,18 @@ def canonical_xml(text: str, namespaces: dict[str, str] | None = None) -> str | 
             bindings[prefix] = scope.get(prefix, "?")
         return f"{text_value!r}@{sorted(bindings.items())!r}"
 
-    def tail(element: ET.Element) -> str:
-        # Text after a child is data only in mixed content; indentation is not.
-        text_value = element.tail or ""
-        return repr(text_value) if text_value.strip() else ""
-
     def form(element: ET.Element) -> str:
         attributes = "".join(f" {key}={value!r}" for key, value in sorted(element.attrib.items()))
         if not len(element):
             return f"<{element.tag}{attributes}>{value(element)}</>"
-        own = element.text or ""
-        lead = repr(own) if own.strip() else ""
-        children = "".join(form(child) + tail(child) for child in element)
-        return f"<{element.tag}{attributes}>{lead}{children}</>"
+        # Text between children is indentation in element-only content, and
+        # dropped; once any of it is more than whitespace the content is mixed
+        # and every piece is data, whitespace included.
+        pieces = [element.text or ""] + [child.tail or "" for child in element]
+        mixed = any(piece.strip() for piece in pieces)
+        keep = (lambda piece: repr(piece)) if mixed else (lambda _piece: "")
+        children = "".join(form(child) + keep(child.tail or "") for child in element)
+        return f"<{element.tag}{attributes}>{keep(element.text or '')}{children}</>"
 
     return "".join(form(child) for child in root)
 

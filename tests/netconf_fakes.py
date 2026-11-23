@@ -82,6 +82,8 @@ class FakeNetconfDevice:
     fail_edit: str = ""
     #: Reply to commit with this rpc-error tag.
     fail_commit: str = ""
+    #: An ``error-path`` for the ``fail_commit`` error.
+    fail_commit_path: str = ""
     #: Speak base:1.0 framing only.
     base10_only: bool = False
     #: Operations to act on but never answer (a reply lost in transit).
@@ -346,11 +348,12 @@ class FakeChannel:
                 return target
         return ""
 
-    def _error(self, tag: str, message: str = "") -> tuple[str, bool]:
+    def _error(self, tag: str, message: str = "", path: str = "") -> tuple[str, bool]:
+        error_path = f"<error-path>{path}</error-path>" if path else ""
         return (
             "<rpc-error><error-type>application</error-type>"
             f"<error-tag>{tag}</error-tag><error-severity>error</error-severity>"
-            f"<error-message>{message or tag}</error-message></rpc-error>",
+            f"{error_path}<error-message>{message or tag}</error-message></rpc-error>",
             False,
         )
 
@@ -441,7 +444,7 @@ class FakeChannel:
             return ok
         if name == "commit":
             if device.fail_commit:
-                return self._error(device.fail_commit, "commit refused")
+                return self._error(device.fail_commit, "commit refused", device.fail_commit_path)
             locked = self._locked_by_other("running", "candidate")
             if locked:
                 return self._error("in-use", f"{locked} is locked by another session")
