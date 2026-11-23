@@ -160,22 +160,34 @@ async def change_candidate(
             raise NetconfError(error)
     result = ChangeResult(datastore="candidate")
     locked: list[str] = []
+    # Only on a retry: a first attempt cannot have left anything pending,
+    # and does not depend on how a server answers an unknown persist id.
+    recover = (
+        check_pending
+        and not options.dry_run
+        and options.commit_mode == "later"
+        and bool(persist_id)
+    )
     try:
-        await session.lock("running")
-        locked.append("running")
-        await session.lock("candidate")
-        locked.append("candidate")
-        # Left over from a session that ended without committing or discarding.
-        await session.discard_changes()
-        # Only on a retry: a first attempt cannot have left anything pending,
-        # and does not depend on how a server answers an unknown persist id.
-        earlier_pending = (
-            check_pending
-            and not options.dry_run
-            and options.commit_mode == "later"
-            and bool(persist_id)
-            and await _still_pending(session, options, result, persist_id)
-        )
+        earlier_pending = False
+        if recover:
+            # A device refuses to lock running while a confirmed commit is
+            # pending (RFC 6241 7.5), so the check comes first, under the
+            # candidate lock; running is locked only when nothing is pending.
+            await session.lock("candidate")
+            locked.append("candidate")
+            await session.discard_changes()
+            earlier_pending = await _still_pending(session, options, result, persist_id)
+            if not earlier_pending:
+                await session.lock("running")
+                locked.insert(0, "running")
+        else:
+            await session.lock("running")
+            locked.append("running")
+            await session.lock("candidate")
+            locked.append("candidate")
+            # Left over from a session that ended without committing or discarding.
+            await session.discard_changes()
         result.before = await read("running")
         await apply()
         result.after = await read("candidate")

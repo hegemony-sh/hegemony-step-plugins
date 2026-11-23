@@ -133,6 +133,26 @@ class Reply:
 
 #: An opening tag's attributes: a quoted value may hold ``>`` or ``/>``.
 _ATTRIBUTES = r"""(\s(?:[^>"'/]|/(?!>)|"[^"]*"|'[^']*')*)?"""
+#: The same, not captured, for tags inside a pattern of their own.
+_ATTRIBUTES_NC = r"""(?:\s(?:[^>"'/]|/(?!>)|"[^"]*"|'[^']*')*)?"""
+#: Text that is not markup: a tag written inside one is not a tag.
+_NOT_MARKUP = re.compile(r"<!--.*?-->|<!\[CDATA\[.*?\]\]>|<\?.*?\?>", re.DOTALL)
+
+
+def _opening_tag(text: str, name: str) -> re.Match[str] | None:
+    """The first real ``<name ...>`` or ``<prefix:name ...>`` tag in ``text``.
+
+    A tag written inside a comment, a CDATA section or a processing
+    instruction is skipped.
+    """
+    skipped = [match.span() for match in _NOT_MARKUP.finditer(text)]
+    pattern = re.compile(rf"<(?:[^\W\d][\w.-]*:)?{re.escape(name)}{_ATTRIBUTES}(/?)>")
+    for match in pattern.finditer(text):
+        if not any(start <= match.start() < end for start, end in skipped):
+            return match
+    return None
+
+
 #: One attribute of an opening tag; matched in order, so a value is never read as a name.
 _ATTRIBUTE = re.compile(r"""\s+([^\s=/>]+)\s*=\s*(["'])(.*?)\2""", re.DOTALL)
 #: A prefix declaration's attribute name.
@@ -149,7 +169,7 @@ def inherited_prefixes(text: str, *names: str) -> dict[str, str]:
     """
     found: dict[str, str] = {}
     for name in names:
-        opening = re.search(rf"<(?:[^\W\d][\w.-]*:)?{name}{_ATTRIBUTES}/?>", text)
+        opening = _opening_tag(text, name)
         if opening and opening.group(1):
             # Attribute values as written: references decoded, so the caller
             # escaping them again gives back the same namespace.
@@ -276,14 +296,14 @@ def element_content(text: str, name: str) -> str:
     Slices the reply text instead of re-serializing the parsed tree, so the
     device's own namespace prefixes and layout reach the step's evidence.
     """
-    opening = re.search(rf"<(?:[^\W\d][\w.-]*:)?{name}{_ATTRIBUTES}(/?)>", text)
+    opening = _opening_tag(text, name)
     if opening is None or opening.group(2) == "/":
         return ""
     # Walk the tags after it, skipping comments, CDATA and processing
     # instructions, to the end tag that closes this element.
     token = re.compile(
         rf"<!--.*?-->|<!\[CDATA\[.*?\]\]>|<\?.*?\?>"
-        rf"|<(/?)(?:[^\W\d][\w.-]*:)?{name}(?=[\s/>])[^>]*?(/?)>",
+        rf"|<(/?)(?:[^\W\d][\w.-]*:)?{re.escape(name)}(?=[\s/>]){_ATTRIBUTES_NC}(/?)>",
         re.DOTALL,
     )
     depth = 1

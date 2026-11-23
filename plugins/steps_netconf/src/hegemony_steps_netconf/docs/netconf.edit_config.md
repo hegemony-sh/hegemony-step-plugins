@@ -68,7 +68,9 @@ Commit:
   600). Needs `:confirmed-commit:1.1`. The persist id comes from the run,
   the step run and the device, so it is the same when the platform runs the
   step again (a retry). A first attempt just makes the confirmed commit. A
-  retry first sends a follow-up confirmed commit under that persist id. When
+  retry locks the candidate and first sends a follow-up confirmed commit
+  under that persist id, locking running only when nothing is pending (a
+  device refuses that lock while a confirmed commit is pending). When
   the device refuses the id (`invalid-value`), nothing is pending and the
   change goes ahead as on a first attempt. When it succeeds, an earlier
   attempt's commit is still pending and its confirm timeout restarts: the
@@ -129,6 +131,6 @@ When the device does not answer the final commit in time, the step fails
 and says the device may already have committed the change: check the
 device before running the step again. After any request times out the
 session is not used again. When the confirmed commit of "confirm in a later
-step" gets no reply (a timeout or a dropped session), the device fails with `commit_uncertain` true and the
-`persist_id` kept, so a `netconf.commit` or `netconf.cancel_commit` step can
+step" gets no reply (a timeout or a dropped session), the device fails with `commit_uncertain` true, the
+`persist_id` kept and `save_requested` set when Save to startup is on, so a `netconf.commit` or `netconf.cancel_commit` step can
 still settle it (the device refuses the id when nothing is pending).

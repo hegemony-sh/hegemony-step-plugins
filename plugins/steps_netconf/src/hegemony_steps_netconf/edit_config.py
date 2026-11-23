@@ -225,13 +225,21 @@ def change_output(result: ChangeResult) -> dict[str, Any]:
     }
 
 
-def uncertain_output(exc: CommitUncertain) -> dict[str, Any]:
+def uncertain_output(exc: CommitUncertain, *, save_requested: bool = False) -> dict[str, Any]:
     """A device's output entry when its confirmed commit got no reply.
 
     The step fails on the device, but the entry keeps the persist id, so a
-    netconf.commit or netconf.cancel_commit step can still settle the commit.
+    netconf.commit or netconf.cancel_commit step can still settle the commit;
+    ``save_requested`` carries a Save to startup over to that confirmation.
     """
-    return {"commit_uncertain": True, "pending": False, "persist_id": exc.persist_id}
+    output: dict[str, Any] = {
+        "commit_uncertain": True,
+        "pending": False,
+        "persist_id": exc.persist_id,
+    }
+    if save_requested:
+        output["save_requested"] = True
+    return output
 
 
 def change_evidence(
@@ -345,7 +353,7 @@ class NetconfEditConfigHandler(BaseHandler):
                             check_pending=ctx.attempt > 1,
                         )
                     except CommitUncertain as exc:
-                        outcome.output = uncertain_output(exc)
+                        outcome.output = uncertain_output(exc, save_requested=config.save_config)
                         raise
                 else:
                     result = await change_running(
