@@ -121,9 +121,9 @@ class Reply:
         Indentation between elements, attribute order, prefix choice and
         empty-element style do not count, so two reads of equal
         configurations compare equal however the device formats each reply.
-        What a value means does count: a leaf's text is kept exactly (spaces
-        included), and a ``prefix:name`` value whose prefix is declared is
-        compared by its namespace, not by the prefix spelling. Data that does
+        What a value says does count: a leaf's text is kept exactly (spaces
+        included), and a ``prefix:name`` value also by the namespace its
+        prefix names. Data that does
         not parse is returned as it came, so it compares equal only when
         identical.
         """
@@ -164,9 +164,9 @@ def canonical_xml(text: str, namespaces: dict[str, str] | None = None) -> str | 
     """A canonical form of an XML fragment, or None when it does not parse.
 
     Elements by namespace and local name, attributes sorted, whitespace
-    between elements dropped, leaf text kept exactly, and leaf values of
-    the form ``prefix:name`` (YANG identityrefs, instance identifiers)
-    resolved to ``{namespace}name`` when the prefix is in scope.
+    between elements dropped, leaf text kept exactly, and a leaf value of
+    the form ``prefix:name`` (a YANG identityref, say) kept with the
+    namespace its prefix names, so a rebinding of the prefix counts.
     """
     declarations = "".join(
         f' {_xmlns(prefix)}="{escape(uri, {chr(34): "&quot;"})}"'
@@ -198,16 +198,21 @@ def canonical_xml(text: str, namespaces: dict[str, str] | None = None) -> str | 
         return None
 
     def value(element: ET.Element) -> str:
+        # The text exactly as written; a prefix:name value also carries the
+        # namespace its prefix names. Without the schema a value's type is
+        # unknown, so it is never equated by namespace alone: i:foo and j:foo
+        # differ even when i and j name one namespace (comparing fails
+        # closed), and i:foo under two bindings of i differs too.
         text_value = element.text or ""
         match = _QNAME_VALUE.match(text_value)
         if match and match.group(1) in in_scope[id(element)]:
-            return "{" + in_scope[id(element)][match.group(1)] + "}" + match.group(2)
-        return text_value
+            return f"{text_value!r}@{{{in_scope[id(element)][match.group(1)]}}}"
+        return repr(text_value)
 
     def form(element: ET.Element) -> str:
         attributes = "".join(f" {key}={value!r}" for key, value in sorted(element.attrib.items()))
         children = "".join(form(child) for child in element)
-        return f"<{element.tag}{attributes}>{children if len(element) else repr(value(element))}</>"
+        return f"<{element.tag}{attributes}>{children if len(element) else value(element)}</>"
 
     return "".join(form(child) for child in root)
 

@@ -213,6 +213,11 @@ async def change_candidate(
                 await session.unlock(target)
 
 
+#: rpc-error tags that say a persist id names no pending commit (RFC 6241 8.4;
+#: servers differ in the tag). Any other refusal leaves the outcome open.
+_NOTHING_PENDING_TAGS = ("invalid-value", "unknown-element", "bad-element", "missing-element")
+
+
 async def _still_pending(
     session: NetconfSession, options: ChangeOptions, result: ChangeResult, persist_id: str
 ) -> bool:
@@ -227,11 +232,19 @@ async def _still_pending(
         await session.commit(
             confirmed=True, confirm_timeout=timeout, persist=persist_id, persist_id=persist_id
         )
-    except RpcFailed:
-        return False  # the device refused the id: nothing is pending under it
-    except NetconfError as exc:
-        # No answer (a timeout, a dropped session): the earlier commit may
-        # still be pending, so the id is kept for a settle step.
+    except RpcFailed as exc:
+        if exc.has_tag(*_NOTHING_PENDING_TAGS):
+            return False  # the device refused the id: nothing is pending under it
+        # Refused for another reason (operation-failed, in-use...): the
+        # earlier commit may still be pending, so the id is kept.
+        raise CommitUncertain(
+            f"{exc}; a commit from an earlier attempt may be pending under persist id "
+            f"{persist_id}: confirm or cancel it, or let it roll back",
+            persist_id,
+        ) from exc
+    except Exception as exc:
+        # No answer (a timeout, a dropped session, a channel error): the
+        # earlier commit may still be pending, so the id is kept.
         raise CommitUncertain(
             f"{exc}; a commit from an earlier attempt may be pending under persist id "
             f"{persist_id}: confirm or cancel it, or let it roll back",
@@ -276,9 +289,9 @@ async def _commit(
             await session.commit(confirmed=True, confirm_timeout=timeout, persist=result.persist_id)
         except RpcFailed:
             raise  # refused: nothing was committed
-        except NetconfError as exc:
-            # No answer (a timeout, a dropped session, broken framing): the
-            # device may have taken the commit, so the id is kept.
+        except Exception as exc:
+            # No answer (a timeout, a dropped session, a channel error, broken
+            # framing): the device may have taken the commit, so the id is kept.
             raise CommitUncertain(
                 f"{exc}; the commit may be pending on the device under persist id "
                 f"{result.persist_id}: confirm or cancel it, or let it roll back after "
