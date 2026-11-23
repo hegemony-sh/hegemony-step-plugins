@@ -1323,6 +1323,21 @@ def test_tags_inside_comments_and_quoted_values_are_not_tags():
     assert element_content(reply, "data") == '<p:top><data label="a>b"/><p:x/></p:top>'
 
 
+def test_only_the_data_child_of_the_reply_is_read():
+    # A warning's error-info may hold an element named data before the real one.
+    from hegemony_steps_netconf.client import element_content, inherited_prefixes
+
+    reply = (
+        '<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1">'
+        "<rpc-error><error-type>application</error-type><error-tag>operation-failed"
+        "</error-tag><error-severity>warning</error-severity><error-info>"
+        '<x:data xmlns:x="urn:x" xmlns:p="urn:wrong"/></error-info></rpc-error>'
+        '<data xmlns:p="urn:right"><p:top/></data></rpc-reply>'
+    )
+    assert element_content(reply, "data") == "<p:top/>"
+    assert inherited_prefixes(reply, "rpc-reply", "data")["p"] == "urn:right"
+
+
 async def test_a_first_attempt_sends_no_pending_check():
     # A first attempt cannot have left a commit pending, so it does not ask:
     # its outcome never depends on how a server answers an unknown persist id.
