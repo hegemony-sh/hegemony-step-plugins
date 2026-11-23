@@ -43,8 +43,11 @@ def _device(name: str = "r1") -> dict[str, Any]:
     return {"id": f"id-{name}", "name": name, "mgmt_host": "192.0.2.1"}
 
 
-def _ctx(config: dict[str, Any], services: Any, names: tuple[str, ...] = ("r1",)) -> HandlerContext:
+def _ctx(
+    config: dict[str, Any], services: Any, names: tuple[str, ...] = ("r1",), attempt: int = 1
+) -> HandlerContext:
     return HandlerContext(
+        attempt=attempt,
         run_id="run-1",
         flow_id="flow-1",
         step_run_id="sr-1",
@@ -1025,7 +1028,9 @@ async def test_a_retried_step_finds_the_commit_an_earlier_attempt_left_pending()
     assert device.pending is not None and device.pending.extended == 0
 
     # The worker crashed after the commit: the activity runs the step again.
-    retry = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    retry = await NetconfEditConfigHandler().execute(
+        _ctx(config, FakeServices({"r1": device}), attempt=2)
+    )
     assert retry.success, retry.error
     entry = retry.output["devices"]["r1"]
     assert entry["pending"] is True and entry["persist_id"] == persist_id
@@ -1255,6 +1260,65 @@ async def test_a_dropped_session_after_the_commit_keeps_the_persist_id():
     assert device.pending is not None and device.pending.persist == entry["persist_id"]
 
 
+async def test_a_first_attempt_sends_no_pending_check():
+    # A first attempt cannot have left a commit pending, so it does not ask:
+    # its outcome never depends on how a server answers an unknown persist id.
+    device = FakeNetconfDevice.with_config(BASE)
+    config = {"config": _hostname("r2"), "commit_mode": "later"}
+    result = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    assert result.success, result.error
+    assert not any("<persist-id>" in request for request in device.requests)
+    assert _running_hostname(device) == "r2"
+
+
+async def test_a_retry_adds_its_change_to_the_commit_left_pending():
+    # The pending commit does not hold this change: it is added under the
+    # same persist id, so the commit still rolls back as a whole.
+    device = FakeNetconfDevice.with_config(BASE)
+    first = await NetconfEditConfigHandler().execute(
+        _ctx({"config": _hostname("r2"), "commit_mode": "later"}, FakeServices({"r1": device}))
+    )
+    persist_id = first.output["devices"]["r1"]["persist_id"]
+    retry = await NetconfEditConfigHandler().execute(
+        _ctx(
+            {"config": _hostname("r3"), "commit_mode": "later"},
+            FakeServices({"r1": device}),
+            attempt=2,
+        )
+    )
+    assert retry.success, retry.error
+    entry = retry.output["devices"]["r1"]
+    assert entry["pending"] is True and entry["changed"] is True
+    assert entry["persist_id"] == persist_id
+    assert any("added to it" in note for note in entry["notes"])
+    assert _running_hostname(device) == "r3"
+    assert device.pending is not None and device.pending.extended == 2
+    device.restore(device.pending.backup)  # what a cancel or the timeout does
+    assert _running_hostname(device) == "r1"
+
+
+async def test_a_refused_follow_up_keeps_the_persist_id_of_the_pending_commit():
+    device = FakeNetconfDevice.with_config(BASE)
+    first = await NetconfEditConfigHandler().execute(
+        _ctx({"config": _hostname("r2"), "commit_mode": "later"}, FakeServices({"r1": device}))
+    )
+    persist_id = first.output["devices"]["r1"]["persist_id"]
+    # The check finds the commit; the follow-up adding this change is refused.
+    device.fail_commit = "operation-failed"
+    device.fail_commit_after = 1
+    retry = await NetconfEditConfigHandler().execute(
+        _ctx(
+            {"config": _hostname("r3"), "commit_mode": "later"},
+            FakeServices({"r1": device}),
+            attempt=2,
+        )
+    )
+    assert not retry.success
+    entry = retry.output["devices"]["r1"]
+    assert entry["commit_uncertain"] is True and entry["persist_id"] == persist_id
+    assert device.pending is not None and _running_hostname(device) == "r2"
+
+
 async def test_a_retry_whose_check_gets_no_answer_keeps_the_persist_id():
     device = FakeNetconfDevice.with_config(BASE)
     config = {"config": _hostname("r2"), "commit_mode": "later", "rpc_timeout_seconds": 1}
@@ -1262,7 +1326,9 @@ async def test_a_retry_whose_check_gets_no_answer_keeps_the_persist_id():
     assert first.success, first.error
     persist_id = first.output["devices"]["r1"]["persist_id"]
     device.stall = frozenset({"commit"})
-    retry = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    retry = await NetconfEditConfigHandler().execute(
+        _ctx(config, FakeServices({"r1": device}), attempt=2)
+    )
     assert not retry.success
     entry = retry.output["devices"]["r1"]
     assert entry["commit_uncertain"] is True and entry["persist_id"] == persist_id
@@ -1297,7 +1363,9 @@ async def test_a_retry_refused_for_another_reason_keeps_the_persist_id():
     first = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
     persist_id = first.output["devices"]["r1"]["persist_id"]
     device.fail_commit = "operation-failed"
-    retry = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    retry = await NetconfEditConfigHandler().execute(
+        _ctx(config, FakeServices({"r1": device}), attempt=2)
+    )
     assert not retry.success
     entry = retry.output["devices"]["r1"]
     assert entry["commit_uncertain"] is True and entry["persist_id"] == persist_id
@@ -1311,7 +1379,9 @@ async def test_a_retry_refused_over_another_parameter_keeps_the_persist_id():
     persist_id = first.output["devices"]["r1"]["persist_id"]
     device.fail_commit = "invalid-value"
     device.fail_commit_path = "/rpc/commit/confirm-timeout"
-    retry = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    retry = await NetconfEditConfigHandler().execute(
+        _ctx(config, FakeServices({"r1": device}), attempt=2)
+    )
     assert not retry.success
     entry = retry.output["devices"]["r1"]
     assert entry["commit_uncertain"] is True and entry["persist_id"] == persist_id
@@ -1455,11 +1525,16 @@ async def test_a_filtered_retry_finds_the_commit_an_earlier_attempt_left_pending
     first = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
     assert first.success, first.error
     persist_id = first.output["devices"]["r1"]["persist_id"]
-    retry = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    retry = await NetconfEditConfigHandler().execute(
+        _ctx(config, FakeServices({"r1": device}), attempt=2)
+    )
     assert retry.success, retry.error
     entry = retry.output["devices"]["r1"]
     assert entry["pending"] is True and entry["persist_id"] == persist_id
-    assert device.pending is not None and device.pending.extended == 1
+    # A filtered diff cannot show the pending commit holds the change: it is
+    # added again under the same persist id (the check, then the follow-up).
+    assert device.pending is not None and device.pending.extended == 2
+    assert _running_hostname(device) == "r2"
 
 
 @pytest.mark.parametrize("target", ["candidate", "running"])

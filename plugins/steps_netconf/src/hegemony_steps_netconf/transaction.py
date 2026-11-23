@@ -135,13 +135,17 @@ async def change_candidate(
     check: Callable[[], Awaitable[None]],
     diff_complete: bool = True,
     persist_id: str = "",
+    check_pending: bool = False,
 ) -> ChangeResult:
     """Run the change on the candidate datastore (see the module docstring).
 
     ``persist_id`` is the id a "confirm in a later step" commit is made
     under. A caller passes one that is the same on every attempt of the step
-    for the device, so that a retried step finds the commit an earlier
-    attempt left pending (its diff is then empty) instead of losing it.
+    for the device. With ``check_pending`` (a retry of the step, never a
+    first attempt) the step first asks whether an earlier attempt left a
+    commit pending under that id; when it did, the change is still applied
+    and diffed, and anything it adds is committed under the same id, so the
+    commit stays one pending commit that rolls back as a whole.
 
     ``diff_complete`` is False when ``read`` returns only part of the
     configuration (a diff filter, or a vendor's modelled view): an empty diff
@@ -163,15 +167,15 @@ async def change_candidate(
         locked.append("candidate")
         # Left over from a session that ended without committing or discarding.
         await session.discard_changes()
-        if (
-            not options.dry_run
+        # Only on a retry: a first attempt cannot have left anything pending,
+        # and does not depend on how a server answers an unknown persist id.
+        earlier_pending = (
+            check_pending
+            and not options.dry_run
             and options.commit_mode == "later"
-            and persist_id
+            and bool(persist_id)
             and await _still_pending(session, options, result, persist_id)
-        ):
-            # An earlier attempt's commit is still pending: report it, whatever
-            # a diff (filtered or not) would show now.
-            return result
+        )
         result.before = await read("running")
         await apply()
         result.after = await read("candidate")
@@ -179,6 +183,15 @@ async def change_candidate(
             result.before, result.after, before_name="running", after_name="candidate"
         )
         result.changed = bool(result.diff)
+        if earlier_pending and not result.changed and diff_complete:
+            # The pending commit already holds the change: report it as pending.
+            await session.discard_changes()
+            result.notes.append(
+                "an earlier attempt of this step left this change pending under the same "
+                "persist id; its confirm timeout restarted: confirm it with netconf.commit "
+                f"within {options.confirm_timeout_seconds} s"
+            )
+            return result
         if not result.changed and diff_complete:
             await session.discard_changes()
             result.notes.append("the change leaves the configuration as it is: nothing committed")
@@ -273,10 +286,6 @@ async def _still_pending(
     result.pending = True
     result.persist_id = persist_id
     result.save_requested = options.save_config
-    result.notes.append(
-        "an earlier attempt of this step left this change pending under the same persist "
-        f"id; its confirm timeout restarted: confirm it with netconf.commit within {timeout} s"
-    )
     return True
 
 
@@ -307,11 +316,29 @@ async def _commit(
         result.committed = True
         return
     if options.commit_mode == "later":
+        # A commit an earlier attempt left pending is extended, not replaced:
+        # a follow-up confirmed commit under its persist id (RFC 6241 8.4).
+        follow_up = result.pending
         result.persist_id = persist_id or secrets.token_urlsafe(18)
         try:
-            await session.commit(confirmed=True, confirm_timeout=timeout, persist=result.persist_id)
-        except RpcFailed:
-            raise  # refused: nothing was committed
+            await session.commit(
+                confirmed=True,
+                confirm_timeout=timeout,
+                persist=result.persist_id,
+                persist_id=result.persist_id if follow_up else "",
+            )
+        except RpcFailed as exc:
+            if not follow_up:
+                raise  # refused: nothing was committed
+            # Refused, but the earlier attempt's commit is still pending.
+            with contextlib.suppress(Exception):
+                await session.discard_changes()
+            raise CommitUncertain(
+                f"{exc}; the commit an earlier attempt left pending under persist id "
+                f"{result.persist_id} is still pending without this change: confirm or "
+                "cancel it, or let it roll back",
+                result.persist_id,
+            ) from exc
         except Exception as exc:
             # No answer (a timeout, a dropped session, a channel error, broken
             # framing): the device may have taken the commit, so the id is kept.
@@ -322,6 +349,11 @@ async def _commit(
                 result.persist_id,
             ) from None
         result.pending = True
+        if follow_up:
+            result.notes.append(
+                "an earlier attempt of this step left a commit pending under the same persist "
+                "id; this change was added to it, so confirming or cancelling settles both"
+            )
         result.notes.append(
             f"confirmed commit pending: confirm it with netconf.commit within {timeout} s, "
             "or the device restores the previous configuration"

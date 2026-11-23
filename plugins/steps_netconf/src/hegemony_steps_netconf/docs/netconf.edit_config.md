@@ -67,12 +67,15 @@ Commit:
   previous configuration on its own after Confirm Timeout (sec) (default
   600). Needs `:confirmed-commit:1.1`. The persist id comes from the run,
   the step run and the device, so it is the same when the platform runs the
-  step again (a worker restart). Before it changes anything, the step sends
-  a follow-up confirmed commit under that persist id. When that succeeds, an
-  earlier attempt's commit is still pending: the device is reported as
-  pending again and its confirm timeout restarts. When the device refuses
-  the id (`invalid-value`), nothing is pending and the change goes ahead; any
-  other answer, or none, keeps the id as `commit_uncertain`.
+  step again (a retry). A first attempt just makes the confirmed commit. A
+  retry first sends a follow-up confirmed commit under that persist id. When
+  the device refuses the id (`invalid-value`), nothing is pending and the
+  change goes ahead as on a first attempt. When it succeeds, an earlier
+  attempt's commit is still pending and its confirm timeout restarts: the
+  step still applies the change and diffs it, reports the device as pending
+  when the diff is empty, and otherwise adds the change to that commit with
+  another follow-up confirmed commit, so confirming or cancelling settles
+  both. Any other answer, or none, keeps the id as `commit_uncertain`.
 - **Commit directly**: a plain commit.
 
 On running (a device without a candidate, or Datastore running) the change
