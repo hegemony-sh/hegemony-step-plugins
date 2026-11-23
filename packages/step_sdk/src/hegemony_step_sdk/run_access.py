@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: 2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""What a step may read from, and record on, the platform about its own run.
+
+Handlers call these functions, and the named methods of
+:class:`HandlerServices` such as ``fetch_run_artifacts``, instead of building
+internal-API requests with :meth:`HandlerServices.open_api_client`. Each one
+reaches only the step's own run or the run's organization, which is what a
+worker outside the platform's network (an edge worker) will be allowed to
+do; a raw internal path is not part of the plugin contract and may be
+refused there.
+
+Each function uses the host's named method when the host has it, and falls
+back to the internal route on a host from before those methods existed
+(platform releases up to 1.0.0-rc.19). Drop the fallbacks once no supported
+platform lacks the methods.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .contract import HandlerContext
+
+_TIMEOUT_SECONDS = 30.0
+
+
+class PlatformRequestError(RuntimeError):
+    """The platform could not answer a step's request; ``status_code`` when it said why."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def fetch_notification_destination(
+    ctx: HandlerContext, destination_id: str
+) -> dict[str, Any] | None:
+    """A notification destination of the run's organization, or None when there is none.
+
+    None covers an unknown, disabled or other organization's destination alike.
+    The mapping holds ``id``, ``name``, ``type`` and ``config_json``. Raises
+    :class:`PlatformRequestError` when the platform does not answer.
+    """
+    services = ctx.require_services()
+    method = getattr(services, "fetch_notification_destination", None)
+    if callable(method):
+        return await method(destination_id)
+    async with services.open_api_client(timeout=_TIMEOUT_SECONDS) as client:
+        response = await client.get(f"/internal/notification-destinations/{destination_id}")
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise PlatformRequestError(
+                f"the notification destination could not be read (HTTP {response.status_code})",
+                status_code=response.status_code,
+            )
+        return response.json()
+
+
+async def emit_run_event(
+    ctx: HandlerContext,
+    message: str,
+    *,
+    kind: str = "log",
+    attrs: dict[str, Any] | None = None,
+) -> None:
+    """Record an event on the step's own run, attributed to the step.
+
+    The step's run, step run, step id and phase come from ``ctx``. Raises
+    :class:`PlatformRequestError` when the platform does not record it.
+    """
+    services = ctx.require_services()
+    phase = ctx.tags.get("phase", "")
+    method = getattr(services, "emit_run_event", None)
+    if callable(method):
+        await method(message, kind=kind, attrs=attrs or {}, phase=phase)
+        return
+    async with services.open_api_client(timeout=_TIMEOUT_SECONDS) as client:
+        response = await client.post(
+            f"/internal/runs/{ctx.run_id}/events",
+            json={
+                "step_run_id": ctx.step_run_id,
+                "step_id": ctx.step_id,
+                "phase": phase,
+                "kind": kind,
+                "message": message,
+                "attrs": attrs or {},
+            },
+        )
+        if response.status_code not in (200, 201):
+            raise PlatformRequestError(
+                f"the run event was not recorded (HTTP {response.status_code})",
+                status_code=response.status_code,
+            )

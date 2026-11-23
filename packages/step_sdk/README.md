@@ -83,8 +83,25 @@ capabilities, and neither the engine nor the editor reads it. A step's `kind`
 tag changes nothing about how the step runs.
 
 Handlers reach every platform facility — device transports, secret/template
-resolution, the internal API, notifications — through `ctx.services`
+resolution, notifications, their own run — through `ctx.services`
 (`HandlerServices`); plugin code never imports Hegemony internals.
+
+Plugins never build internal-API requests themselves. Internal paths are not
+part of the plugin contract: the platform may change them, and a worker
+outside the platform's network (an edge worker) will refuse most of them.
+Use the named methods of `ctx.services` (`fetch_run_artifacts`, `fetch_run`,
+…) and, for a notification destination and a run event, the functions of
+`hegemony_step_sdk.run_access`: `fetch_notification_destination(ctx, id)`
+and `emit_run_event(ctx, message, kind=..., attrs=...)`. They reach only the
+step's own run and its organization, and they also work on hosts from before
+the named methods. They raise `PlatformRequestError` when the platform does
+not answer. A test in this repository fails when a plugin calls
+`open_api_client` or names an `/internal/` path.
+
+A handler that drives the platform instead of a device (starting child runs,
+sending notifications, writing secrets, syncing inventory) declares
+`central_only = True`. Such a step always runs on a worker inside the
+platform's network, never on one in a remote zone.
 
 A device transport that checks SSH host keys sets
 `supports_host_key_verifier = True` and takes a `host_key_verifier`
@@ -198,7 +215,8 @@ Methods declared `async` must be awaited, for example
 Some methods return resources synchronously: `connect(...)` returns a
 `Transport`; `open_state_backend(...)` returns an async context manager
 to use with `async with`. `open_api_client(...)` returns an `httpx.AsyncClient` which
-also needs to be closed, normally with `async with`.
+also needs to be closed, normally with `async with`; it is for the host and
+`run_access`, not for handler code.
 `validate_secret_ref`, `contains_template`, `container_runtime` and
 `is_check_registered` are synchronous. See the service reference for each
 method's exact arguments and result.

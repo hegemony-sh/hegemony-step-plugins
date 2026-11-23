@@ -469,28 +469,19 @@ class TestFindCommandArtifact:
 
 
 class _RunApi:
-    """Host services whose API serves one run's artifacts and counts the fetches."""
+    """Host services that serve one run's artifacts and count the fetches."""
 
     def __init__(self, artifacts: list[dict], status_code: int = 200) -> None:
         self.artifacts = artifacts
         self.status_code = status_code
         self.fetches = 0
 
-    def open_api_client(self, timeout: float = 30) -> _RunApi:
-        return self
-
-    async def __aenter__(self) -> _RunApi:
-        return self
-
-    async def __aexit__(self, *exc: object) -> bool:
-        return False
-
-    async def get(self, url: str) -> _RunApi:
+    async def fetch_run_artifacts(self, run_id: str) -> list[dict]:
+        """The host's named method: raises on a failed fetch, as the platform does."""
         self.fetches += 1
-        return self
-
-    def json(self) -> dict:
-        return {"artifacts": self.artifacts}
+        if self.status_code != 200:
+            raise RuntimeError(f"HTTP {self.status_code}")
+        return self.artifacts
 
 
 async def _run_assert(

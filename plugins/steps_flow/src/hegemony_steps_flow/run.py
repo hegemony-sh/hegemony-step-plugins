@@ -247,6 +247,8 @@ class RunFlowHandler(BaseHandler):
     """Launch another committed flow from the current flow."""
 
     handler_id = "flow.run"
+    # Starts, watches and cancels a child run of the platform.
+    central_only = True
     default_timeout_seconds = 7200
     supported_kinds = [StepKind.ACTION, StepKind.EXECUTE]
     display_name = "Run Flow"

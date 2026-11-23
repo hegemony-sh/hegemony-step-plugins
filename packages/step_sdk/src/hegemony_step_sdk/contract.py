@@ -448,6 +448,13 @@ class BaseHandler(ABC):
     # only to such handlers, and only for providers an administrator has
     # opened to flows.
     syncs_inventory: bool = False
+    # True for handlers that drive the platform instead of a device: starting
+    # child runs, sending notifications, writing secrets, syncing inventory.
+    # Such a step always runs on a worker inside the platform's network,
+    # never on one in a remote zone (an edge worker). A handler that only
+    # talks to devices, and to its own run through hegemony_step_sdk.run_access,
+    # leaves it False.
+    central_only: bool = False
     # True for handlers that keep run-scoped state keyed by the step's node id
     # (tf.plan's working directory under /shared, tf.apply's lookup of the
     # plan step's output). Two executions of one node at the same time would

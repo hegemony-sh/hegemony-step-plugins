@@ -530,6 +530,8 @@ class WriteSecretHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     writes_secrets = True
+    # Writes the organization's secret store: never from a remote zone.
+    central_only = True
     # Values reach the handler as written (see values.resolve_values).
     raw_config_keys = frozenset({"values"})
     config_model = SecretWriteConfig

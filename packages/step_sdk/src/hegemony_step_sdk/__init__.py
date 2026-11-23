@@ -14,6 +14,7 @@ callable under the ``hegemony.step_handlers`` entry-point group and registers
 
 from __future__ import annotations
 
+from . import run_access
 from ._version import SDK_ABI_VERSION, __version__
 from .concurrency import (
     MAX_PARALLEL_DEVICES_LIMIT,
@@ -46,6 +47,7 @@ from .probes import (
     ProbeResult,
 )
 from .registry import StepHandlerRegistry
+from .run_access import PlatformRequestError
 from .services import (
     BUILD_NETWORK_DEFAULT,
     BUILD_NETWORK_NONE,
@@ -91,6 +93,7 @@ __all__ = [
     "OUTPUT_EVENT_MAX_CHARS",
     "OUTPUT_MILESTONE",
     "OUTPUT_TRUNCATION_NOTICE",
+    "PlatformRequestError",
     "PROBE_ENTRY_POINT_GROUP",
     "SDK_ABI_VERSION",
     "STEP_HANDLER_ENTRY_POINT_GROUP",
@@ -134,4 +137,5 @@ __all__ = [
     "max_parallel_from_config",
     "parse_file_ref",
     "resolve_target_devices_for_roles",
+    "run_access",
 ]
