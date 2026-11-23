@@ -646,9 +646,12 @@ class HandlerServices(Protocol):
     def open_api_client(self, *, timeout: float = 30.0) -> httpx.AsyncClient:
         """Build an ``httpx.AsyncClient`` scoped to the internal API (base URL + auth).
 
-        Caller owns the client lifecycle (use ``async with``). Core handlers use it
-        for internal endpoints (artifacts, child runs, notifications); the client is
-        version-locked with the host, so those paths are not third-party ABI.
+        Caller owns the client lifecycle (use ``async with``). Not for handler
+        code: internal paths are not part of the plugin contract, and a worker
+        outside the platform's network (an edge worker) will refuse most of
+        them. Use the named methods instead (:meth:`fetch_run_artifacts` and
+        the others here); for a notification destination and a run event, the
+        functions of :mod:`hegemony_step_sdk.run_access`.
         """
 
     async def dispatch_notification(
@@ -687,6 +690,26 @@ class HandlerServices(Protocol):
 
     async def cancel_run(self, run_id: str) -> bool:
         """Best-effort cancellation of a run; returns whether the API accepted it."""
+
+    # The step's own run and organization: what any worker may reach, an edge
+    # worker included. Handlers call them through hegemony_step_sdk.run_access,
+    # which also serves hosts from before these methods.
+
+    async def fetch_notification_destination(self, destination_id: str) -> dict[str, Any] | None:
+        """A notification destination of the run's organization, None when there is none.
+
+        The mapping holds ``id``, ``name``, ``type`` and ``config_json``.
+        """
+
+    async def emit_run_event(
+        self,
+        message: str,
+        *,
+        kind: str = "log",
+        attrs: dict[str, Any] | None = None,
+        phase: str = "",
+    ) -> None:
+        """Record an event on the executing step's own run, attributed to the step."""
 
     def container_runtime(self) -> ContainerRuntime:
         """Describe the platform's container-execution environment (docker binary, workspaces).

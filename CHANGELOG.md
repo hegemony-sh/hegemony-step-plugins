@@ -1,3 +1,16 @@
+## [0.53.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.52.1...v0.53.0) (2026-11-23)
+
+### Features
+
+* **sdk:** named run access for plugins, and a central_only handler flag ([6d7c8c6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6d7c8c6866e760ed1f0e7733d8a1659e5968c3f3))
+
+### Bug Fixes
+
+* **sdk:** raise PlatformRequestError on every host, not only the fallback ([73f68ca](https://github.com/hegemony-sh/hegemony-step-plugins/commit/73f68cacd0f38a4246645dc268cbabd77ee6ee5e))
+* **sdk:** refuse a notification destination id that is not a UUID ([1822e4a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/1822e4af13548af2f1c56441d3ddcdcc44e79913))
+* **sdk:** report network errors of run_access fallbacks as PlatformRequestError ([0b6b3ca](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0b6b3ca6c9afd2b9f16cb3c7f676525d79179d9f))
+* **sdk:** use the fallback on hosts that subclass HandlerServices ([0d3395f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0d3395f48456206a95058eb3ff3ab5e90fa6c80a))
+
 ## [0.52.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.52.0...v0.52.1) (2026-11-21)
 
 ### Bug Fixes

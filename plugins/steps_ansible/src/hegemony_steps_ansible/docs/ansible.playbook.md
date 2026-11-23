@@ -159,7 +159,7 @@ The output keys:
 
 ## Execution Image
 
-The default image, `ghcr.io/hegemony-sh/ansible-runner:0.52`, bundles
+The default image, `ghcr.io/hegemony-sh/ansible-runner:0.53`, bundles
 ansible-core 2.19, ansible-pylibssh, ncclient, and the network collections the
 platform maps device platforms onto. Its tag names a release of the plugins,
 not the ansible-core inside: every run reports the exact version as
@@ -171,7 +171,7 @@ a minor release of the plugins, and its changelog names it.
 To choose the series yourself, set **ansible-core version**: `default` (the
 series above), `2.19` or `2.21`. Each named series is the same image built
 with that ansible-core, published as
-`ghcr.io/hegemony-sh/ansible-runner:0.52-core2.21` and so on. A step that names
+`ghcr.io/hegemony-sh/ansible-runner:0.53-core2.21` and so on. A step that names
 a series stays on it when a later release of the plugins moves the default,
 and still gets that series' patch releases; a series is withdrawn only with a
 minor release, and a step that names a withdrawn one fails its validation

@@ -270,6 +270,8 @@ class InventorySyncHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     syncs_inventory = True
+    # Drives the organization's inventory providers from the platform.
+    central_only = True
     run_timeout_field = "timeout_seconds"
     config_model = InventorySyncConfig
     output_fields = _OUTPUT_FIELDS
