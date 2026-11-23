@@ -144,6 +144,33 @@ class TestOlderHost:
             await run_access.emit_run_event(_ctx(_OlderHost(_Response(403))), "sent")
 
 
+class _UnreachableHost(_OlderHost):
+    """An older host whose client cannot reach the platform."""
+
+    async def get(self, url: str) -> _Response:
+        raise ConnectionError("connection refused")
+
+    async def post(self, url: str, *, json: Any) -> _Response:
+        self.requests.append(("POST", url, json))
+        raise ConnectionError("connection refused")
+
+
+class TestNetworkErrors:
+    async def test_destination(self) -> None:
+        host = _UnreachableHost(_Response(200))
+        with pytest.raises(PlatformRequestError) as exc:
+            await run_access.fetch_notification_destination(_ctx(host), D1)
+        assert exc.value.status_code is None
+        assert isinstance(exc.value.__cause__, ConnectionError)
+
+    async def test_event_is_sent_once(self) -> None:
+        host = _UnreachableHost(_Response(201))
+        with pytest.raises(PlatformRequestError) as exc:
+            await run_access.emit_run_event(_ctx(host), "sent")
+        assert exc.value.status_code is None
+        assert len(host.requests) == 1
+
+
 class TestOlderHostSubclassingTheProtocol:
     """A host that subclasses HandlerServices inherits empty stubs for newer methods."""
 
