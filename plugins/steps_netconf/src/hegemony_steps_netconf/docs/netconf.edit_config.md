@@ -16,14 +16,21 @@ off is rolled back by the device itself.
 ## Using It
 
 Configuration is the XML that goes inside `<config>`: one or more top nodes,
-each with its namespace. Templates such as `{{ inputs.hostname }}` are filled
-in before the step runs.
+each with its namespace. Templates such as `{{ inputs.hostname | e }}` are
+filled in before the step runs.
 
 ```xml
 <native xmlns="http://cisco.com/ns/yang/Cisco-IOS-XE-native">
-  <hostname>{{ inputs.hostname }}</hostname>
+  <hostname>{{ inputs.hostname | e }}</hostname>
 </native>
 ```
+
+Escape every template value you place in the XML with the `e` filter:
+`{{ inputs.description | e }}`. It turns `<`, `>`, `&`, `'` and `"` into XML
+entities. Without it, a value such as `x</description><shutdown/><description>`
+closes the element it belongs in and adds a `<shutdown/>` node to the
+configuration. Write `| e` on every value, also ones you expect to be plain,
+such as a hostname.
 
 Default Operation is merge (add and change), replace (every node in
 Configuration ends up exactly as written: with a model's whole tree it

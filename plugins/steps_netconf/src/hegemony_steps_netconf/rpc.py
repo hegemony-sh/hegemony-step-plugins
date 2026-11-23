@@ -52,7 +52,7 @@ class NetconfRpcConfig(NetconfConnectionConfig):
         description=(
             "The XML that goes inside <rpc>: one operation element with its namespace, such "
             'as <save-config xmlns="http://cisco.com/yang/cisco-ia"/>. Templates are filled '
-            "in."
+            "in; escape each value placed in XML with the e filter ({{ inputs.name | e }})."
         ),
         json_schema_extra={
             "x_widget": "textarea",
