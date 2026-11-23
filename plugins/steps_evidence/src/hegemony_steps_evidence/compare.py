@@ -201,17 +201,11 @@ class CompareEvidenceHandler(BaseHandler):
     async def _fetch_run_artifacts(self, ctx: HandlerContext) -> list[dict]:
         """Fetch the run's artifacts from the API; empty when the fetch fails."""
         run_id = ctx.run_id
-        async with ctx.require_services().open_api_client(timeout=30) as client:
-            try:
-                # Use internal endpoint for worker-to-API calls
-                response = await client.get(f"/internal/runs/{run_id}")
-                if response.status_code != 200:
-                    logger.error(f"Failed to fetch run {run_id}: {response.status_code}")
-                    return []
-                return response.json().get("artifacts", [])
-            except Exception as e:
-                logger.error(f"Failed to fetch artifacts of run {run_id}: {e}")
-                return []
+        try:
+            return list(await ctx.require_services().fetch_run_artifacts(run_id))
+        except Exception as e:
+            logger.error(f"Failed to fetch artifacts of run {run_id}: {e}")
+            return []
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Compare evidence between steps by fetching artifacts from API."""

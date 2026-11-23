@@ -16,7 +16,9 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    PlatformRequestError,
     StepKind,
+    run_access,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,6 +85,8 @@ class SendNotificationHandler(BaseHandler):
     config_model = SendNotificationConfig
     # Puts nothing in its step output.
     output_fields = ()
+    # Sends through the platform's notification providers and destinations.
+    central_only = True
 
     # title/message are notification templates rendered by this handler with the
     # notification context (run.*, event, ui_base_url, target_lines, steps, plus
@@ -112,43 +116,37 @@ class SendNotificationHandler(BaseHandler):
         if isinstance(message_template, str) and message_template.strip():
             override["body"] = message_template
 
-        # Fetch destination info from API
+        # Fetch destination info from the platform
         try:
-            async with services.open_api_client(timeout=30) as client:
-                response = await client.get(
-                    f"/internal/notification-destinations/{destination_id}",
+            dest_data = await run_access.fetch_notification_destination(ctx, str(destination_id))
+            if dest_data is None:
+                return HandlerResult(
+                    success=False,
+                    error="Notification destination not found or disabled",
+                    summary="Invalid destination",
                 )
 
-                if response.status_code == 404:
-                    return HandlerResult(
-                        success=False,
-                        error="Notification destination not found or disabled",
-                        summary="Invalid destination",
-                    )
-                elif response.status_code != 200:
-                    return HandlerResult(
-                        success=False,
-                        error=f"API error fetching destination: {response.status_code}",
-                        summary="Failed to fetch destination",
-                    )
+            # Validate required keys in destination response
+            required_keys = {"id", "name", "type", "config_json"}
+            missing = required_keys - dest_data.keys()
+            if missing:
+                return HandlerResult(
+                    success=False,
+                    error=f"Destination response missing keys: {missing}",
+                    summary="Invalid destination data from API",
+                )
 
-                dest_data = response.json()
-
-                # Validate required keys in destination response
-                required_keys = {"id", "name", "type", "config_json"}
-                missing = required_keys - dest_data.keys()
-                if missing:
-                    return HandlerResult(
-                        success=False,
-                        error=f"Destination response missing keys: {missing}",
-                        summary="Invalid destination data from API",
-                    )
-
-        except httpx.TimeoutException:
+        except PlatformRequestError as e:
+            if isinstance(e.__cause__, httpx.TimeoutException):
+                return HandlerResult(
+                    success=False,
+                    error="Timeout fetching destination info",
+                    summary="Timeout fetching destination",
+                )
             return HandlerResult(
                 success=False,
-                error="Timeout fetching destination info",
-                summary="Timeout fetching destination",
+                error=f"API error fetching destination: {e.status_code or e}",
+                summary="Failed to fetch destination",
             )
         except Exception as e:
             logger.error(
@@ -275,27 +273,17 @@ class SendNotificationHandler(BaseHandler):
             attrs["error"] = error
 
         try:
-            async with ctx.require_services().open_api_client(timeout=30) as client:
-                response = await client.post(
-                    f"/internal/runs/{ctx.run_id}/events",
-                    json={
-                        "step_run_id": ctx.step_run_id,
-                        "step_id": ctx.step_id,
-                        "phase": ctx.tags.get("phase", ""),
-                        "kind": "notification",
-                        "message": message,
-                        "attrs": attrs,
-                    },
+            await run_access.emit_run_event(ctx, message, kind="notification", attrs=attrs)
+        except PlatformRequestError as emit_error:
+            if isinstance(emit_error.__cause__, httpx.TimeoutException):
+                logger.warning(
+                    f"Notification event emit timed out: run_id={ctx.run_id}, step_id={ctx.step_id}"
                 )
-                if response.status_code not in (200, 201):
-                    logger.warning(
-                        "Failed to emit notification event: "
-                        f"status={response.status_code}, run_id={ctx.run_id}, step_id={ctx.step_id}"
-                    )
-        except httpx.TimeoutException:
-            logger.warning(
-                f"Notification event emit timed out: run_id={ctx.run_id}, step_id={ctx.step_id}"
-            )
+            else:
+                logger.warning(
+                    "Failed to emit notification event: "
+                    f"{emit_error}, run_id={ctx.run_id}, step_id={ctx.step_id}"
+                )
         except Exception as emit_error:
             logger.warning(
                 f"Failed to emit notification event: run_id={ctx.run_id}, step_id={ctx.step_id}, error={emit_error}"
