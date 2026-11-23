@@ -1222,12 +1222,17 @@ def test_the_canonical_form_keeps_what_a_value_means():
     assert _canonical('<a xmlns="urn:x"><b> hello </b></a>') != _canonical(
         '<a xmlns="urn:x"><b>hello</b></a>'
     )
-    # A prefix:name value is compared by the namespace its prefix names.
+    # A prefix:name value keeps its text and the namespace its prefix names:
+    # a rebinding counts, and without the schema another spelling counts too
+    # (a string such as a description is not equated by namespace).
     one = '<a xmlns="urn:x" xmlns:i="urn:one"><k>i:foo</k></a>'
     two = '<a xmlns="urn:x" xmlns:i="urn:two"><k>i:foo</k></a>'
-    same = '<a xmlns="urn:x" xmlns:j="urn:one"><k>j:foo</k></a>'
+    spelled = '<a xmlns="urn:x" xmlns:j="urn:one"><k>j:foo</k></a>'
     assert _canonical(one) != _canonical(two)
-    assert _canonical(one) == _canonical(same)
+    assert _canonical(one) != _canonical(spelled)
+    i_foo = '<d xmlns="urn:x" xmlns:i="urn:x" xmlns:j="urn:x">i:foo</d>'
+    j_foo = '<d xmlns="urn:x" xmlns:i="urn:x" xmlns:j="urn:x">j:foo</d>'
+    assert _canonical(i_foo) != _canonical(j_foo)
     assert _canonical("<a>") is None
 
 
@@ -1276,3 +1281,51 @@ async def test_a_persist_id_confirmation_waits_for_another_sessions_lock(locked)
     assert _running_hostname(device) == "r2"
     await other.close()
     await holder.close()
+
+
+async def test_a_retry_refused_for_another_reason_keeps_the_persist_id():
+    device = FakeNetconfDevice.with_config(BASE)
+    config = {"config": _hostname("r2"), "commit_mode": "later"}
+    first = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    persist_id = first.output["devices"]["r1"]["persist_id"]
+    device.fail_commit = "operation-failed"
+    retry = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    assert not retry.success
+    entry = retry.output["devices"]["r1"]
+    assert entry["commit_uncertain"] is True and entry["persist_id"] == persist_id
+
+
+class _ChannelFailsAfterCommit:
+    """A channel whose read raises (not end of stream) once a commit was sent."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self._committed = False
+
+    async def write(self, data: bytes) -> None:
+        self._committed = self._committed or b"<commit>" in data
+        await self._inner.write(data)
+
+    async def read(self, max_bytes: int = 65536) -> bytes:
+        if self._committed:
+            raise OSError("connection reset by peer")
+        return await self._inner.read(max_bytes)
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+
+async def test_a_channel_error_after_the_commit_keeps_the_persist_id():
+    fake = FakeNetconfDevice.with_config(BASE)
+
+    class Services(FakeServices):
+        async def open_netconf(self, device: dict[str, Any], **kwargs: Any) -> Any:
+            return _ChannelFailsAfterCommit(await super().open_netconf(device, **kwargs))
+
+    result = await NetconfEditConfigHandler().execute(
+        _ctx({"config": _hostname("r2"), "commit_mode": "later"}, Services({"r1": fake}))
+    )
+    assert not result.success
+    entry = result.output["devices"]["r1"]
+    assert entry["commit_uncertain"] is True and entry["persist_id"]
+    assert fake.pending is not None and fake.pending.persist == entry["persist_id"]
