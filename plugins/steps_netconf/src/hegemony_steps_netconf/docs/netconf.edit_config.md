@@ -67,11 +67,12 @@ Commit:
   previous configuration on its own after Confirm Timeout (sec) (default
   600). Needs `:confirmed-commit:1.1`. The persist id comes from the run,
   the step run and the device, so it is the same when the platform runs the
-  step again (a worker restart). A step run again finds the change already
-  in running, so its diff is empty: it then sends a follow-up confirmed
-  commit under the same persist id. When that succeeds, the device is
-  reported as pending again and its confirm timeout restarts; when the
-  device refuses it, nothing is pending.
+  step again (a worker restart). Before it changes anything, the step sends
+  a follow-up confirmed commit under that persist id. When that succeeds, an
+  earlier attempt's commit is still pending: the device is reported as
+  pending again and its confirm timeout restarts. When the device refuses
+  the id (`invalid-value`), nothing is pending and the change goes ahead; any
+  other answer, or none, keeps the id as `commit_uncertain`.
 - **Commit directly**: a plain commit.
 
 On running (a device without a candidate, or Datastore running) the change
@@ -86,7 +87,9 @@ commits the change all the same, counts it as changed, and says so in
 copy-config when the device has a startup datastore, else Cisco's
 `save-config` RPC (IOS XE). With Commit "confirm in a later step" the save
 waits for the confirmation: the output sets `save_requested`, and the
-`netconf.commit` step saves after confirming. Max Parallel Devices defaults to 1, so devices
+`netconf.commit` step saves after confirming. When running already holds
+the change (an earlier attempt applied it, perhaps without saving), the
+step still saves as asked. Max Parallel Devices defaults to 1, so devices
 change one after another. Port, timeouts and Allow legacy SSH work as in
 `netconf.get`.
 

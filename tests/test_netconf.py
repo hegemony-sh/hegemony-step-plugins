@@ -221,7 +221,9 @@ async def test_get_state_and_a_missing_datastore():
     services = FakeServices({"r1": device})
     state = await NetconfGetHandler().execute(_ctx({"source": "state"}, services))
     # The fake's <state> inherits the reply's default (base) namespace, and keeps it.
-    assert ">up</state>" in state.output["devices"]["r1"]["data"]
+    elements = check_fragment(state.output["devices"]["r1"]["data"], what="data")
+    [up] = [element for element in elements if element.tag.endswith("}state")]
+    assert up.tag == "{urn:ietf:params:xml:ns:netconf:base:1.0}state" and up.text == "up"
     startup = await NetconfGetHandler().execute(_ctx({"source": "startup"}, services))
     assert not startup.success
     assert "no startup datastore" in (startup.error or "")
@@ -944,6 +946,7 @@ async def test_close_closes_the_channel_even_when_cancelled():
 
     channel = _Slow()
     session = NetconfSession(channel, timeout=30)
+    session._negotiated = True  # as after a hello: close() sends close-session
     task = asyncio.ensure_future(session.close())
     await asyncio.sleep(0.05)
     task.cancel()
@@ -1139,7 +1142,10 @@ async def test_a_result_recorded_for_another_device_is_never_settled():
 
 
 async def test_a_lost_commit_reply_keeps_the_persist_id_for_a_cancel():
-    device = FakeNetconfDevice.with_config(BASE, stall=frozenset({"commit"}))
+    # The confirmed commit itself (persist, no persist-id) gets no reply.
+    device = FakeNetconfDevice.with_config(
+        BASE, stall=frozenset({"commit"}), only_if="</persist></commit>"
+    )
     services = FakeServices({"r1": device})
     result = await NetconfEditConfigHandler().execute(
         _ctx(
@@ -1237,7 +1243,9 @@ def test_the_canonical_form_keeps_what_a_value_means():
 
 
 async def test_a_dropped_session_after_the_commit_keeps_the_persist_id():
-    device = FakeNetconfDevice.with_config(BASE, drop_after=frozenset({"commit"}))
+    device = FakeNetconfDevice.with_config(
+        BASE, drop_after=frozenset({"commit"}), only_if="</persist></commit>"
+    )
     result = await NetconfEditConfigHandler().execute(
         _ctx({"config": _hostname("r2"), "commit_mode": "later"}, FakeServices({"r1": device}))
     )
@@ -1303,7 +1311,10 @@ class _ChannelFailsAfterCommit:
         self._committed = False
 
     async def write(self, data: bytes) -> None:
-        self._committed = self._committed or b"<commit>" in data
+        # The confirmed commit (persist, no persist-id), not the pending check.
+        self._committed = self._committed or (
+            b"<commit>" in data and b"<persist>" in data and b"<persist-id>" not in data
+        )
         await self._inner.write(data)
 
     async def read(self, max_bytes: int = 65536) -> bytes:
@@ -1329,3 +1340,106 @@ async def test_a_channel_error_after_the_commit_keeps_the_persist_id():
     entry = result.output["devices"]["r1"]
     assert entry["commit_uncertain"] is True and entry["persist_id"]
     assert fake.pending is not None and fake.pending.persist == entry["persist_id"]
+
+
+def test_the_data_ends_at_its_own_end_tag():
+    reply = (
+        '<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1">'
+        "<data><top/><!-- </data> --><x><data>in</data></x></data><!-- </data> -->"
+        "</rpc-reply>"
+    )
+    assert element_content(reply, "data") == "<top/><!-- </data> --><x><data>in</data></x>"
+
+
+def test_the_canonical_form_fails_closed_on_namespaces_a_value_may_use():
+    # An unprefixed identityref takes the default namespace.
+    assert _canonical('<m:mode xmlns:m="urn:m" xmlns="urn:a">active</m:mode>') != _canonical(
+        '<m:mode xmlns:m="urn:m" xmlns="urn:b">active</m:mode>'
+    )
+    # An instance identifier's steps use their prefixes' bindings.
+    one = '<p xmlns="urn:x" xmlns:i="urn:one">/i:root/i:item</p>'
+    two = '<p xmlns="urn:x" xmlns:i="urn:two">/i:root/i:item</p>'
+    assert _canonical(one) != _canonical(two)
+    # Mixed content keeps its text.
+    assert _canonical('<p xmlns="urn:x">allow<rule/></p>') != _canonical(
+        '<p xmlns="urn:x">deny<rule/></p>'
+    )
+    # Indentation in element-only content still does not count.
+    assert _canonical('<p xmlns="urn:x"><r>1</r></p>') == _canonical(
+        '<p xmlns="urn:x">\n  <r>1</r>\n</p>'
+    )
+
+
+def test_a_non_ascii_prefix_declared_above_the_data_is_kept():
+    from hegemony_steps_netconf.client import inherited_prefixes
+
+    reply = (
+        '<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" xmlns:\u00e9="urn:e" '
+        'message-id="1"><data><\u00e9:top/></data></rpc-reply>'
+    )
+    assert inherited_prefixes(reply, "rpc-reply", "data")["\u00e9"] == "urn:e"
+
+
+async def test_a_filtered_retry_finds_the_commit_an_earlier_attempt_left_pending():
+    device = FakeNetconfDevice.with_config(BASE + '<other xmlns="urn:example:other"/>')
+    config = {
+        "config": _hostname("r2"),
+        "commit_mode": "later",
+        "diff_filter": '<other xmlns="urn:example:other"/>',
+    }
+    first = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    assert first.success, first.error
+    persist_id = first.output["devices"]["r1"]["persist_id"]
+    retry = await NetconfEditConfigHandler().execute(_ctx(config, FakeServices({"r1": device})))
+    assert retry.success, retry.error
+    entry = retry.output["devices"]["r1"]
+    assert entry["pending"] is True and entry["persist_id"] == persist_id
+    assert device.pending is not None and device.pending.extended == 1
+
+
+@pytest.mark.parametrize("target", ["candidate", "running"])
+async def test_a_retry_saves_what_an_earlier_attempt_applied_but_could_not_save(target):
+    capabilities = (
+        ALL_CAPABILITIES
+        if target == "candidate"
+        else tuple(c for c in ALL_CAPABILITIES if "candidate" not in c)
+    )
+    device = FakeNetconfDevice.with_config(_hostname("r2"), capabilities=capabilities)
+    result = await NetconfEditConfigHandler().execute(
+        _ctx(
+            {"config": _hostname("r2"), "commit_mode": "direct", "save_config": True},
+            FakeServices({"r1": device}),
+        )
+    )
+    assert result.success, result.error
+    assert result.output["devices"]["r1"]["changed"] is False
+    assert result.output["devices"]["r1"]["saved"] and device.saved == 1
+
+
+async def test_a_refused_confirmation_says_to_save_when_a_save_was_asked():
+    device = FakeNetconfDevice.with_config(BASE)
+    _, services = await _pending_change(device)
+    device.pending = None  # confirmed (or rolled back) by an earlier attempt
+    result = await NetconfCommitHandler().execute(
+        _ctx({"change_step": "change", "save_config": True}, services)
+    )
+    assert not result.success
+    assert "running is not saved yet" in (result.error or "")
+
+
+async def test_close_before_the_hello_sends_no_close_session():
+    device = FakeNetconfDevice.with_config(BASE)
+    channel = await device.open()
+    session = NetconfSession(channel, timeout=5)
+    await session.close()
+    assert channel.closed
+    assert not any("close-session" in request for request in device.requests)
+
+
+async def test_a_final_commit_whose_session_drops_says_it_may_have_happened():
+    device = FakeNetconfDevice.with_config(BASE, drop_after=frozenset({"commit"}))
+    result = await NetconfEditConfigHandler().execute(
+        _ctx({"config": _hostname("r2"), "commit_mode": "direct"}, FakeServices({"r1": device}))
+    )
+    assert not result.success
+    assert "may already have committed" in (result.error or "")

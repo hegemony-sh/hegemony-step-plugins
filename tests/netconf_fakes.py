@@ -87,6 +87,8 @@ class FakeNetconfDevice:
     stall: frozenset[str] = frozenset()
     #: Operations to act on, then drop the session without answering.
     drop_after: frozenset[str] = frozenset()
+    #: Only requests whose text contains this are stalled or dropped ("" = all).
+    only_if: str = ""
     #: Format the candidate's get-config reply differently from running's.
     reformat_candidate: bool = False
     #: Grant a candidate lock while the candidate has uncommitted changes
@@ -307,9 +309,10 @@ class FakeChannel:
                 message_id = root.get("message-id", "")
                 operation = root[0]
                 body, closing = self._handle(operation)
-                if _local(operation.tag) in device.stall:
+                targeted = not device.only_if or device.only_if in text
+                if targeted and _local(operation.tag) in device.stall:
                     continue
-                if _local(operation.tag) in device.drop_after:
+                if targeted and _local(operation.tag) in device.drop_after:
                     break
                 await self._send(
                     f'<rpc-reply xmlns="{BASE_NS}" message-id="{message_id}">{body}</rpc-reply>'

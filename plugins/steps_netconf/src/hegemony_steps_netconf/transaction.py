@@ -44,7 +44,6 @@ from .client import (
     NetconfError,
     NetconfSession,
     RpcFailed,
-    RpcTimeout,
 )
 
 CommitMode = Literal["check", "later", "direct"]
@@ -164,6 +163,15 @@ async def change_candidate(
         locked.append("candidate")
         # Left over from a session that ended without committing or discarding.
         await session.discard_changes()
+        if (
+            not options.dry_run
+            and options.commit_mode == "later"
+            and persist_id
+            and await _still_pending(session, options, result, persist_id)
+        ):
+            # An earlier attempt's commit is still pending: report it, whatever
+            # a diff (filtered or not) would show now.
+            return result
         result.before = await read("running")
         await apply()
         result.after = await read("candidate")
@@ -173,14 +181,11 @@ async def change_candidate(
         result.changed = bool(result.diff)
         if not result.changed and diff_complete:
             await session.discard_changes()
-            if (
-                not options.dry_run
-                and options.commit_mode == "later"
-                and persist_id
-                and await _still_pending(session, options, result, persist_id)
-            ):
-                return result
             result.notes.append("the change leaves the configuration as it is: nothing committed")
+            if options.save_config and not options.dry_run:
+                # Running already holds the change, perhaps from an earlier
+                # attempt whose save failed: save it now, as asked.
+                await _save(session, result)
             return result
         if not result.changed:
             # Unknown, so counted as changed: the part the reads leave out may differ.
@@ -264,7 +269,10 @@ async def _final_commit(session: NetconfSession) -> None:
     """The commit that makes the change final; a timeout may hide that it happened."""
     try:
         await session.commit()
-    except RpcTimeout as exc:
+    except RpcFailed:
+        raise  # refused: nothing was committed
+    except Exception as exc:
+        # No answer (a timeout, a dropped session, a channel error).
         raise NetconfError(
             f"{exc}; the device may already have committed the change, so check its "
             "configuration before running the step again"
@@ -395,7 +403,9 @@ async def change_running(
                 "the rest may have changed, so the change is counted as changed"
             )
         result.committed = result.changed
-        if options.save_config and result.committed:
+        if options.save_config:
+            # Also when nothing changed: an earlier attempt may have applied
+            # the change and failed to save it.
             await _save(session, result)
         return result
     finally:
