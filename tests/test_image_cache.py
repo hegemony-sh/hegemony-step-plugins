@@ -1544,9 +1544,8 @@ async def test_an_unknown_store_reads_a_pinned_image_from_its_registry(monkeypat
 @pytest.mark.parametrize(
     ("platform", "entry_platform"),
     [
-        # The configuration names no variant; the index says v8 (or v7 for arm).
+        # The configuration names no variant; the index says v8.
         ("linux/arm64", {"os": "linux", "architecture": "arm64", "variant": "v8"}),
-        ("linux/arm", {"os": "linux", "architecture": "arm", "variant": "v7"}),
         # And the other way round.
         ("linux/arm64/v8", {"os": "linux", "architecture": "arm64"}),
     ],
@@ -1560,6 +1559,18 @@ def test_a_missing_variant_means_the_architectures_default(
         {"digest": digest, "platform": entry_platform},
     ]
     assert _platform_entry(entries, platform) == digest
+
+
+def test_32_bit_arm_without_a_variant_matches_nothing() -> None:
+    """A v6 sandbox reports plain linux/arm: assuming v7 could accept the wrong image."""
+    v6, v7 = "sha256:" + "06" * 32, "sha256:" + "07" * 32
+    entries = [
+        {"digest": v6, "platform": {"os": "linux", "architecture": "arm", "variant": "v6"}},
+        {"digest": v7, "platform": {"os": "linux", "architecture": "arm", "variant": "v7"}},
+    ]
+    assert _platform_entry(entries, "linux/arm") is None
+    assert _platform_entry(entries, "linux/arm/v6") == v6
+    assert _platform_entry(entries, "linux/arm/v7") == v7
 
 
 def test_a_missing_variant_does_not_match_another_one() -> None:

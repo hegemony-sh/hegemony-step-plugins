@@ -442,9 +442,16 @@ def _platform_entry(entries: list, platform: str) -> str | None:
     names no variant while its index entry says ``v8``. Otherwise an entry
     without a variant matches a platform with one only when no entry names
     that variant.
+
+    32-bit ARM without a variant matches nothing: ``docker version`` reports
+    no variant for an ARM sandbox, and v6 and v7 images differ, so assuming
+    v7 could accept a v7 copy where a pull on a v6 daemon picks v6. A check
+    that cannot tell is no verdict, and the copy is refused.
     """
     os_name, _, rest = platform.partition("/")
     arch, _, variant = rest.partition("/")
+    if arch == "arm" and not variant:
+        return None
     default = _DEFAULT_VARIANTS.get(arch, "")
     wanted = variant or default
     loose: str | None = None
