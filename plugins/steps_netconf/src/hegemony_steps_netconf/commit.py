@@ -90,21 +90,36 @@ def _device_entries(step_output: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def _entry_for(
     device: dict[str, Any], entries: dict[str, dict[str, Any]], *, shared_name: bool
 ) -> dict[str, Any] | None:
-    """This device's entry, matched exactly; raise when the name could be another device's.
+    """This device's entry, matched exactly; raise when it could be another device's.
 
-    The change step keys a device by name, by ``name (id)`` when several
-    devices share the name, and by ``name #2`` for a second device with the
-    same name and no id. A persist id must never be sent to the wrong device.
+    Each entry records the ``device_id`` it was made for; a device with an id
+    matches that, never a display key. A device without one matches its name
+    only when no other device can share it. A persist id must never be sent to
+    the wrong device.
     """
     name = device_label(device)
-    if device.get("id") and f"{name} ({device['id']})" in entries:
-        return entries[f"{name} ({device['id']})"]
+    device_id = str(device.get("id") or "")
+    if device_id:
+        matches = [
+            entry for entry in entries.values() if str(entry.get("device_id") or "") == device_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise NetconfError(f"step results name the device id {device_id!r} more than once")
     if shared_name or f"{name} #2" in entries:
         raise NetconfError(
             f"several devices are named {name!r}, so this device's result cannot be told "
             "apart; give the devices distinct names or ids"
         )
-    return entries.get(name)
+    entry = entries.get(name)
+    recorded = str(entry.get("device_id") or "") if entry is not None else ""
+    if entry is not None and recorded != device_id:
+        raise NetconfError(
+            f"the result for {name!r} was recorded for another device "
+            f"(id {recorded or 'none'}), so its persist id is not sent to this one"
+        )
+    return entry
 
 
 class _SettleHandler(BaseHandler):
@@ -161,7 +176,10 @@ class _SettleHandler(BaseHandler):
             entry = _entry_for(device, entries, shared_name=names[device_label(device)] > 1)
             if entry is None:
                 raise NetconfError(f"step {change_step!r} has no result for this device")
-            persist_id = str(entry.get("persist_id") or "") if entry.get("pending") else ""
+            # A commit whose reply was lost may be pending under its persist id:
+            # settle it too (the device refuses the id when nothing is pending).
+            settleable = entry.get("pending") or entry.get("commit_uncertain")
+            persist_id = str(entry.get("persist_id") or "") if settleable else ""
             if not persist_id:
                 if entry.get("ok") is False:
                     raise NetconfError(
@@ -222,8 +240,9 @@ class NetconfCommitHandler(_SettleHandler):
             await session.lock("candidate")
         except RpcFailed as exc:
             raise NetconfError(
-                f"another session holds the candidate ({exc}); not confirming while it may "
-                "stage other changes"
+                f"the candidate cannot be locked ({exc}): another session holds it or has "
+                "changes staged in it, so the commit is not confirmed. Discard those changes "
+                "on the device, or cancel the commit"
             ) from None
         try:
             # Compared in canonical form: a device may format the two
@@ -243,16 +262,19 @@ class NetconfCommitHandler(_SettleHandler):
                     f"{exc}; the device may already have confirmed the commit, so check its "
                     "configuration before running the step again"
                 ) from None
+            result: dict[str, Any] = {"confirmed": True, "saved": ""}
+            if config.save_config or entry.get("save_requested"):
+                # Still holding the candidate: no other session can commit (and
+                # so put an unconfirmed change in running) before the save copies
+                # running to startup.
+                try:
+                    result["saved"] = await session.save_config()
+                except Exception as exc:  # noqa: BLE001 - the commit is confirmed either way
+                    result["save_error"] = str(exc) or type(exc).__name__
+            return result
         finally:
             with contextlib.suppress(Exception):
                 await session.unlock("candidate")
-        result: dict[str, Any] = {"confirmed": True, "saved": ""}
-        if config.save_config or entry.get("save_requested"):
-            try:
-                result["saved"] = await session.save_config()
-            except Exception as exc:  # noqa: BLE001 - the commit is confirmed either way
-                result["save_error"] = str(exc) or type(exc).__name__
-        return result
 
 
 class NetconfCancelCommitHandler(_SettleHandler):

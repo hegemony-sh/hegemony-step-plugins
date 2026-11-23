@@ -29,7 +29,15 @@ time, the step fails and says the commit may already be confirmed.
 Save to startup saves running to startup after confirming: copy-config when
 the device has a startup datastore, else Cisco's `save-config` RPC. A
 change step with Save to startup on (`save_requested` in its output) is
-saved here even when this step's setting is off. Port,
+saved here even when this step's setting is off. The save runs before the
+candidate lock is released, so no other session's unconfirmed commit can
+reach startup with it.
+
+Each device is matched to its result by the `device_id` the change step
+recorded; a result recorded for another device (or a name several target
+devices share without ids) fails that device before any session opens. A
+device whose confirmed commit got no reply (`commit_uncertain`) is settled
+too. Port,
 timeouts, Allow legacy SSH and Max Parallel Devices (default 10) work as in
 `netconf.get`.
 

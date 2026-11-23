@@ -129,14 +129,16 @@ class Reply:
 
 
 _PREFIX_DECLARATION = re.compile(r"""xmlns:([A-Za-z_][\w.-]*)\s*=\s*(["'])(.*?)\2""")
+_DEFAULT_DECLARATION = re.compile(r"""(?:^|\s)xmlns\s*=\s*(["'])(.*?)\1""")
 
 
 def inherited_prefixes(text: str, *names: str) -> dict[str, str]:
-    """Prefixed namespace declarations on the opening tags of ``names`` (outermost first).
+    """Namespace declarations on the opening tags of ``names`` (outermost first).
 
-    A device may declare a model's prefix on ``<rpc-reply>`` or ``<data>``
-    and use it inside; the extracted content needs those declarations back to
-    be well-formed on its own.
+    A device may declare a model's prefix, or the default namespace, on
+    ``<rpc-reply>`` or ``<data>`` and rely on it inside; the extracted content
+    needs those declarations back to mean the same on its own. The default
+    namespace is under the key ``""``; the innermost declaration wins.
     """
     found: dict[str, str] = {}
     for name in names:
@@ -144,6 +146,9 @@ def inherited_prefixes(text: str, *names: str) -> dict[str, str]:
         if opening and opening.group(1):
             for prefix, _quote, uri in _PREFIX_DECLARATION.findall(opening.group(1)):
                 found[prefix] = uri
+            default = _DEFAULT_DECLARATION.search(opening.group(1))
+            if default:
+                found[""] = default.group(2)
     return found
 
 
@@ -193,15 +198,16 @@ def element_content(text: str, name: str) -> str:
 def pretty(text: str, namespaces: dict[str, str] | None = None) -> str:
     """``text`` (an XML fragment) indented one element per line, for diffs and evidence.
 
-    ``namespaces`` are prefix declarations from above the fragment
-    (:func:`inherited_prefixes`); each top element that uses no declaration of
-    its own for a prefix gets it, so the result stands on its own.
+    ``namespaces`` are declarations from above the fragment
+    (:func:`inherited_prefixes`, ``""`` for the default namespace); each top
+    element that has no declaration of its own for one gets it, so the result
+    stands on its own and its elements keep their namespaces.
     """
     if not text.strip():
         return ""
     namespaces = namespaces or {}
     declarations = "".join(
-        f' xmlns:{prefix}="{escape(uri, {chr(34): "&quot;"})}"'
+        f' {_xmlns(prefix)}="{escape(uri, {chr(34): "&quot;"})}"'
         for prefix, uri in namespaces.items()
     )
     try:
@@ -217,12 +223,31 @@ def pretty(text: str, namespaces: dict[str, str] | None = None) -> str:
     for node in root.childNodes:
         if node.nodeType == node.ELEMENT_NODE:
             for prefix, uri in namespaces.items():
-                if not node.hasAttribute(f"xmlns:{prefix}"):
-                    node.setAttribute(f"xmlns:{prefix}", uri)
+                if prefix == "" and not _uses_default_namespace(node):
+                    continue  # every element is prefixed: the default is not in play
+                if not node.hasAttribute(_xmlns(prefix)):
+                    node.setAttribute(_xmlns(prefix), uri)
     lines = []
     for node in root.childNodes:
         lines.append(node.toprettyxml(indent="  "))
     return "".join(lines).strip() + "\n"
+
+
+def _xmlns(prefix: str) -> str:
+    return f"xmlns:{prefix}" if prefix else "xmlns"
+
+
+def _uses_default_namespace(node: Any) -> bool:
+    """Whether an unprefixed element in ``node``'s tree takes the inherited default namespace."""
+    if node.hasAttribute("xmlns"):
+        return False
+    if ":" not in node.tagName:
+        return True
+    return any(
+        _uses_default_namespace(child)
+        for child in node.childNodes
+        if child.nodeType == child.ELEMENT_NODE
+    )
 
 
 def _strip_blank_text(node: Any) -> None:

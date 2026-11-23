@@ -87,11 +87,18 @@ class FakeNetconfDevice:
     stall: frozenset[str] = frozenset()
     #: Format the candidate's get-config reply differently from running's.
     reformat_candidate: bool = False
+    #: Grant a candidate lock while the candidate has uncommitted changes
+    #: (RFC 6241 7.5 says refuse; some servers do not).
+    lenient_locks: bool = False
 
     candidate: list[ET.Element] = field(default_factory=list)
     locks: dict[str, int] = field(default_factory=dict)
     pending: Pending | None = None
     sessions_opened: int = 0
+    #: Running as each session found it when it opened (the "still manageable" check).
+    running_at_open: list[str] = field(default_factory=list)
+    #: For each save: whether the saving session held the candidate lock.
+    saved_while_locked: list[bool] = field(default_factory=list)
     saved: int = 0
     requests: list[str] = field(default_factory=list)
 
@@ -114,6 +121,10 @@ class FakeNetconfDevice:
     def restore(self, saved: Any) -> None:
         self.running = saved
         self.reset_candidate()
+
+    def candidate_dirty(self) -> bool:
+        """Whether the candidate holds changes not committed or discarded."""
+        return _xml(self.candidate) != _xml(self.running)
 
     def handle_other(self, channel: FakeChannel, op: ET.Element) -> tuple[str, bool] | None:
         """Serve an operation the base device does not know; None: not supported."""
@@ -139,6 +150,7 @@ class FakeNetconfDevice:
 
     async def open(self) -> FakeChannel:
         self.sessions_opened += 1
+        self.running_at_open.append(self.running_xml())
         if self.sessions_opened > self.accept_sessions:
             raise OSError("connection refused")
         channel = FakeChannel(self, self.sessions_opened)
@@ -306,12 +318,23 @@ class FakeChannel:
 
     def _end_session(self) -> None:
         device = self.device
-        for name, owner in list(device.locks.items()):
-            if owner == self.session_id:
-                del device.locks[name]
+        held = [name for name, owner in device.locks.items() if owner == self.session_id]
+        for name in held:
+            del device.locks[name]
         pending = device.pending
         if pending is not None and not pending.persist and pending.session == self.session_id:
             device._rollback()
+        if "candidate" in held:
+            # The lock holder's uncommitted edits go with it (RFC 6241 8.3.5.2).
+            device.reset_candidate()
+
+    def _locked_by_other(self, *targets: str) -> str:
+        """The first of ``targets`` another session has locked ("" when none)."""
+        for target in targets:
+            owner = self.device.locks.get(target)
+            if owner is not None and owner != self.session_id:
+                return target
+        return ""
 
     def _error(self, tag: str, message: str = "") -> tuple[str, bool]:
         return (
@@ -338,6 +361,10 @@ class FakeChannel:
             if name == "lock":
                 if owner is not None and owner != self.session_id:
                     return self._error("lock-denied", f"{target} is locked by session {owner}")
+                if target == "candidate" and device.candidate_dirty() and not device.lenient_locks:
+                    return self._error(
+                        "lock-denied", "the candidate has changes not committed or discarded"
+                    )
                 device.locks[target] = self.session_id
             elif owner == self.session_id:
                 del device.locks[target]
@@ -372,6 +399,8 @@ class FakeChannel:
             if device.fail_edit:
                 return self._error(device.fail_edit, "edit refused")
             target = self._datastore(op.find(f"{{{BASE_NS}}}target"))
+            if self._locked_by_other(target):
+                return self._error("in-use", f"{target} is locked by another session")
             default = op.findtext(f"{{{BASE_NS}}}default-operation") or "merge"
             config_node = op.find(f"{{{BASE_NS}}}config")
             new: list[ET.Element] = list(config_node) if config_node is not None else []
@@ -392,6 +421,9 @@ class FakeChannel:
         if name == "commit":
             if device.fail_commit:
                 return self._error(device.fail_commit, "commit refused")
+            locked = self._locked_by_other("running", "candidate")
+            if locked:
+                return self._error("in-use", f"{locked} is locked by another session")
             persist_id = op.findtext(f"{{{BASE_NS}}}persist-id")
             confirmed = op.find(f"{{{BASE_NS}}}confirmed") is not None
             pending = device.pending
@@ -408,6 +440,11 @@ class FakeChannel:
                 device.pending = None
                 device.commit_candidate()
                 return ok
+            if pending is not None and pending.persist:
+                # A persisted confirmed commit is followed up only with its persist-id.
+                return self._error(
+                    "invalid-value", "a confirmed commit is pending: give persist-id"
+                )
             if pending is not None and not pending.persist and pending.session != self.session_id:
                 # Without a persist id only the session that made the confirmed
                 # commit may follow it up (RFC 6241 8.4).
@@ -434,8 +471,10 @@ class FakeChannel:
             return ok
         if name == "save-config":
             device.saved += 1
+            device.saved_while_locked.append(device.locks.get("candidate") == self.session_id)
             return (f'<result xmlns="{CISCO_IA_NS}">Save running-config successful</result>', False)
         if name == "copy-config":
+            device.saved_while_locked.append(device.locks.get("candidate") == self.session_id)
             device.startup = copy.deepcopy(device.running)
             return ok
         other = device.handle_other(self, op)

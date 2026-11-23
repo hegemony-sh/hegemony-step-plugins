@@ -100,7 +100,8 @@ that changed adds `cli_output` evidence: `<device>:netconf diff`,
   `error`, `datastore`, `changed`, `committed`, `pending` (a confirmed
   commit waits for `netconf.commit`), `persist_id`, `validated`, `saved`
   (`copy-config` or `save-config` when saved), `save_error`,
-  `save_requested` (saved by `netconf.commit`), `diff` and `notes`. When saving fails after the commit, the device fails with
+  `save_requested` (saved by `netconf.commit`), `commit_uncertain`,
+  `device_id`, `diff` and `notes`. When saving fails after the commit, the device fails with
   `committed` true and `save_error` set: the change stands, unsaved.
 - `steps.NODE_ID.output.truncated`: diffs cut short in the output (16 KiB a
   device, 64 KiB the step); the evidence keeps them whole.
@@ -121,4 +122,7 @@ part, and the step error says so.
 When the device does not answer the final commit in time, the step fails
 and says the device may already have committed the change: check the
 device before running the step again. After any request times out the
-session is not used again.
+session is not used again. When the confirmed commit of "confirm in a later
+step" gets no reply, the device fails with `commit_uncertain` true and the
+`persist_id` kept, so a `netconf.commit` or `netconf.cancel_commit` step can
+still settle it (the device refuses the id when nothing is pending).
