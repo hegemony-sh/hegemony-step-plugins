@@ -137,16 +137,16 @@ class SendNotificationHandler(BaseHandler):
                 )
 
         except PlatformRequestError as e:
+            if isinstance(e.__cause__, httpx.TimeoutException):
+                return HandlerResult(
+                    success=False,
+                    error="Timeout fetching destination info",
+                    summary="Timeout fetching destination",
+                )
             return HandlerResult(
                 success=False,
                 error=f"API error fetching destination: {e.status_code or e}",
                 summary="Failed to fetch destination",
-            )
-        except httpx.TimeoutException:
-            return HandlerResult(
-                success=False,
-                error="Timeout fetching destination info",
-                summary="Timeout fetching destination",
             )
         except Exception as e:
             logger.error(
@@ -275,14 +275,15 @@ class SendNotificationHandler(BaseHandler):
         try:
             await run_access.emit_run_event(ctx, message, kind="notification", attrs=attrs)
         except PlatformRequestError as emit_error:
-            logger.warning(
-                "Failed to emit notification event: "
-                f"{emit_error}, run_id={ctx.run_id}, step_id={ctx.step_id}"
-            )
-        except httpx.TimeoutException:
-            logger.warning(
-                f"Notification event emit timed out: run_id={ctx.run_id}, step_id={ctx.step_id}"
-            )
+            if isinstance(emit_error.__cause__, httpx.TimeoutException):
+                logger.warning(
+                    f"Notification event emit timed out: run_id={ctx.run_id}, step_id={ctx.step_id}"
+                )
+            else:
+                logger.warning(
+                    "Failed to emit notification event: "
+                    f"{emit_error}, run_id={ctx.run_id}, step_id={ctx.step_id}"
+                )
         except Exception as emit_error:
             logger.warning(
                 f"Failed to emit notification event: run_id={ctx.run_id}, step_id={ctx.step_id}, error={emit_error}"

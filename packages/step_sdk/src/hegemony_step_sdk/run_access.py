@@ -64,7 +64,8 @@ async def fetch_notification_destination(
     None covers an unknown, disabled or other organization's destination alike.
     The mapping holds ``id``, ``name``, ``type`` and ``config_json``. Raises
     :class:`PlatformRequestError` when the platform does not answer, also on
-    a network error (``status_code`` is then None). An id
+    a network error (``status_code`` is then None), on any host: the error
+    the host raised is its ``__cause__``. An id
     that is not a UUID answers None: it could change the request's path.
     """
     try:
@@ -74,7 +75,12 @@ async def fetch_notification_destination(
     services = ctx.require_services()
     method = _host_method(services, "fetch_notification_destination")
     if method is not None:
-        return await method(destination_id)
+        try:
+            return await method(destination_id)
+        except PlatformRequestError:
+            raise
+        except Exception as exc:  # the host's own error type
+            raise PlatformRequestError(f"the platform did not answer: {exc}") from exc
     try:
         async with services.open_api_client(timeout=_TIMEOUT_SECONDS) as client:
             response = await client.get(f"/internal/notification-destinations/{destination_id}")
@@ -101,13 +107,20 @@ async def emit_run_event(
 
     The step's run, step run, step id and phase come from ``ctx``. Raises
     :class:`PlatformRequestError` when the platform does not record it, also
-    on a network error (``status_code`` is then None); it is not retried.
+    on a network error (``status_code`` is then None). This function does
+    not retry; the host may retry safely (its retries carry one
+    ``Idempotency-Key``).
     """
     services = ctx.require_services()
     phase = ctx.tags.get("phase", "")
     method = _host_method(services, "emit_run_event")
     if method is not None:
-        await method(message, kind=kind, attrs=attrs or {}, phase=phase)
+        try:
+            await method(message, kind=kind, attrs=attrs or {}, phase=phase)
+        except PlatformRequestError:
+            raise
+        except Exception as exc:  # the host's own error type
+            raise PlatformRequestError(f"the platform did not record the event: {exc}") from exc
         return
     try:
         async with services.open_api_client(timeout=_TIMEOUT_SECONDS) as client:
@@ -122,7 +135,7 @@ async def emit_run_event(
                     "attrs": attrs or {},
                 },
             )
-    except Exception as exc:  # not retried: a repeated event would be recorded twice
+    except Exception as exc:  # no retry here: a repeat could record the event twice
         raise PlatformRequestError(f"the platform did not answer: {exc}") from exc
     if response.status_code not in (200, 201):
         raise PlatformRequestError(

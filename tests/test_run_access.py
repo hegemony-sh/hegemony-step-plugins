@@ -171,6 +171,43 @@ class TestNetworkErrors:
         assert len(host.requests) == 1
 
 
+class _FailingHost:
+    """A host whose named methods raise their own error types."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def fetch_notification_destination(self, destination_id: str) -> dict[str, Any] | None:
+        raise self.error
+
+    async def emit_run_event(
+        self, message: str, *, kind: str = "log", attrs: dict | None = None, phase: str = ""
+    ) -> None:
+        raise self.error
+
+
+class TestNamedMethodErrors:
+    """Whatever the host raises reaches the plugin as PlatformRequestError."""
+
+    @pytest.mark.parametrize("error", [ConnectionError("refused"), RuntimeError("HTTP 500")])
+    async def test_destination(self, error: Exception) -> None:
+        with pytest.raises(PlatformRequestError) as exc:
+            await run_access.fetch_notification_destination(_ctx(_FailingHost(error)), D1)
+        assert exc.value.__cause__ is error
+
+    @pytest.mark.parametrize("error", [ConnectionError("refused"), RuntimeError("HTTP 500")])
+    async def test_event(self, error: Exception) -> None:
+        with pytest.raises(PlatformRequestError) as exc:
+            await run_access.emit_run_event(_ctx(_FailingHost(error)), "sent")
+        assert exc.value.__cause__ is error
+
+    async def test_a_platform_request_error_passes_unchanged(self) -> None:
+        error = PlatformRequestError("refused", status_code=403)
+        with pytest.raises(PlatformRequestError) as exc:
+            await run_access.emit_run_event(_ctx(_FailingHost(error)), "sent")
+        assert exc.value is error
+
+
 class TestOlderHostSubclassingTheProtocol:
     """A host that subclasses HandlerServices inherits empty stubs for newer methods."""
 
@@ -193,6 +230,17 @@ class TestOlderHostSubclassingTheProtocol:
 
 
 class TestNotifyUsesRunAccess:
+    async def test_a_timeout_keeps_its_message(self) -> None:
+        import httpx
+
+        from hegemony_steps_flow.notify import SendNotificationHandler
+
+        ctx = _ctx(_FailingHost(httpx.ReadTimeout("slow")))
+        ctx.config = {"destination_id": D1}
+        result = await SendNotificationHandler().execute(ctx)
+        assert result.success is False
+        assert result.error == "Timeout fetching destination info"
+
     async def test_an_unknown_destination_fails_the_step(self) -> None:
         from hegemony_steps_flow.notify import SendNotificationHandler
 
@@ -239,20 +287,18 @@ def test_no_plugin_calls_the_internal_api_itself() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr == "open_api_client":
                 offenders.append(f"{path.relative_to(REPO)}:{node.lineno} open_api_client")
-            elif (
-                isinstance(node, ast.Constant)
-                and isinstance(node.value, str)
-                and node.value.startswith("/internal/")
-            ):
-                offenders.append(f"{path.relative_to(REPO)}:{node.lineno} {node.value}")
-            elif isinstance(node, ast.JoinedStr):
-                first = node.values[0] if node.values else None
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                # also getattr(services, "open_api_client"), "internal/…" and
+                # "…/internal/…" pieces of a concatenated or f-string path
+                text = node.value
                 if (
-                    isinstance(first, ast.Constant)
-                    and isinstance(first.value, str)
-                    and first.value.startswith("/internal/")
+                    text == "open_api_client"
+                    or text.startswith(("/internal/", "internal/"))
+                    or "/internal/" in text
                 ):
-                    offenders.append(f"{path.relative_to(REPO)}:{node.lineno} f'{first.value}…'")
+                    offenders.append(f"{path.relative_to(REPO)}:{node.lineno} {text!r}")
+    # Not flagged: a plugin's own httpx.AsyncClient. Steps use one to reach
+    # devices, registries and HTTP targets; that is their job, not the API.
     assert offenders == [], "use the services' named methods or hegemony_step_sdk.run_access"
 
 
