@@ -133,8 +133,9 @@ async def change_candidate(
     attempt left pending (its diff is then empty) instead of losing it.
 
     ``diff_complete`` is False when ``read`` returns only part of the
-    configuration (a diff filter): an empty diff then proves nothing, so the
-    change is validated and committed all the same.
+    configuration (a diff filter, or a vendor's modelled view): an empty diff
+    then proves nothing, so the change is validated and committed all the
+    same.
     """
     if not session.supports(CAP_CANDIDATE):
         raise NetconfError("the device has no candidate datastore (:candidate capability)")
@@ -170,11 +171,11 @@ async def change_candidate(
             result.notes.append("the change leaves the configuration as it is: nothing committed")
             return result
         if not result.changed:
-            # Unknown, so counted as changed: the part outside the filter may differ.
+            # Unknown, so counted as changed: the part the reads leave out may differ.
             result.changed = True
             result.notes.append(
-                "the filtered diff shows no difference; the part outside the filter may "
-                "differ, so the change is committed as asked and counted as changed"
+                "the diff shows no difference, but it covers only part of the configuration; "
+                "the rest may differ, so the change is committed as asked and counted as changed"
             )
         if options.validate and session.can_validate:
             await session.validate("candidate")
@@ -349,11 +350,11 @@ async def change_running(
         )
         result.changed = bool(result.diff)
         if not result.changed and not diff_complete:
-            # Unknown, so counted as changed (and saved): the part outside the filter may differ.
+            # Unknown, so counted as changed (and saved): the part the reads leave out may differ.
             result.changed = True
             result.notes.append(
-                "the filtered diff shows no difference; the part outside the filter may "
-                "have changed, so the change is counted as changed"
+                "the diff shows no difference, but it covers only part of the configuration; "
+                "the rest may have changed, so the change is counted as changed"
             )
         result.committed = result.changed
         if options.save_config and result.committed:
