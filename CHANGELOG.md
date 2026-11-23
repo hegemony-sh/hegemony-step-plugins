@@ -1,3 +1,11 @@
+## [0.53.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.53.0...v0.53.1) (2026-11-23)
+
+### Bug Fixes
+
+* **container:** refuse a cached copy when the ARM variant is unknown ([cf38321](https://github.com/hegemony-sh/hegemony-step-plugins/commit/cf383212ef7f13dc4036989b26c982a1605d8c80))
+* **container:** refuse an image index with two entries for the platform ([a9147ad](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a9147ad2a4b105b1bcc52f221d6db63f454784bd))
+* **container:** verify a cached base image against its upstream digest ([79628e2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/79628e21ed834decd4d7bcb91a513ef18246d06a)), closes [#137](https://github.com/hegemony-sh/hegemony-step-plugins/issues/137)
+
 ## [0.53.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.52.1...v0.53.0) (2026-11-23)
 
 ### Features
