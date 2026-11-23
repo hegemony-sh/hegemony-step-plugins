@@ -81,6 +81,8 @@ class FakeNetconfDevice:
     fail_commit: str = ""
     #: Speak base:1.0 framing only.
     base10_only: bool = False
+    #: Operations to act on but never answer (a reply lost in transit).
+    stall: frozenset[str] = frozenset()
 
     candidate: list[ET.Element] = field(default_factory=list)
     locks: dict[str, int] = field(default_factory=dict)
@@ -287,6 +289,8 @@ class FakeChannel:
                 message_id = root.get("message-id", "")
                 operation = root[0]
                 body, closing = self._handle(operation)
+                if _local(operation.tag) in device.stall:
+                    continue
                 await self._send(
                     f'<rpc-reply xmlns="{BASE_NS}" message-id="{message_id}">{body}</rpc-reply>'
                 )

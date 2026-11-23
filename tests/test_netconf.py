@@ -11,6 +11,7 @@ and chunked framing, message ids and rpc-errors.
 
 from __future__ import annotations
 
+import random
 from typing import Any, cast
 
 import pytest
@@ -22,6 +23,7 @@ from hegemony_steps_netconf.client import (
     NetconfError,
     NetconfSession,
     RpcFailed,
+    RpcTimeout,
     check_fragment,
     element_content,
     parse_xml,
@@ -106,6 +108,64 @@ async def test_only_the_confirming_session_settles_a_commit_without_persist_id()
     assert device.pending is None and _running_hostname(device) == "r2"
     await other.close()
     await owner.close()
+
+
+class _SplitReads:
+    """A channel whose reads return 1 to ``most`` bytes at a time, at random (fixed seed)."""
+
+    def __init__(self, inner: Any, *, seed: int, most: int) -> None:
+        self._inner = inner
+        self._random = random.Random(seed)
+        self._most = most
+        self._pending = b""
+
+    async def write(self, data: bytes) -> None:
+        await self._inner.write(data)
+
+    async def read(self, max_bytes: int = 65536) -> bytes:
+        if not self._pending:
+            self._pending = await self._inner.read(max_bytes)
+            if not self._pending:
+                return b""
+        size = min(self._random.randint(1, self._most), max_bytes)
+        data, self._pending = self._pending[:size], self._pending[size:]
+        return data
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+
+@pytest.mark.parametrize("base10_only", [False, True], ids=["chunked", "end-of-message"])
+@pytest.mark.parametrize("most", [1, 7, 64])
+async def test_replies_split_into_small_reads_are_reassembled(base10_only, most):
+    big = "".join(f"<item{n}>value {n}</item{n}>" for n in range(300))
+    device = FakeNetconfDevice.with_config(
+        BASE + f'<other xmlns="urn:example:other">{big}</other>', base10_only=base10_only
+    )
+    session = NetconfSession(_SplitReads(await device.open(), seed=133, most=most), timeout=5)
+    await session.hello()
+    assert session._chunked is not base10_only
+    for _ in range(3):
+        data = (await session.get_config("running")).data()
+        assert "<hostname>r1</hostname>" in data.replace("ns0:", "")
+        assert "value 299" in data
+    await session.close()
+
+
+async def test_a_timed_out_request_leaves_the_session_unusable():
+    device = FakeNetconfDevice.with_config(BASE, stall=frozenset({"get-config"}))
+    channel = await device.open()
+    session = NetconfSession(channel, timeout=5)
+    await session.hello()
+    with pytest.raises(RpcTimeout, match="no reply within"):
+        await session.rpc("<get-config><source><running/></source></get-config>", timeout=0.05)
+    # The reply may still arrive half-read: the session does not guess its place.
+    with pytest.raises(NetconfError, match="session is unusable"):
+        await session.lock("running")
+    sent = len(device.requests)
+    await session.close()
+    assert channel.closed
+    assert len(device.requests) == sent  # no close-session sent on a broken session
 
 
 async def test_an_rpc_error_names_the_tag_and_message():

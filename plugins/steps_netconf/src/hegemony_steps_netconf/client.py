@@ -58,6 +58,10 @@ class NetconfError(Exception):
     """The session failed: framing, a closed channel, a timeout, a malformed reply."""
 
 
+class RpcTimeout(NetconfError):
+    """A request got no (complete) reply in time; the device may still act on it."""
+
+
 @dataclass(frozen=True)
 class RpcError:
     """One ``<rpc-error>`` of a reply (RFC 6241, section 4.3)."""
@@ -295,9 +299,13 @@ class NetconfSession:
         self.capabilities: frozenset[str] = frozenset()
         self.session_id = ""
         self._chunked = False
-        self._buffer = b""
+        self._buffer = bytearray()
+        #: Where the next end-of-message search starts (bytes before it hold none).
+        self._scan = 0
         self._message_id = 0
         self._closed = False
+        #: Why the session can no longer frame messages ("" while it can).
+        self._broken = ""
 
     # --- capabilities ---------------------------------------------------
 
@@ -339,10 +347,14 @@ class NetconfSession:
         if self._chunked:
             return await self._receive_chunked()
         while True:
-            end = self._buffer.find(EOM)
+            end = self._buffer.find(EOM, self._scan)
             if end >= 0:
-                message, self._buffer = self._buffer[:end], self._buffer[end + len(EOM) :]
+                message = bytes(self._buffer[:end])
+                del self._buffer[: end + len(EOM)]
+                self._scan = 0
                 return message.decode("utf-8", "replace")
+            # The marker may straddle the next read: rescan only its length.
+            self._scan = max(0, len(self._buffer) - len(EOM) + 1)
             await self._fill()
 
     async def _receive_chunked(self) -> str:
@@ -352,7 +364,7 @@ class NetconfSession:
             while len(self._buffer) < 4:
                 await self._fill()
             if self._buffer.startswith(_END_OF_CHUNKS):
-                self._buffer = self._buffer[len(_END_OF_CHUNKS) :]
+                del self._buffer[: len(_END_OF_CHUNKS)]
                 return b"".join(parts).decode("utf-8", "replace")
             match = _CHUNK_HEADER.match(self._buffer)
             if match is None:
@@ -365,9 +377,9 @@ class NetconfSession:
                 raise NetconfError(f"a NETCONF message exceeded {MAX_MESSAGE_BYTES} bytes")
             while len(self._buffer) < match.end() + length:
                 await self._fill()
-            parts.append(self._buffer[match.end() : match.end() + length])
+            parts.append(bytes(self._buffer[match.end() : match.end() + length]))
             size += length
-            self._buffer = self._buffer[match.end() + length :]
+            del self._buffer[: match.end() + length]
 
     # --- session --------------------------------------------------------
 
@@ -380,7 +392,11 @@ class NetconfSession:
             f"<capability>{CAP_BASE_11}</capability>"
             "</capabilities></hello>"
         )
-        text = await asyncio.wait_for(self._receive(), timeout=self.timeout)
+        try:
+            text = await asyncio.wait_for(self._receive(), timeout=self.timeout)
+        except BaseException:
+            self._broken = "no complete hello"
+            raise
         root = parse_xml(text, what="the device's hello")
         if local_name(root.tag) != "hello":
             raise NetconfError("the device did not start with a NETCONF hello")
@@ -401,13 +417,18 @@ class NetconfSession:
 
         Raises:
             RpcFailed: the reply holds an ``<rpc-error>`` of severity error.
-            NetconfError: no reply in time, a closed session, or a reply
-                that is not one.
+            RpcTimeout: no reply in time. The session is then unusable (it
+                may be part-way through a message), so later calls raise at
+                once.
+            NetconfError: a closed session, broken framing, or a reply that
+                is not one.
         """
+        name = operation or _operation_name(body)
+        if self._broken:
+            raise NetconfError(f"{name}: the NETCONF session is unusable ({self._broken})")
         self._message_id += 1
         message_id = str(self._message_id)
         limit = self.timeout if timeout is None else timeout
-        name = operation or _operation_name(body)
         # One deadline for the whole request: sending (a device that stops
         # reading stalls the write) and every message read until the reply.
         loop = asyncio.get_running_loop()
@@ -418,16 +439,25 @@ class NetconfSession:
                 timeout=limit,
             )
         except TimeoutError:
-            raise NetconfError(
+            self._broken = f"{name} timed out"
+            raise RpcTimeout(
                 f"{name}: the device did not accept the request within {limit:g} s"
             ) from None
+        except BaseException as exc:
+            self._broken = f"{name} was interrupted ({type(exc).__name__})"
+            raise
         while True:
             try:
                 text = await asyncio.wait_for(
                     self._receive(), timeout=max(0.0, deadline - loop.time())
                 )
             except TimeoutError:
-                raise NetconfError(f"{name}: no reply within {limit:g} s") from None
+                self._broken = f"{name} timed out"
+                raise RpcTimeout(f"{name}: no reply within {limit:g} s") from None
+            except BaseException as exc:
+                # Part of a message may have been read: the framing is lost.
+                self._broken = f"{name} failed: {exc}" if str(exc) else f"{name} failed"
+                raise
             root = parse_xml(text, what=f"the reply to {name}")
             if local_name(root.tag) == "notification":
                 continue
@@ -453,11 +483,12 @@ class NetconfSession:
         # stalled device cannot keep the channel, and its locks, open; the
         # channel is closed even when the step is cancelled meanwhile.
         try:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    self.rpc("<close-session/>", timeout=min(self.timeout, 10.0)),
-                    timeout=min(self.timeout, 10.0) + 1.0,
-                )
+            if not self._broken:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        self.rpc("<close-session/>", timeout=min(self.timeout, 10.0)),
+                        timeout=min(self.timeout, 10.0) + 1.0,
+                    )
         finally:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self._channel.close(), timeout=10.0)
