@@ -119,6 +119,11 @@ class NetconfChannel(Protocol):
     itself (the hello exchange, message framing, RPCs), so the protocol is
     the step wheel's, and the host only opens the hardened SSH connection
     (egress policy, host-key trust, jump host, credentials).
+
+    A host may also set a ``disconnect_reason`` string attribute (why the
+    device ended the session, such as an SSH disconnect message); it is
+    optional, so it is not part of this protocol, and handlers read it with
+    ``getattr``.
     """
 
     async def write(self, data: bytes) -> None:

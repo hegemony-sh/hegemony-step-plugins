@@ -469,7 +469,11 @@ class NetconfSession:
     async def _fill(self) -> None:
         chunk = await self._channel.read(65536)
         if not chunk:
-            raise NetconfError("the device closed the NETCONF session")
+            # A host may say why the session ended (an SSH disconnect message).
+            reason = str(getattr(self._channel, "disconnect_reason", "") or "").strip()
+            raise NetconfError(
+                "the device closed the NETCONF session" + (f": {reason}" if reason else "")
+            )
         self._buffer += chunk
         if len(self._buffer) > MAX_MESSAGE_BYTES + 64:
             raise NetconfError(f"a NETCONF message exceeded {MAX_MESSAGE_BYTES} bytes")

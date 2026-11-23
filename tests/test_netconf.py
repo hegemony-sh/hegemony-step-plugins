@@ -1260,6 +1260,26 @@ async def test_a_dropped_session_after_the_commit_keeps_the_persist_id():
     assert device.pending is not None and device.pending.persist == entry["persist_id"]
 
 
+async def test_a_closed_session_error_says_why_when_the_host_knows():
+    from hegemony_steps_netconf.client import NetconfError, NetconfSession
+
+    class Closed:
+        disconnect_reason = "Too many sessions"
+
+        async def write(self, data: bytes) -> None:
+            pass
+
+        async def read(self, max_bytes: int = 65536) -> bytes:
+            return b""
+
+        async def close(self) -> None:
+            pass
+
+    session = NetconfSession(cast(Any, Closed()))
+    with pytest.raises(NetconfError, match="closed the NETCONF session: Too many sessions"):
+        await session._fill()
+
+
 async def test_a_first_attempt_sends_no_pending_check():
     # A first attempt cannot have left a commit pending, so it does not ask:
     # its outcome never depends on how a server answers an unknown persist id.
