@@ -62,6 +62,8 @@ class WaitForFields(BaseModel):
     pattern: str = Field(
         default="",
         min_length=1,
+        # Checked when omitted too: an empty pattern matches any output.
+        validate_default=True,
         title="Pattern (regex)",
         description=(
             "Regular expression (Python syntax) searched for in the command's "
@@ -223,8 +225,11 @@ class Poll:
     ok: bool = False
     #: The session is gone or did not answer: log in again before the next poll.
     lost: bool = False
-    #: Why the poll failed, for the live log and the step's error.
+    #: Why the poll failed, for the step's error and output. It must hold no
+    #: device output: only the live log is redacted by the host.
     error: str | None = None
+    #: More about the failure, device output included, for the live log only.
+    detail: str | None = None
     #: With ``lost``: a session existed and was lost. False when the login
     #: itself failed (a transport that logs in for every command).
     had_session: bool = True
@@ -365,7 +370,7 @@ async def wait_on_device(
                 wait.error = f"session lost: {poll.error}" if poll.error else "session lost"
                 await emit(
                     f"[attempt {wait.attempts}, {_seconds(elapsed)} elapsed] session lost"
-                    + (f" ({poll.error})" if poll.error else "")
+                    + (f" ({poll.detail or poll.error})" if poll.detail or poll.error else "")
                     + f"; reconnecting in {config.poll_interval_seconds} s"
                 )
                 await _pause(poll_started, config.poll_interval_seconds, deadline)
@@ -377,7 +382,7 @@ async def wait_on_device(
             if not poll.ok:
                 wait.streak = 0
                 wait.error = f"command failed: {poll.error}" if poll.error else "command failed"
-                status = wait.error
+                status = wait.error + (f" ({poll.detail})" if poll.detail else "")
             elif condition_met(compiled, poll.output, until=config.until, scope=config.match_scope):
                 wait.streak += 1
                 wait.error = None

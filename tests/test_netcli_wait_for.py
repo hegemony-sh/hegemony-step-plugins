@@ -279,7 +279,7 @@ async def test_a_failed_command_never_meets_does_not_match(clock):
 
     assert result.success is True
     assert result.output["devices"]["sw1"]["attempts"] == 2
-    assert "command failed: % Invalid input" in _log(events)
+    assert "command failed: the device reported an error (% Invalid input)" in _log(events)
     # The command error did not end the session.
     assert transport.login_calls == 1
 
@@ -519,6 +519,36 @@ async def test_a_bad_config_fails_before_connecting(clock, config, message):
     assert result.success is False
     assert message in (result.error or "")
     assert services.connect_calls == []
+
+
+@pytest.mark.parametrize("missing", ["pattern", "command"])
+async def test_an_omitted_pattern_or_command_is_refused(clock, missing):
+    """An empty pattern would match any output, so the step would pass at once."""
+    transport = FakeCliTransport([COMMITTED])
+    services = CliServices({"sw1": transport})
+    config = _cli_config()
+    del config[missing]
+
+    result = await WaitForCliHandler().execute(_ctx(config, services, []))
+
+    assert result.success is False
+    assert missing in (result.error or "")
+    assert services.connect_calls == []
+
+
+async def test_a_device_error_line_reaches_the_live_log_only(clock):
+    """The error line is device output: only the redacted live log may carry it."""
+    failed = CliResult("", f"% Bad secret {SECRET}", 1, f"% Bad secret {SECRET}")
+    transport = FakeCliTransport([failed])
+
+    result, events = await _run_cli(transport, max_wait_seconds=10)
+
+    assert result.success is False
+    assert "command failed: the device reported an error" in (result.error or "")
+    assert SECRET not in (result.error or "")
+    assert SECRET not in result.summary
+    assert SECRET not in str(result.output["devices"]["sw1"]["error"])
+    assert f"(% Bad secret {SECRET})" in _log(events)
 
 
 async def test_netcli_wait_for_end_to_end_on_one_ssh_login():

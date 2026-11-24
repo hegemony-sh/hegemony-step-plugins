@@ -145,3 +145,34 @@ async def test_asyncssh_runs_exec_channels_on_the_held_connection(servers):
     assert len(servers.seen.connections) == 2
     await transport.close_session()
     assert transport.session_open is False
+
+
+async def test_netmiko_closes_a_login_whose_caller_was_cancelled(monkeypatch):
+    """The login thread outlives a cancelled open_session; its connection is closed."""
+    import threading
+
+    transport = SSHTransport(_spec(22), host_key_verifier=checks_off())
+    proceed = threading.Event()
+    connection = object()
+    closed: list[object] = []
+
+    def slow_login():
+        proceed.wait(5)
+        return connection
+
+    monkeypatch.setattr(transport, "_login", slow_login)
+    monkeypatch.setattr(transport, "_logout", closed.append)
+
+    task = asyncio.ensure_future(transport.open_session())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    proceed.set()
+    for _ in range(100):
+        if closed:
+            break
+        await asyncio.sleep(0.02)
+
+    assert closed == [connection]
+    assert transport.session_open is False

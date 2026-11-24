@@ -43,6 +43,8 @@ class _CommandField(BaseModel):
     command: str = Field(
         default="",
         min_length=1,
+        # Checked when omitted too: there is nothing to poll without it.
+        validate_default=True,
         title="Command",
         description=(
             "One exec-mode command run on every poll, such as 'show install "
@@ -97,8 +99,14 @@ class _CliSession:
         if result.exit_code == 0:
             return waiting.Poll(output=result.output or "", ok=True)
         if result.exit_code > 0:
-            # The device printed an error (% Invalid input): the session is fine.
-            return waiting.Poll(output=result.output or "", error=result.error)
+            # The device printed an error (% Invalid input): the session is
+            # fine. The error line is device output, so only the live log,
+            # which the host redacts, gets it.
+            return waiting.Poll(
+                output=result.output or "",
+                error="the device reported an error",
+                detail=result.error,
+            )
         # -1: the transport could not finish the command. Either the device
         # closed the session (disconnected, or session_open is now False) or
         # it did not answer in time; a new login settles both.

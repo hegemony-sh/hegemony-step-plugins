@@ -43,6 +43,8 @@ class _CommandFields(BaseModel):
     command: str = Field(
         default="",
         min_length=1,
+        # Checked when omitted too: there is nothing to poll without it.
+        validate_default=True,
         title="Command",
         description=(
             "One command run on every poll, such as 'systemctl is-active nginx'. "
@@ -139,9 +141,12 @@ class _ShellSession:
         if result.exit_code != 0:
             detail = (result.stderr or result.stdout or "").strip().splitlines()
             first_line = detail[0] if detail else ""
+            # The step's error gets the exit code only; the first output
+            # line goes to the live log, which the host redacts.
             return waiting.Poll(
                 output=result.stdout or "",
-                error=f"exit {result.exit_code}" + (f" ({first_line})" if first_line else ""),
+                error=f"exit {result.exit_code}",
+                detail=first_line or None,
             )
         return waiting.Poll(output=result.stdout or "", ok=True)
 

@@ -160,7 +160,7 @@ async def test_shell_times_out_and_records_the_last_output(clock):
     assert result.success is False
     device = result.output["devices"]["sw1"]
     assert device["last_output"] == "failed\n"
-    assert "last poll: command failed: exit 3 (failed)" in device["error"]
+    assert device["error"].endswith("last poll: command failed: exit 3")
     assert result.evidence[0]["content_text"] == "failed\n"
 
 
@@ -245,3 +245,21 @@ def test_both_steps_extend_the_run_timeout_by_their_longest_poll():
     for handler in (WaitForCliHandler, ShellWaitForHandler):
         assert handler.run_timeout_field == "max_wait_seconds"
         assert handler.run_timeout_margin_seconds == netcli_waiting.RUN_TIMEOUT_MARGIN_SECONDS
+
+
+async def test_shell_failure_output_stays_out_of_the_error_and_summary(clock):
+    """Codex review: a failing command's first line may hold a secret."""
+    services = ShellServices([(1, "", f"auth failed for token {SECRET}\n")])
+    events: list = []
+
+    result = await ShellWaitForHandler().execute(
+        _ctx(_shell_config(max_wait_seconds=10), services, events)
+    )
+
+    assert result.success is False
+    assert SECRET not in (result.error or "")
+    assert SECRET not in result.summary
+    assert SECRET not in str(result.output)
+    assert "command failed: exit 1" in (result.error or "")
+    # The live log, which the host redacts, keeps the detail.
+    assert f"(auth failed for token {SECRET})" in _log(events)

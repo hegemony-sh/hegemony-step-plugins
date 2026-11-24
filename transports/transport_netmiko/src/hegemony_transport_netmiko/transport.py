@@ -1613,7 +1613,21 @@ class SSHTransport:
         (refused, timed out, authentication, host key).
         """
         await self.close_session()
-        self._held = await self._run_in_thread(self._login)
+        login = asyncio.ensure_future(self._run_in_thread(self._login))
+        try:
+            self._held = await asyncio.shield(login)
+        except asyncio.CancelledError:
+            # The login thread runs on; close what it opens, or the session
+            # and its cancellation-registry entry would be left behind.
+            login.add_done_callback(self._logout_late)
+            raise
+
+    def _logout_late(self, login: asyncio.Future) -> None:
+        """Close the connection of a login whose caller was cancelled meanwhile."""
+        if login.cancelled() or login.exception() is not None:
+            return
+        connection = login.result()
+        asyncio.get_running_loop().run_in_executor(None, self._logout, connection)
 
     @property
     def session_open(self) -> bool:
