@@ -233,6 +233,52 @@ def test_a_surface_diff_sorts_additions_from_breaks():
     assert sorted(diff.changed) == ["m:A.g", "m:A.h", "m:K"]
 
 
+def test_the_internal_transport_interface_changes_with_a_minor():
+    """The device-transport interface has no stability promise: only the built-in
+    transports use it, and they pin the SDK exactly."""
+    old = {
+        "hegemony_step_sdk.transports:DeviceConnectionSpec": {"kind": "class"},
+        "hegemony_step_sdk.transports:DeviceConnectionSpec.host": {
+            "kind": "field",
+            "required": True,
+        },
+        "hegemony_step_sdk:TransportRegistry": {"kind": "class"},
+        "hegemony_step_sdk.transports:JumpHostSpec.host": {"kind": "field", "required": True},
+    }
+    new = {
+        "hegemony_step_sdk.transports:DeviceConnectionSpec": {"kind": "class"},
+        "hegemony_step_sdk.transports:DeviceConnectionSpec.address": {
+            "kind": "field",
+            "required": True,
+        },
+    }
+
+    diff = sdk_version.diff_surface(old, new)
+
+    # A new required field of an internal class is an internal change too.
+    assert diff.internal == [
+        "hegemony_step_sdk.transports:DeviceConnectionSpec.address",
+        "hegemony_step_sdk.transports:DeviceConnectionSpec.host",
+        "hegemony_step_sdk:TransportRegistry",
+    ]
+    assert diff.changed == []
+    # JumpHostSpec is part of the handler contract: removing a field breaks.
+    assert diff.removed == ["hegemony_step_sdk.transports:JumpHostSpec.host"]
+    assert sdk_version.required_bump(diff, True) == "major"
+    del old["hegemony_step_sdk.transports:JumpHostSpec.host"]
+    assert sdk_version.required_bump(sdk_version.diff_surface(old, new), True) == "minor"
+
+
+def test_the_internal_names_are_the_ones_the_transports_module_declares():
+    import hegemony_step_sdk.transports as transports
+
+    doc = transports.__doc__ or ""
+    for name in sdk_version.INTERNAL_NAMES - {"TRANSPORT_ENTRY_POINT_GROUP"}:
+        assert f":class:`{name}`" in doc, name
+    assert "hegemony.device_transports" in doc
+    assert not {"DeviceCredentials", "JumpHostSpec"} & sdk_version.INTERNAL_NAMES
+
+
 # --------------------------------------------------------------------------
 # The bump a change needs
 

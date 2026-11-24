@@ -373,6 +373,13 @@ class SurfaceDiff:
     extended: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
     changed: list[str] = field(default_factory=list)
+    #: Removed or changed parts of the internal device-transport interface.
+    internal: list[str] = field(default_factory=list)
+
+    @property
+    def growing(self) -> list[str]:
+        """What needs a minor: additions, and changes to the internal interface."""
+        return sorted(self.added + self.extended + self.internal)
 
     @property
     def breaking(self) -> list[str]:
@@ -380,6 +387,32 @@ class SurfaceDiff:
 
 
 _POSITIONAL = ("POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD")
+
+#: The device-transport interface: internal, with no stability promise
+#: (hegemony_step_sdk.transports says so and lists these names; the platform's
+#: docs/development/compatibility.md, "Device Transports", agrees). Only the
+#: built-in transports use it, and they pin the SDK exactly, so removing or
+#: changing it needs a minor version, not a major (an ABI change). The two
+#: stable exceptions, DeviceCredentials and JumpHostSpec, are not listed.
+INTERNAL_NAMES = frozenset(
+    {
+        "TRANSPORT_ENTRY_POINT_GROUP",
+        "TransportRegistry",
+        "DeviceConnectionSpec",
+        "HostKeyVerifier",
+        "HostKeyRejectedError",
+        "SshAlgorithmRecorder",
+        "ConnectionCancellationRegistry",
+        "TransportOutputSink",
+    }
+)
+_INTERNAL_MODULES = (SDK_PACKAGE, f"{SDK_PACKAGE}.transports")
+
+
+def is_internal(key: str) -> bool:
+    """Whether ``key`` (``module:Name`` or ``module:Name.member``) is the internal interface."""
+    module, _, name = key.partition(":")
+    return module in _INTERNAL_MODULES and name.split(".", 1)[0] in INTERNAL_NAMES
 
 
 def params_compatible(old: list[list[Any]], new: list[list[Any]]) -> bool:
@@ -436,13 +469,15 @@ def _owner(key: str) -> str | None:
 def diff_surface(old: Mapping[str, Mapping], new: Mapping[str, Mapping]) -> SurfaceDiff:
     diff = SurfaceDiff()
     for key in sorted(set(old) | set(new)):
-        if key not in new:
+        if is_internal(key) and (key not in new or (key in old and old[key] != new[key])):
+            diff.internal.append(key)
+        elif key not in new:
             diff.removed.append(key)
         elif key not in old:
             owner = _owner(key)
             # A new required field of a class that existed breaks its callers.
             if owner in old and new[key].get("kind") == "field" and new[key].get("required"):
-                diff.changed.append(key)
+                (diff.internal if is_internal(key) else diff.changed).append(key)
             else:
                 diff.added.append(key)
         elif dict(old[key]) != dict(new[key]):
@@ -453,7 +488,7 @@ def diff_surface(old: Mapping[str, Mapping], new: Mapping[str, Mapping]) -> Surf
 def required_bump(diff: SurfaceDiff, content_changed: bool) -> str | None:
     if diff.breaking:
         return "major"
-    if diff.added or diff.extended:
+    if diff.growing:
         return "minor"
     if content_changed:
         return "patch"
@@ -495,9 +530,9 @@ def bump_failures(
             ]
         return []
     if step is None:
-        return [_unbumped(base, base_version, needed, diff.breaking or diff.added + diff.extended)]
+        return [_unbumped(base, base_version, needed, diff.breaking or diff.growing)]
     if BUMPS.index(step) < BUMPS.index(needed):
-        listed = diff.breaking if needed == "major" else diff.added + diff.extended
+        listed = diff.breaking if needed == "major" else diff.growing
         return [
             f"the SDK change since {base} needs a {needed} version ({next_version(base_version, needed)}), "
             f"not {version}: {_reason(needed)}" + "".join(f"\n  {key}" for key in listed[:40])
@@ -509,7 +544,8 @@ def _reason(bump: str) -> str:
     return {
         "major": "the public surface lost or changed these (a major is an ABI change; "
         "prefer keeping the old name working and adding a new one)",
-        "minor": "the public surface gained these",
+        "minor": "the public surface gained these, or the internal device-transport "
+        "interface changed",
         "patch": f"files in {rel(SDK_DIR)} changed",
     }[bump]
 
@@ -614,7 +650,11 @@ def surface_file_failures() -> list[str]:
     if recorded == current:
         return []
     diff = diff_surface(recorded, current)
-    changes = [f"+ {k}" for k in diff.added + diff.extended] + [f"- {k}" for k in diff.breaking]
+    changes = (
+        [f"+ {k}" for k in diff.added + diff.extended]
+        + [f"~ {k}" for k in diff.internal]
+        + [f"- {k}" for k in diff.breaking]
+    )
     return [
         f"{rel(SDK_SURFACE_FILE)} does not match the code; run "
         "`uv run python scripts/sdk_version.py write` and bump the SDK version as the "

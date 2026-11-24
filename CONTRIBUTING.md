@@ -284,9 +284,13 @@ wheel's SDK requirement, and the SDK's recorded public surface,
 | none | unchanged (a bump without a change fails) |
 | code, docs or dependencies, but not the public surface | at least patch |
 | the surface gains a name, an optional parameter or an optional field | at least minor |
+| the internal device-transport interface changes (the names `hegemony_step_sdk.transports` lists as internal) | at least minor |
 | the surface loses or changes something | major, and `SDK_ABI_VERSION` moves with it |
 
-The SDK's major is always `SDK_ABI_VERSION`, and the platform refuses
+The device-transport interface needs no major because only the built-in
+transports use it and they pin the SDK exactly; `DeviceCredentials` and
+`JumpHostSpec` are part of the handler contract and follow the
+additions-only rule. The SDK's major is always `SDK_ABI_VERSION`, and the platform refuses
 plugins built for another ABI, so avoid a major: keep an old name working
 and add a new one instead. CI runs `scripts/sdk_version.py check`, which
 compares the tree with the newest release tag and fails when the version
