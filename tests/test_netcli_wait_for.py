@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -593,3 +594,24 @@ async def test_a_per_call_transport_that_cannot_log_in_stops_at_once(clock):
     device = result.output["devices"]["sw1"]
     assert device["attempts"] == 1
     assert device["error"] == "cannot log in: Authentication failed: bad password"
+
+
+async def test_a_one_second_wait_still_polls_once(clock):
+    transport = FakeCliTransport([COMMITTED])
+
+    result, _ = await _run_cli(transport, max_wait_seconds=1)
+
+    assert result.success is True
+    assert result.output["devices"]["sw1"]["attempts"] == 1
+
+
+def test_output_too_long_to_search_never_meets_does_not_match():
+    from hegemony_steps_netcli.waiting import MAX_REGEX_INPUT_CHARS, condition_met
+
+    compiled = re.compile("FAILED")
+    long_text = "x" * MAX_REGEX_INPUT_CHARS + "FAILED"
+    assert condition_met(compiled, long_text, until="not_matches", scope="output") is False
+    assert condition_met(compiled, "x" * 10, until="not_matches", scope="output") is True
+    # A match within the searched part still counts.
+    found_early = "FAILED" + "x" * MAX_REGEX_INPUT_CHARS
+    assert condition_met(compiled, found_early, until="matches", scope="lines") is True

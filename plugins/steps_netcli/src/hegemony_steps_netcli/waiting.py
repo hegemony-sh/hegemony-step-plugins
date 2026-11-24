@@ -185,13 +185,21 @@ OUTPUT_FIELDS = (
 
 
 def condition_met(compiled: re.Pattern[str], text: str, *, until: str, scope: str) -> bool:
-    """Whether ``text`` meets the condition: the pattern found (or not found) in it."""
+    """Whether ``text`` meets the condition: the pattern found (or not found) in it.
+
+    Only the first ``MAX_REGEX_INPUT_CHARS`` are searched. A match there
+    counts; output longer than that never meets "does not match", since the
+    pattern may be in the part not searched.
+    """
+    cut = len(text) > MAX_REGEX_INPUT_CHARS
     text = text[:MAX_REGEX_INPUT_CHARS]
     if scope == "lines":
         found = any(compiled.search(line) for line in text.splitlines())
     else:
         found = compiled.search(text) is not None
-    return found if until == "matches" else not found
+    if until == "matches":
+        return found
+    return not found and not cut
 
 
 class WaitAborted(Exception):
@@ -329,7 +337,10 @@ async def wait_on_device(
     try:
         while True:
             poll_started = monotonic()
-            if deadline - poll_started < MIN_POLL_SECONDS:
+            # The first poll runs whenever the deadline has not passed, so a
+            # one-second Max Wait still polls once; later ones need a second.
+            left = deadline - poll_started
+            if left <= 0 or (wait.attempts and left < MIN_POLL_SECONDS):
                 break
             wait.attempts += 1
             elapsed = poll_started - started
