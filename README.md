@@ -75,6 +75,7 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_secret` | `secret.` | write — store, swap or delete a secret in the organization's secret store |
   | `plugins/steps_inventory` | `inventory.` | sync — sync an inventory provider of the run's organization now |
   | `plugins/steps_git` | `git.` | commit — commit an earlier step's evidence (configuration backups) to a Git repository over HTTPS, only when it changed (built on `container.run`'s runner) |
+  | `plugins/steps_netconf` | `netconf.` | get, edit_config, commit, cancel_commit, rpc — NETCONF (RFC 6241): read, change as one transaction (candidate, diff, validate, dry run, confirmed commit), settle a pending commit, any other operation |
   | `plugins/steps_netbox` | `netbox.` | request, ipam.allocate/release, render_config — NetBox objects, IP address management and config rendering (needs `hegemony-steps-http`) |
 
 Device transports (`transports/`: netmiko, scrapli, asyncssh) and the network
@@ -91,6 +92,12 @@ The wheels that reach outside the worker are limited in different ways:
 
 - `hegemony-steps-shell`: only devices whose access config holds SSH
   credentials, checked against the organization's trusted host keys.
+- `hegemony-steps-netconf`: the same as shell steps, on the NETCONF port
+  (830 by default), and the flow's egress policy. On a device with a
+  candidate datastore, configuration changes go through it with a confirmed
+  commit by default. A device without one (`netconf.edit_config` Target
+  `auto`) gets the change on running at once: no dry run and no confirmed
+  commit.
 - `hegemony-steps-http` and `hegemony-steps-netbox` (which needs
   `hegemony-steps-http`): the flow's egress policy. A flow without one can
   reach any address the worker can, except loopback, link-local (cloud

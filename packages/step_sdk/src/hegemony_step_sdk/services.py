@@ -107,6 +107,35 @@ class ShellTransport(Protocol):
         """Close the underlying connection (idempotent)."""
 
 
+#: The NETCONF over SSH port (RFC 6242, section 3).
+DEFAULT_NETCONF_PORT = 830
+
+
+class NetconfChannel(Protocol):
+    """The byte stream of one NETCONF session, returned by :meth:`HandlerServices.open_netconf`.
+
+    An SSH session to the device with the ``netconf`` subsystem started
+    (RFC 6242). The channel carries bytes only: the handler speaks NETCONF
+    itself (the hello exchange, message framing, RPCs), so the protocol is
+    the step wheel's, and the host only opens the hardened SSH connection
+    (egress policy, host-key trust, jump host, credentials).
+
+    A host may also set a ``disconnect_reason`` string attribute (why the
+    device ended the session, such as an SSH disconnect message); it is
+    optional, so it is not part of this protocol, and handlers read it with
+    ``getattr``.
+    """
+
+    async def write(self, data: bytes) -> None:
+        """Send ``data`` to the device."""
+
+    async def read(self, max_bytes: int = 65536) -> bytes:
+        """Receive up to ``max_bytes``; ``b""`` once the device closed the session."""
+
+    async def close(self) -> None:
+        """Close the session and its SSH connection (idempotent)."""
+
+
 @dataclass(frozen=True, slots=True)
 class ImageCache:
     """The platform registry a step may keep copies of the images it pulls in.
@@ -737,6 +766,31 @@ class HandlerServices(Protocol):
         opt-in to weak algorithms and small keys (:class:`SshSecurityConfig`).
         Callers pass it only when it is on, so older hosts keep working.
         """
+
+    async def open_netconf(
+        self,
+        device: dict[str, Any],
+        *,
+        port: int = DEFAULT_NETCONF_PORT,
+        connect_timeout: float | None = None,
+        allow_legacy_ssh: bool = False,
+    ) -> NetconfChannel:
+        """Open a NETCONF session's byte stream to ``device`` on ``port``.
+
+        The host connects as :meth:`open_shell` does, with the SSH
+        credentials of ``device.access_config.ssh``, the flow's egress policy,
+        the organization's trusted host keys (checked for ``host:port``) and
+        the device's jump host, then starts the ``netconf`` subsystem.
+        ``allow_legacy_ssh`` is the step's opt-in to weak SSH algorithms, as
+        for :meth:`open_shell`. Caller owns the channel (``close()`` in a
+        finally).
+
+        Hosts older than this method lack it: a handler checks
+        ``getattr(services, "open_netconf", None)`` and fails with a clear
+        message when it is missing. A host that has it but cannot serve
+        NETCONF raises ``NotImplementedError``.
+        """
+        raise NotImplementedError
 
     async def run_probe(
         self,

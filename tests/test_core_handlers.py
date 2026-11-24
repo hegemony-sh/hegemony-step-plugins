@@ -27,6 +27,7 @@ import hegemony_steps_inventory
 import hegemony_steps_monitor
 import hegemony_steps_netbox
 import hegemony_steps_netcli
+import hegemony_steps_netconf
 import hegemony_steps_probe
 import hegemony_steps_secret
 import hegemony_steps_shell
@@ -62,6 +63,17 @@ WHEELS = [
     (hegemony_steps_secret, "secret", {"secret.write"}),
     (hegemony_steps_inventory, "inventory", {"inventory.sync"}),
     (hegemony_steps_git, "git", {"git.commit"}),
+    (
+        hegemony_steps_netconf,
+        "netconf",
+        {
+            "netconf.get",
+            "netconf.edit_config",
+            "netconf.commit",
+            "netconf.cancel_commit",
+            "netconf.rpc",
+        },
+    ),
     (
         hegemony_steps_netbox,
         "netbox",
