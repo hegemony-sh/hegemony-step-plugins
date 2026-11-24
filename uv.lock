@@ -541,7 +541,7 @@ fuzz = [
 
 [[package]]
 name = "hegemony-step-sdk"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/step_sdk" }
 dependencies = [
     { name = "pydantic" },
