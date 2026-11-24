@@ -32,6 +32,7 @@ from xml.sax.saxutils import escape
 
 BASE_NS = "urn:ietf:params:xml:ns:netconf:base:1.0"
 CISCO_IA_NS = "http://cisco.com/yang/cisco-ia"
+YANG_LIBRARY_NS = "urn:ietf:params:xml:ns:yang:ietf-yang-library"
 EOM = b"]]>]]>"
 
 ALL_CAPABILITIES = (
@@ -95,6 +96,8 @@ class FakeNetconfDevice:
     only_if: str = ""
     #: Format the candidate's get-config reply differently from running's.
     reformat_candidate: bool = False
+    #: Module namespaces the YANG library (RFC 8525) lists beside the hello's.
+    yang_library: tuple[str, ...] = ()
     #: Grant a candidate lock while the candidate has uncommitted changes
     #: (RFC 6241 7.5 says refuse; some servers do not).
     lenient_locks: bool = False
@@ -421,6 +424,17 @@ class FakeChannel:
                 return (f"<data>\n{text}\n</data>", False)
             return (f"<data>{_xml(store)}</data>", False)
         if name == "get":
+            library = op.find(f".//{{{YANG_LIBRARY_NS}}}yang-library")
+            if library is not None:
+                modules = "".join(
+                    f"<module><namespace>{escape(namespace)}</namespace></module>"
+                    for namespace in device.yang_library
+                )
+                return (
+                    f'<data><yang-library xmlns="{YANG_LIBRARY_NS}"><module-set>'
+                    f"{modules}</module-set></yang-library></data>",
+                    False,
+                )
             return (f"<data>{_xml(device.running)}<state>up</state></data>", False)
         if name == "edit-config":
             if device.fail_edit:

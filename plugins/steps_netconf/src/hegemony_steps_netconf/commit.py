@@ -53,7 +53,7 @@ class SettleConfig(NetconfConnectionConfig):
         default="",
         title="Change Step",
         description=(
-            "The change step (such as netconf.edit_config) that left the "
+            "The netconf.edit_config or cisco.iosxe.config_replace step that left the "
             "commit pending (Commit: confirm in a later step). Its output names each "
             "device's persist id."
         ),

@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[project]
+name = "hegemony-steps-cisco-iosxe"
+version = "0.54.0"
+description = "Cisco IOS XE step handlers (atomic config replace over NETCONF) for Hegemony"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE-*.txt"]
+requires-python = ">=3.11"
+dependencies = [
+    "hegemony-step-sdk==0.54.0",
+    # Built on the netconf wheel's client, sessions and transaction.
+    "hegemony-steps-netconf==0.54.0",
+]
+
+[project.entry-points."hegemony.step_handlers"]
+"cisco.iosxe" = "hegemony_steps_cisco_iosxe:register"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "hegemony_steps_cisco_iosxe"
+module-root = "src"

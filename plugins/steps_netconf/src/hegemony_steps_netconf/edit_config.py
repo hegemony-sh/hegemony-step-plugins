@@ -67,7 +67,7 @@ CHANGE_OUTPUT_FIELDS = (
 
 
 class ChangeSettings(NetconfConnectionConfig):
-    """How a change step commits; shared with vendor change steps built on this wheel."""
+    """How a change step commits; shared with ``cisco.iosxe.config_replace``."""
 
     dry_run: bool = Field(
         default=False,

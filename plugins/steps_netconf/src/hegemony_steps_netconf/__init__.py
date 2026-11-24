@@ -10,7 +10,7 @@ state, change configuration as one transaction on the candidate datastore
 (diff, validate, dry run, confirmed commit), settle a pending confirmed commit
 in a later step, and send any other operation. The host opens the SSH session
 (``services.open_netconf``); the protocol is this wheel's (``client``), and
-vendor wheels can build on it.
+vendor wheels (``cisco.iosxe``) build on it.
 
 Registers under the ``hegemony.step_handlers`` entry-point group; the entry
 point name is the claimed handler-id namespace prefix (``netconf``).

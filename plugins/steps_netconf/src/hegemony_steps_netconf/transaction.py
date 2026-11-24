@@ -22,8 +22,8 @@ Any failure after the locks discards the candidate. On the running datastore
 ``rollback-on-error`` where the device offers it.
 
 The change and the reads are callables, so ``netconf.edit_config`` (an
-``edit-config``) and vendor change steps (a vendor RPC) share the whole
-sequence.
+``edit-config``) and ``cisco.iosxe.config_replace`` (a CLI transaction RPC)
+share the whole sequence.
 """
 
 from __future__ import annotations
