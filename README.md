@@ -36,10 +36,13 @@ entry-point group and the platform discovers them at startup.
   `.github/plugin-pins.json` names a release tag and commit, and its
   `pyproject.toml` accepts only the matching version range of each wheel.
   A release of the platform is built against exactly that tag.
-- **The wheels share one version.** Every package here carries the SDK's
-  version, and that version is the release tag `vX.Y.Z`. The wheels are
-  versioned in lockstep with one another, not with the platform's own version
-  number. The pins and the release workflow are described in
+- **Two version numbers.** Every plugin, probe and transport wheel carries
+  the release version, the release tag `vX.Y.Z`. The SDK,
+  `hegemony-step-sdk`, has its own version, which changes only when the SDK
+  changes; its major version is the SDK's ABI version. Step-handler and
+  probe wheels accept a range of SDK versions (`>=X.Y,<X+1`), transport
+  wheels one exact SDK version. Neither number follows the platform's own
+  version. The pins and the release workflow are described in
   [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
 - **Plugins never import platform code.** A handler reaches every platform
   facility (device transports, secret and template resolution, the internal
@@ -115,32 +118,33 @@ The wheels are not on PyPI. Each release publishes them as assets of its
 a wheel of your own to a derived platform image, or to use the SDK on its
 own; the platform's images already carry the rest.
 
-A wheel pins `hegemony-step-sdk` to its own exact version, and the SDK is not
-on an index, so name the SDK wheel of the same release in the same command,
-together with any wheel that the wheels you install depend on
-(`hegemony-steps-netbox` needs `hegemony-steps-http`; `hegemony-steps-ansible`,
-`hegemony-steps-tf` and `hegemony-steps-git` need `hegemony-steps-container`):
+Every wheel requires `hegemony-step-sdk`, and the SDK is not on an index, so
+name the SDK wheel of the same release in the same command, together with
+any wheel that the wheels you install depend on (`hegemony-steps-netbox`
+needs `hegemony-steps-http`; `hegemony-steps-ansible`, `hegemony-steps-tf`
+and `hegemony-steps-git` need `hegemony-steps-container`). The SDK wheel has
+its own version, so take each wheel's file name from the release's
+`SHA256SUMS`:
 
 ```bash
 version=X.Y.Z   # a release tag without the leading v
 base="https://github.com/hegemony-sh/hegemony-step-plugins/releases/download/v${version}"
+mkdir wheels && cd wheels
 curl -fsSLO "${base}/SHA256SUMS"
 for wheel in hegemony_step_sdk hegemony_steps_http hegemony_steps_netbox; do
-  curl -fsSLO "${base}/${wheel}-${version}-py3-none-any.whl"
+  file=$(awk -v w="${wheel}-" 'index($2, w) == 1 {print $2}' SHA256SUMS)
+  curl -fsSLO "${base}/${file}"
 done
 sha256sum -c --ignore-missing SHA256SUMS
 (
-  for wheel in ./hegemony_*-"${version}"-py3-none-any.whl; do
+  for wheel in ./hegemony_*.whl; do
     gh attestation verify "$wheel" \
       --repo hegemony-sh/hegemony-step-plugins \
       --signer-workflow hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml \
       || exit 1
   done
 ) &&
-uv pip install \
-  ./hegemony_step_sdk-"${version}"-py3-none-any.whl \
-  ./hegemony_steps_http-"${version}"-py3-none-any.whl \
-  ./hegemony_steps_netbox-"${version}"-py3-none-any.whl
+uv pip install ./hegemony_*.whl
 ```
 
 Replace `X.Y.Z` with the release your Hegemony version pins (see
@@ -184,6 +188,12 @@ release. Install the release your platform pins; the newest one is on the
 | 1.0.0 | 0.33.0 |
 
 Hegemony versions before 1.0.0 were not released publicly.
+
+Up to v0.55.0 the SDK carried the release version. From the release that
+gave it its own version on, the SDK version is in the name of the release's
+`hegemony_step_sdk-*.whl`; a plugin wheel from a newer release works with
+any SDK its requirement accepts, so it can also run on an older platform
+whose SDK is in that range.
 
 ## Develop a handler
 
