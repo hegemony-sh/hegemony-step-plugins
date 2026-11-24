@@ -65,7 +65,7 @@ the saved plan before writing them anywhere.
 
 ## The Image
 
-OpenTofu runs in `ghcr.io/hegemony-sh/opentofu-runner:0.55` by default:
+OpenTofu runs in `ghcr.io/hegemony-sh/opentofu-runner:0.56` by default:
 OpenTofu 1.12 on Alpine Linux, with git and an SSH client for
 module sources, built from `images/opentofu-runner` in the plugin repository.
 `tofu` is compiled there from the OpenTofu release's source, with Go libraries
@@ -87,7 +87,7 @@ minor release of the plugins, and its changelog names it.
 To choose the OpenTofu series yourself, set **OpenTofu version**: `default`
 (the series above), `1.12` or `1.13`. Each named series is the same image
 built from that OpenTofu release, published as
-`ghcr.io/hegemony-sh/opentofu-runner:0.55-tofu1.13` and so on. A step that
+`ghcr.io/hegemony-sh/opentofu-runner:0.56-tofu1.13` and so on. A step that
 names a series stays on it when a later release of the plugins moves the
 default, and still gets that series' patch releases; a series is withdrawn
 only with a minor release, and a step that names a withdrawn one fails its

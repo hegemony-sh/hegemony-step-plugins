@@ -13,7 +13,7 @@
 # release tag vX.Y.Z as ghcr.io/hegemony-sh/git-runner:X.Y.Z and :X.Y. The
 # step's default names X.Y (DEFAULT_IMAGE in
 # plugins/steps_git/src/hegemony_steps_git/commit.py), currently
-# ghcr.io/hegemony-sh/git-runner:0.55.
+# ghcr.io/hegemony-sh/git-runner:0.56.
 
 # Pinned by digest, so a build uses exactly the reviewed image; Renovate
 # proposes the new digest when the tag moves (.github/renovate.json).

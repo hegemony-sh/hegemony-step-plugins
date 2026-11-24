@@ -1,3 +1,21 @@
+## [0.56.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.55.0...v0.56.0) (2026-11-24)
+
+### ⚠ BREAKING CHANGES
+
+* **sdk:** hegemony-step-sdk is now 1.0.0, not the release version,
+and the plugin wheels require it as >=1.0,<2 instead of ==<release>. The
+platform's floors, plugin pins and Dockerfiles that assume one shared
+version must change before they pin this release.
+
+### Features
+
+* **sdk:** give the SDK its own version ([0e9d71b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0e9d71b6da4a75ab2d175dde9c997ce7f380acc2))
+* **sdk:** let the internal transport interface change with a minor ([7af4a66](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7af4a661da671f54cd1e19188761f1eef706a907)), closes [#145](https://github.com/hegemony-sh/hegemony-step-plugins/issues/145)
+
+### Bug Fixes
+
+* **sdk:** catch more incompatible SDK changes in the version check ([f134dc9](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f134dc92fc00e165f17f24910ed8545313aed7cc))
+
 ## [0.55.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.54.1...v0.55.0) (2026-11-24)
 
 ### Features

@@ -61,7 +61,7 @@ CAs as well as the public ones.
 The step runs git in a container on the platform's sandbox, like
 `container.run`, so the flow's network policy must allow it to reach the
 Git server on port 443. Execution image (advanced) defaults to
-`ghcr.io/hegemony-sh/git-runner:0.55`; change it only to pull that image
+`ghcr.io/hegemony-sh/git-runner:0.56`; change it only to pull that image
 from a mirror. Timeout, memory and CPU limits, environment variables and
 egress rules work as in `container.run`.
 

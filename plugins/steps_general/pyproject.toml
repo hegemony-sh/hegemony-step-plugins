@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-steps-general"
-version = "0.55.0"
+version = "0.56.0"
 description = "General flow-utility step handlers for Hegemony (noop, sleep)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
