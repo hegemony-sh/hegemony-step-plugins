@@ -606,7 +606,8 @@ async def test_a_one_second_wait_still_polls_once(clock):
 
 
 def test_output_too_long_to_search_never_meets_the_condition():
-    from hegemony_steps_netcli.waiting import MAX_REGEX_INPUT_CHARS, condition_met
+    MAX_REGEX_INPUT_CHARS = netcli_waiting.MAX_REGEX_INPUT_CHARS
+    condition_met = netcli_waiting.condition_met
 
     compiled = re.compile("FAILED")
     long_text = "x" * MAX_REGEX_INPUT_CHARS + "FAILED"
