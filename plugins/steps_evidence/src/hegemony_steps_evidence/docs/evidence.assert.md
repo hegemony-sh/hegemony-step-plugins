@@ -60,9 +60,10 @@ expected: '{{ inputs.firmware.size_bytes + 65536 }}'
 
 Content the regex does not match fails, with an error that says so, so a
 missing value never passes Does Not Contain or Not Equals. An invalid
-regex fails the step. The extracted value (up to 500 characters) is
-recorded in the evidence as `extracted` in whole-output scope. Extract
-reads the first million characters, like the regex operators.
+regex fails the step. In whole-output scope the extracted value (up to 500
+characters) is recorded in the evidence as `extracted` and is also put in
+the step's `extracted` output (see Output), so a later step can use it.
+Extract reads the first million characters, like the regex operators.
 
 Custom Message, when set, replaces the generated pass summary and the
 generated failure error with your own wording.
@@ -72,7 +73,32 @@ generated failure error with your own wording.
 Later steps read the outcome from `steps.NODE_ID.output`: `passed`,
 `checked` (the artifact names it looked at, as `<device name>:<command>` for
 a target role) and `failed` (those that did not pass, including any it could
-not fetch). The step records no metrics; the details are evidence. Each
+not fetch).
+
+`extracted` maps each checked artifact's name (the same names as in
+`checked`) to the text Extract read from it, cut to 500 characters. It
+holds only artifacts where Extract matched, whether or not the comparison
+then passed, so a missing name means nothing was read: Extract was empty,
+did not match, or the capture failed. It is filled only in whole-output
+scope. In Every line scope there is one value per line, and the step checks
+that every line passes rather than reading one value, so `extracted` stays
+empty; to read a value, use a separate assert in whole-output scope. A
+later step reads the value by artifact name, for example the running
+software version of device `r1`:
+
+```yaml
+# The assert step, with node ID "version":
+command: show version
+extract: 'Version ([^ ,]+)'
+operator: matches
+expected: '^17\.'
+```
+
+A later step then writes
+`{{ steps.version.output.extracted['r1:show version'] }}` in a template,
+which renders as, for example, `17.09.04a`.
+
+The step records no metrics; the details are evidence. Each
 fetched artifact produces one `assertion_result` evidence record — named
 `assertion` for a single artifact, or `assertion:<artifact name>` when
 several devices were checked — capturing the operator, the expected and
