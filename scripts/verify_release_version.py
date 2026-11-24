@@ -286,7 +286,7 @@ def main() -> None:
 
     # The SDK's own version: consistent, pinned right, and the bump its change needs.
     failures.extend(sdk_version.pin_failures(_name_and_dependencies))
-    failures.extend(sdk_version.check())
+    failures.extend(sdk_version.check(release=version))
 
     for image in RUNNER_IMAGES:
         for path in image.files:

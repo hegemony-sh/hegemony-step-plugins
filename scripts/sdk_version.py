@@ -234,9 +234,9 @@ def public_modules() -> list[str]:
     package = importlib.import_module(SDK_PACKAGE)
     names = [SDK_PACKAGE]
     names += sorted(
-        f"{SDK_PACKAGE}.{info.name}"
-        for info in pkgutil.iter_modules(package.__path__)
-        if not info.name.startswith("_")
+        info.name
+        for info in pkgutil.walk_packages(package.__path__, prefix=f"{SDK_PACKAGE}.")
+        if not any(part.startswith("_") for part in info.name.split(".")[1:])
     )
     return names
 
@@ -310,6 +310,10 @@ def _class_members(cls) -> dict[str, dict[str, Any]]:
                 if name.startswith("_") and not _is_sdk(raw):
                     continue  # typing.Protocol's own __init__
                 members[name] = {"kind": "method", "params": _params(raw)}
+                if getattr(raw, "__isabstractmethod__", False):
+                    # A subclass must implement it: adding one breaks every
+                    # existing subclass, which then cannot be instantiated.
+                    members[name]["abstract"] = True
             elif inspect.isclass(raw):
                 members[name] = {"kind": "class"}
             else:
@@ -427,6 +431,10 @@ def params_compatible(old: list[list[Any]], new: list[list[Any]]) -> bool:
     new_pos = [p for p in new if p[1] in _POSITIONAL]
     if len(new_pos) < len(old_pos):
         return False
+    if any(p[1] == "VAR_POSITIONAL" for p in old) and len(new_pos) > len(old_pos):
+        # f(*args, x=1) -> f(x=1, *args): the new slot takes a positional
+        # argument *args used to collect, so f(5, x=9) gets x twice.
+        return False
     for before, after in zip(old_pos, new_pos, strict=False):
         if before[0] != after[0] or before[1] != after[1] or (before[2] and not after[2]):
             return False
@@ -453,6 +461,8 @@ def entry_compatible(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
     """``new`` only adds to what ``old`` promised."""
     if old.get("kind") != new.get("kind"):
         return False
+    if new.get("abstract") and not old.get("abstract"):
+        return False  # existing subclasses do not implement it
     if "params" in old:
         return params_compatible(old["params"], new.get("params", []))
     if "required" in old:
@@ -475,8 +485,11 @@ def diff_surface(old: Mapping[str, Mapping], new: Mapping[str, Mapping]) -> Surf
             diff.removed.append(key)
         elif key not in old:
             owner = _owner(key)
-            # A new required field of a class that existed breaks its callers.
-            if owner in old and new[key].get("kind") == "field" and new[key].get("required"):
+            # A new required field or attribute of a class that existed breaks
+            # its callers or the classes implementing it, and so does a new
+            # abstract method its existing subclasses lack.
+            required = new[key].get("kind") in ("field", "attribute") and new[key].get("required")
+            if owner in old and (required or new[key].get("abstract")):
                 (diff.internal if is_internal(key) else diff.changed).append(key)
             else:
                 diff.added.append(key)
@@ -571,12 +584,19 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def latest_release_tag() -> str:
-    """The newest ``vX.Y.Z`` tag in HEAD's history: what was last published."""
+def latest_release_tag(before: str | None = None) -> str:
+    """The newest ``vX.Y.Z`` tag in HEAD's history: what was last published.
+
+    With ``before`` (a version), the newest tag older than it: verifying a
+    release whose tag already exists compares it with the one before, not with
+    itself.
+    """
     listed = _git("tag", "--merged", "HEAD", "--list", "v*")
     if listed.returncode != 0:
         raise SystemExit(f"Could not list the release tags: {listed.stderr.strip()}")
     tags = [tag for tag in listed.stdout.split() if VERSION.fullmatch(tag[1:])]
+    if before is not None:
+        tags = [tag for tag in tags if parse_version(tag[1:]) < parse_version(before)]
     if not tags:
         raise SystemExit(
             "Found no release tag in HEAD's history to compare the SDK with; fetch the "
@@ -662,12 +682,16 @@ def surface_file_failures() -> list[str]:
     ]
 
 
-def check(base: str | None = None) -> list[str]:
-    """Every failure of the SDK's version against the code and the last release."""
+def check(base: str | None = None, *, release: str | None = None) -> list[str]:
+    """Every failure of the SDK's version against the code and the last release.
+
+    ``release`` is the release version being verified: the baseline is then the
+    newest release before it.
+    """
     failures = consistency_failures() + surface_file_failures()
     if failures:
         return failures
-    ref = base or latest_release_tag()
+    ref = base or latest_release_tag(before=release)
     base_pyproject = _show(ref, rel(SDK_PYPROJECT))
     match = _PROJECT_VERSION.search(base_pyproject or "")
     if match is None:

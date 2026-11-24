@@ -191,9 +191,11 @@ Hegemony versions before 1.0.0 were not released publicly.
 
 Up to v0.55.0 the SDK carried the release version. From the release that
 gave it its own version on, the SDK version is in the name of the release's
-`hegemony_step_sdk-*.whl`; a plugin wheel from a newer release works with
-any SDK its requirement accepts, so it can also run on an older platform
-whose SDK is in that range.
+`hegemony_step_sdk-*.whl`. A plugin wheel from a newer release installs
+with any SDK its requirement accepts, so it can also install on an older
+platform whose SDK is in that range. It runs there only if that platform
+provides the services its handlers call, or the handlers fall back when a
+service is missing (an older host raises `NotImplementedError` for it).
 
 ## Develop a handler
 

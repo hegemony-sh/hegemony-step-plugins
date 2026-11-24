@@ -198,6 +198,24 @@ KW = "KEYWORD_ONLY"
         ([("a", KW, True)], [], False),
         # **kwargs stays.
         ([("kw", "VAR_KEYWORD", False)], [], False),
+        # A new positional slot ahead of an existing *args captures an argument
+        # *args used to take: f(*args, x=1) -> f(x=1, *args) breaks f(5, x=9).
+        (
+            [("args", "VAR_POSITIONAL", False), ("x", KW, True)],
+            [("x", POS, True), ("args", "VAR_POSITIONAL", False)],
+            False,
+        ),
+        (
+            [("a", POS, False), ("args", "VAR_POSITIONAL", False)],
+            [("a", POS, False), ("b", POS, True), ("args", "VAR_POSITIONAL", False)],
+            False,
+        ),
+        # Without *args, a trailing optional positional stays an addition.
+        (
+            [("a", POS, False), ("x", KW, True)],
+            [("a", POS, False), ("b", POS, True), ("x", KW, True)],
+            True,
+        ),
     ],
 )
 def test_which_signature_changes_are_compatible(old, new, ok):
@@ -277,6 +295,76 @@ def test_the_internal_names_are_the_ones_the_transports_module_declares():
         assert f":class:`{name}`" in doc, name
     assert "hegemony.device_transports" in doc
     assert not {"DeviceCredentials", "JumpHostSpec"} & sdk_version.INTERNAL_NAMES
+
+
+def test_a_new_obligation_on_an_existing_class_breaks():
+    """What existing implementations lack: a required protocol attribute, a new
+    abstract method, a concrete method made abstract."""
+    run = _fn(("self", POS, False))
+    abstract_run = {**run, "abstract": True}
+    old = {
+        "m:Result": {"kind": "class"},
+        "m:Base": {"kind": "class"},
+        "m:Base.run": run,
+    }
+    new = {
+        "m:Result": {"kind": "class"},
+        "m:Result.latency_ms": {"kind": "attribute", "required": True},
+        "m:Result.note": {"kind": "attribute", "required": False},
+        "m:Base": {"kind": "class"},
+        "m:Base.run": abstract_run,
+        "m:Base.check": {**_fn(("self", POS, False)), "abstract": True},
+        "m:Base.helper": _fn(("self", POS, False)),
+    }
+
+    diff = sdk_version.diff_surface(old, new)
+
+    assert diff.changed == ["m:Base.check", "m:Base.run", "m:Result.latency_ms"]
+    assert diff.added == ["m:Base.helper", "m:Result.note"]
+    assert sdk_version.required_bump(diff, True) == "major"
+    # An abstract method that becomes concrete only relaxes.
+    relaxed = sdk_version.diff_surface({"m:Base.run": abstract_run}, {"m:Base.run": run})
+    assert relaxed.extended == ["m:Base.run"] and relaxed.breaking == []
+
+
+def test_the_surface_records_the_abstract_methods_subclasses_implement():
+    entries = sdk_version.surface()
+    assert entries["hegemony_step_sdk:BaseHandler.execute"].get("abstract") is True
+    assert entries["hegemony_step_sdk:BaseProbe.execute"].get("abstract") is True
+    assert "abstract" not in entries["hegemony_step_sdk:BaseHandler.parse_config"]
+
+
+def test_nested_public_modules_are_recorded(monkeypatch):
+    from types import SimpleNamespace
+
+    found = [
+        SimpleNamespace(name="hegemony_step_sdk.ssh"),
+        SimpleNamespace(name="hegemony_step_sdk.helpers"),
+        SimpleNamespace(name="hegemony_step_sdk.helpers.codec"),
+        SimpleNamespace(name="hegemony_step_sdk._private.codec"),
+        SimpleNamespace(name="hegemony_step_sdk.helpers._impl"),
+    ]
+    monkeypatch.setattr(sdk_version.pkgutil, "walk_packages", lambda path, prefix: iter(found))
+
+    assert sdk_version.public_modules() == [
+        "hegemony_step_sdk",
+        "hegemony_step_sdk.helpers",
+        "hegemony_step_sdk.helpers.codec",
+        "hegemony_step_sdk.ssh",
+    ]
+
+
+def test_verifying_a_tagged_release_compares_with_the_release_before(monkeypatch):
+    import subprocess
+
+    def fake_git(*args):
+        return subprocess.CompletedProcess(args, 0, stdout="v0.55.0\nv0.56.0\nv0.57.0\n", stderr="")
+
+    monkeypatch.setattr(sdk_version, "_git", fake_git)
+    assert sdk_version.latest_release_tag() == "v0.57.0"
+    assert sdk_version.latest_release_tag(before="0.57.0") == "v0.56.0"
+    with pytest.raises(SystemExit, match="Found no release tag"):
+        sdk_version.latest_release_tag(before="0.55.0")
 
 
 # --------------------------------------------------------------------------
@@ -376,7 +464,7 @@ def test_check_compares_with_the_newest_release_tag(monkeypatch):
         pyproject: f'[project]\nversion = "{version}"\n',
         surface_file: sdk_version.render_surface(recorded),
     }
-    monkeypatch.setattr(sdk_version, "latest_release_tag", lambda: "v9.9.9")
+    monkeypatch.setattr(sdk_version, "latest_release_tag", lambda before=None: "v9.9.9")
     monkeypatch.setattr(sdk_version, "_show", lambda ref, path: shown.get(path))
     monkeypatch.setattr(sdk_version, "sdk_files_at", lambda ref: {"a": "1"})
     monkeypatch.setattr(sdk_version, "sdk_files_now", lambda: {"a": "1"})

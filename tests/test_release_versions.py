@@ -413,7 +413,7 @@ def test_set_version_leaves_the_sdk_version_alone(tmp_path, monkeypatch):
     assert '"hegemony-steps-http==0.56.0"' in text
     assert written == ["1.2.3"]
     paths = _script("package_paths")
-    assert paths.SDK_DIR not in set_version.RELEASE_DIRS
+    assert paths.SDK_DIR not in paths.RELEASE_DIRS
 
 
 def test_a_breaking_change_of_any_type_releases():
