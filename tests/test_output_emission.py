@@ -229,6 +229,42 @@ class TestHandlerWiring:
         assert out[0][2]["command"] == "delete /force flash:old.bin"
 
     @pytest.mark.asyncio
+    async def test_netcli_execute_leaves_skipped_commands_out_of_the_log(self):
+        """A command the transport skipped after a failure never ran, so it is not logged."""
+        from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+        class _Result:
+            def __init__(self, command, exit_code, error):
+                self.command = command
+                self.output = ""
+                self.exit_code = exit_code
+                self.error = error
+                self.latency_ms = 1.0
+
+        class _Transport:
+            async def execute_commands(self, commands):
+                return [
+                    _Result("show bogus", 1, "% Invalid input detected"),
+                    _Result("show version", -1, "Skipped: earlier command failed"),
+                ]
+
+        class _Services:
+            def connect(self, device, *, platform=None, **kwargs):
+                return _Transport()
+
+        events = []
+        ctx = _ctx(
+            events,
+            config={"commands": ["show bogus", "show version"]},
+            target_roles=["primary"],
+            target_devices_by_role={"primary": [DEVICE]},
+            services=cast(HandlerServices, _Services()),
+        )
+        result = await ExecuteCLIActionHandler().execute(ctx)
+        assert result.success is False
+        assert [e[0] for e in _output_events(events)] == ["$ show bogus\n"]
+
+    @pytest.mark.asyncio
     async def test_netcli_execute_config_mode_streams_transcript(self):
         """Config transcripts stream too — the host redacts every
         platform-resolved secret (device/enable/bastion credentials,

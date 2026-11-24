@@ -17,3 +17,15 @@ def command_transcript(command: str, output: str | None) -> str:
     if output:
         text += output if output.endswith("\n") else output + "\n"
     return text
+
+
+def was_skipped(result: object) -> bool:
+    """Whether the transport skipped the command instead of running it.
+
+    Every transport gives a command it did not send (after an earlier
+    failure, a closed session or a cancelled run) an error that starts with
+    ``Skipped:``. The live log leaves such a command out, so it does not
+    read as one that ran.
+    """
+    error = getattr(result, "error", None)
+    return isinstance(error, str) and error.startswith("Skipped:")

@@ -28,7 +28,7 @@ from hegemony_step_sdk import (
 from hegemony_step_sdk.cli_prompts import CliPrompt
 from hegemony_step_sdk.ssh import SshSecurityConfig, configure_ssh_security
 
-from .transcript import command_transcript
+from .transcript import command_transcript, was_skipped
 
 logger = logging.getLogger(__name__)
 
@@ -345,11 +345,13 @@ class ExecuteCLIActionHandler(BaseHandler):
                         # the Logs tab. The transports strip the command echo
                         # and the prompt, so without the line a command that
                         # prints nothing (delete /force) would leave no trace.
-                        await ctx.emit_output(
-                            command_transcript(result.command, result.output),
-                            device=device,
-                            command=result.command,
-                        )
+                        # A command the transport skipped never ran.
+                        if not was_skipped(result):
+                            await ctx.emit_output(
+                                command_transcript(result.command, result.output),
+                                device=device,
+                                command=result.command,
+                            )
                         outcome.evidence.append(
                             {
                                 "kind": "cli_output",
