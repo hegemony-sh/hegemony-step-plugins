@@ -122,8 +122,10 @@ EXPECTED_RUN_TIMEOUT_FIELDS = {
     "container.run": "timeout_seconds",
     "general.noop": "delay_seconds",
     "general.sleep": "duration_seconds",
+    "git.commit": "timeout_seconds",
     "inventory.sync": "timeout_seconds",
     "probe.wait_reachable": "max_wait_seconds",
+    "probe.wait_unreachable": "max_wait_seconds",
     "tf.apply": "timeout_seconds",
     "tf.plan": "timeout_seconds",
 }
@@ -614,3 +616,24 @@ async def test_shell_legacy_ssh_on_an_older_host_is_refused_not_ignored():
 
     assert not result.success
     assert "does not support the allow_legacy_ssh setting" in (result.error or "")
+
+
+async def test_shell_declares_the_keys_it_outputs():
+    from hegemony_steps_shell.execute import ShellExecuteHandler
+
+    result = await ShellExecuteHandler().execute(_shell_ctx({"commands": ["uptime"]}, _Shell()))
+
+    assert result.success is True, result.error
+    assert {field.name for field in ShellExecuteHandler.output_fields} == set(result.output)
+
+
+def test_shell_execute_docs_name_every_declared_output_field():
+    from hegemony_step_sdk.docs import load_docs_bundle
+    from hegemony_steps_shell.execute import ShellExecuteHandler
+
+    page = load_docs_bundle("hegemony_steps_shell")["shell.execute"]
+    output_section = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in ShellExecuteHandler.output_fields:
+        name = field.name
+        assert f"`{name}`" in output_section or f"output.{name}`" in output_section, name
+        assert field.description and field.type, name

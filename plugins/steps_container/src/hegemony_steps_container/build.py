@@ -81,6 +81,7 @@ from hegemony_step_sdk import (
     HandlerTargeting,
     ImageBuild,
     ImageCache,
+    OutputField,
     StepKind,
 )
 
@@ -347,6 +348,98 @@ class BaseImage:
         }
 
 
+class _CopyCheck:
+    """Whether a copy in the platform registry is the image an upstream digest names.
+
+    A copy is found by its key tag, ``sha256_<upstream digest>``, and any step
+    of the organization can push over that tag, so the tag vouches for
+    nothing. A copy is the image when its digest is the upstream digest
+    itself (same digest, same content), or when its image for the sandbox's
+    platform has the configuration digest the upstream digest names for that
+    platform. The configuration names every layer by the digest of its
+    content, and BuildKit checks the layers it pulls against it, so this
+    holds however the copy was made: ``docker push`` of a pulled image writes
+    a manifest of its own (one platform of an upstream index, in the
+    daemon's manifest format), or the upstream platform manifest unchanged,
+    or an index of its own on the containerd image store. Upstream is read by
+    digest (content checked against it), once per image; the copy is built
+    on pinned to the platform manifest that was checked, never to an index a
+    client would pick an entry from itself. A check that cannot be made is
+    no verdict: the copy is refused just the same.
+    """
+
+    def __init__(
+        self,
+        *,
+        upstream: RegistryClient,
+        upstream_repo: str,
+        upstream_digest: str,
+        registry: RegistryClient,
+        platform: Callable[[], Awaitable[str]],
+        deadline: float,
+    ) -> None:
+        self._upstream = upstream
+        self._upstream_repo = upstream_repo
+        self._upstream_digest = upstream_digest
+        self._registry = registry
+        self._platform = platform
+        self._deadline = deadline
+        self._expected: tuple[tuple[str, str] | None, str] | None = None
+
+    async def run(self, name: str, repo: str, found: str) -> tuple[str, str, bool]:
+        """Check the copy ``repo@found``, which ``name`` (``registry/repo:tag``) names.
+
+        Returns the reference to build on (``name`` pinned to the checked
+        manifest) and "", or "", why the copy is refused, and whether it was
+        shown to be another image (False: the check could not be made).
+        """
+        if found == self._upstream_digest:
+            return pin_reference(name, found), "", False
+        platform = await self._platform()
+        if not platform:
+            return "", "the sandbox daemon did not say its platform", False
+        if self._expected is None:
+            self._expected = await self._read(
+                self._upstream, self._upstream_repo, self._upstream_digest, platform, "its registry"
+            )
+        expected, problem = self._expected
+        if problem:
+            return "", problem, False
+        if expected is None:
+            return "", f"its registry names no {platform} image for it", False
+        actual, problem = await self._read(
+            self._registry, repo, found, platform, "the platform registry"
+        )
+        if problem:
+            return "", problem, False
+        if actual is None:
+            return "", f"the copy holds no {platform} image", True
+        if actual[1] != expected[1]:
+            return (
+                "",
+                f"its {platform} image has the configuration {actual[1]}, not {expected[1]}",
+                True,
+            )
+        return pin_reference(name, actual[0]), "", False
+
+    async def _read(
+        self, client: RegistryClient, repo: str, digest: str, platform: str, who: str
+    ) -> tuple[tuple[str, str] | None, str]:
+        """``client``'s :meth:`RegistryClient.platform_image`, or None and why it could not say."""
+        budget = min(self._deadline - time.monotonic(), _run._VERIFY_MAX_SECONDS)
+        if budget <= 0:
+            return None, "no time left in the step"
+        try:
+            image = await asyncio.wait_for(
+                client.platform_image(repo, digest, platform), timeout=budget
+            )
+        except (RegistryUnavailable, RegistryDenied) as exc:
+            return None, f"{who} could not say ({exc})"
+        except TimeoutError:
+            return None, f"{who} did not answer in time"
+        return image, ""
+
+
 @dataclass(frozen=True, slots=True)
 class BuildDestination:
     """Where one build's image goes: its repository, and the registry it is pushed to."""
@@ -491,8 +584,9 @@ class BuildImageConfig(BaseModel):
             "Build on copies of the Dockerfile's base images (FROM and COPY --from) kept in "
             "the platform registry under this organization, saving a copy on first use, as "
             "Cache image does for a container step. A tag is still checked against the "
-            "image's registry by digest, and the copy serves when that registry is "
-            "unreachable. Turn off for base images that must come straight from their "
+            "image's registry by digest, and a copy serves only once checked to be the image "
+            "that digest names, so not while that registry is unreachable. Turn off for base "
+            "images that must come straight from their "
             "registries every time. No effect when the platform runs no registry, or when "
             "the build targets another platform."
         ),
@@ -770,6 +864,18 @@ class _BuildLog:
         return output
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("image", "Repository of the built image", "string"),
+    OutputField("digest", "Image digest (empty for an image kept in the sandbox)", "string"),
+    OutputField("reference", "Image to run: by digest when pushed, else the run tag", "string"),
+    OutputField("tags", "Tags the image got", "list"),
+    OutputField("references", "One image reference per tag", "list"),
+    OutputField("destination", "Where the image went: platform, remote or local", "string"),
+    OutputField("pushed", "Whether the image was pushed to a registry", "bool"),
+)
+
+
 class BuildImageHandler(BaseHandler):
     """Build an image from flow attachments; push it to a registry, or keep it in the sandbox."""
 
@@ -788,6 +894,7 @@ class BuildImageHandler(BaseHandler):
     # Secret references reach the handler as written (see resolve_secret_values).
     raw_config_keys = frozenset({"secrets"})
     config_model = BuildImageConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"dockerfile": "Dockerfile"}
     default_timeout_seconds = DEFAULT_BUILD_TIMEOUT_SECONDS
 
@@ -1316,13 +1423,25 @@ class BuildImageHandler(BaseHandler):
         tag names upstream today (a digest-qualified reference already says),
         a copy of that digest in the organization's namespace and then the
         read-only ones, and without one a pull of that digest from upstream
-        and a copy saved (:meth:`RunContainerHandler._store_copy`). With
-        upstream unreachable, the last copy under the tag serves. Anything
-        else (a refused check, an unreachable platform registry, a failed
-        pull or copy) leaves the image to BuildKit's own pull, as without a
-        cache. Never fails the step; out of time, the rest are left alone.
+        and a copy saved (:meth:`RunContainerHandler._store_copy`). A copy is
+        built on only once it is shown to be the image the upstream digest
+        names (:meth:`_check_copy`): its key tag can be pushed over by any
+        step of the organization. With upstream unreachable no copy serves,
+        since none can be checked. Anything else (a refused check, an
+        unreachable platform registry, a copy that is not the image or cannot
+        be checked, a failed pull or copy) leaves the image to BuildKit's own
+        pull, as without a cache. Never fails the step; out of time, the rest
+        are left alone.
         """
         runner = RunContainerHandler()
+        known_platform: list[str] = []
+
+        async def sandbox_platform() -> str:
+            # Asked once per build, and only when a copy has to be checked.
+            if not known_platform:
+                known_platform.append(await self._sandbox_platform(docker_bin, env))
+            return known_platform[0]
+
         registry = RegistryClient(
             cache.api_url,
             login_for(cache.registry, env),
@@ -1343,6 +1462,7 @@ class BuildImageHandler(BaseHandler):
                         runner,
                         registry,
                         plan,
+                        platform=sandbox_platform,
                         docker_bin=docker_bin,
                         docker_host=docker_host,
                         env=env,
@@ -1360,12 +1480,35 @@ class BuildImageHandler(BaseHandler):
                 break
         return served
 
+    @staticmethod
+    async def _sandbox_platform(docker_bin: str, env: dict[str, str]) -> str:
+        """The sandbox daemon's ``os/arch``, the platform its copies hold; "" when it does not say."""
+        try:
+            proc = await RunContainerHandler._run_docker(
+                docker_bin,
+                ["version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"],
+                env=env,
+                timeout=_PROBE_TIMEOUT_SECONDS,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            logger.warning("Could not read the sandbox daemon's platform: %s", exc)
+            return ""
+        platform = (proc.stdout or "").strip()
+        if proc.returncode != 0 or not _PLATFORM_RE.match(platform):
+            logger.warning(
+                "Could not read the sandbox daemon's platform: %s",
+                (proc.stderr or proc.stdout or "").strip()[:300],
+            )
+            return ""
+        return platform
+
     async def _base_image(
         self,
         runner: RunContainerHandler,
         registry: RegistryClient,
         plan: CachePlan,
         *,
+        platform: Callable[[], Awaitable[str]],
         docker_bin: str,
         docker_host: str,
         env: dict[str, str],
@@ -1391,7 +1534,6 @@ class BuildImageHandler(BaseHandler):
             transport=_run._registry_transport(upstream_url),
         )
         upstream_digest = reference.digest
-        upstream_problem = ""
         if upstream_digest is None:
             try:
                 upstream_digest = await runner._lookup(
@@ -1403,21 +1545,35 @@ class BuildImageHandler(BaseHandler):
                     deadline=deadline,
                 )
             except RegistryUnavailable as exc:
-                upstream_problem = str(exc)
+                # Without the digest the tag names today nothing tells a copy
+                # under the tag (which any step of the organization can push
+                # over) from the image: no copy stands in for it.
+                return await skip(
+                    f"{reference.host} is unreachable ({exc}), and without it no copy in the "
+                    "platform registry can be checked to be the image"
+                )
             except RegistryDenied as exc:
                 # Access may have been withdrawn: no copy stands in for it.
                 return await skip(f"{reference.host} refused the manifest check ({exc})")
-            if upstream_digest is None and not upstream_problem:
+            if upstream_digest is None:
                 return await skip(f"{reference.host} does not have it")
-        key_tag = cache_key_tag(upstream_digest) if upstream_digest else ""
-        lookup_tag = key_tag or (reference.tag or "" if upstream_problem else "")
+        key_tag = cache_key_tag(upstream_digest)
+        check = _CopyCheck(
+            upstream=upstream,
+            upstream_repo=reference.repo,
+            upstream_digest=upstream_digest,
+            registry=registry,
+            platform=platform,
+            deadline=deadline,
+        )
 
-        for repo in plan.read_repos if lookup_tag else ():
+        refused = ""
+        for repo in plan.read_repos:
             try:
                 found = await runner._lookup(
                     registry,
                     repo,
-                    lookup_tag,
+                    key_tag,
                     docker_bin=docker_bin,
                     image=image,
                     deadline=deadline,
@@ -1426,32 +1582,20 @@ class BuildImageHandler(BaseHandler):
                 return await skip(f"the platform registry is unavailable ({exc})")
             if found is None:
                 continue
-            copy = pin_reference(plan.copy_reference(repo, lookup_tag), found)
-            if upstream_problem:
-                await emit(
-                    f"{reference.host} is unreachable ({upstream_problem}); base image {image} "
-                    f"comes from its last copy in the platform registry, {copy}",
-                    attrs={
-                        "milestone": "base_image_cache_stale",
-                        "image": image,
-                        "copy": copy,
-                        "reason": upstream_problem,
-                    },
-                )
-            else:
+            tagged = plan.copy_reference(repo, key_tag)
+            copy, problem, mismatch = await check.run(tagged, repo, found)
+            if copy:
                 await emit(
                     f"Base image {image} comes from its copy in the platform registry, {copy}",
                     attrs={"milestone": "base_image_cache_hit", "image": image, "copy": copy},
                 )
-            return BaseImage(image, served=copy)
+                return BaseImage(image, served=copy)
+            await self._emit_refused(emit, image, tagged, found, upstream_digest, problem, mismatch)
+            refused = problem
 
-        if upstream_problem or not upstream_digest:
-            return await skip(
-                f"{reference.host} is unreachable ({upstream_problem}) and the platform "
-                "registry has no copy of it"
-            )
-        # No copy yet: pull exactly the digest the check named and save it, so
-        # this build and later ones are built on the copy.
+        # No copy yet, or none that is the image: pull exactly the digest the
+        # check named and save it (over a copy that was refused), so this
+        # build and later ones are built on the copy.
         target = image if reference.digest else pin_reference(image, upstream_digest)
         pulled = await runner._pull_image(
             docker_bin=docker_bin,
@@ -1462,6 +1606,11 @@ class BuildImageHandler(BaseHandler):
             emit=emit,
         )
         if isinstance(pulled, HandlerResult):
+            if refused:
+                return await skip(
+                    f"its copy in the platform registry was refused ({refused}), and it could "
+                    f"not be pulled to save a true copy ({pulled.error})"
+                )
             return await skip(f"it could not be pulled to save a copy ({pulled.error})")
         tags = [key_tag, *([reference.tag] if reference.tag else [])]
         stored = await runner._store_copy(
@@ -1488,12 +1637,54 @@ class BuildImageHandler(BaseHandler):
             return await skip(f"the copy just saved cannot be found ({exc})")
         if found is None:
             return await skip("the copy just saved cannot be found")
-        copy = pin_reference(plan.copy_reference(plan.write_repo, key_tag), found)
+        # The tag may have been pushed over since this step pushed it: the copy
+        # is checked like any other.
+        tagged = plan.copy_reference(plan.write_repo, key_tag)
+        copy, problem, mismatch = await check.run(tagged, plan.write_repo, found)
+        if not copy:
+            await self._emit_refused(emit, image, tagged, found, upstream_digest, problem, mismatch)
+            return await skip(f"the copy just saved was refused ({problem})")
         await emit(
             f"Base image {image} comes from the copy just saved to the platform registry, {copy}",
             attrs={"milestone": "base_image_cached", "image": image, "copy": copy},
         )
         return BaseImage(image, served=copy, cached=True)
+
+    @staticmethod
+    async def _emit_refused(
+        emit: Callable[..., Awaitable[None]],
+        image: str,
+        tagged: str,
+        found: str,
+        upstream_digest: str,
+        problem: str,
+        mismatch: bool,
+    ) -> None:
+        """Say why the copy ``tagged`` (at ``found``) is not built on."""
+        if mismatch:
+            await emit(
+                f"The copy {tagged} ({found}) is not the image {upstream_digest} names: "
+                f"{problem}. Not building on it",
+                attrs={
+                    "milestone": "base_image_cache_mismatch",
+                    "image": image,
+                    "copy": tagged,
+                    "copy_digest": found,
+                    "reason": problem,
+                },
+            )
+        else:
+            await emit(
+                f"Could not check the copy {tagged} ({found}) against the image "
+                f"{upstream_digest} names ({problem}). Not building on it",
+                attrs={
+                    "milestone": "base_image_cache_unverified",
+                    "image": image,
+                    "copy": tagged,
+                    "copy_digest": found,
+                    "reason": problem,
+                },
+            )
 
     @staticmethod
     async def _run_build(

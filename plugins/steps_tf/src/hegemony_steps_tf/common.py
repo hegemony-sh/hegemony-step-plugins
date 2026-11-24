@@ -79,10 +79,18 @@ LockTimeout = Annotated[
 #: write the run's shared workspace, and have a POSIX sh with ``timeout``.
 #: tf.plan records the image's digest and tf.apply runs that.
 DEFAULT_IMAGES: dict[str, str] = {
-    "opentofu": "ghcr.io/hegemony-sh/opentofu-runner:0.42",
+    "opentofu": "ghcr.io/hegemony-sh/opentofu-runner:0.56",
     "terraform": "hashicorp/terraform:1.16.4",
 }
 BINARIES: dict[str, str] = {"opentofu": "tofu", "terraform": "terraform"}
+#: The OpenTofu series the runner image is also published for, as
+#: ``<default image>-tofu<series>`` (images/opentofu-runner/variants.json;
+#: tests/test_release_versions.py keeps the two equal). "default" is the plain
+#: tag, whose series a minor release of the plugins may move; a named series
+#: stays until a minor release stops publishing it.
+OpenTofuVersion = Literal["default", "1.12", "1.13"]
+#: The tools as their own output names them, for text a person reads.
+TOOL_NAMES: dict[str, str] = {"opentofu": "OpenTofu", "terraform": "Terraform"}
 
 ATTACHMENTS_ROOT = "/attachments"
 SHARED_ROOT = "/shared"
@@ -94,8 +102,13 @@ BACKEND_CONFIG_FILE = f"{TF_ROOT}/backend.hcl"
 VARS_FILE = f"{TF_ROOT}/vars.tfvars.json"
 SECRET_VARS_FILE = f"{TF_ROOT}/secret-vars.tfvars.json"
 PLAN_FILE = "plan.tfplan"
+#: ``version -json`` of the tool the step ran, read back as ``tool_version``:
+#: the image's tag names a plugin release, not the tool inside.
+TOOL_VERSION_FILE = f"{OUTPUT_DIR}/tool-version.json"
 #: A saved plan's digest as tf.plan records it: ``sha256sum``'s 64 hex digits.
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+#: An image ID as `docker image inspect --format {{.Id}}` prints it.
+IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 #: Appended to a plan's summary when its readable plan could not be kept.
 PLAN_TEXT_MISSING_NOTE = " (the readable plan could not be collected)"
 #: Harvested as downloadable run artifacts after the container exits (the
@@ -170,8 +183,30 @@ class TfContainerConfig(ContainerExecutionConfig):
     )
 
 
-def default_image(engine: str) -> str:
-    return DEFAULT_IMAGES.get(engine, DEFAULT_IMAGES["opentofu"])
+def default_image(engine: str, opentofu_version: str = "default") -> str:
+    """The image a step runs when it sets none: the engine's, at the OpenTofu series asked for."""
+    image = DEFAULT_IMAGES.get(engine, DEFAULT_IMAGES["opentofu"])
+    if engine == "opentofu" and opentofu_version != "default":
+        return f"{image}-tofu{opentofu_version}"
+    return image
+
+
+def step_image(config: dict[str, Any]) -> str:
+    """The image a plan step's raw config names: its own, else the default for its engine."""
+    engine = str(config.get("engine") or "opentofu")
+    version = str(config.get("opentofu_version") or "default")
+    return str(config.get("image") or "").strip() or default_image(engine, version)
+
+
+def opentofu_version_errors(config: dict[str, Any]) -> list[str]:
+    """A named OpenTofu series next to a setting that already decides the tool."""
+    if str(config.get("opentofu_version") or "default") == "default":
+        return []
+    if str(config.get("engine") or "opentofu") != "opentofu":
+        return ["'opentofu_version' needs the opentofu engine"]
+    if str(config.get("image") or "").strip():
+        return ["set 'image' or 'opentofu_version', not both: the image decides the version"]
+    return []
 
 
 def workdir_for(step_id: str) -> str:
@@ -409,10 +444,9 @@ def common_errors(config: dict[str, Any]) -> list[str]:
     """Checks shared by both steps: lock timeout, credentials, the container half."""
     errors = lock_timeout_errors(config.get("lock_timeout"))
     errors += secret_env_errors(config.get("secret_env"))
-    image = config.get("image") or default_image(str(config.get("engine") or "opentofu"))
     errors.extend(
         RunContainerHandler().validate_config(
-            container_config_from(config, image=str(image), command=[])
+            container_config_from(config, image=step_image(config), command=[])
         )
     )
     return errors
@@ -572,6 +606,42 @@ def tool_env() -> dict[str, str]:
         "TF_INPUT": "0",
         "CHECKPOINT_DISABLE": "1",
     }
+
+
+#: A version as either tool prints it: 1.12.6, 1.13.0-rc1, 1.16.4+ent.
+_TOOL_VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]{1,40})?")
+
+
+def tool_version_line(tool: str, run: str = "") -> str:
+    """The run script's line that records the tool's version (``run``: "bounded " or "").
+
+    Never fails the script: an image whose tool has no ``version -json``
+    leaves no file, and the step reports an empty version.
+    """
+    return (
+        f"if ! {run}{tool} version -json > {TOOL_VERSION_FILE} 2>/dev/null; "
+        f"then rm -f {TOOL_VERSION_FILE}; fi"
+    )
+
+
+def tool_version(outcome: Any) -> str:
+    """The version the tool reported (:data:`TOOL_VERSION_FILE`), or "" when unknown.
+
+    Both tools print ``{"terraform_version": "X.Y.Z", ...}``. Never a guess:
+    anything that is not a version is dropped.
+    """
+    raw = (getattr(outcome, "collected", None) or {}).get(TOOL_VERSION_FILE)
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return ""
+    version = data.get("terraform_version") if isinstance(data, dict) else None
+    if not isinstance(version, str):
+        return ""
+    version = version.strip().removeprefix("v")
+    return version if _TOOL_VERSION_RE.fullmatch(version) else ""
 
 
 def script_header(deadline: int | None = None, kill_after: int = KILL_AFTER_SECONDS) -> list[str]:

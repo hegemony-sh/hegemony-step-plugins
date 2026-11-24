@@ -27,6 +27,9 @@ USERNAME, PASSWORD = "admin", "device-pw"
 JUMP_USERNAME, JUMP_PASSWORD = "jump", "bastion-pw"
 PROMPT = "r1#"
 
+#: How long the fake router stays silent during a copy of a URL with /slow/ in it.
+COPY_SILENCE_SECONDS = 1.0
+
 
 def key_line(key: asyncssh.SSHKey) -> str:
     """``<type> <base64>`` of a key, as the verifier names keys."""
@@ -121,6 +124,29 @@ class _Bastion(_Device):
         return True
 
 
+async def _copy_dialogue(process: asyncssh.SSHServerProcess, command: str) -> None:
+    """IOS's ``copy <url> flash:<name>``: one question, then the file arrives."""
+    name = command.rsplit(":", 1)[-1]
+    process.stdout.write(f"Destination filename [{name}]? ")
+    await process.stdin.readline()
+    process.stdout.write("Accessing ...\r\n")
+    if "/slow/" in command:
+        # IOS prints nothing while it opens the connection and fetches.
+        await asyncio.sleep(COPY_SILENCE_SECONDS)
+    process.stdout.write("!!!!\r\n4096 bytes copied in 0.1 secs (40960 bytes/sec)\r\n")
+
+
+async def _delete_dialogue(process: asyncssh.SSHServerProcess, command: str) -> None:
+    """IOS's ``delete flash:<name>``: the file name, then a confirmation."""
+    path = command.split(maxsplit=1)[1]
+    name = path.rsplit(":", 1)[-1]
+    process.stdout.write(f"Delete filename [{name}]? ")
+    await process.stdin.readline()
+    process.stdout.write(f"\r\nDelete {path}? [confirm]")
+    await process.stdin.readline()
+    process.stdout.write("\r\n")
+
+
 async def _session(process: asyncssh.SSHServerProcess) -> None:
     """An exec command answers once; a shell is a router-like prompt loop."""
     if process.command is not None:
@@ -140,7 +166,25 @@ async def _session(process: asyncssh.SSHServerProcess) -> None:
         command = line.strip()
         if command in ("exit", "logout", "quit"):
             break
-        if command and not command.startswith("terminal"):
+        if command.startswith("copy http"):
+            await _copy_dialogue(process, command)
+        elif command.startswith("delete "):
+            await _delete_dialogue(process, command)
+        elif command == "bad-reload":
+            # A device error, then the session closes.
+            process.stdout.write("% Invalid input detected at '^' marker.\r\n")
+            break
+        elif command == "reload":
+            # IOS confirms, says so, and closes the session as it goes down.
+            process.stdout.write("Proceed with reload? [confirm]")
+            await process.stdin.readline()
+            process.stdout.write("\r\nReload requested\r\n")
+            break
+        elif command == "copy run start":
+            process.stdout.write("Destination filename [startup-config]? ")
+            await process.stdin.readline()
+            process.stdout.write("\r\nBuilding configuration...\r\n[OK]\r\n")
+        elif command and not command.startswith("terminal"):
             process.stdout.write(f"output of {command}\r\n")
         process.stdout.write(PROMPT)
     with contextlib.suppress(Exception):

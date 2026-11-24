@@ -119,6 +119,23 @@ class HandlerTargeting:
     multi_role: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class OutputField:
+    """One key a handler puts in its step output, for the flow editor's variable picker.
+
+    ``name`` is the key's path under ``output``, dotted for a nested key
+    (``size_bytes``, ``file.path``); a flow reads it as
+    ``{{ steps.NODE_ID.output.<name> }}``. ``type`` is a hint shown beside it
+    (``string``, ``int``, ``float``, ``bool``, ``object``, ``list``, or ``any``
+    for a value of more than one type); ``description``
+    says what it holds.
+    """
+
+    name: str
+    description: str = ""
+    type: str = ""
+
+
 def _device_identity_key(device: dict[str, Any]) -> tuple[str, str] | None:
     """Return a stable target-device identity key when one is available."""
     device_id = device.get("id")
@@ -362,6 +379,12 @@ class BaseHandler(ABC):
     # instead reach the handler as raw templates (the handler renders them itself
     # with its own context, e.g. the notification single-JIT renderer).
     raw_config_keys: frozenset[str] = frozenset()
+    # Config keys whose value, when it is one whole ``{{ }}`` expression, is
+    # rendered to the native value (a dict, a list) instead of its text, so
+    # ``"{{ inputs.firmware }}"`` reaches the handler as the file reference
+    # the run form resolved. Hosts older than this attribute render text; a
+    # handler parses such text itself (``parse_file_ref`` does).
+    native_config_keys: frozenset[str] = frozenset()
 
     # --- Registry/editor metadata (served via the step-handler-types endpoint) ---
 
@@ -425,6 +448,13 @@ class BaseHandler(ABC):
     # only to such handlers, and only for providers an administrator has
     # opened to flows.
     syncs_inventory: bool = False
+    # True for handlers that drive the platform instead of a device: starting
+    # child runs, sending notifications, writing secrets, syncing inventory.
+    # Such a step always runs on a worker inside the platform's network,
+    # never on one in a remote zone (an edge worker). A handler that only
+    # talks to devices, and to its own run through hegemony_step_sdk.run_access,
+    # leaves it False.
+    central_only: bool = False
     # True for handlers that keep run-scoped state keyed by the step's node id
     # (tf.plan's working directory under /shared, tf.apply's lookup of the
     # plan step's output). Two executions of one node at the same time would
@@ -439,6 +469,11 @@ class BaseHandler(ABC):
     config_model: type[BaseModel] | None = None
     # Initial config the editor seeds for a newly added step of this handler.
     default_config: dict[str, Any] = {}
+    # The keys the handler puts in ``HandlerResult.output``. The flow editor's
+    # variable picker lists them for a later step
+    # (``{{ steps.NODE_ID.output.<name> }}``). Purely descriptive: the host
+    # does not check the output against them. Empty when not declared.
+    output_fields: tuple[OutputField, ...] = ()
 
     @abstractmethod
     async def execute(self, ctx: HandlerContext) -> HandlerResult:

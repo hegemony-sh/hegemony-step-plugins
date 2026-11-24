@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock
 import asyncssh
 import pytest
 
-from hegemony_step_sdk.ssh import asyncssh_security_options, validate_asyncssh_client_key
 from hegemony_transport_asyncssh.transport import AsyncSSHTransport
 from hegemony_transport_scrapli.transport import ScrapliTransport
+from hegemony_transport_support.ssh import asyncssh_security_options, validate_asyncssh_client_key
 from tests import ssh_fakes
 from tests.ssh_fakes import JUMP_PASSWORD, PASSWORD, FakeVerifier, key_line, ssh_servers
 from tests.test_ssh_security_policy import build

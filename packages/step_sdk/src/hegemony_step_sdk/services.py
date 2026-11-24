@@ -107,6 +107,35 @@ class ShellTransport(Protocol):
         """Close the underlying connection (idempotent)."""
 
 
+#: The NETCONF over SSH port (RFC 6242, section 3).
+DEFAULT_NETCONF_PORT = 830
+
+
+class NetconfChannel(Protocol):
+    """The byte stream of one NETCONF session, returned by :meth:`HandlerServices.open_netconf`.
+
+    An SSH session to the device with the ``netconf`` subsystem started
+    (RFC 6242). The channel carries bytes only: the handler speaks NETCONF
+    itself (the hello exchange, message framing, RPCs), so the protocol is
+    the step wheel's, and the host only opens the hardened SSH connection
+    (egress policy, host-key trust, jump host, credentials).
+
+    A host may also set a ``disconnect_reason`` string attribute (why the
+    device ended the session, such as an SSH disconnect message); it is
+    optional, so it is not part of this protocol, and handlers read it with
+    ``getattr``.
+    """
+
+    async def write(self, data: bytes) -> None:
+        """Send ``data`` to the device."""
+
+    async def read(self, max_bytes: int = 65536) -> bytes:
+        """Receive up to ``max_bytes``; ``b""`` once the device closed the session."""
+
+    async def close(self) -> None:
+        """Close the session and its SSH connection (idempotent)."""
+
+
 @dataclass(frozen=True, slots=True)
 class ImageCache:
     """The platform registry a step may keep copies of the images it pulls in.
@@ -281,6 +310,12 @@ class FileDownload:
     step that hands the link to a target fails with a clear message then.
     ``worker_url`` is the same link as the worker process itself reaches it,
     for a handler that fetches the file onto the worker.
+
+    ``repository`` (the file repository's name), ``repository_id``, ``path``
+    (folder and file name, no leading slash), ``folder``, ``content_type``,
+    ``sha512`` and ``metadata`` (the stored file's metadata) describe where
+    the file lives. A host older than these fields leaves them at their
+    defaults: empty text, None and an empty dict.
     """
 
     file_id: str
@@ -294,6 +329,13 @@ class FileDownload:
     # ISO 8601, with a UTC offset.
     expires_at: str
     md5: str | None = None
+    repository: str = ""
+    repository_id: str = ""
+    path: str = ""
+    folder: str = ""
+    content_type: str | None = None
+    sha512: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -548,17 +590,33 @@ class HandlerServices(Protocol):
         raise NotImplementedError
 
     def open_file_download(
-        self, file_id: str, *, ttl_seconds: int = 600
+        self,
+        file_id: str | None = None,
+        *,
+        repository: str | None = None,
+        path: str | None = None,
+        ttl_seconds: int = 600,
     ) -> AbstractAsyncContextManager[FileDownload]:
-        """Open a short-lived download link to the file-repository file ``file_id``.
+        """Open a short-lived download link to one file-repository file.
 
         For a step that stages a file on a target: the step hands
         :attr:`FileDownload.url` to the target, which downloads the file from
         the platform by itself (``Transport.http_transfer``, a ``curl`` on a
-        server). ``file_id`` is the stored file's id, as a step field marked
-        ``x_widget: repository-file-select`` stores it (name such a field
-        ``file_ids``: the platform refuses to delete a file a flow lists
-        there).
+        server). Name the file in one of two ways:
+
+        - ``file_id``: the stored file's id, as a step field marked
+          ``x_widget: repository-file-select`` stores it (name such a field
+          ``file_ids``: the platform refuses to delete a file a flow lists
+          there).
+        - ``repository`` and ``path``: the file repository's name and the
+          file's path in it (folder and file name, no leading slash), as a
+          :class:`~hegemony_step_sdk.FileRef` gives them. The repository is
+          looked up in the run's organization first, then in the shared
+          organization. Two files with the same path are refused as
+          ambiguous.
+
+        A platform older than ``repository`` and ``path`` raises
+        ``TypeError`` when they are passed.
 
         The host finds only files the run's organization may read: its own
         and those the platform's shared organization publishes. The link
@@ -569,7 +627,8 @@ class HandlerServices(Protocol):
         naming the run, the step and the file.
 
         Raises ``LookupError`` for a file the organization does not have,
-        ``ValueError`` for a malformed ``file_id`` or ``ttl_seconds``, and
+        ``ValueError`` for a malformed ``file_id``, ``repository``, ``path``
+        or ``ttl_seconds`` or an ambiguous path, and
         ``RuntimeError`` when the host cannot be reached or the step or run
         has ended. Hosts without support raise ``NotImplementedError``; a
         platform older than this method has no such attribute at all, so
@@ -616,9 +675,12 @@ class HandlerServices(Protocol):
     def open_api_client(self, *, timeout: float = 30.0) -> httpx.AsyncClient:
         """Build an ``httpx.AsyncClient`` scoped to the internal API (base URL + auth).
 
-        Caller owns the client lifecycle (use ``async with``). Core handlers use it
-        for internal endpoints (artifacts, child runs, notifications); the client is
-        version-locked with the host, so those paths are not third-party ABI.
+        Caller owns the client lifecycle (use ``async with``). Not for handler
+        code: internal paths are not part of the plugin contract, and a worker
+        outside the platform's network (an edge worker) will refuse most of
+        them. Use the named methods instead (:meth:`fetch_run_artifacts` and
+        the others here); for a notification destination and a run event, the
+        functions of :mod:`hegemony_step_sdk.run_access`.
         """
 
     async def dispatch_notification(
@@ -658,6 +720,26 @@ class HandlerServices(Protocol):
     async def cancel_run(self, run_id: str) -> bool:
         """Best-effort cancellation of a run; returns whether the API accepted it."""
 
+    # The step's own run and organization: what any worker may reach, an edge
+    # worker included. Handlers call them through hegemony_step_sdk.run_access,
+    # which also serves hosts from before these methods.
+
+    async def fetch_notification_destination(self, destination_id: str) -> dict[str, Any] | None:
+        """A notification destination of the run's organization, None when there is none.
+
+        The mapping holds ``id``, ``name``, ``type`` and ``config_json``.
+        """
+
+    async def emit_run_event(
+        self,
+        message: str,
+        *,
+        kind: str = "log",
+        attrs: dict[str, Any] | None = None,
+        phase: str = "",
+    ) -> None:
+        """Record an event on the executing step's own run, attributed to the step."""
+
     def container_runtime(self) -> ContainerRuntime:
         """Describe the platform's container-execution environment (docker binary, workspaces).
 
@@ -684,6 +766,31 @@ class HandlerServices(Protocol):
         opt-in to weak algorithms and small keys (:class:`SshSecurityConfig`).
         Callers pass it only when it is on, so older hosts keep working.
         """
+
+    async def open_netconf(
+        self,
+        device: dict[str, Any],
+        *,
+        port: int = DEFAULT_NETCONF_PORT,
+        connect_timeout: float | None = None,
+        allow_legacy_ssh: bool = False,
+    ) -> NetconfChannel:
+        """Open a NETCONF session's byte stream to ``device`` on ``port``.
+
+        The host connects as :meth:`open_shell` does, with the SSH
+        credentials of ``device.access_config.ssh``, the flow's egress policy,
+        the organization's trusted host keys (checked for ``host:port``) and
+        the device's jump host, then starts the ``netconf`` subsystem.
+        ``allow_legacy_ssh`` is the step's opt-in to weak SSH algorithms, as
+        for :meth:`open_shell`. Caller owns the channel (``close()`` in a
+        finally).
+
+        Hosts older than this method lack it: a handler checks
+        ``getattr(services, "open_netconf", None)`` and fails with a clear
+        message when it is missing. A host that has it but cannot serve
+        NETCONF raises ``NotImplementedError``.
+        """
+        raise NotImplementedError
 
     async def run_probe(
         self,

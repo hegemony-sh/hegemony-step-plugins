@@ -111,9 +111,24 @@ last stage without a target; the Dockerfile's `ARG` values before its first
 `FROM` and the step's build arguments filled in), the step asks the image's
 registry which digest the tag names today, looks for a copy of that digest in the organization's
 namespace and then in the global one, and without one pulls that digest and
-saves a copy. BuildKit then takes the image from the copy, by digest
-(`--build-context`), with the step's platform registry token. With the
-image's registry unreachable, the last copy under the tag serves. The step's
+saves a copy. A copy is found by a tag named after the upstream digest, and
+any step of the organization can push over that tag, so before the build
+uses a copy the step checks it is that image: its digest is the upstream
+digest itself, or the configuration digest of its image for the sandbox's
+platform is the one the upstream digest names for that platform (read from
+the image's registry by digest, the content checked against it). A copy of a
+multi-platform image usually holds the sandbox's platform only, under a
+digest of its own; the configuration names every layer by its content, so
+it is the same for every faithful copy. BuildKit then takes the image from
+the copy, by the digest of the image that was checked (`--build-context`),
+with the step's platform registry token. A copy that is another image
+(`base_image_cache_mismatch` in the step's events), or that cannot be
+checked (`base_image_cache_unverified`), is not built on: the step pulls the
+image from its registry and saves a true copy over it, or else leaves the
+image to BuildKit's own pull. With the image's registry unreachable no copy
+is used, since none can be checked (a digest-pinned image excepted, whose
+copy carries that very digest): BuildKit pulls from that registry, as
+without the cache. The step's
 log says where each base image came from ("Base image alpine:3.20 comes from
 its copy in the platform registry, …@sha256:…"), and the build details record
 it (`base_images`). An image the cache cannot serve (a refused check, a
@@ -147,9 +162,10 @@ Past that the live log says so and shows no more; the build goes on. Later steps
 can read `steps.NODE_ID.output.reference`: for a pushed image, the image by
 digest (`registry.hegemony.internal/orgs/ORG/NAME@sha256:…`, or
 `ghcr.io/acme/NAME@sha256:…`), which a `container.run` step can run exactly.
-Also `steps.NODE_ID.output.digest`, `.image` (the repository), `.tags`,
-`.references` (one per tag), `.destination` (`platform`, `remote` or `local`)
-and `.pushed`.
+Also `steps.NODE_ID.output.digest`, `steps.NODE_ID.output.image` (the
+repository), `steps.NODE_ID.output.tags`, `steps.NODE_ID.output.references`
+(one per tag), `steps.NODE_ID.output.destination` (`platform`, `remote` or
+`local`) and `steps.NODE_ID.output.pushed`. A build that fails has no output.
 
 An image kept in the sandbox has no digest a registry knows (`.digest` is
 empty), so its reference is the run tag

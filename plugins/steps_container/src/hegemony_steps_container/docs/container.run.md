@@ -37,9 +37,29 @@ was given (`image`) and the registry digest of the image it pulled
 that digest, so a tag that moves while the step runs, even through another
 step pulling it at the same moment, cannot change what runs, and the record
 names exactly the content that ran. The step's log says it too, right after the pull: "Running
-the image by digest: ghcr.io/…@sha256:…". An image built on the sandbox daemon
-and never pushed has no digest: it runs by its tag, `image_digest` is empty,
-and the log says so.
+the image by digest: ghcr.io/…@sha256:…". The step always pulls its image, so an
+image kept only in the sandbox (built there, never pushed) cannot run here: no
+registry serves it. When a pull reports no digest and the daemon lists none for
+the repository, `image_digest` is empty, the container runs by the image ID
+read right after the pull (so a retag in the meantime cannot
+change what runs; by its tag only when the daemon reports no ID), and the log
+says so. The evidence also records the image's ID (`image_id`,
+the digest of its configuration). A copy of an image in another registry can
+have another digest (the copy keeps one platform of a multi-platform image,
+or another manifest format), but always the same ID, so the ID is what shows
+two steps ran the same image. The sandbox daemon's image store does not
+change it. The classic store reports the configuration digest as the image's
+ID. The containerd image store (the default for new Docker 29 installs)
+reports the digest of the manifest or index the image was pulled by instead,
+so the step reads the configuration digest from the image's registry by that
+digest (its content checked against it). Those manifest requests can count
+against a registry's pull limits, so on that store a plain `container.run`
+step does not make them and records no `image_id`; steps that compare images
+(`tf.plan`, `tf.apply`, a cache hit's check) do. Every step records the
+daemon's own ID as `image_local_id`: on the classic store it equals
+`image_id`, on the containerd store it names the image on that daemon only (a
+copy in another registry has another one). When the daemon does not say which
+store it uses, only an image pulled by a digest gets an `image_id`.
 
 When the platform runs its own container registry, Cache image (on by
 default) keeps a copy of the pulled image there, under the organization's
@@ -47,11 +67,27 @@ namespace, named after the image's own registry and repository. Later runs
 ask the image's registry only which digest the tag points at today (one
 manifest request, plus whatever login round trip that registry asks for;
 Docker Hub does not count these requests against its pull limits) and pull
-the copy when it matches, or the newest copy under the tag when that registry
-is unreachable; the step's events say which. A new digest is pulled from the
+the copy when it matches. With that registry unreachable no copy is used,
+since nothing is left to check one against (a copy under the tag could be
+anything a step of the organization pushed there): the image is pulled from
+its registry as without the cache, and the step's events say why. A new digest is pulled from the
 image's registry by that digest, so the copy holds exactly what was checked
 even if the tag moves meanwhile, and saved as a copy in turn, without ever
-failing the step when the save cannot happen. A registry that refuses the
+failing the step when the save cannot happen. A copy is filed under a tag
+named after the upstream digest, and a tag can be pushed over, so before a
+copy runs the step reads the image's manifest from its own registry (by that
+digest, the content checked against it) and compares the configuration digest
+it names for the sandbox's platform with the image ID of the copy as this
+step pulled it (by the digest its pull reported, or the ID it read when the
+pull reported none, which the container then runs by; never the tag, which
+another step can move meanwhile). A copy whose pull reported the upstream
+digest itself needs no check: the same digest is the same content. A copy
+that is another image is not run: the step pulls the image from its registry
+and saves a true copy over it (`image_cache_mismatch` in its events). Nor is
+a copy the check cannot be made for (the registry is unreachable, refuses the
+login, or does not answer within 30 seconds; the copy's image ID cannot be
+read; the image's registry has no image for the copy's platform): the step
+pulls the image from its registry the same way (`image_cache_unverified`). A registry that refuses the
 check's login gets the plain pull instead, with no copy served or saved: a
 refusal may mean access was withdrawn. An image from a registry whose name
 has no dot and is not `localhost` (`myregistry:5000`) is pulled from it and
@@ -157,8 +193,8 @@ artifact - stdout and stderr each capped at 2.5 MB (half of a 5 MB budget),
 with a truncation marker beyond that - that also records the exit code, image and its digest, duration, and the separated
 stdout/stderr streams. Text files harvested from the new-artifacts folder are
 added as further evidence artifacts; binary files become downloadable run
-artifacts. Metrics record `exit_code`, `duration_seconds`, `image`, and
-`image_digest`.
+artifacts. Metrics record `exit_code`, `duration_seconds`, `image`,
+`image_digest`, `image_id` and `image_local_id`.
 While the container runs, its output streams into the step's live log, up to
 5 MB. Past that the live log says so and shows no more; the container goes on,
 and the evidence keeps stdout and stderr as above.

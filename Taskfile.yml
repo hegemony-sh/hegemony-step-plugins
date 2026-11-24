@@ -104,9 +104,20 @@ tasks:
       - uv run pre-commit run --all-files
 
   version:set:
-    desc: "Update all package versions and plugin SDK pins. Usage: task version:set -- 0.2.0"
+    desc: "Set the release version on every package but the SDK, and every SDK pin. Usage: task version:set -- 0.2.0"
     cmds:
       - uv run python scripts/set_version.py {{.CLI_ARGS}}
+
+  sdk:check:
+    desc: "Check the SDK's own version against its change since the last release tag"
+    cmds:
+      - uv run python scripts/sdk_version.py check
+
+  sdk:bump:
+    desc: "Bump the SDK's own version and every SDK pin. Usage: task sdk:bump -- minor"
+    cmds:
+      - uv run python scripts/sdk_version.py bump {{.CLI_ARGS}}
+      - uv lock
 
   version:verify:
     desc: "Verify all package versions match a tag. Usage: task version:verify -- v0.2.0"

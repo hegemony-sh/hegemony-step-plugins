@@ -26,14 +26,11 @@ from hegemony_step_sdk import (
     for_each_target_device,
 )
 
-from .checks import CHECK_TYPE_LABELS, PORT_CHECKS, CheckUnavailable, default_port
+from .checks import CHECK_TYPE_LABELS, CheckUnavailable
 from .targets import DEFAULT_MAX_PARALLEL_TARGETS, all_probe_targets
+from .waiting import CheckMisconfigured, missing_host, poll_port, poll_target
 
 logger = logging.getLogger(__name__)
-
-
-class _CheckMisconfigured(Exception):
-    """The probe refused its options (a ``config_error``); no poll can pass."""
 
 
 class WaitReachableConfig(BaseModel):
@@ -205,27 +202,11 @@ class WaitReachableHandler(BaseHandler):
         max_wait_seconds = config.max_wait_seconds
         stable_seconds = config.stable_seconds
         poll_interval = config.poll_interval_seconds
-        connect_timeout = config.connect_timeout_seconds
-        socks_proxy = config.socks_proxy.strip()
 
         # Fail fast if any device is missing mgmt_host — waiting would always time out
-        for device in target_devices:
-            host = device.get("mgmt_host")
-            if not host:
-                device_name = device.get("name", device.get("id", "unknown"))
-                return HandlerResult(
-                    success=False,
-                    error=f"Device '{device_name}' has no mgmt_host configured",
-                    summary=f"Device '{device_name}' missing mgmt_host — cannot check reachability",
-                )
-
-        def _port(device: dict[str, Any]) -> int | None:
-            """The port polled on ``device``, or None for a check without one."""
-            if check_type not in PORT_CHECKS:
-                return None
-            if config.port is not None:
-                return config.port
-            return default_port(check_type, device.get("mgmt_port") or 22)
+        missing = missing_host(target_devices)
+        if missing is not None:
+            return missing
 
         services = ctx.require_services()
         loop = asyncio.get_running_loop()
@@ -239,40 +220,9 @@ class WaitReachableHandler(BaseHandler):
         attempts = 0
 
         async def _poll(device: dict[str, Any]) -> float | None:
-            """Poll one target; the loop time it answered, or None if it did not.
-
-            run_probe applies the flow egress gate, so a denied target raises
-            here on its first poll and fails the step with the policy's reason.
-            """
-            # A poll never outlasts the deadline, also when it starts late in
-            # a round with more targets than run at once.
-            timeout = min(connect_timeout, deadline - loop.time())
-            if timeout <= 0:
-                return None
-            options: dict[str, Any] = {"timeout_ms": max(1, int(timeout * 1000))}
-            port = _port(device)
-            if port is not None:
-                options["port"] = port
-            if check_type == "http_health":
-                options["url_path"] = config.url_path or "/health"
-            elif check_type == "icmp_ping":
-                options["count"] = 1
-            if socks_proxy:
-                options["socks_proxy"] = socks_proxy
-            try:
-                result = await asyncio.wait_for(
-                    services.run_probe(check_type, device["mgmt_host"], options),
-                    timeout=timeout,
-                )
-            except TimeoutError:
-                return None
-            except KeyError:
-                raise CheckUnavailable from None
-            # A probe that refuses its options refuses them on every poll.
-            if result.error_kind == "config_error":
-                name = device.get("name", device["mgmt_host"])
-                raise _CheckMisconfigured(f"{name}: {result.error_detail}")
-            return loop.time() if result.ok else None
+            """Poll one target; the loop time it answered, or None if it did not."""
+            result = await poll_target(services, config, device, deadline)
+            return loop.time() if result is not None and result.ok else None
 
         def _timed_out() -> HandlerResult:
             unreachable: list[str] = []
@@ -314,7 +264,7 @@ class WaitReachableHandler(BaseHandler):
                     error=f"Check type '{check_type}' is not available on this worker",
                     summary=f"Unsupported check type: {check_type}",
                 )
-            except _CheckMisconfigured as exc:
+            except CheckMisconfigured as exc:
                 return HandlerResult(
                     success=False,
                     error=f"{check_type} cannot run against {exc}",
@@ -361,7 +311,7 @@ class WaitReachableHandler(BaseHandler):
                                 "device_name": device_name,
                                 "host": device.get("mgmt_host"),
                                 "check_type": check_type,
-                                "port": _port(device),
+                                "port": poll_port(config, device),
                                 "success": True,
                                 "stable_seconds": stable_seconds,
                             },

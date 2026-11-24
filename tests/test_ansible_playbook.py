@@ -26,6 +26,7 @@ from hegemony_step_sdk import (
     HandlerServices,
     JumpHostSpec,
 )
+from hegemony_step_sdk.docs import load_docs_bundle
 from hegemony_steps_ansible.inventory import (
     build_inventory,
     group_name,
@@ -51,6 +52,7 @@ from hegemony_steps_ansible.playbook import (
     _failure_detail,
     build_run_script,
     credential_host_vars,
+    execution_image,
 )
 from hegemony_steps_ansible.results import (
     CALLBACK_NAME,
@@ -60,7 +62,9 @@ from hegemony_steps_ansible.results import (
     MAX_RESULTS_BYTES,
     MAX_TASK_RECORDS,
     RESULTS_FILE,
+    VERSION_FILE,
     parse_results,
+    parse_version,
     render_host_report,
 )
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
@@ -957,7 +961,11 @@ def _install_docker(
     pull_returncode: int = 0,
     collect_returncode: int = 0,
     pull_stdout: str = "",
+    version: bytes | None = b"ansible-playbook [core 2.19.13]\n  config file = None\n",
 ) -> dict[str, Any]:
+    """Fake docker. ``collected`` is the results file the play left (None:
+    none), ``version`` what ``ansible-playbook --version`` printed (None: no
+    file)."""
     state: dict[str, Any] = {"roots": {}, "calls": []}
     monkeypatch.setattr(
         "hegemony_steps_container.run.stream_pull",
@@ -982,9 +990,14 @@ def _install_docker(
                             state["roots"][rel] = fh.read()
             elif src.endswith(":/hegemony/out/.") and collect_returncode:
                 return SimpleNamespace(returncode=collect_returncode, stdout="", stderr="cp broke")
-            elif src.endswith(":/hegemony/out/.") and collected is not None:
-                with open(os.path.join(dest, "ansible-results.json"), "wb") as fh:
-                    fh.write(collected)
+            elif src.endswith(":/hegemony/out/."):
+                for name, data in (
+                    ("ansible-results.json", collected),
+                    ("ansible-version.txt", version),
+                ):
+                    if data is not None:
+                        with open(os.path.join(dest, name), "wb") as fh:
+                            fh.write(data)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr("subprocess.run", fake_run)
@@ -1448,3 +1461,188 @@ def test_handler_metadata():
     # Secret fields reach the handler as written (never resolved twice).
     assert handler.raw_config_keys == {"secrets", "group_secrets", "vault_password", "vault_ids"}
     assert handler.targeting.roles is True and handler.targeting.ips is False
+
+
+@pytest.mark.parametrize(
+    ("raw", "version"),
+    [
+        (b"ansible-playbook [core 2.19.13]\n  config file = None\n", "2.19.13"),
+        (b"ansible-playbook [core 2.20.0rc1]\n", "2.20.0rc1"),
+        (b"ansible-playbook [core 2.21.0.dev0] (devel 0123abc) last updated\n", "2.21.0.dev0"),
+        # Before ansible-core 2.11.
+        (b"ansible-playbook 2.9.27\n  config file = None\n", "2.9.27"),
+        # Never a guess: no file, nothing in it, or not the version line.
+        (None, ""),
+        (b"", ""),
+        (b"[WARNING]: something\nansible-playbook [core 2.19.13]\n", ""),
+        (b"ansible-playbook [core $(reboot)]\n", ""),
+        (b"ansible [core 2.19.13]\n", ""),
+    ],
+)
+def test_the_ansible_version_is_what_ansible_reported_or_empty(raw, version):
+    assert parse_version(raw) == version
+
+
+def test_the_script_records_the_ansible_version_before_anything_can_fail():
+    config = AnsiblePlaybookConfig.model_validate(
+        {"playbook": "site.yml", "requirements_file": "requirements.yml"}
+    )
+    line = (
+        f"if ! ansible-playbook --version > {VERSION_FILE} 2>/dev/null; "
+        f"then rm -f {VERSION_FILE}; fi"
+    )
+    lines = build_run_script(
+        config, has_extra_vars=False, has_secrets=False, vault_files={}
+    ).splitlines()
+    assert line in lines
+    assert lines.index(line) < next(
+        i for i, text in enumerate(lines) if text.startswith("ansible-galaxy")
+    )
+    bounded = build_run_script(
+        config, has_extra_vars=False, has_secrets=False, vault_files={}, deadline=1_900_000_000
+    )
+    assert f"\nif ! bounded ansible-playbook --version > {VERSION_FILE}" in bounded
+
+
+def test_a_named_ansible_core_series_runs_its_own_tag_of_the_default_image():
+    assert execution_image(DEFAULT_IMAGE) == DEFAULT_IMAGE
+    assert execution_image("", "default") == DEFAULT_IMAGE
+    assert execution_image(None, None) == DEFAULT_IMAGE
+    assert execution_image(DEFAULT_IMAGE, "2.21") == f"{DEFAULT_IMAGE}-core2.21"
+    # The default series by name too: it stays when the default moves.
+    assert execution_image(f" {DEFAULT_IMAGE} ", "2.19") == f"{DEFAULT_IMAGE}-core2.19"
+    # A flow saved with an earlier release's default image runs this release's
+    # image of the series it names.
+    earlier = DEFAULT_IMAGE.rsplit(":", 1)[0] + ":0.48"
+    assert earlier != DEFAULT_IMAGE
+    assert execution_image(earlier, "2.21") == f"{DEFAULT_IMAGE}-core2.21"
+    # Without a named series it stays what the flow says, as before.
+    assert execution_image(earlier) == earlier
+    # Only the plain X.Y tag is a default: a patch tag or a series tag is a choice.
+    assert execution_image(f"{earlier}.1", "2.21") == f"{earlier}.1"
+    assert execution_image(f"{earlier}-core2.19", "2.21") == f"{earlier}-core2.19"
+    # An image of the author's own is never rewritten.
+    assert execution_image("registry.example.com/ee:1", "default") == "registry.example.com/ee:1"
+
+    handler = AnsiblePlaybookHandler()
+    assert handler.validate_config({"playbook": "site.yml", "ansible_core_version": "2.21"}) == []
+    assert (
+        handler.validate_config(
+            {"playbook": "site.yml", "ansible_core_version": "2.21", "image": DEFAULT_IMAGE}
+        )
+        == []
+    )
+    both = handler.validate_config(
+        {
+            "playbook": "site.yml",
+            "ansible_core_version": "2.21",
+            "image": "registry.example.com/ee:1",
+        }
+    )
+    assert both == [
+        "set 'image' or 'ansible_core_version', not both: the image decides the version"
+    ]
+    # A series the image is not published for never reaches a pull.
+    unknown = handler.validate_config({"playbook": "site.yml", "ansible_core_version": "2.17"})
+    assert len(unknown) == 1 and "ansible_core_version" in unknown[0]
+
+
+@pytest.mark.asyncio
+async def test_a_flow_saved_with_an_earlier_default_image_can_name_a_series(monkeypatch):
+    earlier = DEFAULT_IMAGE.rsplit(":", 1)[0] + ":0.48"
+    config = {"playbook": "site.yml", "ansible_core_version": "2.21", "image": earlier}
+    assert AnsiblePlaybookHandler().validate_config(config) == []
+    # A pinned patch tag is the author's own choice, so both together are refused.
+    assert AnsiblePlaybookHandler().validate_config({**config, "image": f"{earlier}.1"}) == [
+        "set 'image' or 'ansible_core_version', not both: the image decides the version"
+    ]
+
+    recap = {"r1": {"ok": 1, "changed": 0, "failures": 0, "unreachable": 0}}
+    state = _install_docker(monkeypatch, collected=_results_json(recap), exit_code=0)
+    result = await AnsiblePlaybookHandler().execute(_ctx(config, [_device("r1")]))
+
+    assert result.success is True, result.error
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert f"{DEFAULT_IMAGE}-core2.21" in create
+    assert earlier not in create
+
+
+@pytest.mark.asyncio
+async def test_the_step_pulls_the_image_of_the_series_it_names(monkeypatch):
+    recap = {"r1": {"ok": 1, "changed": 0, "failures": 0, "unreachable": 0}}
+    state = _install_docker(monkeypatch, collected=_results_json(recap), exit_code=0)
+    result = await AnsiblePlaybookHandler().execute(
+        _ctx({"playbook": "site.yml", "ansible_core_version": "2.21"}, [_device("r1")])
+    )
+
+    assert result.success is True, result.error
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert f"{DEFAULT_IMAGE}-core2.21" in create
+    assert DEFAULT_IMAGE not in create
+
+
+@pytest.mark.asyncio
+async def test_the_step_reports_the_ansible_version_that_ran(monkeypatch):
+    recap = {"r1": {"ok": 1, "changed": 0, "failures": 0, "unreachable": 0}}
+    _install_docker(monkeypatch, collected=_results_json(recap), exit_code=0)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+
+    assert result.success is True, result.error
+    assert result.output["ansible_version"] == "2.19.13"
+    assert result.metrics["ansible_version"] == "2.19.13"
+
+
+@pytest.mark.asyncio
+async def test_a_play_that_never_started_still_names_its_ansible_version(monkeypatch):
+    # No results file: the version was written before the play.
+    _install_docker(monkeypatch, collected=None, exit_code=4)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+
+    assert result.success is False
+    assert result.output["ansible_version"] == "2.19.13"
+
+
+@pytest.mark.asyncio
+async def test_an_image_that_reports_no_version_gives_an_empty_one(monkeypatch):
+    recap = {"r1": {"ok": 1, "changed": 0, "failures": 0, "unreachable": 0}}
+    _install_docker(monkeypatch, collected=_results_json(recap), exit_code=0, version=None)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+
+    assert result.success is True, result.error
+    assert result.output["ansible_version"] == ""
+
+
+@pytest.mark.asyncio
+async def test_the_declared_output_fields_cover_every_key_the_step_outputs(monkeypatch):
+    # The editor's variable picker lists output_fields; every key must be there.
+    collected = _results_json(
+        {"r1": {"ok": 2, "changed": 1, "failures": 0, "unreachable": 0}},
+    )
+    _install_docker(monkeypatch, collected=collected, exit_code=0)
+    result = await AnsiblePlaybookHandler().execute(_ctx({"playbook": "site.yml"}, [_device("r1")]))
+
+    declared = [field.name for field in AnsiblePlaybookHandler.output_fields]
+    assert len(declared) == len(set(declared))
+    assert set(result.output) <= set(declared)
+    # The truncation markers only appear on oversized output; the rest always do.
+    always = {name for name in declared if not name.endswith(("_truncated", "_trimmed"))}
+    assert set(result.output) == always
+    # So do the keys only an oversized output gets.
+    names = [f"h{index}" for index in range(MAX_OUTPUT_HOST_NAMES + 1)]
+    bounded = _bounded_output(
+        {
+            "changed_hosts": names,
+            "failed_hosts": names,
+            "unreachable_hosts": names,
+            "hosts": {"h": {"blob": "x" * MAX_OUTPUT_BYTES}},
+            "stats": {"blob": "x" * MAX_OUTPUT_BYTES},
+        }
+    )
+    assert set(bounded) <= set(declared)
+
+
+def test_the_docs_page_names_every_declared_output_field():
+    text = load_docs_bundle("hegemony_steps_ansible")["ansible.playbook"]
+    for field in AnsiblePlaybookHandler.output_fields:
+        assert f"output.{field.name}`" in text, field.name
+        assert field.description and field.type, field.name

@@ -19,6 +19,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
+from hegemony_step_sdk import OutputField
+
 #: Targets a probe handler checks at once when the step does not say. A probe
 #: mostly waits on the network, so one slow target should not hold up the rest.
 DEFAULT_MAX_PARALLEL_TARGETS = 10
@@ -73,6 +75,17 @@ def merge_outcomes(
 #: Evidence fields a probe's chainable output leaves out: the target is the key,
 #: and these are its identity, not what the check found.
 _IDENTITY_FIELDS = frozenset({"device_id", "device_name", "success", "error"})
+
+
+#: What a probe step built on :func:`chain_output` puts in its output, for the
+#: flow editor's variable picker.
+TARGETS_OUTPUT_FIELDS = (
+    OutputField(
+        "targets",
+        "Each target's result by target name: ok, error, latency_ms and the check's facts",
+        "object",
+    ),
+)
 
 
 def chain_output(outcomes: list[TargetOutcome]) -> dict[str, Any]:

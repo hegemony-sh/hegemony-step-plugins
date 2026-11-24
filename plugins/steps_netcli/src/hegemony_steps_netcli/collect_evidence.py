@@ -18,12 +18,15 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StepKind,
     command_label,
     for_each_target_device,
     max_parallel_from_config,
 )
 from hegemony_step_sdk.ssh import SshSecurityConfig, configure_ssh_security
+
+from .transcript import command_transcript, was_skipped
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +124,18 @@ class _DeviceOutcome:
     failure: str | None = None
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField(
+        "devices",
+        "Each device's success, error and command outputs, keyed by device name",
+        "object",
+    ),
+    OutputField("truncated", "Outputs cut short, as device:command", "list"),
+    OutputField("omitted", "Devices whose command outputs did not fit", "list"),
+)
+
+
 class CollectEvidenceHandler(BaseHandler):
     """Handler for collecting CLI evidence from devices."""
 
@@ -132,6 +147,7 @@ class CollectEvidenceHandler(BaseHandler):
     # Devices come from roles only: an additional IP has no login details.
     targeting = HandlerTargeting(roles=True, ips=False)
     config_model = CollectEvidenceConfig
+    output_fields = _OUTPUT_FIELDS
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Collect CLI command outputs as evidence from all target devices."""
@@ -203,9 +219,14 @@ class CollectEvidenceHandler(BaseHandler):
                 results = await ssh.execute_commands(commands)
                 for result in results:
                     outcome.texts[result.command] = result.output or ""
-                    if result.output:
-                        # Live view: per-command output into the Logs tab
-                        await ctx.emit_output(result.output, device=device, command=result.command)
+                    # Live view: the command line, then its output, into the
+                    # Logs tab; a command the transport skipped never ran.
+                    if not was_skipped(result):
+                        await ctx.emit_output(
+                            command_transcript(result.command, result.output),
+                            device=device,
+                            command=result.command,
+                        )
                     outcome.evidence.append(
                         {
                             "kind": "cli_output",

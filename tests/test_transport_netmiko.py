@@ -773,6 +773,70 @@ def test_http_transfer_stops_at_once_when_the_device_does_not_know_the_command(a
     assert connection.read_channel.call_count == 1
 
 
+@pytest.mark.parametrize(
+    "name", ["Invalid-image.bin", "refused.bin", "not found.cfg", "bytes", "copied"]
+)
+def test_http_transfer_does_not_read_the_echoed_name_as_an_error(name):
+    """The device echoes the URL and the name: a marker in them is not its answer."""
+    url = f"http://10.123.2.4:8080/api/dl/tok/{name}"
+    chunks = iter(
+        [
+            f"copy {url} flash:{name}\r\nDestination filename [{name}]? ",
+            f"\r\nAccessing {url}...\r\n!!!!",
+            "\r\n4096 bytes copied in 0.1 secs (40960 bytes/sec)\r\nr1#",
+        ]
+    )
+    connection = MagicMock()
+    connection.read_channel.side_effect = lambda: next(chunks, "")
+    transport = _make_transport()
+
+    with (
+        patch.object(
+            hegemony_transport_netmiko.transport, "ConnectHandler", return_value=connection
+        ),
+        patch.object(hegemony_transport_netmiko.transport, "_safe_disconnect"),
+        patch.object(hegemony_transport_netmiko.transport.time, "sleep"),
+    ):
+        result = transport._http_transfer_sync(
+            url=url, dest_fs="flash:", dest_filename=name, timeout_seconds=60
+        )
+
+    assert result["transferred"] is True, result["output"]
+    written = [c.args[0] for c in connection.write_channel.call_args_list]
+    assert written == [f"copy {url} flash:{name}\n", "\n"]
+
+
+def test_http_transfer_waits_for_an_echoed_url_split_across_reads():
+    """A read that ends inside the echoed URL does not end the dialogue."""
+    url = "http://10.123.2.4:8080/api/dl/tok/Invalid-image.bin"
+    chunks = iter(
+        [
+            "copy http://10.123.2.4:8080/api/dl/tok/Invalid",
+            "-image.bin flash:image.bin\r\nDestination filename [image.bin]? ",
+            f"\r\nAccessing {url}...\r\n!!!!",
+            "\r\n4096 bytes copied in 0.1 secs (40960 bytes/sec)\r\nr1#",
+        ]
+    )
+    connection = MagicMock()
+    connection.read_channel.side_effect = lambda: next(chunks, "")
+    transport = _make_transport()
+
+    with (
+        patch.object(
+            hegemony_transport_netmiko.transport, "ConnectHandler", return_value=connection
+        ),
+        patch.object(hegemony_transport_netmiko.transport, "_safe_disconnect"),
+        patch.object(hegemony_transport_netmiko.transport.time, "sleep"),
+    ):
+        result = transport._http_transfer_sync(
+            url=url, dest_fs="flash:", dest_filename="image.bin", timeout_seconds=60
+        )
+
+    assert result["transferred"] is True, result["output"]
+    written = [c.args[0] for c in connection.write_channel.call_args_list]
+    assert written == [f"copy {url} flash:image.bin\n", "\n"]
+
+
 # ── Jump host (bastion) hop ──────────────────────────────────────────────────
 
 

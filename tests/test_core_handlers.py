@@ -21,11 +21,13 @@ import hegemony_steps_container
 import hegemony_steps_evidence
 import hegemony_steps_flow
 import hegemony_steps_general
+import hegemony_steps_git
 import hegemony_steps_http
 import hegemony_steps_inventory
 import hegemony_steps_monitor
 import hegemony_steps_netbox
 import hegemony_steps_netcli
+import hegemony_steps_netconf
 import hegemony_steps_probe
 import hegemony_steps_secret
 import hegemony_steps_shell
@@ -37,7 +39,15 @@ WHEELS = [
     (
         hegemony_steps_probe,
         "probe",
-        {"probe.connectivity", "probe.wait_reachable", "probe.http", "probe.dns", "probe.tls"},
+        {
+            "probe.connectivity",
+            "probe.wait_reachable",
+            "probe.wait_unreachable",
+            "probe.http",
+            "probe.dns",
+            "probe.snmp",
+            "probe.tls",
+        },
     ),
     (
         hegemony_steps_netcli,
@@ -52,6 +62,18 @@ WHEELS = [
     (hegemony_steps_http, "http", {"http.request"}),
     (hegemony_steps_secret, "secret", {"secret.write"}),
     (hegemony_steps_inventory, "inventory", {"inventory.sync"}),
+    (hegemony_steps_git, "git", {"git.commit"}),
+    (
+        hegemony_steps_netconf,
+        "netconf",
+        {
+            "netconf.get",
+            "netconf.edit_config",
+            "netconf.commit",
+            "netconf.cancel_commit",
+            "netconf.rpc",
+        },
+    ),
     (
         hegemony_steps_netbox,
         "netbox",
@@ -359,12 +381,14 @@ async def test_probe_handlers_fail_the_same_way_without_any_target():
     from hegemony_steps_probe.dns_check import DnsProbeHandler
     from hegemony_steps_probe.http_check import HttpProbeHandler
     from hegemony_steps_probe.wait_reachable import WaitReachableHandler
+    from hegemony_steps_probe.wait_unreachable import WaitUnreachableHandler
 
     for handler in (
         ConnectivityCheckHandler(),
         DnsProbeHandler(),
         HttpProbeHandler(),
         WaitReachableHandler(),
+        WaitUnreachableHandler(),
     ):
         result = await handler.execute(_ip_target_ctx({}, []))
         assert result.success is False, handler.handler_id
@@ -1489,3 +1513,136 @@ async def test_collect_evidence_keeps_devices_that_share_a_name_apart():
 
     assert result.output is not None
     assert sorted(result.output["devices"]) == ["core", "edge (d1)", "edge (d2)"]
+
+
+class _PromptTransport:
+    """A transport that records the prompts the step hands it."""
+
+    def __init__(self, *, answers_prompts: bool = True) -> None:
+        self.prompts: list[Any] | None = None
+        if answers_prompts:
+            self.configure_cli_prompts = self._configure
+
+    def _configure(self, prompts) -> None:
+        self.prompts = list(prompts)
+
+    async def execute_commands(self, commands):
+        class _Result:
+            def __init__(self, command: str) -> None:
+                self.command = command
+                self.output = ""
+                self.exit_code = 0
+                self.error = None
+                self.latency_ms = 1.0
+
+        return [_Result(c) for c in commands]
+
+
+class _OneTransport:
+    def __init__(self, transport: _PromptTransport) -> None:
+        self.transport = transport
+
+    def connect(self, device, **kwargs):
+        return self.transport
+
+
+_DELETE_PROMPTS = [
+    {"command": "^delete ", "expect": r"Delete filename \[.*\]\?"},
+    {"command": "^delete ", "expect": r"\[confirm\]", "answer": "", "repeat": False},
+]
+
+
+async def test_execute_cli_hands_the_listed_prompts_to_the_transport():
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    transport = _PromptTransport()
+    result = await ExecuteCLIActionHandler().execute(
+        _netcli_ctx(
+            _OneTransport(transport), commands=["delete flash:a.bin"], prompts=_DELETE_PROMPTS
+        )
+    )
+
+    assert result.success is True, result.error
+    assert transport.prompts is not None
+    assert [p.expect for p in transport.prompts] == [p["expect"] for p in _DELETE_PROMPTS]
+
+
+async def test_execute_cli_without_prompts_leaves_the_transport_as_it_was():
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    transport = _PromptTransport()
+    result = await ExecuteCLIActionHandler().execute(_netcli_ctx(_OneTransport(transport)))
+
+    assert result.success is True, result.error
+    assert transport.prompts is None
+
+
+async def test_execute_cli_refuses_prompts_a_transport_cannot_answer():
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    result = await ExecuteCLIActionHandler().execute(
+        _netcli_ctx(
+            _OneTransport(_PromptTransport(answers_prompts=False)),
+            commands=["delete flash:a.bin"],
+            prompts=_DELETE_PROMPTS,
+        )
+    )
+
+    assert result.success is False
+    assert "cannot answer prompts" in (result.error or "")
+
+
+async def test_execute_cli_rejects_an_invalid_prompt_before_connecting():
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    services = _RecordingConnects()
+    result = await ExecuteCLIActionHandler().execute(
+        _netcli_ctx(services, prompts=[{"expect": "("}])
+    )
+
+    assert result.success is False
+    assert (result.error or "").startswith("Invalid prompts:")
+    assert services.calls == []
+
+
+async def test_execute_cli_declares_the_keys_it_outputs():
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    result = await ExecuteCLIActionHandler().execute(_netcli_ctx(_OneTransport(_PromptTransport())))
+
+    assert result.success is True, result.error
+    assert {field.name for field in ExecuteCLIActionHandler.output_fields} == set(result.output)
+
+
+async def test_collect_evidence_declares_the_keys_it_outputs():
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    services = _AnsweringConnects({"r1": {"show ip ospf neighbor": "10.255.0.2 Full/DR"}})
+    result = await CollectEvidenceHandler().execute(_collect_ctx(services, "r1"))
+
+    assert result.success is True, result.error
+    assert {field.name for field in CollectEvidenceHandler.output_fields} == set(result.output)
+
+
+def test_netcli_execute_docs_name_every_declared_output_field():
+    from hegemony_step_sdk.docs import load_docs_bundle
+    from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+    page = load_docs_bundle("hegemony_steps_netcli")["netcli.execute"]
+    output_section = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in ExecuteCLIActionHandler.output_fields:
+        name = field.name
+        assert f"`{name}`" in output_section or f"output.{name}`" in output_section, name
+        assert field.description and field.type, name
+
+
+def test_netcli_collect_evidence_docs_name_every_declared_output_field():
+    from hegemony_step_sdk.docs import load_docs_bundle
+    from hegemony_steps_netcli.collect_evidence import CollectEvidenceHandler
+
+    page = load_docs_bundle("hegemony_steps_netcli")["netcli.collect_evidence"]
+    output_section = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in CollectEvidenceHandler.output_fields:
+        name = field.name
+        assert f"`{name}`" in output_section or f"output.{name}`" in output_section, name
+        assert field.description and field.type, name

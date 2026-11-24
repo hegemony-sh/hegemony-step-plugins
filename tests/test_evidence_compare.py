@@ -509,7 +509,7 @@ async def test_nothing_in_common_still_records_both_sides(monkeypatch: pytest.Mo
 
 
 class _RunApi:
-    """Host services whose API serves one run's artifacts and counts the fetches."""
+    """Host services that serve one run's artifacts and count the fetches."""
 
     status_code = 200
 
@@ -517,21 +517,12 @@ class _RunApi:
         self.artifacts = artifacts
         self.fetches = 0
 
-    def open_api_client(self, timeout: float = 30) -> _RunApi:
-        return self
-
-    async def __aenter__(self) -> _RunApi:
-        return self
-
-    async def __aexit__(self, *exc: object) -> bool:
-        return False
-
-    async def get(self, url: str) -> _RunApi:
+    async def fetch_run_artifacts(self, run_id: str) -> list[dict]:
+        """The host's named method: raises on a failed fetch, as the platform does."""
         self.fetches += 1
-        return self
-
-    def json(self) -> dict:
-        return {"artifacts": self.artifacts}
+        if self.status_code != 200:
+            raise RuntimeError(f"HTTP {self.status_code}")
+        return self.artifacts
 
 
 async def test_execute_fetches_the_run_artifacts_once() -> None:
@@ -628,3 +619,86 @@ def test_json_diff_on_text_that_is_not_json_is_exact() -> None:
     passed, details = handler._compare(_ROUTES, _ROUTES + "\n", "json_diff", [])
     assert passed is False
     assert details["json_parsed"] is False
+
+
+def _ssh_algorithms() -> dict:
+    """The record the platform adds to every step that opened an SSH connection."""
+    return {
+        "kind": "transport_meta",
+        "name": "ssh-algorithms",
+        "content_json": {
+            "hops": [{"hop": "device", "kex": "diffie-hellman-group1-sha1", "cipher": "aes256-cbc"}]
+        },
+    }
+
+
+async def test_changed_mode_ignores_the_platforms_connection_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One device, one command that changed: the same SSH record on both sides must not fail it."""
+    egress = {"kind": "egress_report", "name": "egress", "content_json": {"allowed": []}}
+    pre = [*_collected({"show flash": "2 files"}), _ssh_algorithms(), egress]
+    post = [*_collected({"show flash": "3 files"}), _ssh_algorithms(), egress]
+
+    result = await _compare(pre, post, monkeypatch, mode="changed")
+
+    assert result.success is True, result.error
+    content = result.evidence[0]["content_json"]
+    assert content["artifacts_compared"] == ["r1:show flash"]
+
+
+async def test_an_explicit_artifact_name_still_compares_a_platform_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pre = [*_collected({"show flash": "2 files"}), _ssh_algorithms()]
+    post = [*_collected({"show flash": "3 files"}), _ssh_algorithms()]
+    handler = _handler_with(pre, post, monkeypatch)
+
+    result = await handler.execute(
+        _ctx(
+            precheck_step_id="precheck",
+            postcheck_step_id="postcheck",
+            comparison_type="exact",
+            artifact_name="ssh-algorithms",
+        )
+    )
+
+    assert result.success is True, result.error
+    assert result.evidence[0]["content_json"]["artifacts_compared"] == ["ssh-algorithms"]
+
+
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The editor's variable picker lists output_fields; they must match, also
+    # when nothing could be compared.
+    declared = {field.name for field in CompareEvidenceHandler.output_fields}
+    compared = await _handler_with(
+        [_artifact("dc1:show version", "v1")], [_artifact("dc1:show version", "v1")], monkeypatch
+    ).execute(_ctx(precheck_step_id="precheck", postcheck_step_id="postcheck"))
+    assert compared.success is True, compared.error
+    assert set(compared.output) == declared
+
+    nothing = await _handler_with(
+        [_artifact("dc1:show ip route ospf", "x")],
+        [_artifact("dc1:show ip route ospf", "x")],
+        monkeypatch,
+    ).execute(
+        _ctx(
+            precheck_step_id="precheck",
+            postcheck_step_id="postcheck",
+            artifact_name_pattern="*running-config",
+        )
+    )
+    assert nothing.success is False
+    assert set(nothing.output) == declared
+
+
+def test_the_docs_page_names_every_declared_output_field() -> None:
+    from hegemony_step_sdk.docs import load_docs_bundle
+
+    page = load_docs_bundle("hegemony_steps_evidence")["evidence.compare"]
+    output = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in CompareEvidenceHandler.output_fields:
+        assert f"`{field.name}`" in output, field.name
+        assert field.description and field.type, field.name

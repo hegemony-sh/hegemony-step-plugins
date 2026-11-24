@@ -22,7 +22,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from hegemony_step_sdk import BaseHandler, HandlerContext, HandlerResult, HandlerTargeting, StepKind
+from hegemony_step_sdk import (
+    BaseHandler,
+    HandlerContext,
+    HandlerResult,
+    HandlerTargeting,
+    OutputField,
+    StepKind,
+)
 from hegemony_steps_container.runner import (
     KILL_AFTER_SECONDS,
     OUTPUT_DIR,
@@ -35,6 +42,7 @@ from hegemony_steps_container.runner import (
 
 from .common import (
     BINARIES,
+    IMAGE_ID_RE,
     KEEP_DIR,
     PLAN_FILE,
     PLAN_TEXT_MISSING_NOTE,
@@ -59,6 +67,8 @@ from .common import (
     tool_deadline,
     tool_env,
     tool_kill_after,
+    tool_version,
+    tool_version_line,
     workdir_for,
 )
 
@@ -155,6 +165,7 @@ def build_apply_script(
         "\n".join(
             [
                 *script_header(deadline, kill_after),
+                tool_version_line(tf, run),
                 f"if [ ! -f {quoted_workdir}/{PLAN_FILE} ]; then",
                 f"  echo {shlex.quote(NO_PLAN_MESSAGE)} >&2",
                 f"  exit {EXIT_NO_PLAN}",
@@ -211,6 +222,10 @@ class PlanHandoff(BaseModel):
     engine: Engine
     image: str = Field(min_length=1)
     image_digest: str = ""
+    # The plan's image ID; the apply runs only an image with it. None from an
+    # older tf.plan, which did not record it; read_plan_handoff refuses one
+    # that is recorded but empty or malformed.
+    image_id: str | None = None
     # Whether the plan step kept a copy of its image in the platform registry;
     # the apply follows it (a plan from an older tf.plan reads as the default).
     cache_image: bool = True
@@ -223,6 +238,8 @@ class PlanHandoff(BaseModel):
     working_dir: str
     apply_ready: bool
     has_changes: bool
+    # The version the plan's tool reported ("" from an older tf.plan, or unknown).
+    tool_version: str = ""
     outputs: dict[str, Any] = Field(default_factory=dict)
     sensitive_outputs: list[str] = Field(default_factory=list)
 
@@ -244,6 +261,16 @@ def read_plan_handoff(plan_step: str, output: dict[str, Any]) -> PlanHandoff | s
             f"the plan of step {plan_step!r} was made by an older version of tf.plan, "
             "which did not record the saved plan's digest: plan again"
         )
+    # A tf.plan that records the field but could not read the ID would turn
+    # the apply's image check off; only an older tf.plan, without the field,
+    # applies unchecked.
+    if "image_id" in output and not (
+        isinstance(output["image_id"], str) and IMAGE_ID_RE.fullmatch(output["image_id"])
+    ):
+        return (
+            f"the plan of step {plan_step!r} could not record its image's ID, so the "
+            "apply cannot check it runs the image that made the plan: plan again"
+        )
     try:
         handoff = PlanHandoff.model_validate(output)
     except ValidationError as exc:
@@ -259,6 +286,20 @@ def read_plan_handoff(plan_step: str, output: dict[str, Any]) -> PlanHandoff | s
             f"{handoff.working_dir!r}, not {expected!r}"
         )
     return handoff
+
+
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("applied", "Whether a plan was applied (false when it had no changes)", "bool"),
+    OutputField(
+        "tool_version",
+        "Version of the tool that applied, such as 1.12.6; the plan's when nothing was "
+        "applied (empty when the tool did not report it)",
+        "string",
+    ),
+    OutputField("outputs", "Non-sensitive output values after the apply", "object"),
+    OutputField("sensitive_outputs", "Names of sensitive outputs", "list"),
+)
 
 
 class TfApplyHandler(BaseHandler):
@@ -278,6 +319,7 @@ class TfApplyHandler(BaseHandler):
     raw_config_keys = frozenset({"secret_env", "state_encryption_key"})
     default_timeout_seconds = 3600
     config_model = TfApplyConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"timeout_seconds": 3600}
     run_timeout_field = "timeout_seconds"
 
@@ -321,9 +363,13 @@ class TfApplyHandler(BaseHandler):
             return HandlerResult(
                 success=True,
                 summary=summary,
+                # No container ran, so this is the only metric there is.
+                metrics={"tool_version": handoff.tool_version},
                 # The state is as the plan found it, and so are its outputs.
                 output={
                     "applied": False,
+                    # No tool ran here: the version the plan was made with.
+                    "tool_version": handoff.tool_version,
                     "outputs": handoff.outputs,
                     "sensitive_outputs": handoff.sensitive_outputs,
                 },
@@ -388,6 +434,8 @@ class TfApplyHandler(BaseHandler):
                     handler_id=self.handler_id,
                     extra_hosts=dict(access.extra_hosts) if access else {},
                     stop_grace_seconds=config.stop_grace_seconds,
+                    # The image the plan ran, whatever registry serves it now.
+                    expected_image_id=handoff.image_id or "",
                 )
                 outcome = await run_container_job(ctx, job)
         except (ValueError, RuntimeError) as exc:
@@ -415,8 +463,11 @@ class TfApplyHandler(BaseHandler):
         metrics = {
             "exit_code": outcome.exit_code,
             "duration_seconds": outcome.duration_seconds,
+            "tool_version": tool_version(outcome),
             "image": image,
             "image_digest": outcome.image_digest,
+            "image_id": outcome.image_id,
+            "image_local_id": outcome.image_local_id,
             "image_served": outcome.image_served,
             "image_source": outcome.image_source,
             "image_cached": outcome.image_cached,
@@ -445,7 +496,12 @@ class TfApplyHandler(BaseHandler):
             summary=summary,
             metrics=metrics,
             evidence=list(outcome.evidence),
-            output={"applied": True, "outputs": values, "sensitive_outputs": sensitive},
+            output={
+                "applied": True,
+                "tool_version": metrics["tool_version"],
+                "outputs": values,
+                "sensitive_outputs": sensitive,
+            },
         )
 
 

@@ -23,6 +23,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     InvalidConfigError,
+    OutputField,
     StepKind,
 )
 
@@ -230,10 +231,24 @@ class RunFlowConfig(BaseModel):
     )
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("child_run_id", "Id of the child run", "string"),
+    OutputField("child_workflow_id", "Workflow id of the child run", "string"),
+    OutputField("child_status", "Child run status (PENDING when the step did not wait)", "string"),
+    OutputField("waited", "Whether the step waited for the child run", "bool"),
+    OutputField(
+        "outputs", "The child flow's outputs (when the step waited and it succeeded)", "object"
+    ),
+)
+
+
 class RunFlowHandler(BaseHandler):
     """Launch another committed flow from the current flow."""
 
     handler_id = "flow.run"
+    # Starts, watches and cancels a child run of the platform.
+    central_only = True
     default_timeout_seconds = 7200
     supported_kinds = [StepKind.ACTION, StepKind.EXECUTE]
     display_name = "Run Flow"
@@ -241,6 +256,7 @@ class RunFlowHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = RunFlowConfig
+    output_fields = _OUTPUT_FIELDS
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         errors: list[str] = []

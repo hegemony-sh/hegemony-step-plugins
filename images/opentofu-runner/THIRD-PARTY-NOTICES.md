@@ -58,6 +58,13 @@ build flags. It is a statically linked Go program: the Go standard library
 Apache-2.0, BSD and MIT modules) are compiled into it. Their copyright notices
 and licence texts are in `/usr/share/doc/hegemony/opentofu/licenses/`.
 
+**One image per OpenTofu series.** The Images workflow builds the Dockerfile
+once for each series in [`variants.json`](variants.json), with that entry's
+`OPENTOFU_VERSION`, `OPENTOFU_COMMIT`, Go toolchain and `GO_MODULE_RAISES`, and
+tags the result with the series (`X.Y.Z-tofu1.13`). These notices cover each of
+them; the files written at build time, listed above, say exactly what a given
+image holds.
+
 **The one change.** The OpenTofu release pins some Go modules at versions with
 known HIGH vulnerabilities, and no OpenTofu release fixes them yet. The build
 raises exactly those modules (the Dockerfile's `GO_MODULE_RAISES`) to their
@@ -71,9 +78,10 @@ code those modules serve run on it during the build.
 
 ### Build stage
 
-`golang` (`golang:1.26-bookworm`): the Go toolchain that compiles `tofu`. Only
-the compiled binary leaves the build stage; the Go standard library compiled
-into it is BSD-3-Clause.
+`golang` (`golang:1.26-bookworm`, or `golang:1.27-bookworm` for an OpenTofu
+series whose `go.mod` asks for Go 1.27): the Go toolchain that compiles
+`tofu`. Only the compiled binary leaves the build stage; the Go standard
+library compiled into it is BSD-3-Clause.
 
 ### Base image
 

@@ -29,6 +29,12 @@ checked after the change. So does a pair whose capture failed on either
 side, whatever the comparison mode: the device could not be reached or the
 command returned an error, so there is no output to compare.
 Artifacts found only in the postcheck are listed but do not fail the step.
+The records the platform adds to a step about its connection are left out:
+`ssh-algorithms` (the SSH algorithms each hop agreed on) and
+`egress-report-*` (what the step reached on the network). They are usually
+the same before and after a change, so in "changed" mode they would fail the
+step however the captured output changed. Name one in "Only this artifact"
+to compare it.
 "Only this artifact" narrows the comparison to one exact artifact name, and
 "Only artifacts matching" filters names with a glob (ignored when the exact
 name is set) so volatile outputs such as routing or neighbor tables can be

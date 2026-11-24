@@ -61,6 +61,8 @@ class SleepHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = SleepConfig
+    # Puts nothing in its step output.
+    output_fields = ()
     default_config = {"duration_seconds": 30}
     run_timeout_field = "duration_seconds"
 

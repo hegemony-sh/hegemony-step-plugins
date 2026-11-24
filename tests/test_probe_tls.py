@@ -3274,3 +3274,21 @@ async def test_an_unavailable_organization_list_fails_the_step(pki):
     result = await run_step({"endpoints": "127.0.0.1:1"}, services=services)
     assert result.success is False
     assert result.error == "Could not load the organization's trusted CAs: database unavailable"
+
+
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs(pki):
+    # The editor's variable picker lists output_fields; they must match.
+    result = await run_step(
+        {"pem": pem_of(pki.leaves["rsa"].cert, pki.inter), "ca_bundle": pki.root_pem}
+    )
+
+    declared = [output_field.name for output_field in TlsProbeHandler.output_fields]
+    assert len(declared) == len(set(declared))
+    assert set(declared) == set(result.output)
+
+
+def test_the_docs_page_names_every_declared_output_field():
+    text = load_docs_bundle("hegemony_steps_probe")["probe.tls"]
+    for output_field in TlsProbeHandler.output_fields:
+        assert f"output.{output_field.name}`" in text, output_field.name
+        assert output_field.description and output_field.type, output_field.name

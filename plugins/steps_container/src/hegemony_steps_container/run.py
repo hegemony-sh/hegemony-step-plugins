@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -30,6 +31,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     ImageCache,
+    OutputField,
     StepKind,
 )
 from hegemony_step_sdk.trust import (
@@ -91,6 +93,19 @@ logger = logging.getLogger(__name__)
 # The image-size lookup is a caption, not a step operation: bounded well below
 # any step deadline so a wedged daemon costs a missing number, not the step.
 _IMAGE_INSPECT_TIMEOUT = 15.0
+# Longest a cache hit spends checking its copy against the image's registry.
+_VERIFY_MAX_SECONDS = 30.0
+# The image inspect that names an image: its ID and its platform. The variant
+# is read with `index`, not as `.Variant`: Docker 29 leaves the key out of the
+# inspect data when the image has none (any amd64 image), and `.Variant` then
+# fails the whole template ("map has no entry for key"), so no image's ID
+# could be read. `index` gives "" for a missing key.
+_IDENTITY_FORMAT = '{{.Id}} {{.Os}}/{{.Architecture}}{{with index . "Variant"}}/{{.}}{{end}}'
+# What `docker info` names the containerd image store's snapshotter.
+_CONTAINERD_SNAPSHOTTER = "io.containerd.snapshotter"
+# What `docker image inspect --format {{.Id}}` prints: on the classic store the
+# configuration digest, on the containerd store the pulled manifest's or index's.
+_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 #: Saving a copy to the platform registry: keep this much of the step's deadline
 #: for the step itself, never spend more than the cap, and skip below the floor.
 _COPY_RESERVE_SECONDS = 20.0
@@ -99,6 +114,42 @@ _COPY_MIN_SECONDS = 15.0
 #: Tagging the pulled image for its copy is local and quick; this is the most a
 #: wedged daemon may spend on it, inside whatever the copy budget still allows.
 _TAG_TIMEOUT_SECONDS = 30.0
+
+
+def _registry_client(
+    host: str, cache: ImageCache | None, docker_env: dict[str, str]
+) -> RegistryClient:
+    """The client for the registry at ``host``, with the step's login for it.
+
+    The platform registry (``cache``'s) is reached directly on the compose
+    network, never through a proxy; any other registry through the worker's
+    proxy settings.
+    """
+    if cache is not None and host == cache.registry:
+        return RegistryClient(
+            cache.api_url,
+            login_for(cache.registry, docker_env),
+            trust_env=False,
+            transport=_registry_transport(cache.api_url),
+        )
+    url = upstream_api_url(host)
+    return RegistryClient(
+        url, login_for(host, docker_env), trust_env=True, transport=_registry_transport(url)
+    )
+
+
+@dataclass(frozen=True)
+class _ImageIdentity:
+    """A pulled image, as :meth:`RunContainerHandler._image_identity` read it.
+
+    ``image_id`` is the configuration digest, the same for every copy of one
+    image ("" when unknown); ``local_id`` the daemon's own ID, which
+    ``docker create`` takes; ``platform`` ``os/arch[/variant]``.
+    """
+
+    local_id: str = ""
+    image_id: str = ""
+    platform: str = ""
 
 
 def _registry_transport(base_url: str) -> httpx.AsyncBaseTransport | None:
@@ -205,8 +256,9 @@ class RunContainerConfig(BaseModel):
         description=(
             "Keep a copy of the pulled image in the platform registry, under this "
             "organization, and use it on later runs. A tag is still checked against the "
-            "image's registry by digest, and the copy serves when that registry is "
-            "unreachable. Turn off for an image that must come straight from its registry "
+            "image's registry by digest, and a copy runs only once checked to be the image "
+            "that digest names, so not while that registry is unreachable. Turn off for an "
+            "image that must come straight from its registry "
             "every time. No effect when the platform runs no registry."
         ),
     )
@@ -1233,6 +1285,8 @@ def _container_run_result(ctx: HandlerContext, outcome: ContainerJobResult) -> H
             "duration_seconds": outcome.duration_seconds,
             "image": outcome.image,
             "image_digest": outcome.image_digest,
+            "image_id": outcome.image_id,
+            "image_local_id": outcome.image_local_id,
             "image_served": outcome.image_served,
             "image_source": outcome.image_source,
             "image_cached": outcome.image_cached,
@@ -1266,6 +1320,16 @@ def _host_access_enabled(config: dict[str, Any]) -> list[str]:
     ]
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("stdout", "Standard output (first 4096 characters)", "string"),
+    OutputField("stderr", "Standard error (first 4096 characters)", "string"),
+    OutputField(
+        "data", "Contents of /hegemony/out/output.json, when the container wrote it", "object"
+    ),
+)
+
+
 class RunContainerHandler(BaseHandler):
     """Handler for running commands inside Docker containers.
 
@@ -1283,6 +1347,7 @@ class RunContainerHandler(BaseHandler):
     # Secret references reach the handler as written (see resolve_secret_values).
     raw_config_keys = frozenset({"secrets"})
     config_model = RunContainerConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"timeout_seconds": 300}
     run_timeout_field = "timeout_seconds"
 
@@ -2297,26 +2362,109 @@ class RunContainerHandler(BaseHandler):
             # (the fallback, for a pull that reported none) could name what a
             # concurrent pull of the same tag brought instead. A reference that
             # is already digest-qualified needs neither.
-            image_digest = digest_reference(
-                served, acquired.digest
-            ) or await self._image_repo_digest(
-                docker_bin=docker_bin, image=served, docker_env=docker_env, deadline=deadline
+            # A copy checked by image ID (its pull reported no digest) runs by
+            # that ID: looking a digest up by its tag now could name another image.
+            image_digest = digest_reference(served, acquired.digest) or (
+                ""
+                if acquired.image_id
+                else await self._image_repo_digest(
+                    docker_bin=docker_bin, image=served, docker_env=docker_env, deadline=deadline
+                )
             )
             if image_digest:
                 config = {**config, "image": image_digest}
+            # The image ID (the config digest) is the same for every copy of one
+            # image, whatever manifest a registry serves it by: it is what shows
+            # that a cached copy is the image a job asked for (see
+            # ContainerJob.expected_image_id). `local_id` is what the daemon
+            # calls the image, which `docker create` takes.
+            expected_image_id = (getattr(job, "expected_image_id", "") or "").strip()
+            if acquired.checked_local_id and acquired.checked_config_id:
+                # The cache check just read this very reference: reuse it.
+                identity = _ImageIdentity(
+                    local_id=acquired.checked_local_id,
+                    image_id=acquired.checked_config_id,
+                    platform=acquired.checked_platform,
+                )
+            else:
+                identity = await self._image_identity(
+                    reference=image_digest or acquired.image_id or served,
+                    repository=served,
+                    cache=getattr(runtime, "image_cache", None),
+                    docker_bin=docker_bin,
+                    docker_env=docker_env,
+                    deadline=deadline,
+                    resolve=bool(expected_image_id or getattr(job, "needs_image_id", False)),
+                )
+            image_id = identity.image_id
+            # Only the configuration digest is compared: the daemon's own ID
+            # differs between a registry's image and its copy on the containerd
+            # store, so it cannot say two pulls brought the same image.
+            if expected_image_id and image_id != expected_image_id:
+                if image_id:
+                    message = (
+                        f"The pulled image {image_digest or served} has image ID {image_id}, "
+                        f"not {expected_image_id}, the image this step must run; refusing "
+                        "to run it"
+                    )
+                else:
+                    message = (
+                        f"The image ID of the pulled image {image_digest or served} could "
+                        "not be read (the sandbox daemon or the image's registry did not "
+                        f"answer; the daemon knows it as {identity.local_id or 'nothing'}), "
+                        f"so it cannot be shown to be {expected_image_id}, the image this "
+                        "step must run; refusing to run it. This can pass on a retry"
+                    )
+                await _safe_emit_progress(
+                    message,
+                    attrs={
+                        "milestone": "image_id_mismatch",
+                        "image": image,
+                        "served": served,
+                        "digest": image_digest,
+                        "image_id": image_id,
+                        "image_local_id": identity.local_id,
+                        "expected_image_id": expected_image_id,
+                    },
+                )
+                return HandlerResult(
+                    success=False,
+                    error=message,
+                    summary="Image differs from the expected one",
+                    metrics={
+                        "image": image,
+                        "image_digest": image_digest,
+                        "image_served": served,
+                        "image_source": acquired.source,
+                        "image_id": image_id,
+                        "image_local_id": identity.local_id,
+                        "expected_image_id": expected_image_id,
+                    },
+                )
+            # Without a registry digest the tag is all that names the image, and
+            # a pull or retag can move it between this check and `docker create`:
+            # the container then runs by the image ID just read, so what runs is
+            # the image that was checked and recorded.
+            if not image_digest and identity.local_id:
+                config = {**config, "image": identity.local_id}
             # The step's log names what runs, digest included, as its evidence does.
             await _safe_emit_progress(
                 f"Running the image by digest: {image_digest}"
                 if image_digest
                 else (
-                    f"No registry digest for {served}: the container runs by tag "
-                    "(an image built on the sandbox daemon and never pushed has none)"
+                    f"No registry digest for {served}: the container runs by its image "
+                    f"ID {identity.local_id} (no registry digest is available)"
+                    if identity.local_id
+                    else f"No registry digest for {served}: the container runs by tag "
+                    "(no registry digest or image ID is available)"
                 ),
                 attrs={
                     "milestone": "image_digest",
                     "image": image,
                     "served": served,
                     "digest": image_digest,
+                    "image_id": image_id,
+                    "image_local_id": identity.local_id,
                 },
             )
 
@@ -2732,6 +2880,8 @@ class RunContainerHandler(BaseHandler):
                                 "error": error,
                                 "image": image,
                                 "image_digest": image_digest,
+                                "image_id": image_id,
+                                "image_local_id": identity.local_id,
                                 "image_served": served,
                                 "image_source": acquired.source,
                                 "image_cached": acquired.cached,
@@ -2875,6 +3025,8 @@ class RunContainerHandler(BaseHandler):
                         "exit_code": exit_code,
                         "image": image,
                         "image_digest": image_digest,
+                        "image_id": image_id,
+                        "image_local_id": identity.local_id,
                         "image_served": served,
                         "image_source": acquired.source,
                         "image_cached": acquired.cached,
@@ -2909,6 +3061,8 @@ class RunContainerHandler(BaseHandler):
                 collected=collected,
                 collect_errors=collect_errors,
                 image_digest=image_digest,
+                image_id=image_id,
+                image_local_id=identity.local_id,
                 image_served=served,
                 image_source=acquired.source,
                 image_cached=acquired.cached,
@@ -3241,6 +3395,149 @@ class RunContainerHandler(BaseHandler):
         except TimeoutError:
             raise subprocess.TimeoutExpired([docker_bin, "pull", image], remaining) from None
 
+    async def _copy_matches_upstream(
+        self,
+        *,
+        upstream: RegistryClient,
+        repo: str,
+        upstream_digest: str,
+        copy: str,
+        pinned: str,
+        cache: ImageCache | None,
+        image: str,
+        docker_bin: str,
+        docker_env: dict[str, str],
+        deadline: float,
+        emit: Callable[..., Awaitable[None]],
+    ) -> tuple[bool, _ImageIdentity]:
+        """Whether the pulled cache ``copy`` is the image ``upstream_digest`` names.
+
+        ``pinned`` is the reference the container will run by (the copy at the
+        digest its pull reported, or its tag when the pull reported none); the
+        check inspects that. Returns the verdict and what was read of the copy
+        (empty where the daemon or its registry did not say).
+
+        A copy is filed under a tag named after the upstream digest, and a tag
+        can be pushed over. The copy's own digest differs from the upstream one
+        (a copy keeps one platform, in the daemon's manifest format), but its
+        image ID is the config digest the upstream manifest names for that
+        platform. True only for a copy shown to be the image: a check that
+        cannot be made (upstream unreachable or refusing, the daemon not
+        saying, a platform upstream has no image for) is no verdict, and the
+        copy is refused like one shown to be another image. Any step of the
+        organization can push over the key tag, and an image made to fail the
+        check (a platform upstream does not serve) must not be run for it.
+        """
+        problem = ""
+        identity = _ImageIdentity()
+        image_id = ""
+        expected: str | None = None
+        started = time.monotonic()
+        budget = min(deadline - started - _COPY_RESERVE_SECONDS, _VERIFY_MAX_SECONDS)
+        if budget <= 0:
+            problem = "no time left in the step"
+        else:
+            # Half the budget at most for reading the copy: the upstream lookup
+            # the verdict depends on always keeps the other half.
+            identity = await self._image_identity(
+                reference=pinned,
+                repository=copy,
+                cache=cache,
+                docker_bin=docker_bin,
+                docker_env=docker_env,
+                deadline=started + budget / 2,
+                resolve=True,
+            )
+            image_id, platform = identity.image_id, identity.platform
+            if not image_id or not platform:
+                problem = "the copy's image ID could not be read"
+            else:
+                try:
+                    expected = await asyncio.wait_for(
+                        upstream.config_digest(repo, upstream_digest, platform),
+                        timeout=max(budget - (time.monotonic() - started), 0.1),
+                    )
+                except (RegistryUnavailable, RegistryDenied) as exc:
+                    problem = str(exc)
+                except TimeoutError:
+                    problem = "the image's registry did not answer in time"
+                else:
+                    if expected is None:
+                        problem = f"its registry names no {platform} image for {upstream_digest}"
+        if problem:
+            await emit(
+                f"Could not check the cached copy {copy} against the image {upstream_digest} "
+                f"names ({problem}). Not running it; pulling {image} from its registry",
+                attrs={
+                    "milestone": "image_cache_unverified",
+                    "image": image,
+                    "copy": copy,
+                    "reason": problem,
+                },
+            )
+            return False, identity
+        if image_id == expected:
+            await emit(
+                f"The cached copy of {image} is the image {upstream_digest} names "
+                f"(image ID {image_id})",
+                attrs={
+                    "milestone": "image_cache_verified",
+                    "image": image,
+                    "copy": copy,
+                    "image_id": image_id,
+                },
+            )
+            return True, identity
+        await emit(
+            f"The cached copy {copy} is not the image {upstream_digest} names: its image ID "
+            f"is {image_id}, not {expected}. Not running it; pulling {image} from its "
+            "registry and saving a true copy over it",
+            attrs={
+                "milestone": "image_cache_mismatch",
+                "image": image,
+                "copy": copy,
+                "image_id": image_id,
+                "expected_image_id": expected,
+            },
+        )
+        return False, identity
+
+    async def _image_id_and_platform(
+        self, *, docker_bin: str, image: str, docker_env: dict[str, str], timeout: float
+    ) -> tuple[str, str]:
+        """``image``'s ID and ``os/arch[/variant]`` from the daemon; empty when it does not say."""
+        try:
+            proc = await self._run_docker(
+                docker_bin,
+                ["image", "inspect", "--format", _IDENTITY_FORMAT, image],
+                env=docker_env,
+                timeout=min(timeout, _IMAGE_INSPECT_TIMEOUT),
+            )
+        except (subprocess.SubprocessError, OSError):
+            return "", ""
+        if proc.returncode != 0:
+            # The caller carries on without the ID; the reason is kept here,
+            # since a failure for every image would otherwise go unexplained.
+            logger.warning(
+                "Could not read the image ID and platform of %s: %s",
+                image,
+                (str(proc.stderr or "").strip() or f"exit code {proc.returncode}")[:300],
+            )
+            return "", ""
+        parts = proc.stdout.split()
+        if len(parts) < 2:
+            logger.warning("The daemon named no image ID and platform for %s", image)
+            return "", ""
+        image_id, platform = parts[0], parts[1]
+        if not _IMAGE_ID.fullmatch(image_id) or platform.count("/") not in (1, 2):
+            logger.warning(
+                "The daemon named an unusable image ID and platform for %s: %r",
+                image,
+                proc.stdout.strip()[:300],
+            )
+            return "", ""
+        return image_id, platform
+
     async def _acquire_image(
         self,
         *,
@@ -3262,8 +3559,11 @@ class RunContainerHandler(BaseHandler):
         for a copy of that digest under the step's own namespace and then the
         read-only ones, and pull the copy when there is one. A missing copy
         means pulling that digest from upstream and saving a copy of it
-        (:meth:`_store_copy`). An unreachable upstream falls back to the last
-        copy by tag, with a warning; an upstream that refuses the check gets
+        (:meth:`_store_copy`). A copy runs only once checked to be the image
+        (:meth:`_copy_matches_upstream`), since its key tag can be pushed
+        over. An unreachable upstream means no copy is used, since none can be
+        checked: the plain pull, which then fails like it would without the
+        cache, with a note; an upstream that refuses the check gets
         the plain pull, with no copy served or saved, since a refusal may mean
         access was withdrawn; an unreachable platform registry means a plain
         upstream pull, with a note. Every registry lookup is bounded by what
@@ -3294,19 +3594,8 @@ class RunContainerHandler(BaseHandler):
 
         assert cache is not None  # plan_cache returned a plan
         reference = plan.reference
-        registry = RegistryClient(
-            cache.api_url,
-            login_for(cache.registry, docker_env),
-            trust_env=False,
-            transport=_registry_transport(cache.api_url),
-        )
-        upstream_url = upstream_api_url(reference.host)
-        upstream = RegistryClient(
-            upstream_url,
-            login_for(reference.host, docker_env),
-            trust_env=True,
-            transport=_registry_transport(upstream_url),
-        )
+        registry = _registry_client(cache.registry, cache, docker_env)
+        upstream = _registry_client(reference.host, None, docker_env)
 
         # 1. The digest upstream serves today: the key a copy is filed under,
         # and what the pull below asks for.
@@ -3351,9 +3640,17 @@ class RunContainerHandler(BaseHandler):
             # None: the tag does not exist upstream; the pull below says so.
         key_tag = cache_key_tag(upstream_digest) if upstream_digest else None
 
-        # 2. A copy of that digest, or, with upstream unreachable, the last copy
-        # under the tag.
-        lookup_tag = key_tag or (reference.tag if upstream_problem else None)
+        # 2. A copy of that digest. With upstream unreachable there is none to
+        # look for: the last copy under the tag could be anything any step of
+        # the organization pushed there, and nothing is left to check it by.
+        if upstream_problem is not None:
+            await emit(
+                f"{reference.host} is unreachable ({upstream_problem}); a cached copy of "
+                f"{image} cannot be checked against it, so none is used. Pulling it from "
+                "its registry",
+                attrs={"milestone": "image_cache_skip", "image": image, "reason": upstream_problem},
+            )
+        lookup_tag = key_tag
         cache_problem: str | None = None
         copy: str | None = None
         if lookup_tag:
@@ -3373,23 +3670,11 @@ class RunContainerHandler(BaseHandler):
                 if found is not None:
                     copy = plan.copy_reference(repo, lookup_tag)
                     break
-        if copy is not None:
-            if upstream_problem:
-                await emit(
-                    f"{reference.host} is unreachable ({upstream_problem}); using the cached "
-                    f"copy of {image} from the platform registry",
-                    attrs={
-                        "milestone": "image_cache_stale",
-                        "image": image,
-                        "copy": copy,
-                        "reason": upstream_problem,
-                    },
-                )
-            else:
-                await emit(
-                    f"Using the cached copy of {image} from the platform registry",
-                    attrs={"milestone": "image_cache_hit", "image": image, "copy": copy},
-                )
+        if copy is not None and upstream_digest:
+            await emit(
+                f"Using the cached copy of {image} from the platform registry",
+                attrs={"milestone": "image_cache_hit", "image": image, "copy": copy},
+            )
             pulled = await self._pull_image(
                 docker_bin=docker_bin,
                 image=copy,
@@ -3398,19 +3683,63 @@ class RunContainerHandler(BaseHandler):
                 deadline=deadline,
                 emit=emit,
             )
-            if not isinstance(pulled, HandlerResult):
+            if isinstance(pulled, HandlerResult):
+                # The copy was there a moment ago and cannot be pulled now: the
+                # image's own registry is the fallback, and saving a copy
+                # afterwards would ask the same registry again.
+                cache_problem = pulled.error or "the copy could not be pulled"
+                await emit(
+                    f"Could not pull the cached copy ({cache_problem}); pulling {image} from "
+                    "its registry",
+                    attrs={
+                        "milestone": "image_cache_miss",
+                        "image": image,
+                        "reason": cache_problem,
+                    },
+                )
+            elif pulled.digest == upstream_digest:
+                # The copy is the upstream manifest itself (a copy made by a
+                # tool that keeps digests): the same digest is the same content.
+                await emit(
+                    f"The cached copy of {image} is the image {upstream_digest} names "
+                    "(the same digest)",
+                    attrs={"milestone": "image_cache_verified", "image": image, "copy": copy},
+                )
                 return AcquiredImage(
                     served=copy, source="cache", cached=False, digest=pulled.digest
                 )
-            # The copy was there a moment ago and cannot be pulled now: the
-            # image's own registry is the fallback, and saving a copy afterwards
-            # would ask the same registry again.
-            cache_problem = pulled.error or "the copy could not be pulled"
-            await emit(
-                f"Could not pull the cached copy ({cache_problem}); pulling {image} from "
-                "its registry",
-                attrs={"milestone": "image_cache_miss", "image": image, "reason": cache_problem},
-            )
+            else:
+                # Check exactly what will run: the digest this pull reported
+                # (the container runs by it), not the copy's tag, which another
+                # step can pull or retag meanwhile. Without a digest, the image
+                # ID the check reads is what the container then runs by.
+                matches, checked = await self._copy_matches_upstream(
+                    upstream=upstream,
+                    repo=reference.repo,
+                    upstream_digest=upstream_digest,
+                    copy=copy,
+                    pinned=digest_reference(copy, pulled.digest) or copy,
+                    cache=cache,
+                    image=image,
+                    docker_bin=docker_bin,
+                    docker_env=docker_env,
+                    deadline=deadline,
+                    emit=emit,
+                )
+                if matches:
+                    return AcquiredImage(
+                        served=copy,
+                        source="cache",
+                        cached=False,
+                        digest=pulled.digest,
+                        image_id="" if pulled.digest else checked.local_id,
+                        checked_local_id=checked.local_id,
+                        checked_config_id=checked.image_id,
+                        checked_platform=checked.platform,
+                    )
+            # Otherwise the copy is not the image its key names (the tag was
+            # pushed over): it is not run, and the pull below saves a true copy
+            # over it.
         elif cache_problem:
             await emit(
                 f"Platform registry unavailable ({cache_problem}); pulling {image} from its "
@@ -3601,9 +3930,9 @@ class RunContainerHandler(BaseHandler):
 
         The fallback for a pull that did not report its digest: read from the
         image's RepoDigests, the digests the daemon pulled it by, for the
-        repository ``image`` names (in ``image``'s own spelling). An image
-        built on the daemon and never pushed has none; the step then runs, and
-        reports, the tag. Never fails the step.
+        repository ``image`` names (in ``image``'s own spelling). When the
+        daemon lists none for that repository, the step runs by the image ID
+        (or, without one, the tag) and reports that. Never fails the step.
         """
         if "@" in image:
             return image
@@ -3631,6 +3960,114 @@ class RunContainerHandler(BaseHandler):
         if not digest:
             logger.info("No registry digest for image %s; running it by tag", image)
         return digest
+
+    async def _image_store(
+        self, *, docker_bin: str, docker_env: dict[str, str], timeout: float
+    ) -> str:
+        """``containerd``, ``classic`` or ``unknown``: the sandbox daemon's image store.
+
+        The containerd image store (Docker 29's default for new installs)
+        reports a pulled image's ID as the digest of the manifest or index it
+        was pulled by, not of its configuration; the classic store reports the
+        configuration digest. Asked each time (a daemon can be recreated with
+        another store behind the same address) and bounded by ``timeout`` (the
+        step's remaining time). ``unknown`` when there is no time left, the
+        daemon does not answer, or its answer names no storage driver (a
+        daemon still starting, say): only a real answer is read as the classic
+        store.
+        """
+        if timeout <= 0:
+            return "unknown"
+        try:
+            proc = await self._run_docker(
+                docker_bin,
+                ["info", "--format", "{{.Driver}}|{{json .DriverStatus}}"],
+                env=docker_env,
+                timeout=min(timeout, _IMAGE_INSPECT_TIMEOUT),
+            )
+        except (subprocess.SubprocessError, OSError):
+            return "unknown"
+        if proc.returncode != 0:
+            return "unknown"
+        driver, sep, status = proc.stdout.strip().partition("|")
+        # A classic driver may print no status list (vfs), so the driver's name
+        # is what shows the daemon answered; the snapshotter marker is in the
+        # status of every containerd-store daemon.
+        if not sep or not driver.strip() or driver.strip() == "<no value>":
+            return "unknown"
+        return "containerd" if _CONTAINERD_SNAPSHOTTER in status else "classic"
+
+    async def _image_identity(
+        self,
+        *,
+        reference: str,
+        repository: str,
+        cache: ImageCache | None,
+        docker_bin: str,
+        docker_env: dict[str, str],
+        deadline: float,
+        resolve: bool,
+    ) -> _ImageIdentity:
+        """Who the pulled image at ``reference`` is, the same on either image store.
+
+        ``image_id`` is the image's configuration digest, the same for every
+        copy of one image whatever registry or manifest format serves it; ""
+        when it cannot be read. The classic store reports it as the image's
+        ID. The containerd store reports the digest of the manifest or index
+        the image was pulled by instead: the configuration digest is then read
+        from the registry ``repository`` lives in, by that digest (content
+        checked against it), for the image's platform. ``local_id`` is the
+        daemon's own ID, which ``docker create`` takes; it is content-addressed
+        on both stores, but on the containerd store it differs between a
+        registry's image and a copy of it. Without ``resolve`` the registry is
+        not asked (its manifest requests can count against pull limits), so on
+        the containerd store ``image_id`` stays "". Never fails the step by
+        itself.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _ImageIdentity()
+        local_id, platform = await self._image_id_and_platform(
+            docker_bin=docker_bin, image=reference, docker_env=docker_env, timeout=remaining
+        )
+        if not local_id:
+            return _ImageIdentity()
+        store = await self._image_store(
+            docker_bin=docker_bin,
+            docker_env=docker_env,
+            timeout=deadline - time.monotonic(),
+        )
+        if store == "classic":
+            return _ImageIdentity(local_id=local_id, image_id=local_id, platform=platform)
+        if not resolve:
+            return _ImageIdentity(local_id=local_id, platform=platform)
+        name, at, pinned = reference.rpartition("@")
+        if at and _IMAGE_ID.fullmatch(pinned):
+            registry_digest = pinned
+        elif store == "containerd":
+            # The containerd store's ID is the digest the image was pulled by.
+            registry_digest = local_id
+        else:
+            # The store is unknown and the image was not pulled by a digest:
+            # the daemon's ID may be either kind, so it is no configuration digest.
+            return _ImageIdentity(local_id=local_id, platform=platform)
+        parsed = parse_reference(name if at else repository)
+        client = _registry_client(parsed.host, cache, docker_env)
+        budget = min(deadline - time.monotonic(), _VERIFY_MAX_SECONDS)
+        config: str | None = None
+        if budget > 0:
+            try:
+                config = await asyncio.wait_for(
+                    client.config_digest(parsed.repo, registry_digest, platform), timeout=budget
+                )
+            except (RegistryUnavailable, RegistryDenied, TimeoutError) as exc:
+                logger.info("Could not read the configuration digest of %s: %s", reference, exc)
+        if config:
+            return _ImageIdentity(local_id=local_id, image_id=config, platform=platform)
+        # A pulled image whose registry could not say: its configuration digest
+        # is unknown, and the daemon's ID (a manifest or index digest here) is
+        # not offered in its place.
+        return _ImageIdentity(local_id=local_id, platform=platform)
 
     @staticmethod
     async def _run_docker(

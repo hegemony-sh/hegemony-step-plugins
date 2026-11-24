@@ -65,15 +65,39 @@ the saved plan before writing them anywhere.
 
 ## The Image
 
-OpenTofu runs in `ghcr.io/hegemony-sh/opentofu-runner:0.42` by default:
-OpenTofu at an exact version on Alpine Linux, with git and an SSH client for
+OpenTofu runs in `ghcr.io/hegemony-sh/opentofu-runner:0.56` by default:
+OpenTofu 1.12 on Alpine Linux, with git and an SSH client for
 module sources, built from `images/opentofu-runner` in the plugin repository.
 `tofu` is compiled there from the OpenTofu release's source, with Go libraries
 that have known vulnerabilities raised to fixed versions until an OpenTofu
 release carries them; the image lists the change. That tag names a minor version of the plugins and follows its
 newest patch release.
 Terraform runs in HashiCorp's `hashicorp/terraform` image at an exact
-version. Image replaces either; it needs a POSIX `sh` with `timeout` and
+version, Terraform 1.16 today.
+
+Neither default names the tool's version where a flow author sets it, so every
+run reports it: `steps.NODE_ID.output.tool_version` is the version the tool
+itself printed, such as `1.12.6`, and the plan artifact ends with it. The
+OpenTofu image also carries it in its `sh.hegemony.opentofu.version` label. A
+patch release of the plugins may bring a newer patch release of the same
+series (1.12, 1.16), never another series: a state written by a newer series
+cannot always be read by an older one, so a new series comes only with a
+minor release of the plugins, and its changelog names it.
+
+To choose the OpenTofu series yourself, set **OpenTofu version**: `default`
+(the series above), `1.12` or `1.13`. Each named series is the same image
+built from that OpenTofu release, published as
+`ghcr.io/hegemony-sh/opentofu-runner:0.56-tofu1.13` and so on. A step that
+names a series stays on it when a later release of the plugins moves the
+default, and still gets that series' patch releases; a series is withdrawn
+only with a minor release, and a step that names a withdrawn one fails its
+validation rather than run another version. Move a state to a newer series
+deliberately: once a newer OpenTofu has written it, an older one may refuse
+it. `tf.apply` needs no setting, since it runs the plan's image. For any
+other version, or for Terraform, set Image; it replaces OpenTofu version, so
+set only one of the two.
+
+Image replaces either default; it needs a POSIX `sh` with `timeout` and
 `sha256sum` (as BusyBox and coreutils have) and must run as root, since the step writes the
 run's shared workspace. An image in a registry that needs a login pulls with
 the organization's registry credential for that host, stored once by an
@@ -90,8 +114,23 @@ and its metrics, as `tf.apply` does in its own), and `tf.apply` runs that
 digest: a saved plan is refused by any other tool version, and the tag may
 move between the plan and an approved apply. When the plan ran a copy from
 the platform registry, the digest names that copy, which the apply pulls
-from the platform registry too. An image built on the sandbox and never
-pushed has no digest, so the apply runs its tag.
+from the platform registry too. The image is always pulled, so one kept only
+in the sandbox (built there, never pushed) cannot be planned with. When no
+registry digest is available (neither the pull nor the sandbox daemon gives
+one), the apply pulls the tag and checks the pulled image against the ID the
+plan recorded; the container then runs by whatever reference the apply's own
+pull pins (its digest, or else the daemon's ID of it).
+
+The plan also records the image's ID (`image_id`). A copy in the platform
+registry has another digest than the image it was copied from, so the digest
+alone cannot show the apply runs what the plan ran. The apply checks the ID
+and fails before it starts its container when the image it pulled has
+another one. When the ID cannot be read (on Docker's containerd image store,
+when the image's registry does not answer the manifest lookup, although the
+pull itself worked) the plan records it empty, and its apply refuses to run:
+plan again. The sandbox daemon's own ID of the image is in the metrics as
+`image_local_id`, for the record only: on the containerd store it differs
+between an image and its copy in the platform registry, so it is not compared.
 
 ## Applying The Plan
 
@@ -141,8 +180,31 @@ output for `tf.apply`, which refuses a step output without it. Branch on
 `steps.NODE_ID.output.has_changes`, or show the summary in an approval
 message. `plan_sha256` is the saved plan's digest, which also ends the
 readable plan artifact. `state_held` is true when the run still holds the managed state
-for the apply. `image` is the image the plan ran, and `image_digest`
-the same image by digest (empty when it has none).
+for the apply. `image` is the image the plan ran, `image_digest`
+the same image by digest (empty when it has none), and `image_id` its ID
+(empty when the sandbox daemon did not report it).
+
+Every key, for the variable picker and later steps:
+`steps.NODE_ID.output.handler`, `steps.NODE_ID.output.has_changes`,
+`steps.NODE_ID.output.summary`, the counts `steps.NODE_ID.output.add`,
+`steps.NODE_ID.output.change`, `steps.NODE_ID.output.destroy`,
+`steps.NODE_ID.output.replace`, `steps.NODE_ID.output.import`,
+`steps.NODE_ID.output.move`, `steps.NODE_ID.output.read` and
+`steps.NODE_ID.output.forget`, `steps.NODE_ID.output.resource_changes`,
+`steps.NODE_ID.output.resource_changes_truncated`,
+`steps.NODE_ID.output.output_changes`, `steps.NODE_ID.output.drift`,
+`steps.NODE_ID.output.engine`, `steps.NODE_ID.output.tool_version` (the
+version that tool reported, empty when it reported none),
+`steps.NODE_ID.output.image`,
+`steps.NODE_ID.output.image_digest`, `steps.NODE_ID.output.image_id`,
+`steps.NODE_ID.output.cache_image` (the step's **Cache image** setting, which
+`tf.apply` reuses; it does not say whether a cache was used), `steps.NODE_ID.output.plan_sha256`, `steps.NODE_ID.output.state`
+(managed, backend or ephemeral), `steps.NODE_ID.output.state_name` (the
+managed state's name, empty otherwise), `steps.NODE_ID.output.state_held`,
+`steps.NODE_ID.output.working_dir`, `steps.NODE_ID.output.apply_ready`
+(whether `tf.apply` can apply the saved plan), `steps.NODE_ID.output.outputs`
+and `steps.NODE_ID.output.sensitive_outputs`. The counts, the change lists and
+`drift` are missing when the JSON plan could not be read.
 
 ## When It Fails
 

@@ -3,12 +3,31 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Device-transport plugin contract — pluggable device I/O beneath handlers.
+"""Device-transport interface: device I/O beneath handlers. Internal.
+
+Internal: this module has no stability promise. It is for the built-in
+transports in this monorepo only (``hegemony-transport-netmiko``,
+``-scrapli``, ``-asyncssh``). It is not part of the step-plugin contract,
+which is handlers and ``HandlerServices``. Everything a transport uses here
+can change in any release: the ``hegemony.device_transports`` entry-point
+group, :class:`TransportRegistry`, :class:`DeviceConnectionSpec`,
+:class:`HostKeyVerifier`, :class:`HostKeyRejectedError`,
+:class:`SshAlgorithmRecorder`, :class:`ConnectionCancellationRegistry`,
+:class:`TransportOutputSink` and the ``supports_*`` class flags. A device
+transport from another party is not supported.
+
+Two exceptions are part of the stable handler contract, because
+``HandlerServices.resolve_device_credentials`` returns them:
+:class:`DeviceCredentials` and :class:`JumpHostSpec` (its ``jump_host``
+field). They change by additions only.
+
+The reason: a transport is handed resolved passwords and keys, and it
+enforces the SSH host-key and algorithm rules. That makes it platform code.
 
 A *transport* is the concrete device-connection library (netmiko, scrapli,
-asyncssh, …) that satisfies the :class:`Transport` I/O surface. Transports are
-pluggable: out-of-tree wheels register under the ``hegemony.device_transports``
-entry-point group, each exposing a ``register(registry)`` callable that calls
+asyncssh) that satisfies the :class:`Transport` I/O surface. Each built-in
+transport wheel registers under the ``hegemony.device_transports``
+entry-point group and exposes a ``register(registry)`` callable that calls
 :meth:`TransportRegistry.register_transport` with a transport class.
 
 The host stays the factory: it resolves credentials, picks a transport by id,
@@ -27,13 +46,15 @@ from typing import Any, Protocol
 
 from .contract import DEFAULT_DEVICE_PLATFORM
 
-#: The entry-point group out-of-tree device-transport plugins register under.
+#: The entry-point group the built-in device transports register under.
 TRANSPORT_ENTRY_POINT_GROUP = "hegemony.device_transports"
 
 #: Default SSH/CLI management port when a device does not specify one.
 DEFAULT_DEVICE_MGMT_PORT = 22
 
 
+# Stable: part of the handler contract (returned by
+# HandlerServices.resolve_device_credentials). Additions only.
 @dataclass(frozen=True, slots=True)
 class JumpHostSpec:
     """Resolved bastion (ProxyJump) hop a transport must tunnel through.
@@ -83,6 +104,8 @@ class DeviceConnectionSpec:
     allow_legacy_ssh: bool = False
 
 
+# Stable: part of the handler contract (returned by
+# HandlerServices.resolve_device_credentials). Additions only.
 @dataclass(frozen=True, slots=True)
 class DeviceCredentials:
     """A device's resolved login material, for handlers that hand it to a tool.
@@ -143,9 +166,10 @@ class HostKeyRejectedError(ConnectionError):
 class HostKeyVerifier(Protocol):
     """Host-owned SSH host-key trust for the hops of one connection.
 
-    The host builds one per ``connect()`` call and passes it to transport
-    constructors that advertise ``supports_host_key_verifier = True``
-    (feature-detected, like the output sink). Before a transport dials a hop
+    The host builds one per ``connect()`` call and passes it to the transport
+    constructor, which must advertise ``supports_host_key_verifier = True``:
+    the Hegemony worker refuses to connect with a transport that does not,
+    before it resolves any credential. Before a transport dials a hop
     (the jump host first, then the device) it asks :meth:`trusted_keys` and
     connects accepting only those keys, so a host presenting any other key
     fails during the key exchange, before a password or private key is sent.
@@ -287,7 +311,7 @@ class SshAlgorithmRecorder(Protocol):
 
     The host builds one per ``connect()`` call and passes it to transport
     constructors that advertise ``supports_ssh_algorithm_recorder = True``
-    (feature-detected, like the host-key verifier). Once a hop is logged in
+    (feature-detected, like the output sink). Once a hop is logged in
     (the jump host first, then the device) the transport reports what its
     key exchange agreed on, so the step's evidence shows which devices are
     not yet reached with a quantum-safe key exchange.

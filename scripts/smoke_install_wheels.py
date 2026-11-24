@@ -5,6 +5,10 @@
 
 """Install built wheels in a clean virtualenv and verify imports, entry points, docs and licences.
 
+It also checks the two version streams: the SDK wheel carries the SDK's own
+version, and every other wheel requires the SDK in the form its kind takes
+(a range for step handlers and probes, an exact pin for transports).
+
 The docs half is the only mechanical proof that a plugin's documentation
 bundle left git and entered the built artifact: it loads every step-handler
 package's bundle from the *installed* wheel and asserts one page per
@@ -21,10 +25,12 @@ import tomllib
 import venv
 from pathlib import Path
 
-from package_paths import PACKAGE_DIRS, ROOT
+from package_paths import PACKAGE_DIRS, PLUGIN_DIRS, ROOT
+from sdk_version import expected_sdk_pin, read_sdk_version
 
 EXPECTED_MODULES = (
     "hegemony_step_sdk",
+    "hegemony_transport_support",
     "hegemony_steps_general",
     "hegemony_steps_probe",
     "hegemony_steps_netcli",
@@ -39,6 +45,8 @@ EXPECTED_MODULES = (
     "hegemony_steps_secret",
     "hegemony_steps_inventory",
     "hegemony_steps_netbox",
+    "hegemony_steps_git",
+    "hegemony_steps_netconf",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
     "hegemony_transport_scrapli",
@@ -61,6 +69,8 @@ EXPECTED_ENTRY_POINTS = {
     "secret",
     "inventory",
     "netbox",
+    "git",
+    "netconf",
 }
 
 # Entry-point names under hegemony.probes (probe wheels).
@@ -119,6 +129,17 @@ def expected_licenses() -> dict[str, str]:
     return licenses
 
 
+def expected_sdk_requirements() -> dict[str, str]:
+    """Distribution name -> its SDK requirement, without spaces, as the wheel declares it."""
+    sdk = read_sdk_version()
+    requirements: dict[str, str] = {}
+    for package_dir in PLUGIN_DIRS:
+        with (package_dir / "pyproject.toml").open("rb") as fh:
+            name = tomllib.load(fh)["project"]["name"]
+        requirements[name] = expected_sdk_pin(package_dir, sdk)
+    return requirements
+
+
 def _python_bin(venv_dir: Path) -> Path:
     return venv_dir / ("Scripts" if sys.platform == "win32" else "bin") / "python"
 
@@ -157,6 +178,19 @@ for name, expression in {expected_licenses()!r}.items():
     for file in files:
         text = dist.read_text("licenses/" + file)
         assert text and text.strip(), (name, file)
+
+# Two version streams: the SDK has its own version, and each wheel requires
+# it in the form its kind takes.
+assert distribution("hegemony-step-sdk").version == {read_sdk_version()!r}, (
+    distribution("hegemony-step-sdk").version
+)
+for name, expected in {expected_sdk_requirements()!r}.items():
+    found = [
+        "".join(requirement.split(";", 1)[0].split())
+        for requirement in distribution(name).requires or []
+        if requirement.startswith("hegemony-step-sdk")
+    ]
+    assert found == [expected], (name, found, expected)
 
 modules = {EXPECTED_MODULES!r}
 for module in modules:

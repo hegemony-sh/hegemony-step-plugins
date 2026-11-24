@@ -17,6 +17,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StepKind,
     command_label,
 )
@@ -40,6 +41,18 @@ def _number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _extracted(extractor: re.Pattern[str], text: str) -> str | None:
+    """What ``extractor`` captures in ``text``: its first group, else the whole match.
+
+    None when it does not match, or when its first group took no part in the
+    match.
+    """
+    match = extractor.search(text)
+    if match is None:
+        return None
+    return match.group(1) if extractor.groups else match.group(0)
 
 
 class AssertConfig(BaseModel):
@@ -123,6 +136,22 @@ class AssertConfig(BaseModel):
             "were selected — an empty selection must not pass vacuously."
         ),
     )
+    extract: str = Field(
+        default="",
+        title="Extract (regex)",
+        description=(
+            "Compare only part of the content: a regex whose first group (or "
+            "whole match, without a group) is what the operator compares, in "
+            "the whole output or in each selected line. For example "
+            "'([0-9]+) bytes free' compares the free space as a number. "
+            "Content the regex does not match fails. Empty compares the whole "
+            "content."
+        ),
+        json_schema_extra={
+            "x_placeholder": "([0-9]+) bytes free",
+            "x_col_span": 2,
+        },
+    )
     target_role: str = Field(
         default="",
         title="Evidence Output",
@@ -171,6 +200,16 @@ class AssertConfig(BaseModel):
     )
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("passed", "Whether every checked artifact passed", "bool"),
+    OutputField("checked", "Names of the artifacts checked", "list"),
+    OutputField(
+        "failed", "Names of the artifacts that did not pass or could not be fetched", "list"
+    ),
+)
+
+
 class AssertHandler(BaseHandler):
     """Handler for inline assertions with expected values.
 
@@ -198,6 +237,7 @@ class AssertHandler(BaseHandler):
     category = "Checks"
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = AssertConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"operator": "contains"}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
@@ -216,6 +256,7 @@ class AssertHandler(BaseHandler):
             # default. The API schema already rejects negatives (ge=0).
             min_lines = 1
         message = ctx.config.get("message", "")
+        extract = ctx.config.get("extract") or ""
         artifact_step_id = ctx.config.get("artifact_step_id")
         log_extra = {
             "run_id": ctx.run_id,
@@ -318,7 +359,7 @@ class AssertHandler(BaseHandler):
             error = capture_error(artifact)
             if error is None:
                 passed, comparison_msg, scope_detail = self._assert_content(
-                    actual, expected, operator, match_scope, line_filter, min_lines
+                    actual, expected, operator, match_scope, line_filter, min_lines, extract
                 )
             else:
                 # A failed capture holds an error, not the device's output:
@@ -417,20 +458,11 @@ class AssertHandler(BaseHandler):
     async def _fetch_run_artifacts(self, ctx: HandlerContext) -> list[dict] | None:
         """Fetch the run's artifacts from the API; None when the fetch fails."""
         run_id = ctx.run_id
-        async with ctx.require_services().open_api_client(timeout=30) as client:
-            try:
-                # Use internal endpoint for worker-to-API calls
-                response = await client.get(f"/internal/runs/{run_id}")
-                if response.status_code == 404:
-                    logger.warning(f"Run {run_id} not found (may have been deleted)")
-                    return None
-                if response.status_code != 200:
-                    logger.error(f"Failed to fetch run {run_id}: {response.status_code}")
-                    return None
-                return response.json().get("artifacts", [])
-            except Exception as e:
-                logger.error(f"Failed to fetch artifact: {e}")
-                return None
+        try:
+            return list(await ctx.require_services().fetch_run_artifacts(run_id))
+        except Exception as e:
+            logger.error(f"Failed to fetch artifacts of run {run_id}: {e}")
+            return None
 
     @staticmethod
     def _artifact_content(artifact: dict) -> str | None:
@@ -453,8 +485,15 @@ class AssertHandler(BaseHandler):
         match_scope: str,
         line_filter: str,
         min_lines: int,
+        extract: str = "",
     ) -> tuple[bool, str, dict[str, Any]]:
         """Assert against artifact content in the configured scope.
+
+        With ``extract`` set, each comparison takes the part of the content
+        (the whole output, or one selected line) that the regex captured:
+        its first group, or the whole match when it has none. Content it
+        does not match fails, so a missing value never passes ``ne`` or
+        ``not_contains``.
 
         ``output`` scope compares once against the whole artifact (the
         original behavior); ``lines`` scope selects lines (via the optional
@@ -465,11 +504,37 @@ class AssertHandler(BaseHandler):
         """
         if match_scope not in ("output", "lines"):
             return False, f"Unknown match_scope: {match_scope}", {"match_scope": match_scope}
+        extractor = None
+        if extract:
+            try:
+                extractor = re.compile(extract)
+            except re.error as exc:
+                return (
+                    False,
+                    f"Invalid extract regex: {exc}",
+                    {"match_scope": match_scope, "extract": extract},
+                )
         if match_scope == "output":
+            detail_out: dict[str, Any] = {"match_scope": "output"}
+            if extractor is not None:
+                detail_out["extract"] = extract
+                if not isinstance(actual, str):
+                    return (
+                        False,
+                        f"Extract needs text content, got {type(actual).__name__}",
+                        detail_out,
+                    )
+                value = _extracted(extractor, actual[:_MAX_REGEX_INPUT_CHARS])
+                if value is None:
+                    return False, f"extract '{extract}' matched nothing", detail_out
+                detail_out["extracted"] = value[:500]
+                actual = value
             passed, msg = self._compare_values(actual, expected, operator)
-            return passed, msg, {"match_scope": "output"}
+            return passed, msg, detail_out
 
         detail: dict[str, Any] = {"match_scope": "lines", "line_filter": line_filter}
+        if extractor is not None:
+            detail["extract"] = extract
         if not isinstance(actual, str):
             return (
                 False,
@@ -502,22 +567,28 @@ class AssertHandler(BaseHandler):
 
         lines_passed = 0
         first_failed: str | None = None
+        first_failed_value: str | None = None
         for line in selected:
-            line_ok, _ = self._compare_values(line, expected, operator)
+            value = line if extractor is None else _extracted(extractor, line)
+            line_ok = value is not None and self._compare_values(value, expected, operator)[0]
             if line_ok:
                 lines_passed += 1
             elif first_failed is None:
                 first_failed = line.strip()[:200]
+                first_failed_value = value
         detail["lines_passed"] = lines_passed
 
         if first_failed is not None:
             detail["first_failed_line"] = first_failed
             # Ordering operators compare numbers only; say when that is why.
             not_a_number = ""
-            if operator in _ORDERING_SYMBOLS:
+            if extractor is not None and first_failed_value is None:
+                not_a_number = f"; extract '{extract}' matched nothing in it"
+            elif operator in _ORDERING_SYMBOLS:
+                compared = first_failed if extractor is None else first_failed_value
                 if _number(expected) is None:
                     not_a_number = f"; the expected value '{expected}' is not a number"
-                elif _number(first_failed) is None:
+                elif _number(compared) is None:
                     not_a_number = ", which is not a number"
             return (
                 False,

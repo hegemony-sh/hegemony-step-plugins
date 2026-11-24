@@ -2226,3 +2226,26 @@ async def test_a_plain_http_request_is_sent_when_the_organization_list_is_unavai
     result = await HttpRequestHandler().execute(_ctx({"url": "http://api.example.test/"}, services))
     assert result.success is True, result.error
     assert seen[0]["verify"] is True
+
+
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs():
+    # The editor's variable picker lists output_fields; they must match.
+    declared = {field.name for field in HttpRequestHandler.output_fields}
+    recorder = Recorder(lambda request: httpx.Response(200, json={"a": 1}))
+
+    result = await _handler(recorder).execute(_ctx({"url": "https://api.example.test/v1"}))
+    assert result.success is True, result.error
+    assert set(result.output) == declared
+
+    sensitive = await _handler(recorder).execute(
+        _ctx({"url": "https://api.example.test/v1", "sensitive": True})
+    )
+    assert set(sensitive.output) < declared
+
+
+def test_the_docs_page_names_every_declared_output_field():
+    page = load_docs_bundle("hegemony_steps_http")["http.request"]
+    output = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in HttpRequestHandler.output_fields:
+        assert f"`{field.name}`" in output, field.name
+        assert field.description and field.type, field.name

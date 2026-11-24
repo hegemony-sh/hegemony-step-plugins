@@ -10,6 +10,11 @@
 set -eu
 test "$(id -u)" != 0
 ansible-playbook --version
+# The workflow names the version the variant must have (variants.json).
+if [ -n "${EXPECT_VERSION:-}" ]; then
+  ansible-playbook --version | head -n 1 | grep -qF "[core ${EXPECT_VERSION}]" \
+    || { echo "expected ansible-core ${EXPECT_VERSION}"; exit 1; }
+fi
 python3 -c "import pylibsshext, ncclient"
 for c in ansible.netcommon ansible.utils ansible.posix community.general \
          cisco.ios cisco.nxos cisco.iosxr arista.eos junipernetworks.junos; do

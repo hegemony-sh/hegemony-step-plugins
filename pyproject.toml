@@ -33,6 +33,7 @@ package = false
 [tool.uv.workspace]
 members = [
     "packages/step_sdk",
+    "packages/transport_support",
     "plugins/steps_general",
     "plugins/steps_probe",
     "plugins/steps_netcli",
@@ -47,6 +48,8 @@ members = [
     "plugins/steps_secret",
     "plugins/steps_inventory",
     "plugins/steps_netbox",
+    "plugins/steps_git",
+    "plugins/steps_netconf",
     "probes/probe_net",
     "transports/transport_netmiko",
     "transports/transport_scrapli",
@@ -55,6 +58,7 @@ members = [
 
 [tool.uv.sources]
 hegemony-step-sdk = { workspace = true }
+hegemony-transport-support = { workspace = true }
 hegemony-steps-general = { workspace = true }
 hegemony-steps-probe = { workspace = true }
 hegemony-steps-netcli = { workspace = true }
@@ -69,6 +73,8 @@ hegemony-steps-http = { workspace = true }
 hegemony-steps-secret = { workspace = true }
 hegemony-steps-inventory = { workspace = true }
 hegemony-steps-netbox = { workspace = true }
+hegemony-steps-git = { workspace = true }
+hegemony-steps-netconf = { workspace = true }
 hegemony-probe-net = { workspace = true }
 hegemony-transport-netmiko = { workspace = true }
 hegemony-transport-scrapli = { workspace = true }
@@ -87,6 +93,7 @@ ignore = ["E501"]
 combine-as-imports = true
 known-first-party = [
     "hegemony_step_sdk",
+    "hegemony_transport_support",
     "hegemony_steps_general",
     "hegemony_steps_probe",
     "hegemony_steps_netcli",
@@ -101,6 +108,8 @@ known-first-party = [
     "hegemony_steps_secret",
     "hegemony_steps_inventory",
     "hegemony_steps_netbox",
+    "hegemony_steps_git",
+    "hegemony_steps_netconf",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
     "hegemony_transport_scrapli",

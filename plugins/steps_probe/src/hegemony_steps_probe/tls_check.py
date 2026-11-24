@@ -37,6 +37,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     InvalidConfigError,
+    OutputField,
     StepKind,
 )
 from hegemony_step_sdk.concurrency import for_each_target_device
@@ -1102,6 +1103,24 @@ def _endpoint_plans(
     return plans
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("endpoints", "One record per endpoint checked, targets first", "list"),
+    OutputField(
+        "summary", "Counts over all endpoints (total, reachable, expired, failed, ...)", "object"
+    ),
+    OutputField("all_ok", "Whether every endpoint passed every enabled assertion", "bool"),
+    OutputField(
+        "min_days_left", "Fewest days left over all certificates (null if none read)", "int"
+    ),
+    OutputField(
+        "trust_store",
+        "What chains were verified against: ca_bundle, system+org or system",
+        "string",
+    ),
+)
+
+
 class TlsProbeHandler(BaseHandler):
     """Report the TLS certificate each endpoint serves and evaluate it."""
 
@@ -1114,6 +1133,7 @@ class TlsProbeHandler(BaseHandler):
     )
     category = "Checks"
     config_model = TlsProbeConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"port": 443, "attempt_timeout_seconds": 10, "require_reachable": True}
     # The CA bundle may be a secret reference; it is resolved here, not by the
     # step template engine, so a bare reference is understood too.

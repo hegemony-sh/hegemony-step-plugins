@@ -5,8 +5,11 @@
 
 """Per-connection SSH policy shared by the built-in device transports.
 
-No SSH library is imported by the SDK. Adapters supply their library objects.
-Legacy negotiation is explicit; a failed secure handshake never retries weakly.
+No SSH library is imported by the SDK. This module is the contract and policy;
+the built-in transports map it onto Paramiko and AsyncSSH through the internal
+``hegemony_transport_support.ssh`` package, which depends on this one and never
+the other way round. Legacy negotiation is explicit; a failed secure handshake
+never retries weakly.
 
 The policy names weak algorithms and exchanges whose minimum size cannot be
 enforced. Secure mode starts from the installed library's own defaults and
@@ -18,15 +21,11 @@ override offers every algorithm the library still implements, weak included.
 from __future__ import annotations
 
 import base64
-import hashlib
-import logging
 import re
 from collections.abc import Collection, Iterable, Mapping
 from typing import Any
 
 from pydantic import BaseModel, Field
-
-logger = logging.getLogger(__name__)
 
 #: Name parts (split on ``-`` and ``@``) that make an algorithm weak, per kind.
 #: ``kex`` key exchange, ``cipher`` encryption, ``mac`` integrity,
@@ -55,7 +54,8 @@ WEAK_ALGORITHM_NAMES: dict[str, frozenset[str]] = {
 #: accept a group below 2048 bits even with a SHA-256 exchange hash. They stay
 #: behind the explicit legacy opt-in, GSS variants included, unless the adapter
 #: enforces ``MIN_DH_GROUP_BITS`` on the server's group for that connection
-#: (``algorithm_policy``'s ``bounded``; Paramiko does, see ``configure_paramiko``).
+#: (``algorithm_policy``'s ``bounded``; the Paramiko adapter does, see
+#: ``hegemony_transport_support.ssh.configure_paramiko``).
 UNBOUNDED_DH_EXCHANGE_PREFIXES = ("diffie-hellman-group-exchange-", "gss-gex-")
 
 #: Smallest Diffie-Hellman group, in bits, a bounded group exchange accepts.
@@ -119,13 +119,6 @@ def algorithm_policy(
     return secure
 
 
-def _plain_host_key_algorithm(name: str) -> bool:
-    """Host trust stores plain keys: no certificates, X.509 or security-key types."""
-    return not (
-        name.endswith("-cert-v01@openssh.com") or name.startswith(("x509v3-", "sk-", "webauthn-"))
-    )
-
-
 class SshSecurityConfig(BaseModel):
     """Step setting shared by netcli handlers."""
 
@@ -164,7 +157,8 @@ def validate_ssh_public_key(line: str, *, allow_security_keys: bool = False) -> 
     types are also checked for a well-formed encoding. A type this function
     does not know is accepted, so stronger key types the SSH library adds
     later keep working. Certificates are not plain keys: validate their
-    keys separately (``validate_asyncssh_client_key``).
+    keys separately (the AsyncSSH adapter does, in
+    ``hegemony_transport_support.ssh.validate_asyncssh_client_key``).
     """
     try:
         fields = line.split()
@@ -269,125 +263,6 @@ def hop_allows_legacy(spec: Any, *, jump_host: bool, step_setting: bool = False)
     return bool(getattr(hop, "allow_legacy_ssh", False))
 
 
-def validate_asyncssh_client_key(library: Any, keypair: Any) -> None:
-    """Validate a login identity's keys, including certificate subject and signing keys.
-
-    OpenSSH certificates are checked for both the user key and the signing
-    (certificate authority) key; X.509 identities for the key of every
-    certificate in the chain they present.
-    """
-    data = keypair.public_data
-    size = int.from_bytes(data[:4], "big")
-    algorithm = data[4 : 4 + size].decode("ascii")
-    if algorithm.startswith("x509v3-"):
-        keys = [library.import_certificate(der).key for der in _x509_chain(data, 4 + size)]
-    elif algorithm.endswith("-cert-v01@openssh.com"):
-        certificate = library.import_certificate(
-            algorithm + " " + base64.b64encode(data).decode("ascii")
-        )
-        keys = [certificate.key, certificate.signing_key]
-    else:
-        keys = [library.import_public_key(algorithm + " " + base64.b64encode(data).decode())]
-    for key in keys:
-        validate_ssh_public_key(
-            key.export_public_key("openssh").decode("ascii"), allow_security_keys=True
-        )
-
-
-def _x509_chain(data: bytes, offset: int) -> list[bytes]:
-    """DER certificates of an X.509 public key blob (RFC 6187), after its algorithm name."""
-    if offset + 4 > len(data):
-        raise ValueError("truncated X.509 certificate chain")
-    count = int.from_bytes(data[offset : offset + 4], "big")
-    offset += 4
-    certificates = []
-    for _ in range(count):
-        size = int.from_bytes(data[offset : offset + 4], "big")
-        certificate = data[offset + 4 : offset + 4 + size]
-        if offset + 4 > len(data) or len(certificate) != size:
-            raise ValueError("truncated X.509 certificate chain")
-        certificates.append(certificate)
-        offset += 4 + size
-    if not certificates:
-        raise ValueError("empty X.509 certificate chain")
-    return certificates
-
-
-def _identity_label(keypair: Any) -> str:
-    """Algorithm, SHA-256 fingerprint and comment of a login identity, for logs."""
-    data = keypair.public_data
-    kind = data[4 : 4 + int.from_bytes(data[:4], "big")].decode("ascii", "replace")
-    digest = base64.b64encode(hashlib.sha256(data).digest()).decode("ascii").rstrip("=")
-    label = f"{kind} SHA256:{digest}"
-    get_comment = getattr(keypair, "get_comment", None)
-    comment = get_comment() if callable(get_comment) else None
-    return f"{label} ({comment})" if comment else label
-
-
-def asyncssh_algorithms(library: Any, allow_legacy: bool = False) -> dict[str, Any]:
-    """AsyncSSH's own algorithm lists, without weak ones unless legacy is allowed."""
-    # These options objects only enumerate the library's lists; they never connect.
-    defaults = library.SSHClientConnectionOptions(config=None)
-    implemented = library.SSHClientConnectionOptions(
-        config=None, kex_algs="*", encryption_algs="*", mac_algs="*", signature_algs="*"
-    )
-    policy: dict[str, Any] = {}
-    for name, kind in (
-        ("kex_algs", "kex"),
-        ("encryption_algs", "cipher"),
-        ("mac_algs", "mac"),
-        ("signature_algs", "signature"),
-    ):
-        policy[name] = algorithm_policy(
-            kind,
-            (alg.decode("ascii") for alg in getattr(defaults, name)),
-            (alg.decode("ascii") for alg in getattr(implemented, name)),
-            allow_legacy,
-        )
-    # AsyncSSH accepts X.509 signatures only with X.509 trust anchors, which
-    # these transports never configure (host trust uses plain keys). With
-    # PyOpenSSL installed its defaults still list them, so drop them here.
-    policy["signature_algs"] = tuple(
-        alg for alg in policy["signature_algs"] if not alg.startswith("x509v3-")
-    )
-    policy["server_host_key_algs"] = tuple(
-        alg for alg in policy["signature_algs"] if _plain_host_key_algorithm(alg)
-    )
-    for name, algorithms in policy.items():
-        if not algorithms:
-            raise ValueError(f"the SSH library has no supported {name} for this policy")
-    return policy
-
-
-def asyncssh_algorithm_lists(
-    library: Any, allow_legacy: bool = False
-) -> dict[str, tuple[str, ...]]:
-    """What an asyncssh connection offers, by kind (``SSH_ALGORITHM_KINDS``), in order.
-
-    The same lists ``asyncssh_algorithms`` gives a connection, named the way
-    ``SshAlgorithms`` names what a connection agreed on, so a host can show the
-    exact effect of the legacy opt-in.
-    """
-    policy = asyncssh_algorithms(library, allow_legacy)
-    return {
-        "kex": tuple(policy["kex_algs"]),
-        "host_key": tuple(policy["server_host_key_algs"]),
-        "cipher": tuple(policy["encryption_algs"]),
-        "mac": tuple(policy["mac_algs"]),
-    }
-
-
-def paramiko_algorithm_lists(transport: Any) -> dict[str, tuple[str, ...]]:
-    """What a Paramiko transport configured by ``configure_paramiko`` offers, by kind."""
-    options = transport.get_security_options()
-    return {
-        "kex": tuple(options.kex),
-        "host_key": tuple(options.key_types),
-        "cipher": tuple(options.ciphers),
-        "mac": tuple(options.digests),
-    }
-
-
 def legacy_algorithms(
     agreed: Any,
     secure: Mapping[str, Collection[str]],
@@ -411,97 +286,91 @@ def legacy_algorithms(
     return found
 
 
-def asyncssh_security_options(
-    library: Any, keys: tuple[str, ...] | None, allow_legacy: bool = False
-) -> dict[str, Any]:
-    """Check strength before authentication, even when host identity checks are off."""
-    options = asyncssh_algorithms(library, allow_legacy)
-    parsed = [library.import_public_key(line) for line in keys] if keys is not None else None
-    if parsed is not None:
-        accepted = {alg.decode("ascii") for key in parsed for alg in key.sig_algorithms}
-        options["server_host_key_algs"] = tuple(
-            alg for alg in options["server_host_key_algs"] if alg in accepted
-        )
-        if not options["server_host_key_algs"]:
-            raise ValueError("trusted SSH keys require allow_legacy_ssh or a host-key upgrade")
-
-    class PolicyClient(library.SSHClient):
-        def connection_made(self, connection: Any) -> None:
-            """Filter each selected identity before AsyncSSH can send a key offer.
-
-            AsyncSSH's owner callback runs only after agent/default identities.
-            Wrap the per-connection selection method to cover those identities,
-            PKCS#11 keys, and certificate retries without changing global state.
-            Integration tests cover the supported AsyncSSH versions and both hops.
-            """
-            if allow_legacy:
-                return
-            select_key = getattr(connection, "public_key_auth_requested", None)
-            if not callable(select_key):
-                raise RuntimeError("this AsyncSSH version cannot enforce client-key strength")
-
-            async def select_secure_key() -> Any:
-                """Skip rejected identities and let other keys or passwords proceed."""
-                while (keypair := await select_key()) is not None:
-                    try:
-                        validate_asyncssh_client_key(library, keypair)
-                    except ValueError as exc:
-                        logger.warning(
-                            "Skipping SSH login identity %s: %s", _identity_label(keypair), exc
-                        )
-                        continue
-                    return keypair
-                return None
-
-            connection.public_key_auth_requested = select_secure_key
-
-        def validate_host_public_key(self, host: str, addr: str, port: int, key: Any) -> bool:
-            """Check key strength before matching the host's trusted identities."""
-            if not allow_legacy:
-                validate_ssh_public_key(key.export_public_key("openssh").decode("ascii"))
-            return parsed is None or key in parsed
-
-    # An empty known_hosts list delegates to the callback; None would bypass it.
-    options.update(known_hosts=([], [], []), client_factory=PolicyClient)
-    return options
+#: Where each kind's name-list sits in a KEXINIT message (RFC 4253 §7.1), with
+#: the label an error names it by. Ciphers and MACs are listed per direction.
+_NEGOTIATED_LISTS: tuple[tuple[str, int, str], ...] = (
+    ("kex", 0, "key exchange (kex)"),
+    ("host_key", 1, "host key"),
+    ("cipher", 2, "cipher"),
+    ("cipher", 3, "cipher (device to client)"),
+    ("mac", 4, "MAC (message authentication code)"),
+    ("mac", 5, "MAC (message authentication code, device to client)"),
+)
 
 
-def configure_paramiko(
-    transport: Any,
-    allow_legacy: bool = False,
-    group_exchange: Mapping[str, Any] | None = None,
-) -> None:
-    """Apply the policy to Paramiko's per-connection ``SecurityOptions`` lists.
+#: Names a KEXINIT lists among key exchanges that only signal an extension
+#: (RFC 8308 ext-info, OpenSSH strict key exchange); no exchange runs by them.
+_KEX_MARKER_PREFIXES = ("ext-info-", "kex-strict-")
 
-    Paramiko's defaults are the starting point. With legacy, every algorithm
-    in its registries (``Transport._kex_info`` and so on) is offered too.
 
-    ``group_exchange`` maps group-exchange names to the adapter's handlers that
-    refuse a server group below ``MIN_DH_GROUP_BITS``. In secure mode they
-    replace Paramiko's handlers on this connection only (an instance attribute
-    over the class registry), and those exchanges are offered again.
+#: What a hop is told when no setting can make its transport agree with the device.
+_UNSUPPORTED = (
+    "this transport implements none of the device's; choose another SSH transport for this device"
+)
+
+
+def _name_list(names: list[str]) -> str:
+    """Algorithm names for an error, without key-exchange extension markers."""
+    shown = [name for name in names if not name.startswith(_KEX_MARKER_PREFIXES)]
+    return ", ".join(shown) or "(none)"
+
+
+def negotiation_failure_detail(
+    client_kexinit: bytes,
+    server_kexinit: bytes,
+    *,
+    with_legacy: Mapping[str, Collection[str]] | None = None,
+    legacy_allowed: bool = False,
+) -> str:
+    """Why two KEXINIT messages agree on nothing, naming both sides' algorithms.
+
+    For each kind the two lists share no name in, the text gives what the
+    device offers and what this connection offers. ``with_legacy`` is what the
+    transport would offer with the legacy opt-in (``ssh_algorithm_lists(True)``);
+    pass it only for a hop that does not already allow legacy SSH, and the text
+    says whether the opt-in would add a name the device offers;
+    ``legacy_allowed`` says the hop already allows it. Returns ``""``
+    when a message is missing or malformed, or every kind has a match, so a
+    caller keeps its library's own message then.
     """
-    bounded: tuple[str, ...] = ()
-    if group_exchange and not allow_legacy:
-        transport._kex_info = {**transport._kex_info, **group_exchange}
-        bounded = tuple(group_exchange)
-    options = transport.get_security_options()
-    for name, kind, registry in (
-        ("kex", "kex", "_kex_info"),
-        ("ciphers", "cipher", "_cipher_info"),
-        ("digests", "mac", "_mac_info"),
-        ("key_types", "signature", "_key_info"),
-    ):
-        implemented = tuple(getattr(transport, registry, None) or ())
-        algorithms = algorithm_policy(
-            kind,
-            getattr(options, name),
-            implemented,
-            allow_legacy,
-            bounded if kind == "kex" else (),
+    from .transports import _AEAD_CIPHERS, _first_match, _kexinit_lists
+
+    try:
+        client = _kexinit_lists(client_kexinit)
+        server = _kexinit_lists(server_kexinit)
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    ciphers = (_first_match(client[2], server[2]), _first_match(client[3], server[3]))
+    parts: list[str] = []
+    reported: set[int] = set()
+    for kind, index, label in _NEGOTIATED_LISTS:
+        ours, theirs = client[index], server[index]
+        if _first_match(ours, theirs):
+            continue
+        # A cipher with integrity built in uses no MAC, so no MAC match is needed.
+        if kind == "mac" and ciphers[index - 4] in _AEAD_CIPHERS:
+            continue
+        # The device-to-client list is reported only when it says something new.
+        if (
+            index in (3, 5)
+            and index - 1 in reported
+            and (ours, theirs) == (client[index - 1], server[index - 1])
+        ):
+            continue
+        reported.add(index)
+        text = (
+            f"no {label} algorithm in common; the device offers: "
+            f"{_name_list(theirs)}; this connection offers: {_name_list(ours)}"
         )
-        if name == "key_types":
-            algorithms = tuple(alg for alg in algorithms if _plain_host_key_algorithm(alg))
-        if not algorithms:
-            raise ValueError(f"the SSH library has no supported {name} for this policy")
-        setattr(options, name, algorithms)
+        if legacy_allowed:
+            text += f"; legacy SSH is already allowed, so {_UNSUPPORTED}"
+        elif with_legacy is not None:
+            added = [
+                name for name in theirs if name in with_legacy.get(kind, ()) and name not in ours
+            ]
+            if added:
+                text += f"; allowing legacy SSH (allow_legacy_ssh) would add: {', '.join(added)}"
+            else:
+                text += f"; allowing legacy SSH (allow_legacy_ssh) would not help: {_UNSUPPORTED}"
+        parts.append(text)
+    return ". ".join(parts)

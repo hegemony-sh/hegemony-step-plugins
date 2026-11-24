@@ -1,3 +1,265 @@
+## [0.56.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.55.0...v0.56.0) (2026-11-24)
+
+### ⚠ BREAKING CHANGES
+
+* **sdk:** hegemony-step-sdk is now 1.0.0, not the release version,
+and the plugin wheels require it as >=1.0,<2 instead of ==<release>. The
+platform's floors, plugin pins and Dockerfiles that assume one shared
+version must change before they pin this release.
+
+### Features
+
+* **sdk:** give the SDK its own version ([0e9d71b](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0e9d71b6da4a75ab2d175dde9c997ce7f380acc2))
+* **sdk:** let the internal transport interface change with a minor ([7af4a66](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7af4a661da671f54cd1e19188761f1eef706a907)), closes [#145](https://github.com/hegemony-sh/hegemony-step-plugins/issues/145)
+
+### Bug Fixes
+
+* **sdk:** catch more incompatible SDK changes in the version check ([f134dc9](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f134dc92fc00e165f17f24910ed8545313aed7cc))
+
+## [0.55.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.54.1...v0.55.0) (2026-11-24)
+
+### Features
+
+* **netconf:** confirm past the committing session's lock; live log ([66e11e4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/66e11e4d68475ef1853bc603085f9aab97c7580a))
+
+### Bug Fixes
+
+* **netconf:** say which phase timed out when a session is slow to open ([2dd6e02](https://github.com/hegemony-sh/hegemony-step-plugins/commit/2dd6e024ef4573ca6e4c999dc39801494ecf0c7b))
+
+## [0.54.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.54.0...v0.54.1) (2026-11-24)
+
+### Bug Fixes
+
+* **netcli:** leave skipped commands out of the live log ([1be556f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/1be556f71a060a686efb1ce165a160f9094aadc5))
+* **netcli:** log each command in the live view, even with no output ([fb02a53](https://github.com/hegemony-sh/hegemony-step-plugins/commit/fb02a53c1fc76739acd0b39368c11a8484648aa0))
+
+## [0.54.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.53.1...v0.54.0) (2026-11-24)
+
+### Features
+
+* **netconf:** add the netconf steps: get, edit_config, commit, cancel_commit, rpc ([427f799](https://github.com/hegemony-sh/hegemony-step-plugins/commit/427f799e067db819a94cdc6a8865976f3a3afc07))
+* **sdk:** add open_netconf and the NetconfChannel protocol ([ef35907](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ef35907e48bae44819562330e136889204638a7e))
+
+### Bug Fixes
+
+* **netconf:** check for a pending commit only on a retry, and add to it ([8364c62](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8364c62a09c7d8f0df1e8db2443b46cdb2f826c0))
+* **netconf:** compare what values mean, decode inherited namespaces, keep ids on any lost reply ([20927bc](https://github.com/hegemony-sh/hegemony-step-plugins/commit/20927bcdcf2863c231353538e2957374da193cf3))
+* **netconf:** fail closed on prefixed values, unclear refusals and channel errors ([58aeb71](https://github.com/hegemony-sh/hegemony-step-plugins/commit/58aeb718d53229d23feca69b2aa08e6f8c05311d))
+* **netconf:** keep a pending commit findable on retry, and confirm only what is pending ([6de829a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6de829af9b1375287d05cf5cb123652f89c2e226))
+* **netconf:** keep inherited namespaces, save under the lock, match devices by id ([580f44f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/580f44f082cb6f264a53e7e7138d67e0fb9c4d92))
+* **netconf:** read non-ASCII prefixes on the enclosing reply tags ([d34dfdb](https://github.com/hegemony-sh/hegemony-step-plugins/commit/d34dfdbc84eb139807ba8445cf773d83a93aa2c4))
+* **netconf:** read only real namespace declarations, keep mixed whitespace ([bc0290f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bc0290ff3b3f328d0fddd4ee27480ccf954bcbd6))
+* **netconf:** read only the reply's own <data> child ([ce921df](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ce921df865c09cd325e172431677eff2138fd9c0))
+* **netconf:** recover a pending commit before locking running ([ef4858d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ef4858d1354900e1078d600c35f38228910e7deb))
+* **netconf:** recover and save on retries, fail closed on more value shapes ([557f196](https://github.com/hegemony-sh/hegemony-step-plugins/commit/557f196596b7c87cea352516352452734729abe3))
+* **netconf:** say why the device closed the session when the host knows ([718aea8](https://github.com/hegemony-sh/hegemony-step-plugins/commit/718aea848ca7dadc1fa88c9561a5803c3f74d11f))
+* **netconf:** skip quoted '>' in tags, keep same-line whitespace ([a5d42fd](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a5d42fdd118169aeae58cdbfc0614651557eefac))
+* **netconf:** stop using a session after a timeout, and reassemble replies in place ([bda013e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bda013ed293250669c483ff61e31b6740a0209c5))
+* **netconf:** word the partial-diff note for any partial read, not only a filter ([55cd6bb](https://github.com/hegemony-sh/hegemony-step-plugins/commit/55cd6bb657b46510a6e374ef548856eb97502290))
+
+## [0.53.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.53.0...v0.53.1) (2026-11-23)
+
+### Bug Fixes
+
+* **container:** refuse a cached copy when the ARM variant is unknown ([cf38321](https://github.com/hegemony-sh/hegemony-step-plugins/commit/cf383212ef7f13dc4036989b26c982a1605d8c80))
+* **container:** refuse an image index with two entries for the platform ([a9147ad](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a9147ad2a4b105b1bcc52f221d6db63f454784bd))
+* **container:** verify a cached base image against its upstream digest ([79628e2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/79628e21ed834decd4d7bcb91a513ef18246d06a)), closes [#137](https://github.com/hegemony-sh/hegemony-step-plugins/issues/137)
+
+## [0.53.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.52.1...v0.53.0) (2026-11-23)
+
+### Features
+
+* **sdk:** named run access for plugins, and a central_only handler flag ([6d7c8c6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6d7c8c6866e760ed1f0e7733d8a1659e5968c3f3))
+
+### Bug Fixes
+
+* **sdk:** raise PlatformRequestError on every host, not only the fallback ([73f68ca](https://github.com/hegemony-sh/hegemony-step-plugins/commit/73f68cacd0f38a4246645dc268cbabd77ee6ee5e))
+* **sdk:** refuse a notification destination id that is not a UUID ([1822e4a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/1822e4af13548af2f1c56441d3ddcdcc44e79913))
+* **sdk:** report network errors of run_access fallbacks as PlatformRequestError ([0b6b3ca](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0b6b3ca6c9afd2b9f16cb3c7f676525d79179d9f))
+* **sdk:** use the fallback on hosts that subclass HandlerServices ([0d3395f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0d3395f48456206a95058eb3ff3ab5e90fa6c80a))
+
+## [0.52.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.52.0...v0.52.1) (2026-11-21)
+
+### Bug Fixes
+
+* **tf:** build OpenTofu 1.12 with Go 1.26.11 ([76c36ec](https://github.com/hegemony-sh/hegemony-step-plugins/commit/76c36ecb277b4b5957c642a3a3677b6792ab07b4))
+
+## [0.52.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.51.0...v0.52.0) (2026-11-21)
+
+### Features
+
+* **ansible,tf:** let a step choose its ansible-core or OpenTofu series ([6c28424](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6c284242079f29d2f7abd05e7af9b768597cacd5))
+
+### Bug Fixes
+
+* **ansible,tf:** build the runner images on ansible-core 2.19.15 and OpenTofu 1.12.12 ([5370df0](https://github.com/hegemony-sh/hegemony-step-plugins/commit/5370df02045b3139f18bb1e299977f01f135f561))
+* **ansible:** let a flow saved with an earlier default image name a series ([0bc12a2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0bc12a2992c3c168c82e1069de4ecb1c68c874f1))
+
+## [0.51.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.50.0...v0.51.0) (2026-11-21)
+
+### Features
+
+* **ansible,tf:** report the tool version every run used ([dd3f7da](https://github.com/hegemony-sh/hegemony-step-plugins/commit/dd3f7da7e49b26ef06226db5fd0551a406a29c46))
+
+### Bug Fixes
+
+* **tf:** close three gaps in the tool version reporting and its release check ([31a539f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/31a539fd2c05ce990727f1d7f312ceec672e12ee))
+
+## [0.50.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.49.0...v0.50.0) (2026-11-21)
+
+### Features
+
+* **evidence:** compare an extracted part of the content in evidence.assert ([52dbb45](https://github.com/hegemony-sh/hegemony-step-plugins/commit/52dbb451d5efbb144bf0da9e2f0f9d9f2a2abd87))
+* **netcli:** allow netcli.execute's last command to end the session ([25da9bb](https://github.com/hegemony-sh/hegemony-step-plugins/commit/25da9bbb1ea78e881417aee59e1dceb3f8fe0c03))
+* **probe:** add probe.wait_unreachable to wait for targets to go down ([efda758](https://github.com/hegemony-sh/hegemony-step-plugins/commit/efda75878093723c13880d3bffac5e84568f9d34))
+
+### Bug Fixes
+
+* **netcli:** allow a disconnect only where the whole output is read ([755a32d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/755a32dfb767dc3c31156fe6c44dbdc1cc1f343f))
+* **netcli:** count a closed session only after the command went out ([e224433](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e22443327cf894207a9770a963fc66edf34e04fb))
+* **netcli:** count only a closed-session error as a disconnect ([f103352](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f10335286865dd02375e63089d4918f4e1c9a818))
+* **netcli:** keep cancellations, device errors and read errors failures ([8c2c781](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8c2c781f3d0ef607e851cc8e3210f8777fa4c87a))
+* **netcli:** keep the output when an answer meets a closed session ([6d6f1cf](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6d6f1cf484bf8c2d47d2bb906b1aa7475a6e95c7))
+* **netcli:** report only a session the device closed from scrapli ([a52482c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a52482c5ed91b839cdf1ff4f508a01aa5c052a85))
+* **probe:** blame the proxy for a stall after CONNECT succeeded ([a97efe6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a97efe6840d893b1e4b9f8d1ccb5d781ccefc2e9))
+* **probe:** count a target down only on real evidence ([f4ccf73](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f4ccf73de7509139f98c1d6319c9f730e55657c2))
+* **probe:** never blame the target for a stalled SOCKS proxy ([5d620f4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/5d620f4f17fa278211b4cf14b289715f459387a1))
+* **probe:** report a target that never answers the proxy as a timeout ([253ac99](https://github.com/hegemony-sh/hegemony-step-plugins/commit/253ac9901fb72c4af8ca77c8680101384b52d76e))
+
+## [0.49.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.48.0...v0.49.0) (2026-11-21)
+
+### Features
+
+* **git:** add git.commit, which commits a step's evidence to a Git repository ([b2f7b8e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b2f7b8e8a639a686035e6caaaf11732065cfdd7d))
+* **probe:** add probe.snmp, a read-only SNMP get and walk step ([79e6f32](https://github.com/hegemony-sh/hegemony-step-plugins/commit/79e6f321cd3766f23ba1febea9c7522fc220793d))
+
+### Bug Fixes
+
+* **git,probe:** harden git.commit's environment and reports, keep SNMP Unicode text ([1058e23](https://github.com/hegemony-sh/hegemony-step-plugins/commit/1058e2385e1b6b96d9a0e54b316eda66ce169009))
+
+## [0.48.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.47.0...v0.48.0) (2026-11-19)
+
+### Features
+
+* **ansible,container:** declare the output fields for the variable picker ([0b0bcdf](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0b0bcdf3126b39c353739df085b994659491f494))
+* **netbox,http,evidence:** declare the output fields for the variable picker ([3ba3efc](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3ba3efc6a26969fae22d7929b18db349ba5f386a))
+* **netcli,shell,secret,inventory:** declare the output fields for the variable picker ([c48d9b6](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c48d9b60a0f049935fd0fe9d5ca2b1085b975fca))
+* **probe:** declare the output fields for the variable picker ([f3604db](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f3604db498c688f871f76358169be58b19e40d64))
+* **tf,flow,general:** declare the output fields for the variable picker ([6ed1e97](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6ed1e970c1d7431dbe07abc2e5438d7301fc15e1))
+
+### Bug Fixes
+
+* **netbox:** correct two output type hints and the allocate failure docs ([171df93](https://github.com/hegemony-sh/hegemony-step-plugins/commit/171df939f5fd73411732896bfe1369f49dc257b5))
+* **tf:** describe cache_image as the setting, and check plan keys both ways ([0a79ac9](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0a79ac99a3f17474207434f5493482303eb53698))
+
+## [0.47.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.46.1...v0.47.0) (2026-11-19)
+
+### Features
+
+* **file-download:** declare the output fields for the variable picker ([7ce19ef](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7ce19ef01828145b1f689c49fcaaf03be31e983f))
+* **sdk:** let a handler declare its output fields ([f9bc031](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f9bc031f68ff280a2b66f0f6b65a6265830e1c9e))
+
+## [0.46.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.46.0...v0.46.1) (2026-11-18)
+
+### Bug Fixes
+
+* **container:** read the image ID on Docker 29 ([ea6adc4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ea6adc41b185af271b5c1ac6062a7bb1d7e6df86))
+
+## [0.46.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.45.0...v0.46.0) (2026-11-18)
+
+### Features
+
+* **file-download:** name the file by repository and path, and report it in the output ([bbaeaf0](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bbaeaf0ebb0026418c4b6a98e10643f0f0e8229b))
+
+### Bug Fixes
+
+* **file-download:** evidence falls back to the configured file reference ([3ba5487](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3ba5487ae96050bb5f2c1a1b6a8b4f0f84d8f958))
+* **file-download:** one file for every target, and the reference in evidence ([7b01e3f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7b01e3f347ac584827e2367194d4b8e25c81c055))
+* **sdk:** keep spaces in a file reference's path ([3c9f8c8](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3c9f8c88b14cbd43c3b52b90a1f01701b671c89c))
+
+## [0.45.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.44.0...v0.45.0) (2026-11-18)
+
+### Features
+
+* **netcli:** answer the questions a command asks, as the step lists them ([da74718](https://github.com/hegemony-sh/hegemony-step-plugins/commit/da74718c225e7bfcc041aba1b0604fe7963e0660))
+* **netcli:** edit a step's answers in the step form ([e026679](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e0266790727393da107739a4657ed46232ca94d9)), closes [hegemony-sh/hegemony#828](https://github.com/hegemony-sh/hegemony/issues/828)
+
+### Bug Fixes
+
+* **netcli:** keep a pending question from taking the next command ([f5fdd6d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f5fdd6d68f7299d9c91da0eeae9baee0a461f51d))
+* **netcli:** keep a save's own answers beside the step's prompts ([8ce1dcf](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8ce1dcf84e798b617b5224e0eb219e1bec6648d7))
+
+## [0.44.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.43.2...v0.44.0) (2026-11-18)
+
+### ⚠ BREAKING CHANGES
+
+* **sdk:** hegemony_step_sdk.ssh no longer exports configure_paramiko,
+paramiko_algorithm_lists, asyncssh_algorithms, asyncssh_algorithm_lists,
+asyncssh_security_options or validate_asyncssh_client_key. A deprecated
+re-export is not possible without the SDK importing
+hegemony-transport-support. Import them from hegemony_transport_support.ssh
+(internal, no stability promise), or apply the SDK's algorithm_policy and
+validate_ssh_public_key directly.
+
+### Code Refactoring
+
+* **sdk:** move SSH library glue into hegemony-transport-support ([d923cf2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/d923cf29f2a0486b5108ad1436d3be8c7049448b))
+
+## [0.43.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.43.1...v0.43.2) (2026-11-18)
+
+### Bug Fixes
+
+* **transport-netmiko:** judge a copy's progress on complete lines only ([f4c9aeb](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f4c9aebedab13aea37407bb705b1d14ba5fc8e17))
+* **transport-netmiko:** read a copy's outcome without the inputs it echoes ([7d601e5](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7d601e5096dbbd2165f617dfc626bd34a76b8375))
+* **transport-netmiko:** strip a copy's file name only where it is echoed ([45db016](https://github.com/hegemony-sh/hegemony-step-plugins/commit/45db0169f7e03e04e36cc29ba08ac54dae829f18))
+* **transport-scrapli:** judge a copy's progress on complete lines only ([39c08ab](https://github.com/hegemony-sh/hegemony-step-plugins/commit/39c08ab2a36249ec4b89a4e88ba66c540f76dbec))
+* **transport-scrapli:** strip a copy's file name only where it is echoed ([417dc39](https://github.com/hegemony-sh/hegemony-step-plugins/commit/417dc392d8c3cd4858eba944a4b021a95044f758))
+
+## [0.43.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.43.0...v0.43.1) (2026-11-17)
+
+### Bug Fixes
+
+* **container:** compare images by configuration digest only, and read it once ([70e4f66](https://github.com/hegemony-sh/hegemony-step-plugins/commit/70e4f66d02fefdc1631a53bffbbc40c9f421ba31))
+* **container:** keep the image store question to the step's deadline ([d42fba9](https://github.com/hegemony-sh/hegemony-step-plugins/commit/d42fba92073b35b09b99a6b45a84c8e6eb7d739a))
+* **container:** let tf.apply match a locally built image by its daemon ID ([aa1ec07](https://github.com/hegemony-sh/hegemony-step-plugins/commit/aa1ec079112c8d25e3d7cea7cfc8db10c2faaf0a))
+* **container:** never record a manifest digest as an image's configuration ID ([a4ec112](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a4ec11244cea62f2e953af3e1fbd79919b6b0f64))
+* **container:** read a missing platform variant as the architecture's default ([372708c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/372708cecfc3ef69aa121431f9e6fdd948b1aec4))
+* **container:** read the image ID the same way on the containerd image store ([f95d0d2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f95d0d2a0ad9b8fd44374c754f29e238355e1cdc))
+
+## [0.43.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.4...v0.43.0) (2026-11-16)
+
+### Features
+
+* **transport-scrapli:** stage files over HTTP with the device's copy ([88c861d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/88c861d3c83d7f5db6de8856e5269d60574ed7a0))
+
+### Bug Fixes
+
+* **steps-evidence:** leave the platform's connection records out of a compare ([92519ee](https://github.com/hegemony-sh/hegemony-step-plugins/commit/92519ee6fa61687d17bcce08ae412cc4a00d9aba))
+* **transport-scrapli:** keep the session open while a device is quiet ([ca2e003](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ca2e003cc128edbc73d2429fe5799ea046df37f6))
+* **transport-scrapli:** read a copy's outcome without the inputs it echoes ([9b17e21](https://github.com/hegemony-sh/hegemony-step-plugins/commit/9b17e213e705186d02f5866ab4d9d30708aa71b5))
+
+## [0.42.4](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.3...v0.42.4) (2026-11-16)
+
+### Bug Fixes
+
+* **container:** check a cached copy against its registry before it runs ([3ef71fa](https://github.com/hegemony-sh/hegemony-step-plugins/commit/3ef71fa4ccd370224950715faad76a24c248db7c))
+* **container:** check the cached copy the step runs, not its tag ([05ed11e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/05ed11e2df923feec92fca9580549d1110528afc))
+
+## [0.42.3](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.2...v0.42.3) (2026-11-16)
+
+### Bug Fixes
+
+* **container:** run an image without a digest by the ID that was checked ([bcb84fe](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bcb84fec40047528f28e55ddbdc955cb23bf6b42))
+* **tf:** apply only the image its plan ran, checked by image ID ([b52a6ac](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b52a6ac26094fff599f69173bea3e9cf3f6673f4))
+
+## [0.42.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.1...v0.42.2) (2026-11-16)
+
+### Bug Fixes
+
+* **step-sdk:** report a device-to-client MAC mismatch beside an AEAD cipher ([0ea382f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0ea382f8d3b0ec691b840fe92234a964ca52c365))
+* **transport-netmiko:** name both sides' algorithms when SSH negotiation fails ([7237f21](https://github.com/hegemony-sh/hegemony-step-plugins/commit/7237f212669d16d36fb9d086ec4b7563e572649b))
+* **transport-netmiko:** say to choose another transport when none can match ([a0d1471](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a0d1471356cfd1a16440427b766b3421657a0d8a))
+
 ## [0.42.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.42.0...v0.42.1) (2026-11-16)
 
 ### Bug Fixes

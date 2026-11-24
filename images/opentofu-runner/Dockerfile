@@ -32,24 +32,48 @@
 # release tag vX.Y.Z as ghcr.io/hegemony-sh/opentofu-runner:X.Y.Z and :X.Y. The
 # steps' default names X.Y (DEFAULT_IMAGES in
 # plugins/steps_tf/src/hegemony_steps_tf/common.py), currently
-# ghcr.io/hegemony-sh/opentofu-runner:0.42. For another OpenTofu version, build
-# and push it under your own tag and set the plan step's Image:
+# ghcr.io/hegemony-sh/opentofu-runner:0.56. That tag names a plugin release, not
+# the OpenTofu inside: the image's sh.hegemony.opentofu.version label names it,
+# and so does every run (the steps' tool_version output). A patch release of
+# the plugins stays on OpenTofu 1.12; another series needs a minor release, so
+# commit that change as feat (scripts/verify_release_version.py refuses the
+# release otherwise).
+#
+# The workflow also publishes the image for every OpenTofu series in
+# variants.json, as X.Y.Z-tofu<series> and X.Y-tofu<series> (0.51-tofu1.13, say):
+# this Dockerfile built with that entry's build arguments, each series with its
+# own module raises and Go toolchain. The plan step's "OpenTofu version" names
+# one of them. The ARG defaults below are the default series' entry
+# (tests/test_release_versions.py checks it), so a plain build is the default
+# image.
+#
+# For any other OpenTofu version, build and push it under your own tag and set
+# the plan step's Image (GO: the toolchain stage its go.mod needs):
 #
 #   docker build --no-cache --build-arg OPENTOFU_VERSION=<version> \
 #       --build-arg OPENTOFU_COMMIT=<commit the v<version> tag names> \
-#       --build-arg GO_MODULE_RAISES= \
+#       --build-arg GO=<1.26 or 1.27> --build-arg GO_MODULE_RAISES= \
 #       -t registry.example.com/opentofu-runner:custom images/opentofu-runner
 #   docker push registry.example.com/opentofu-runner:custom
 
-# The Debian-based Go image, which has git; only the compiled tofu leaves it.
-# Both base images are pinned by digest, so a build uses exactly the reviewed
-# image; Renovate proposes the new digest when a tag moves
-# (.github/renovate.json).
-FROM golang:1.26.10-bookworm@sha256:5de7c99eb78ca5e515a4c340235d0955ec5964a5071c492c15503d7c267da473 AS tofu
+# Before the first FROM, so every stage can read them. The build stage builds
+# this version and the last stage names it in a label; GO picks the toolchain
+# stage, since each OpenTofu series needs the Go its go.mod names.
+ARG OPENTOFU_VERSION=1.12.12
+ARG GO=1.26
 
-ARG OPENTOFU_VERSION=1.12.6
-# The commit the v1.12.6 tag names; the build refuses any other.
-ARG OPENTOFU_COMMIT=b4305e5a5dd2fb79a27897ae30784a181d3a26cb
+# The Debian-based Go images, which have git; only the compiled tofu leaves
+# them, and a build pulls only the one GO names. All base images are pinned by
+# digest, so a build uses exactly the reviewed image; Renovate proposes the
+# new digest when a tag moves (.github/renovate.json).
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS go-1.26
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS go-1.27
+
+FROM go-${GO} AS tofu
+
+ARG OPENTOFU_VERSION
+# The commit the v1.12.12 tag names; the build refuses any other.
+ARG OPENTOFU_COMMIT=4e626d547ec0c2a145dc15603bb34bf94e5c6f55
 # First fixed versions of the modules the scan flags (THIRD-PARTY-NOTICES.md);
 # the modules they need move with them.
 ARG GO_MODULE_RAISES="github.com/go-jose/go-jose/v4@v4.1.6 github.com/klauspost/compress@v1.18.7 go.opentelemetry.io/otel/sdk@v1.44.0 golang.org/x/crypto@v0.58.0 golang.org/x/mod@v0.41.0 golang.org/x/net@v0.62.0 golang.org/x/text@v0.43.0 google.golang.org/grpc@v1.83.2 oras.land/oras-go/v2@v2.6.2"
@@ -62,6 +86,7 @@ WORKDIR /src
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=
 RUN if [ -n "${GO_MODULE_RAISES}" ]; then \
         go get ${GO_MODULE_RAISES} \
+        && go mod download go.opentelemetry.io/otel/sdk \
         && sdk="$(go list -m -f '{{.Dir}}' go.opentelemetry.io/otel/sdk)" \
         && semconv="$(grep -ho 'go.opentelemetry.io/otel/semconv/v[0-9.]*[0-9]' \
             "${sdk}/resource/builtin.go" | head -n 1)" \
@@ -96,6 +121,9 @@ RUN if [ -n "${GO_MODULE_RAISES}" ]; then \
     && test -s /out/doc/licenses/github.com/opentofu/opentofu/LICENSE
 
 FROM alpine:3.22@sha256:bfe7ceb9f09ec0566c48fb93356e45a47a00be5a1dd14fa5b909e7709c66b034
+
+ARG OPENTOFU_VERSION
+LABEL sh.hegemony.opentofu.version="${OPENTOFU_VERSION}"
 
 # The pinned base carries Alpine's fixes only up to its digest; upgrade so a
 # rebuild of the same tag still picks up the fixed packages.

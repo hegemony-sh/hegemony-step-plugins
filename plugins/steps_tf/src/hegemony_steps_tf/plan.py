@@ -27,6 +27,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StateBackendAccess,
     StepKind,
 )
@@ -55,9 +56,11 @@ from .common import (
     SECRET_VARS_FILE,
     SHA256_RE,
     TF_ROOT,
+    TOOL_NAMES,
     VARS_FILE,
     Engine,
     LockTimeout,
+    OpenTofuVersion,
     StateMode,
     TfContainerConfig,
     address_list_errors,
@@ -70,6 +73,7 @@ from .common import (
     lock_conflict_error,
     managed_state_access,
     managed_timeout_errors,
+    opentofu_version_errors,
     public_outputs,
     relative_path_error,
     release_state_hold,
@@ -80,6 +84,8 @@ from .common import (
     tool_deadline,
     tool_env,
     tool_kill_after,
+    tool_version,
+    tool_version_line,
     typed_variable,
     variable_map_errors,
     workdir_for,
@@ -255,16 +261,30 @@ class TfPlanConfig(TfContainerConfig):
         ),
         json_schema_extra={"x_advanced": True, "x_col_span": 2},
     )
+    opentofu_version: OpenTofuVersion = Field(
+        default="default",
+        title="OpenTofu version",
+        description=(
+            "The OpenTofu series to run: default (OpenTofu 1.12 today; a new minor release "
+            "of the plugins may move it), 1.12 or 1.13. Name a series to stay on it across "
+            "plugin upgrades; patch releases of that series still arrive. The step output "
+            "names the exact version that ran (tool_version). The apply step uses the same "
+            "one."
+        ),
+        json_schema_extra={"x_show_when": {"field": "engine", "value": "opentofu"}},
+    )
     image: str = Field(
         default="",
         title="Image",
         description=(
             "Container image with the tool, run as root with a POSIX sh. Leave empty for "
-            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.42 for OpenTofu, "
-            "hashicorp/terraform at a pinned version for Terraform."
+            "the engine's default: ghcr.io/hegemony-sh/opentofu-runner:0.56 (OpenTofu 1.12, "
+            "or the series OpenTofu version names) for OpenTofu, hashicorp/terraform "
+            "(Terraform 1.16) for Terraform. An image replaces OpenTofu version, so set "
+            "only one. The step output names the version that ran (tool_version)."
         ),
         json_schema_extra={
-            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.42",
+            "x_placeholder": "ghcr.io/hegemony-sh/opentofu-runner:0.56",
             "x_advanced": True,
         },
     )
@@ -330,6 +350,8 @@ def build_plan_script(
     quoted_workdir = shlex.quote(workdir)
     lines = [
         *script_header(deadline, kill_after),
+        # First, so a plan that fails still names the version that failed.
+        tool_version_line(tf, run),
         f"rm -rf {quoted_workdir}",
         f"mkdir -p {quoted_workdir}",
         f"cp -R {shlex.quote(source)}/. {quoted_workdir}/",
@@ -375,6 +397,61 @@ def saved_plan_digest(raw: bytes | None) -> str:
     return digest if SHA256_RE.fullmatch(digest) else ""
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("handler", "Always tf.plan; tf.apply refuses an output without it", "string"),
+    OutputField("has_changes", "Whether the plan has changes", "bool"),
+    OutputField("summary", "Summary line, such as Plan: +3 ~1 -0", "string"),
+    OutputField("add", "Resources to add (when the JSON plan was read)", "int"),
+    OutputField("change", "Resources to change (when the JSON plan was read)", "int"),
+    OutputField("destroy", "Resources to destroy (when the JSON plan was read)", "int"),
+    OutputField("replace", "Resources to replace (when the JSON plan was read)", "int"),
+    OutputField("import", "Resources to import (when the JSON plan was read)", "int"),
+    OutputField("move", "Resources to move (when the JSON plan was read)", "int"),
+    OutputField("read", "Data sources read during apply (when the JSON plan was read)", "int"),
+    OutputField("forget", "Resources to forget (when the JSON plan was read)", "int"),
+    OutputField(
+        "resource_changes",
+        "Changed resource addresses with their actions, the first 200 "
+        "(when the JSON plan was read)",
+        "list",
+    ),
+    OutputField(
+        "resource_changes_truncated",
+        "True when more than 200 resources change",
+        "bool",
+    ),
+    OutputField("output_changes", "Names of changed outputs (when the JSON plan was read)", "list"),
+    OutputField(
+        "drift",
+        "Resources changed outside the configuration (when the JSON plan was read)",
+        "int",
+    ),
+    OutputField("engine", "Tool that made the plan: opentofu or terraform", "string"),
+    OutputField(
+        "tool_version",
+        "Version of that tool, such as 1.12.6 (empty when the tool did not report it)",
+        "string",
+    ),
+    OutputField("image", "Image the plan ran", "string"),
+    OutputField("image_digest", "The same image by digest (empty when it has none)", "string"),
+    OutputField("image_id", "The image's ID (empty when not reported)", "string"),
+    OutputField(
+        "cache_image",
+        "The step's cache_image setting, passed on to tf.apply (not proof a cache was used)",
+        "bool",
+    ),
+    OutputField("plan_sha256", "SHA-256 of the saved plan", "string"),
+    OutputField("state", "State mode: managed, backend or ephemeral", "string"),
+    OutputField("state_name", "Managed state name (empty for other modes)", "string"),
+    OutputField("state_held", "Whether the run still holds the managed state", "bool"),
+    OutputField("working_dir", "Working directory of the plan", "string"),
+    OutputField("apply_ready", "Whether tf.apply can apply the saved plan", "bool"),
+    OutputField("outputs", "Non-sensitive output values before the plan's changes", "object"),
+    OutputField("sensitive_outputs", "Names of sensitive outputs", "list"),
+)
+
+
 class TfPlanHandler(BaseHandler):
     """Plan an OpenTofu/Terraform configuration and report what would change."""
 
@@ -395,6 +472,7 @@ class TfPlanHandler(BaseHandler):
     raw_config_keys = frozenset({"secret_vars", "secret_env", "state_encryption_key"})
     default_timeout_seconds = 1800
     config_model = TfPlanConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"engine": "opentofu", "state": "managed", "timeout_seconds": 1800}
     run_timeout_field = "timeout_seconds"
 
@@ -426,6 +504,7 @@ class TfPlanHandler(BaseHandler):
             errors.append("'replace' cannot be combined with 'destroy'")
         if modes.refresh_only and modes.replace:
             errors.append("'replace' cannot be combined with 'refresh_only'")
+        errors += opentofu_version_errors(config)
         if config.get("state_encryption_key") and config.get("engine") == "terraform":
             errors.append("'state_encryption_key' needs the opentofu engine")
         errors += common_errors(config)
@@ -440,7 +519,7 @@ class TfPlanHandler(BaseHandler):
                 summary="Config validation failed",
             )
         config = TfPlanConfig.model_validate(ctx.config)
-        image = config.image.strip() or default_image(config.engine)
+        image = config.image.strip() or default_image(config.engine, config.opentofu_version)
         shared = shared_workspace_mounted(ctx)
         workdir = workdir_for(ctx.step_id) if shared else LOCAL_WORKDIR
         state_name = config.state_name.strip() if config.state == "managed" else None
@@ -473,6 +552,8 @@ class TfPlanHandler(BaseHandler):
                     handler_id=self.handler_id,
                     extra_hosts=dict(access.extra_hosts) if access else {},
                     stop_grace_seconds=config.stop_grace_seconds,
+                    # tf.apply checks the image it pulls against this plan's.
+                    needs_image_id=True,
                 )
                 ran_tool = True
                 outcome = await run_container_job(ctx, job)
@@ -570,6 +651,7 @@ class TfPlanHandler(BaseHandler):
     ) -> HandlerResult:
         evidence = list(outcome.evidence)
         exit_code = outcome.exit_code
+        version = tool_version(outcome)
         if exit_code != 0:
             tool = BINARIES[config.engine]
             reason = (
@@ -587,6 +669,7 @@ class TfPlanHandler(BaseHandler):
                 metrics={
                     "exit_code": exit_code,
                     "duration_seconds": outcome.duration_seconds,
+                    "tool_version": version,
                     "image_digest": outcome.image_digest,
                     "image_served": outcome.image_served,
                     "image_source": outcome.image_source,
@@ -620,6 +703,7 @@ class TfPlanHandler(BaseHandler):
                 metrics={
                     "exit_code": exit_code,
                     "duration_seconds": outcome.duration_seconds,
+                    "tool_version": version,
                     "image_digest": outcome.image_digest,
                     "image_served": outcome.image_served,
                     "image_source": outcome.image_source,
@@ -647,6 +731,7 @@ class TfPlanHandler(BaseHandler):
                 metrics={
                     "exit_code": exit_code,
                     "duration_seconds": outcome.duration_seconds,
+                    "tool_version": version,
                     "image_digest": outcome.image_digest,
                     "image_served": outcome.image_served,
                     "image_source": outcome.image_source,
@@ -668,13 +753,17 @@ class TfPlanHandler(BaseHandler):
                 {
                     "kind": "step_result",
                     "name": f"plan_{ctx.step_id}.txt",
-                    # The digest tf.apply checks, for whoever approves this plan.
+                    # The digest tf.apply checks, for whoever approves this plan,
+                    # and the tool version, which the image's tag does not name.
                     "content_text": plan_text.rstrip("\n")
-                    + f"\n\nSaved plan {PLAN_FILE}, SHA-256: {plan_sha256}\n",
+                    + f"\n\nSaved plan {PLAN_FILE}, SHA-256: {plan_sha256}\n"
+                    + (f"Made by {TOOL_NAMES[config.engine]} {version}\n" if version else ""),
                     "content_json": {
                         "has_changes": has_changes,
                         **summary_data,
                         "plan_sha256": plan_sha256,
+                        "engine": config.engine,
+                        "tool_version": version,
                     },
                 }
             )
@@ -715,12 +804,22 @@ class TfPlanHandler(BaseHandler):
             **summary_data,
             "summary": summary,
             "engine": config.engine,
+            # What the tool itself reported; the image's tag names a plugin
+            # release, and a custom image names whatever its author chose.
+            "tool_version": version,
             "image": image,
             # The image by digest, which tf.apply runs: it must run the same
             # tool version, since a saved plan is refused by any other, and the
-            # image's tag may move. Empty for an image the registry never saw
-            # (built on the sandbox daemon).
+            # image's tag may move. Empty when the pull reported no digest and
+            # the daemon lists none for the repository.
             "image_digest": outcome.image_digest,
+            # The image's ID: tf.apply runs only an image with it. A copy from
+            # the platform registry's cache has another digest than the image
+            # it copies, so only the ID shows it is the same image.
+            # Empty when it could not be read (on the containerd image store,
+            # the image's registry did not answer): tf.apply then refuses the
+            # plan, and planning again reads it.
+            "image_id": outcome.image_id,
             # tf.apply pulls the plan's image the way the plan did.
             "cache_image": config.cache_image,
             # tf.apply applies the saved plan only while it has this digest.
@@ -741,8 +840,11 @@ class TfPlanHandler(BaseHandler):
             metrics={
                 "exit_code": exit_code,
                 "duration_seconds": outcome.duration_seconds,
+                "tool_version": version,
                 "image": image,
                 "image_digest": outcome.image_digest,
+                "image_id": outcome.image_id,
+                "image_local_id": outcome.image_local_id,
                 "image_served": outcome.image_served,
                 "image_source": outcome.image_source,
                 "image_cached": outcome.image_cached,

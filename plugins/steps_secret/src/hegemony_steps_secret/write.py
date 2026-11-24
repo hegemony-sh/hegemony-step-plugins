@@ -33,6 +33,7 @@ from hegemony_step_sdk import (
     HandlerServices,
     HandlerTargeting,
     InvalidConfigError,
+    OutputField,
     StepKind,
 )
 
@@ -503,6 +504,19 @@ def _workspace_dir(ctx: HandlerContext, services: HandlerServices) -> str:
     return os.path.join(root, run_id)
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("operation", "write, swap or delete", "string"),
+    OutputField("path", "Secret path the step wrote, swapped or deleted", "string"),
+    OutputField("reference", "Reference to read a key through (null for a delete)", "string"),
+    OutputField("keys", "Names of the keys the secret holds after the step", "list"),
+    OutputField("created", "Whether no secret existed at the path before the write", "bool"),
+    OutputField("previous_path", "Where the previous keys were copied, or null", "string"),
+    OutputField("swapped_with", "The other secret of a swap, or null", "string"),
+    OutputField("deleted", "Whether a delete removed a secret", "bool"),
+)
+
+
 class WriteSecretHandler(BaseHandler):
     """Store keys in, swap, or delete a secret of the run's organization."""
 
@@ -516,9 +530,12 @@ class WriteSecretHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     writes_secrets = True
+    # Writes the organization's secret store: never from a remote zone.
+    central_only = True
     # Values reach the handler as written (see values.resolve_values).
     raw_config_keys = frozenset({"values"})
     config_model = SecretWriteConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"operation": "write"}
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:

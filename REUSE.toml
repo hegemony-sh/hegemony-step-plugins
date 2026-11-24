@@ -16,6 +16,8 @@ SPDX-License-Identifier = "AGPL-3.0-or-later"
 path = [
     ".releaserc.json",
     ".github/renovate.json",
+    "images/*/variants.json",
+    "packages/step_sdk/api-surface.json",
     "CHANGELOG.md",
 ]
 precedence = "aggregate"

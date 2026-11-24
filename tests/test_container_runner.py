@@ -32,6 +32,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerResult, HandlerServices
+from hegemony_step_sdk.docs import load_docs_bundle
 from hegemony_steps_container.pull_progress import EnginePullUnsupported
 from hegemony_steps_container.run import (
     MAX_OUTPUT_DATA_BYTES,
@@ -130,6 +131,9 @@ def _install_docker(
 
     def fake_run(cmd, *args, **kwargs):
         state["calls"].append(list(cmd))
+        if cmd[1:2] == ["info"]:
+            # A classic-store daemon: its image ID is the configuration digest.
+            return SimpleNamespace(returncode=0, stdout="overlay2|[]\n", stderr="")
         if cmd[1:3] == ["image", "inspect"] and "{{json .RepoDigests}}" in cmd:
             return SimpleNamespace(returncode=0, stdout=json.dumps(repo_digests or []), stderr="")
         if len(cmd) >= 4 and cmd[1] == "cp":
@@ -452,7 +456,7 @@ async def test_run_container_job_stages_files_and_collects(monkeypatch):
             "docker.io/library/python@sha256:ccc",
         ),
         ("python", ["python@sha256:ccc"], "python@sha256:ccc"),
-        # Built on the daemon, never pushed: no digest, the tag runs.
+        # The daemon lists no digest for the repository: none to report.
         ("tool:local", [], ""),
         # Already pinned: nothing to look up.
         ("ghcr.io/x/tool@sha256:ddd", [], "ghcr.io/x/tool@sha256:ddd"),
@@ -513,6 +517,48 @@ async def test_a_digest_the_daemon_cannot_give_leaves_the_job_on_its_tag(monkeyp
     [(message, attrs)] = [e for e in events if e[1].get("milestone") == "image_digest"]
     assert message.startswith("No registry digest for ghcr.io/x/tool:1: the container runs by tag")
     assert attrs["digest"] == ""
+
+
+@pytest.mark.asyncio
+async def test_without_a_digest_the_job_runs_by_the_image_id_it_checked(monkeypatch):
+    """A tag can be pulled or retagged between the check and `docker create`.
+
+    With no registry digest, the container is created from the image ID read
+    after the pull, so the image that runs is the one checked and recorded.
+    """
+    state = _install_docker(monkeypatch)
+    fake_run = subprocess.run
+    image_id = "sha256:" + "7" * 64
+
+    def run(cmd, *args, **kwargs):
+        if cmd[1:3] == ["image", "inspect"] and any("{{.Id}}" in a for a in cmd):
+            return SimpleNamespace(returncode=0, stdout=f"{image_id} linux/amd64\n", stderr="")
+        return fake_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", run)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    async def record(message: str, device_id: str | None, attrs: dict[str, Any] | None) -> bool:
+        events.append((message, dict(attrs or {})))
+        return True
+
+    ctx = _ctx({})
+    ctx._emit_progress = record
+    job = ContainerJob(
+        config=container_config_from({}, image="ghcr.io/x/tool:1", command=["true"]),
+        expected_image_id=image_id,
+    )
+    outcome = await run_container_job(ctx, job)
+
+    assert isinstance(outcome, ContainerJobResult)
+    assert outcome.image_digest == "" and outcome.image_id == image_id
+    create = _create_args(state)
+    assert image_id in create
+    assert "ghcr.io/x/tool:1" not in create
+    [(message, _attrs)] = [e for e in events if e[1].get("milestone") == "image_digest"]
+    assert message.startswith(
+        f"No registry digest for ghcr.io/x/tool:1: the container runs by its image ID {image_id}"
+    )
 
 
 @pytest.mark.asyncio
@@ -947,3 +993,84 @@ def test_bounded_passes_a_stop_request_on_without_preserve_status(tmp_path):
     [*probes, launch] = calls.read_text().splitlines()
     assert probes == ["--preserve-status -s TERM -k 300 5 true", "-s TERM -k 300 5 true"]
     assert launch.startswith("-s TERM -k 300 ")
+
+
+def _docker_daemon() -> str | None:
+    """The docker CLI when a daemon answers it, for tests that need a real one."""
+    docker = shutil.which("docker")
+    if docker is None:
+        return None
+    try:
+        info = subprocess.run([docker, "info"], capture_output=True, timeout=10)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    return docker if info.returncode == 0 else None
+
+
+@pytest.mark.asyncio
+async def test_the_identity_inspect_reads_an_image_without_a_variant(tmp_path):
+    """The ID-and-platform inspect works on a real daemon for an image with no variant.
+
+    Docker 29 leaves ``Variant`` out of the inspect data when it is empty (any
+    amd64 image), and a template reading ``.Variant`` then fails for every
+    image: tf.plan recorded no image ID, and every tf.apply refused its plan.
+    """
+    docker = _docker_daemon()
+    if docker is None:
+        pytest.skip("needs a docker daemon")
+    tag = f"hegemony-test/identity:{os.getpid()}"
+    (tmp_path / "f").write_text("hi\n")
+    layer = tmp_path / "layer.tar"
+    subprocess.run(["tar", "-cf", str(layer), "-C", str(tmp_path), "f"], check=True)
+    # `docker import` needs no registry. The platform is named: the daemon's
+    # own one has a variant on ARM hosts (linux/arm64/v8).
+    subprocess.run(
+        [docker, "import", "--platform", "linux/amd64", str(layer), tag],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        image_id, platform = await RunContainerHandler()._image_id_and_platform(
+            docker_bin=docker, image=tag, docker_env=dict(os.environ), timeout=30
+        )
+    finally:
+        subprocess.run([docker, "image", "rm", "-f", tag], capture_output=True)
+    assert image_id.startswith("sha256:")
+    assert platform.count("/") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_identity_inspect_is_logged(monkeypatch, caplog):
+    """The step carries on without the ID, but the daemon's reason is logged."""
+
+    def run(cmd, *args, **kwargs):
+        return SimpleNamespace(
+            returncode=1, stdout="", stderr='template parsing error: no entry for key "X"\n'
+        )
+
+    monkeypatch.setattr("subprocess.run", run)
+    with caplog.at_level("WARNING", logger="hegemony_steps_container.run"):
+        result = await RunContainerHandler()._image_id_and_platform(
+            docker_bin="docker", image="x/tool:1", docker_env={}, timeout=5
+        )
+    assert result == ("", "")
+    assert "x/tool:1" in caplog.text
+    assert "template parsing error" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs(monkeypatch):
+    # The editor's variable picker lists output_fields; they must match.
+    _install_docker(monkeypatch, out_files={"output.json": b'{"k": 1}'})
+    result = await RunContainerHandler().execute(_ctx({"image": "alpine:3.20"}))
+
+    declared = [field.name for field in RunContainerHandler.output_fields]
+    assert len(declared) == len(set(declared))
+    assert set(result.output) == set(declared)
+
+
+def test_the_docs_page_names_every_declared_output_field():
+    text = load_docs_bundle("hegemony_steps_container")["container.run"]
+    for field in RunContainerHandler.output_fields:
+        assert f"output.{field.name}`" in text, field.name
+        assert field.description and field.type, field.name

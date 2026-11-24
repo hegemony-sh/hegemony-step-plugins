@@ -34,6 +34,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StepKind,
 )
 from hegemony_steps_container.run import RunContainerHandler
@@ -67,8 +68,10 @@ from .results import (
     CALLBACK_SOURCE,
     EXIT_CODE_MEANINGS,
     RESULTS_FILE,
+    VERSION_FILE,
     PlaybookResults,
     parse_results,
+    parse_version,
     render_host_report,
 )
 
@@ -76,7 +79,49 @@ from .results import (
 #: network collections. Built from images/ansible-runner in this repository; the
 #: Images workflow publishes it for every release as X.Y.Z and X.Y, and the tag
 #: here names this release's minor version (scripts/set_version.py moves it).
-DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.42"
+DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.56"
+#: The ansible-core series that image is also published for, as
+#: ``<DEFAULT_IMAGE>-core<series>`` (images/ansible-runner/variants.json;
+#: tests/test_release_versions.py keeps the two equal). "default" is the plain
+#: tag, whose series a minor release of the plugins may move; a named series
+#: stays until a minor release stops publishing it.
+AnsibleCoreVersion = Literal["default", "2.19", "2.21"]
+
+
+#: The default image of any release of the plugins: its plain X.Y tag. A flow
+#: saved from the step's form carries the default of the release it was saved
+#: with, which a later release no longer equals.
+_DEFAULT_IMAGE_OF_A_RELEASE = re.compile(re.escape(DEFAULT_IMAGE.rsplit(":", 1)[0]) + r":\d+\.\d+")
+
+
+def _is_a_default_image(image: str) -> bool:
+    return bool(_DEFAULT_IMAGE_OF_A_RELEASE.fullmatch(image))
+
+
+def execution_image(image: object, ansible_core_version: object = "default") -> str:
+    """The image the step runs: its own, else the default at the series asked for.
+
+    A named series always runs this release's image for it, also when the
+    config still carries an earlier release's default image.
+    """
+    version = str(ansible_core_version or "default")
+    chosen = str(image or "").strip() or DEFAULT_IMAGE
+    if version != "default" and _is_a_default_image(chosen):
+        return f"{DEFAULT_IMAGE}-core{version}"
+    return chosen
+
+
+def ansible_core_version_errors(config: dict[str, Any]) -> list[str]:
+    """A named ansible-core series next to an image of the author's own.
+
+    The default image of any release is not one: see :func:`execution_image`.
+    """
+    if str(config.get("ansible_core_version") or "default") == "default":
+        return []
+    if not _is_a_default_image(execution_image(config.get("image"))):
+        return ["set 'image' or 'ansible_core_version', not both: the image decides the version"]
+    return []
+
 
 ATTACHMENTS_ROOT = "/attachments"
 ANSIBLE_ROOT = "/hegemony/ansible"
@@ -296,13 +341,27 @@ class AnsiblePlaybookConfig(ContainerExecutionConfig):
         description="Ansible verbosity: 0 is normal, 1-4 add -v to -vvvv.",
         json_schema_extra={"x_advanced": True},
     )
+    ansible_core_version: AnsibleCoreVersion = Field(
+        default="default",
+        title="ansible-core version",
+        description=(
+            "The ansible-core series to run: default (ansible-core 2.19 today; a new minor "
+            "release of the plugins may move it), 2.19 or 2.21. Name a series to stay on it "
+            "across plugin upgrades; patch releases of that series still arrive. The step "
+            "output names the exact version that ran (ansible_version)."
+        ),
+        json_schema_extra={"x_advanced": True},
+    )
     image: str = Field(
         default=DEFAULT_IMAGE,
         min_length=1,
         title="Execution image",
         description=(
             "Container image with ansible-playbook and the collections the playbook "
-            "needs. Any Ansible execution environment image works."
+            "needs. The default has ansible-core 2.19, or the series ansible-core version "
+            "names; an image of your own replaces that setting, so set only one. The step "
+            "output names the version that ran (ansible_version). Any Ansible execution "
+            "environment image works."
         ),
         json_schema_extra={"x_advanced": True, "x_col_span": 2},
     )
@@ -540,6 +599,13 @@ def build_run_script(
     if deadline is not None:
         lines += deadline_shell_lines(deadline)
         run = "bounded "
+    # Before anything can fail: the image's tag names a plugin release, not the
+    # ansible-core inside, and a custom image names whatever its author chose.
+    bound = "" if deadline is None else "bounded "
+    lines.append(
+        f"if ! {bound}ansible-playbook --version > {VERSION_FILE} 2>/dev/null; "
+        f"then rm -f {VERSION_FILE}; fi"
+    )
     if config.requirements_file.strip():
         requirements = posixpath.join(ATTACHMENTS_ROOT, config.requirements_file.strip())
         galaxy = f"ansible-galaxy install -r {shlex.quote(requirements)}"
@@ -619,18 +685,45 @@ def _explain_default_image_pull_failure(
     config: AnsiblePlaybookConfig, result: HandlerResult
 ) -> HandlerResult:
     """Say how to get the default image when the sandbox could not pull it."""
-    if config.image.strip() != DEFAULT_IMAGE or not (result.summary or "").startswith(
+    image = execution_image(config.image, config.ansible_core_version)
+    if not image.startswith(DEFAULT_IMAGE) or not (result.summary or "").startswith(
         "Failed to pull image"
     ):
         return result
     result.error = (
-        f"The default execution image {DEFAULT_IMAGE} could not be pulled. The release "
+        f"The default execution image {image} could not be pulled. The release "
         "publishes it on ghcr.io: check that the sandbox's Docker daemon can reach "
         "ghcr.io (directly or through its proxy), or build it from images/ansible-runner "
         "in hegemony-step-plugins, push it to a registry the sandbox can pull from, and "
         f"set Execution image to that tag. {result.error or ''}"
     ).strip()
     return result
+
+
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("exit_code", "Exit code of ansible-playbook", "int"),
+    OutputField(
+        "ansible_version",
+        "Version of ansible-core that ran, such as 2.19.13 (empty when it was not reported)",
+        "string",
+    ),
+    OutputField("check_mode", "Whether the playbook ran in check mode", "bool"),
+    OutputField("changed", "Whether any host changed (null when the play gave no results)", "bool"),
+    OutputField("hosts", "Per-host task counts from the play recap", "object"),
+    OutputField("changed_hosts", "Hosts with changes", "list"),
+    OutputField("failed_hosts", "Hosts with failed tasks", "list"),
+    OutputField("unreachable_hosts", "Hosts that could not be reached", "list"),
+    OutputField("stats", "Values the play published with set_stats", "object"),
+    OutputField("results_trimmed", "What was left out of very large results, when any was", "list"),
+    OutputField("changed_hosts_truncated", "True when changed_hosts was cut to fit", "bool"),
+    OutputField("failed_hosts_truncated", "True when failed_hosts was cut to fit", "bool"),
+    OutputField(
+        "unreachable_hosts_truncated", "True when unreachable_hosts was cut to fit", "bool"
+    ),
+    OutputField("hosts_truncated", "True when hosts was left out to fit", "bool"),
+    OutputField("stats_truncated", "True when stats was left out to fit", "bool"),
+)
 
 
 class AnsiblePlaybookHandler(BaseHandler):
@@ -650,6 +743,7 @@ class AnsiblePlaybookHandler(BaseHandler):
     raw_config_keys = frozenset({"secrets", "group_secrets", "vault_password", "vault_ids"})
     default_timeout_seconds = 1800
     config_model = AnsiblePlaybookConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"playbook": "site.yml", "timeout_seconds": 1800}
     run_timeout_field = "timeout_seconds"
 
@@ -687,12 +781,12 @@ class AnsiblePlaybookHandler(BaseHandler):
         for name in extra_vars:
             if not isinstance(name, str) or not SECRET_NAME_RE.match(name):
                 errors.append(f"'extra_vars' name {name!r} is not a valid variable name")
+        errors.extend(ansible_core_version_errors(config))
         # The container half: image reference, env keys, egress rules.
+        image = execution_image(config.get("image"), config.get("ansible_core_version"))
         errors.extend(
             RunContainerHandler().validate_config(
-                container_config_from(
-                    config, image=str(config.get("image") or DEFAULT_IMAGE), command=[]
-                )
+                container_config_from(config, image=image, command=[])
             )
         )
         return errors
@@ -733,7 +827,7 @@ class AnsiblePlaybookHandler(BaseHandler):
         job = ContainerJob(
             config=container_config_from(
                 ctx.config,
-                image=config.image,
+                image=execution_image(config.image, config.ansible_core_version),
                 command=[f"exec sh {RUN_SCRIPT}"],
                 entrypoint="/bin/sh",
                 env=_ansible_env(config, user_env),
@@ -947,8 +1041,10 @@ class AnsiblePlaybookHandler(BaseHandler):
         failed = results.hosts_where("failures")
         unreachable = results.hosts_where("unreachable")
         exit_code = outcome.exit_code
+        ansible_version = parse_version(outcome.collected.get(VERSION_FILE))
         raw_output: dict[str, Any] = {
             "exit_code": exit_code,
+            "ansible_version": ansible_version,
             "check_mode": config.check_mode,
             # Unknown (null), never a guessed "no changes", without the recap: a
             # check-mode gate branching on it must not skip an approval.
@@ -995,6 +1091,7 @@ class AnsiblePlaybookHandler(BaseHandler):
                 "exit_code": exit_code,
                 "target_devices": sum(len(devices) for devices in devices_by_role.values()),
                 "duration_seconds": outcome.duration_seconds,
+                "ansible_version": ansible_version,
                 "image": outcome.image,
                 "image_digest": outcome.image_digest,
                 "image_served": outcome.image_served,

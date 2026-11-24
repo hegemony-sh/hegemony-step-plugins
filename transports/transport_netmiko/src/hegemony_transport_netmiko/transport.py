@@ -20,7 +20,7 @@ import re
 import socket
 import tempfile
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, TypeVar, cast
@@ -34,13 +34,24 @@ from hegemony_step_sdk import (
     SshAlgorithms,
     TransportOutputSink,
 )
+from hegemony_step_sdk.cli_prompts import (
+    CliPrompt,
+    CliPromptError,
+    PromptDialogue,
+    last_line,
+    prompts_for,
+    waiting_at,
+)
 from hegemony_step_sdk.ssh import (
     MIN_DH_GROUP_BITS,
-    configure_paramiko,
     hop_allows_legacy,
     is_weak_ssh_public_key,
-    paramiko_algorithm_lists,
+    negotiation_failure_detail,
     validate_ssh_public_key,
+)
+from hegemony_transport_support.ssh import (
+    configure_paramiko,
+    paramiko_algorithm_lists,
 )
 
 try:
@@ -67,6 +78,9 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+#: SSH_MSG_KEXINIT (RFC 4253 §12): paramiko hands its parser the message without it.
+_MSG_KEXINIT = 20
 
 #: How long the executor thread waits for the host's verifier, which runs on
 #: the event loop the transport was called from.
@@ -228,6 +242,36 @@ if paramiko is not None:
         client_kexinit = b""
         server_kexinit = b""
 
+        def _parse_kex_init(self, m: Any) -> None:
+            """Keep the server's KEXINIT and name both sides' lists when nothing matches.
+
+            paramiko records the server's message only once it agreed on every
+            algorithm, and its error names just the kind that failed.
+            """
+            if not self.server_kexinit:
+                self.server_kexinit = bytes([_MSG_KEXINIT]) + m.get_remainder()
+            try:
+                super()._parse_kex_init(m)
+            except paramiko.IncompatiblePeer as exc:
+                detail = self._negotiation_detail()
+                if not detail:
+                    raise
+                raise paramiko.IncompatiblePeer(f"{exc}: {detail}") from exc
+
+        def _negotiation_detail(self) -> str:
+            """What each side offered for the kinds the key exchange found no match in."""
+            try:
+                with_legacy = None if self._allow_legacy else _offered_algorithms(True)
+                return negotiation_failure_detail(
+                    self.client_kexinit,
+                    self.server_kexinit,
+                    with_legacy=with_legacy,
+                    legacy_allowed=self._allow_legacy,
+                )
+            except Exception:  # noqa: BLE001 - the detail is extra; keep paramiko's error
+                logger.debug("could not describe the SSH negotiation failure", exc_info=True)
+                return ""
+
         @property
         def local_kex_init(self) -> bytes | None:
             return self.__dict__.get("_local_kex_init")
@@ -247,6 +291,26 @@ if paramiko is not None:
             self.__dict__["_remote_kex_init"] = message
             if message is not None and not self.server_kexinit:
                 self.server_kexinit = message
+
+
+def _incompatible_peer(exc: BaseException) -> BaseException | None:
+    """The algorithm mismatch behind ``exc``, if it is one.
+
+    netmiko reports every paramiko ``SSHException`` while connecting as a
+    ``NetmikoTimeoutException``; a key exchange that agreed on nothing is not a
+    timeout, and its own message names what each side offered.
+    """
+    incompatible = getattr(paramiko, "IncompatiblePeer", None)
+    if not isinstance(incompatible, type):
+        return None
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, incompatible):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _keep_kexinit(connection: Any, *, allow_legacy: bool = False) -> None:
@@ -288,6 +352,22 @@ def _agreed_algorithms(client: Any) -> SshAlgorithms | None:
         logger.debug("could not read the SSH host key to classify it", exc_info=True)
         return agreed
     return replace(agreed, weak_host_key=is_weak_ssh_public_key(line))
+
+
+def _offered_algorithms(allow_legacy: bool) -> dict[str, tuple[str, ...]]:
+    """What a connection offers, by kind: a transport set up the same way, unconnected."""
+    if paramiko is None:
+        raise RuntimeError("paramiko is not installed")
+    ours, theirs = socket.socketpair()
+    try:
+        transport = _KexinitKeepingTransport(ours, allow_legacy=allow_legacy)
+        try:
+            return paramiko_algorithm_lists(transport)
+        finally:
+            transport.close()
+    finally:
+        theirs.close()
+        ours.close()
 
 
 class _NullCancellationRegistry:
@@ -408,6 +488,8 @@ class SSHResult:
     exit_code: int
     error: str | None = None
     latency_ms: float = 0.0
+    #: The device closed the session while this command ran (a reload).
+    disconnected: bool = False
 
 
 # Map inventory platform strings to Netmiko device_type values.
@@ -452,13 +534,135 @@ def _is_save_command(command_lower: str) -> bool:
     return command_lower.startswith("write") or command_lower.startswith("copy run")
 
 
+#: Output that ends a ``copy <url> <fs>`` dialogue, whether it worked or not.
+#: "nknown command" is a platform without this copy command ("% Unknown
+#: command" on FRR, "unknown command." on Junos): the answer is final, so do
+#: not wait out the timeout.
+_COPY_DONE_MARKERS = (
+    "bytes copied",
+    "%Error",
+    "Error opening",
+    "Invalid",
+    "not found",
+    "timed out",
+    "refused",
+    "Could not",
+    "Incomplete command",
+    "nknown command",
+    "Broken pipe",
+)
+
+#: Output that means the copy failed.
+_COPY_ERROR_MARKERS = (
+    "%Error",
+    "Error opening",
+    "Error reading",
+    "Invalid",
+    "not found",
+    "refused",
+    "Could not",
+    "Broken pipe",
+    "timed out",
+)
+
+
+def _copy_answer(output: str, url: str, dest_fs: str, dest_filename: str) -> str:
+    """The device's own words in a copy dialogue: ``output`` without the inputs it echoes.
+
+    The device repeats the URL and the file name (the command echo,
+    "Destination filename [<name>]?", "Accessing <url>..."), so a name like
+    ``Invalid-image.bin`` must not read as the device's "Invalid".
+
+    The URL holds "://", so it is never part of the device's own words and is
+    removed everywhere. The file name is removed only where it is echoed
+    (``<fs><name>`` and ``[<name>]``): a name like ``bytes`` must not cut
+    "bytes copied" out of the device's answer.
+    """
+    echoes = [f"copy {url} {dest_fs}{dest_filename}", url]
+    if dest_filename:
+        if dest_fs:
+            echoes.append(f"{dest_fs}{dest_filename}")
+        echoes.append(f"[{dest_filename}]")
+    for echoed in echoes:
+        if echoed:
+            output = output.replace(echoed, "")
+    return output
+
+
 #: What IOS asks before a copy to startup-config, unless 'file prompt quiet'
 #: is set: the destination file name, then on some platforms a confirmation
 #: to overwrite it. Enter takes the answer the device offers.
 _COPY_QUESTION = r"(?:Destination filename \[[^\]\n]*\]\?|\[confirm\])"
 
+#: How often a command answering prompts reads the session.
+_PROMPT_POLL_SECONDS = 0.2
+
 #: A copy to startup-config asks at most these two questions.
 _MAX_COPY_ANSWERS = 2
+
+
+#: The questions a copy to startup-config asks, answered with Enter as the
+#: built-in dialogue does, after any the step lists itself.
+_STARTUP_COPY_PROMPTS = (
+    CliPrompt(expect=r"Destination filename \[[^\]\n]*\]\?"),
+    CliPrompt(expect=r"\[confirm\]"),
+)
+
+#: Error of a result for a command not run because an earlier one may have left
+#: the device at a question: its text would be taken as the answer.
+_LEFT_WAITING_ERROR = "Skipped: an earlier command may have left the device waiting at a question"
+_CLOSED_ERROR = "Skipped: the device closed the session"
+
+
+class _SessionClosed(Exception):
+    """The device closed the session while a command ran; ``output`` is what it sent first."""
+
+    def __init__(self, output: str) -> None:
+        super().__init__("The device closed the session")
+        self.output = output
+
+
+def _session_open(connection: Any) -> bool:
+    """Whether the SSH session is still open, from paramiko's own state.
+
+    A session the device closed cleanly reads as silence rather than an
+    error, so a command that ran into silence asks here. Nothing is written
+    to the device: a probe byte could reach one that waits at a question. A
+    session that went silent without closing (the network dropped it)
+    counts as open, since nothing proves it closed.
+    """
+    channel = getattr(connection, "remote_conn", None)
+    if channel is None:
+        return True
+    # Only real booleans count: anything else proves nothing.
+    if getattr(channel, "closed", None) is True or getattr(channel, "eof_received", None) is True:
+        return False
+    transport = getattr(channel, "transport", None)
+    is_active = getattr(transport, "is_active", None)
+    if callable(is_active):
+        try:
+            return is_active() is not False
+        except Exception:  # noqa: BLE001 - a check that cannot run proves nothing
+            return True
+    return True
+
+
+def _closed_result(command: str, output: str, latency_ms: float) -> SSHResult:
+    """The result of a command during which the device closed the session.
+
+    ``disconnected`` stops the commands after it either way. A device error
+    in what it printed first keeps it a failed command (exit code 1), which
+    the step never accepts as an allowed disconnect; otherwise exit code -1.
+    """
+    cli_error = _detect_cli_error(output) if command.strip() else None
+    return SSHResult(
+        command=command,
+        output=output,
+        exit_code=1 if cli_error else -1,
+        error=cli_error or "The device closed the session",
+        latency_ms=latency_ms,
+        disconnected=True,
+    )
 
 
 def _is_startup_copy(command: str) -> bool:
@@ -565,6 +769,22 @@ class SSHTransport:
             raise ValueError("allow_legacy must be a boolean")
         self._allow_legacy_ssh = allow_legacy
 
+    #: Feature flag: ``configure_cli_prompts`` answers the questions a step lists.
+    supports_cli_prompts = True
+    _cli_prompts: tuple[CliPrompt, ...] = ()
+    #: Set when a command may have left the device at a question.
+    _left_waiting = False
+
+    def configure_cli_prompts(self, prompts: Sequence[CliPrompt]) -> None:
+        """Set the questions the step's commands may ask, and what to answer."""
+        self._cli_prompts = tuple(prompts)
+
+    #: Feature flag: a result is ``disconnected`` when the device closed the
+    #: session while that exec command ran, such as on a reload.
+    supports_disconnect_reports = True
+    #: Whether the running exec command was written to the device.
+    _command_sent = False
+
     def _legacy(self, *, jump_host: bool) -> bool:
         """Whether a hop may use legacy SSH: the step setting, or that hop's inventory flag."""
         return hop_allows_legacy(
@@ -581,18 +801,7 @@ class SSHTransport:
         The exact lists its connections and its bastion hop use, read from a
         Paramiko transport set up the same way on an unconnected socket.
         """
-        if paramiko is None:
-            raise RuntimeError("paramiko is not installed")
-        ours, theirs = socket.socketpair()
-        try:
-            transport = _KexinitKeepingTransport(ours, allow_legacy=allow_legacy)
-            try:
-                return paramiko_algorithm_lists(transport)
-            finally:
-                transport.close()
-        finally:
-            theirs.close()
-            ours.close()
+        return _offered_algorithms(allow_legacy)
 
     def __init__(
         self,
@@ -919,9 +1128,12 @@ class SSHTransport:
                 connection._open()
             except Exception as exc:
                 refusal = self._refusal(exc, self.host, self.port, keys)
-                if refusal is None:
-                    raise
-                raise refusal from exc
+                if refusal is not None:
+                    raise refusal from exc
+                incompatible = _incompatible_peer(exc)
+                if incompatible is not None:
+                    raise incompatible from exc
+                raise
         except BaseException:
             if bastion is not None:
                 with contextlib.suppress(Exception):
@@ -978,13 +1190,28 @@ class SSHTransport:
     def _run_exec_command(self, connection, command: str) -> SSHResult:
         """Run one command at privilege-exec; a CLI error pattern gives exit code 1."""
         start = time.perf_counter()
+        # Only a session that closes after the command went out can be the
+        # command's doing (a reload); one that closed before it is not.
+        self._command_sent = False
         try:
             if not command.strip():
                 connection.write_channel("\n")
                 raw_output = connection.read_channel()
+            elif prompts := prompts_for(command, self._cli_prompts):
+                if _is_startup_copy(command):
+                    # The flow's entries first; the copy's own questions still answered.
+                    prompts = [*prompts, *_STARTUP_COPY_PROMPTS]
+                raw_output = self._send_with_prompts(connection, command, prompts)
             elif _is_startup_copy(command):
                 raw_output = self._send_startup_copy(connection, command)
             else:
+                # send_command drops what it read when it raises, so a device
+                # error printed before the session closed would be lost: a
+                # close here is never reported as the command's disconnect.
+                # A command that may end the session goes through the prompt
+                # path (a prompts entry whose pattern matches it), which keeps
+                # all of its output.
+                self._command_sent = False
                 raw_output = connection.send_command(
                     command,
                     read_timeout=self.command_timeout,
@@ -993,12 +1220,27 @@ class SSHTransport:
                 )
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
+            # Every close the prompt path can attribute to the command raises
+            # _SessionClosed with the output read so far; any other error,
+            # also on a session that closed meanwhile, stays a failure.
+            closed = self._command_sent and isinstance(e, _SessionClosed)
+            # Cancelling the run closes the session too; that is no reload.
+            if closed and not self._cancellation_registry.is_cancelled(self.step_run_id):
+                logger.warning(f"{self.host} closed the session during a command")
+                return _closed_result(command, getattr(e, "output", ""), latency_ms)
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
+            error = self._exception_error(e)
+            if isinstance(e, (ReadTimeout, CliPromptError)):
+                # The device may still be waiting at a question.
+                self._left_waiting = True
+            if isinstance(e, ReadTimeout):
+                # The device may be waiting at a question the step did not list.
+                error += "; if the command asks a question, list it under prompts"
             return SSHResult(
                 command=command,
                 output="",
                 exit_code=-1,
-                error=str(e),
+                error=error,
                 latency_ms=latency_ms,
             )
         latency_ms = (time.perf_counter() - start) * 1000
@@ -1024,6 +1266,68 @@ class SSHTransport:
             )
         logger.info(f"Command on {self.host} completed in {latency_ms:.0f}ms")
         return SSHResult(command=command, output=output, exit_code=0, latency_ms=latency_ms)
+
+    def _send_with_prompts(self, connection, command: str, prompts: Sequence[CliPrompt]) -> str:
+        """Run ``command``, answering the questions ``prompts`` list, until the prompt returns.
+
+        The session is read here rather than by send_command, so the output is
+        kept: a question nobody listed fails the command with the line the
+        device is waiting at. ``command_timeout`` bounds each wait, from the
+        command or an answer to the next question or the prompt. The output
+        keeps neither the command echo nor the trailing prompt.
+        """
+        prompt = connection.find_prompt().strip()
+        dialogue = PromptDialogue(prompts)
+        connection.write_channel(command + connection.RETURN)
+        self._command_sent = True
+        output = ""
+        # Where the output after the latest answer starts: the question just
+        # answered is not read as a new one.
+        since_answer = 0
+        deadline = time.monotonic() + self.command_timeout
+        while True:
+            if self._cancellation_registry.is_cancelled(self.step_run_id):
+                raise CliPromptError("The step was cancelled while the command ran")
+            expired = time.monotonic() >= deadline
+            try:
+                chunk = connection.read_channel()
+            except (OSError, EOFError) as exc:
+                # A read error is the device closing the session only when
+                # the session is closed; otherwise it fails the command.
+                if not _session_open(connection):
+                    raise _SessionClosed(output) from exc
+                raise
+            if not chunk and not _session_open(connection):
+                raise _SessionClosed(output)
+            if chunk:
+                output += chunk
+                recent = output[since_answer:]
+                if last_line(recent) == prompt:
+                    break
+                answer = None if expired else dialogue.answer_for(recent)
+                if answer is not None:
+                    try:
+                        connection.write_channel(answer + connection.RETURN)
+                    except Exception as exc:
+                        # Keep what the device printed, a device error included.
+                        if not _session_open(connection):
+                            raise _SessionClosed(output) from exc
+                        raise
+                    since_answer = len(output)
+                    deadline = time.monotonic() + self.command_timeout
+                    continue
+            if expired or time.monotonic() >= deadline:
+                raise CliPromptError(
+                    f"Timed out after {self.command_timeout:g} seconds; {waiting_at(output)} "
+                    "(list that question under prompts if the command should answer it)"
+                )
+            time.sleep(_PROMPT_POLL_SECONDS)
+        lines = output.rstrip().splitlines()
+        if lines and lines[0].strip() == command.strip():
+            lines.pop(0)
+        if lines and lines[-1].strip() == prompt:
+            lines.pop()
+        return "\n".join(lines)
 
     def _send_startup_copy(self, connection, command: str) -> str:
         """Run a copy to startup-config, answering its questions with Enter.
@@ -1210,9 +1514,22 @@ class SSHTransport:
                     if any(r.exit_code != 0 for r in step_results):
                         skip_reason = self._skip_reason()
             else:
-                # Execute show/exec commands individually
-                for command in commands:
+                # Execute show/exec commands individually. After a command that
+                # may have left the device at a question, the next one would be
+                # taken as the answer, so the rest are not sent.
+                self._left_waiting = False
+                for index, command in enumerate(commands):
                     results.append(self._run_exec_command(connection, command))
+                    if results[-1].disconnected:
+                        results.extend(
+                            _skipped(cmd, _CLOSED_ERROR) for cmd in commands[index + 1 :]
+                        )
+                        break
+                    if self._left_waiting:
+                        results.extend(
+                            _skipped(cmd, _LEFT_WAITING_ERROR) for cmd in commands[index + 1 :]
+                        )
+                        break
 
         except NetmikoAuthenticationException as e:
             logger.error(f"Authentication failed to {self.host}: {e}")
@@ -1428,26 +1745,13 @@ class SSHTransport:
                     }
 
                 # Check for completion/error indicators FIRST (before prompt handling)
-                # This ensures we exit the loop when transfer completes or fails
-                if any(
-                    indicator in output
-                    for indicator in [
-                        "bytes copied",
-                        "%Error",
-                        "Error opening",
-                        "Invalid",
-                        "not found",
-                        "timed out",
-                        "refused",
-                        "Could not",
-                        "Incomplete command",
-                        # A platform without this copy command ("% Unknown
-                        # command" on FRR, "unknown command." on Junos): the
-                        # answer is final, so do not wait out the timeout.
-                        "nknown command",
-                        "Broken pipe",
-                    ]
-                ):
+                # This ensures we exit the loop when transfer completes or fails.
+                # Not in the raw output: the device echoes the URL and the name.
+                # Complete lines only: a read can end inside an echoed URL, whose
+                # partial text would not be removed and could hold a marker.
+                complete = output[: output.rfind("\n") + 1]
+                answer = _copy_answer(complete, url, dest_fs, dest_filename)
+                if any(marker in answer for marker in _COPY_DONE_MARKERS):
                     break
 
                 # Check for destination filename prompt (only handle once)
@@ -1486,18 +1790,8 @@ class SSHTransport:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
 
             # Check for errors first (more specific matches)
-            error_patterns = [
-                "%Error",
-                "Error opening",
-                "Error reading",
-                "Invalid",
-                "not found",
-                "refused",
-                "Could not",
-                "Broken pipe",
-                "timed out",
-            ]
-            has_error = any(err in output for err in error_patterns)
+            answer = _copy_answer(output, url, dest_fs, dest_filename)
+            has_error = any(marker in answer for marker in _COPY_ERROR_MARKERS)
 
             if has_error:
                 # Not the output: the device echoes the copy command and its URL.
@@ -1510,7 +1804,7 @@ class SSHTransport:
 
             # Check for success indicators
             # "bytes copied" is the definitive success indicator for IOS copy
-            transferred = "bytes copied" in output.lower()
+            transferred = "bytes copied" in answer.lower()
 
             return {
                 "transferred": transferred,

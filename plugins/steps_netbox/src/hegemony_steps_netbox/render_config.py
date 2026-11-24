@@ -28,6 +28,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     InvalidConfigError,
+    OutputField,
     StepKind,
     resolve_target_devices_for_roles,
 )
@@ -137,6 +138,21 @@ def config_errors(config: RenderConfigConfig, *, allow_templates: bool) -> list[
     return errors
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("ok", "Whether every configuration was rendered", "bool"),
+    OutputField("object_type", "The kind of NetBox object rendered", "string"),
+    OutputField(
+        "rendered", "One entry per rendered configuration: id, name, template, size, sha256", "list"
+    ),
+    OutputField("failed", "The objects that could not be rendered, with NetBox's message", "list"),
+    OutputField(
+        "configs", "Rendered configurations by device name (null when over 64 KiB)", "object"
+    ),
+    OutputField("configs_truncated", "True when configs was left out for size", "bool"),
+)
+
+
 class RenderConfigHandler(BaseHandler):
     """Have NetBox render the configuration of devices or virtual machines."""
 
@@ -151,6 +167,7 @@ class RenderConfigHandler(BaseHandler):
     targeting = HandlerTargeting(roles=True, ips=False, multi_role=True)
     raw_config_keys = frozenset({"token", "ca_bundle"})
     config_model = RenderConfigConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"object_type": "device"}
 
     def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None) -> None:

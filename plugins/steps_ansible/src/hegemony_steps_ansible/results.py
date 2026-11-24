@@ -20,6 +20,7 @@ Ansible.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +32,9 @@ from .callback_plugin import CALLBACK_TEMPLATE
 CALLBACK_NAME = "hegemony_results"
 #: Where the callback writes its results inside the container.
 RESULTS_FILE = "/hegemony/out/ansible-results.json"
+#: ``ansible-playbook --version``, written by the run script before the play,
+#: so a play that fails to start still names the version that ran.
+VERSION_FILE = "/hegemony/out/ansible-version.txt"
 
 #: Bounds that keep one step's structured results reasonable.
 MAX_TASK_RECORDS = 2000
@@ -71,6 +75,21 @@ _STATUS_MARKS = {
     "unreachable": "UNREACHABLE",
     "skipped": "skipped",
 }
+
+
+#: The first line of ``ansible-playbook --version``: "ansible-playbook [core
+#: 2.19.13]" since ansible-core 2.11 (a source checkout adds its branch after
+#: the bracket), "ansible-playbook 2.9.27" before.
+_VERSION_LINE_RE = re.compile(r"^ansible-playbook (?:\[core (?P<core>[^\]\s]+)\]|(?P<old>\d\S*))")
+_VERSION_RE = re.compile(r"\d+\.\d+[0-9A-Za-z.+-]{0,40}")
+
+
+def parse_version(raw: bytes | None) -> str:
+    """The ansible-core version in :data:`VERSION_FILE`, or "" when it names none."""
+    lines = (raw or b"").decode("utf-8", "replace").splitlines()
+    match = _VERSION_LINE_RE.match(lines[0]) if lines else None
+    version = (match.group("core") or match.group("old")) if match else ""
+    return version if _VERSION_RE.fullmatch(version) else ""
 
 
 @dataclass

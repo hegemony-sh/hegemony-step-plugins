@@ -18,7 +18,13 @@ engine and image, so the lock file, providers, backend settings, and
 variables are the ones that were planned. The image is run by the digest the
 plan recorded, so a tag moved since the plan does not change the tool; when
 the plan ran a copy from the platform registry, that copy is what the apply
-pulls, and the plan's Cache image choice applies to the apply too. Give both steps shared (or
+pulls, and the plan's Cache image choice applies to the apply too. The apply
+also checks the pulled image's ID against the one the plan recorded, and fails
+before it starts the tool when they differ: the saved plan is applied only by
+the image that made it. A plan that recorded an empty ID (it could not be
+read) is refused, and so is an apply that cannot read the ID of the image it
+pulled; the error says which, and a retry can pass. Only a plan from an older `tf.plan`, which
+recorded no ID at all, is applied without this check. Give both steps shared (or
 explicit) execution affinity so they share the run's workspace and worker; the
 worker must have shared workspaces enabled. Every container step in the run
 can write that workspace, so the apply copies the saved plan out of it and
@@ -44,7 +50,13 @@ The apply's output streams into the step's live log and is kept as the
 container output artifact. Later steps read the configuration's
 non-sensitive outputs under `steps.NODE_ID.output.outputs`, for example
 `steps.NODE_ID.output.outputs.vpc_id`; sensitive outputs are listed by name
-in `sensitive_outputs` but their values are never kept.
+in `steps.NODE_ID.output.sensitive_outputs` but their values are never kept.
+`steps.NODE_ID.output.applied` is true when a plan was applied, and false
+when the plan had no changes (the outputs are then the plan's).
+`steps.NODE_ID.output.tool_version` is the version of OpenTofu or Terraform
+that applied, such as `1.12.6`: the plan's version, since the apply runs the
+plan's image (and the version the plan reported when nothing was applied).
+It is empty when the tool reported none.
 
 ## When It Fails
 
@@ -55,7 +67,10 @@ whether the plan step ran without one (its saved plan is gone, so give it
 shared affinity and plan again) or this step has none (shared affinity
 missing, or the worker has shared workspaces disabled). It also fails when
 the apply itself fails, and when the saved plan changed since the plan
-step made it, so it is not the plan that was reviewed: plan again. A plan
+step made it, so it is not the plan that was reviewed: plan again. It fails
+before the tool starts when the pulled image's ID is not the one the plan
+recorded (a copy in the platform registry was replaced, for example): the
+error names both IDs. A plan
 made by an older version of
 `tf.plan`, which recorded no digest, is refused too: plan again. The tool refuses
 a saved plan made stale by a state change since planning: plan again (a

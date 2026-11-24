@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hegemony_step_sdk import (
+    BaseHandler,
     ContainerRuntime,
     HandlerContext,
     HandlerResult,
@@ -41,9 +43,11 @@ from hegemony_steps_tf.apply import (
     NO_PLAN_MESSAGE,
     OUTPUTS_FILE,
     PLAN_CHANGED_MESSAGE,
+    PlanHandoff,
     TfApplyHandler,
     apply_failure,
     build_apply_script,
+    read_plan_handoff,
 )
 from hegemony_steps_tf.common import (
     BACKEND_CONFIG_FILE,
@@ -60,15 +64,19 @@ from hegemony_steps_tf.common import (
     SECRET_ENV_FILE,
     SECRET_VARS_FILE,
     STATE_ACCESS_MARGIN_SECONDS,
+    TOOL_VERSION_FILE,
     VARS_FILE,
     collect_failure,
+    default_image,
     encryption_hcl,
     hcl_string,
     lock_conflict_error,
     lock_timeout_errors,
     public_outputs,
+    step_image,
     tool_deadline,
     tool_kill_after,
+    tool_version,
     typed_variable,
     workdir_for,
 )
@@ -497,10 +505,12 @@ def _install_docker(
     exit_code: int = 0,
     events: list[Any] | None = None,
     repo_digests: list[str] | None = None,
+    image_id: str = "",
 ) -> dict[str, Any]:
     """Fake docker. ``events`` (a _Services' log) records the staging of the
     container's files and the container start among the state access events.
-    ``repo_digests`` is the pulled image's RepoDigests (none by default).
+    ``repo_digests`` is the pulled image's RepoDigests (none by default),
+    ``image_id`` its ID (none by default).
     ``out`` gets the saved plan's digest unless it names ``plan.sha256``
     itself (None: not written)."""
     out = {"plan.sha256": _PLAN_SUM, **out}
@@ -513,6 +523,12 @@ def _install_docker(
 
     def fake_run(cmd, *args, **kwargs):
         state["calls"].append(list(cmd))
+        if cmd[1:2] == ["info"]:
+            # A classic-store daemon: its image ID is the configuration digest.
+            return SimpleNamespace(returncode=0, stdout="overlay2|[]\n", stderr="")
+        if cmd[1:3] == ["image", "inspect"] and any("{{.Id}}" in a for a in cmd):
+            identity = f"{image_id} linux/amd64" if image_id else ""
+            return SimpleNamespace(returncode=0, stdout=f"{identity}\n", stderr="")
         if cmd[1:3] == ["image", "inspect"] and "{{json .RepoDigests}}" in cmd:
             return SimpleNamespace(returncode=0, stdout=json.dumps(repo_digests or []), stderr="")
         if len(cmd) >= 4 and cmd[1] == "cp":
@@ -1383,7 +1399,10 @@ async def test_apply_step_applies_the_saved_plan(monkeypatch):
             "pw": {"sensitive": True, "value": "hunter2"},
         }
     ).encode()
-    state = _install_docker(monkeypatch, out={"outputs.json": outputs})
+    state = _install_docker(
+        monkeypatch,
+        out={"outputs.json": outputs, "tool-version.json": b'{"terraform_version": "1.12.6"}'},
+    )
     services = _Services(_plan_output())
     result = await TfApplyHandler().execute(
         _ctx({"plan_step": "plan", "secret_env": {"TOKEN": "vault://a/tok"}}, services)
@@ -1391,8 +1410,10 @@ async def test_apply_step_applies_the_saved_plan(monkeypatch):
 
     assert result.success is True, result.error
     assert result.summary == "Applied: +1 ~0 -0"
+    assert result.metrics["tool_version"] == "1.12.6"
     assert result.output == {
         "applied": True,
+        "tool_version": "1.12.6",
         "outputs": {"svc": "telemetry"},
         "sensitive_outputs": ["pw"],
     }
@@ -1533,7 +1554,10 @@ async def test_apply_step_refuses_managed_state_without_a_name(monkeypatch):
 async def test_apply_step_skips_a_plan_without_changes(monkeypatch):
     state = _install_docker(monkeypatch, out={})
     plan = _plan_output(
-        has_changes=False, outputs={"vpc_id": "vpc-1"}, sensitive_outputs=["db_password"]
+        has_changes=False,
+        outputs={"vpc_id": "vpc-1"},
+        sensitive_outputs=["db_password"],
+        tool_version="1.12.6",
     )
     result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _Services(plan)))
     assert result.success is True
@@ -1541,9 +1565,12 @@ async def test_apply_step_skips_a_plan_without_changes(monkeypatch):
     # on the one that changed something.
     assert result.output == {
         "applied": False,
+        # No tool ran: the version the plan reported.
+        "tool_version": "1.12.6",
         "outputs": {"vpc_id": "vpc-1"},
         "sensitive_outputs": ["db_password"],
     }
+    assert result.metrics == {"tool_version": "1.12.6"}
     assert state["calls"] == []
 
 
@@ -1985,3 +2012,281 @@ def test_lock_timeout_blank_is_the_default_and_spaces_do_not_count(value, normal
 @pytest.mark.parametrize("value", ["s", "5 m", "300", "5h", "-5m"])
 def test_a_malformed_lock_timeout_is_refused(value):
     assert lock_timeout_errors(value) == ["'lock_timeout' must look like 300s or 5m"]
+
+
+_IMAGE_ID = "sha256:" + "4" * 64
+
+
+@pytest.mark.asyncio
+async def test_plan_step_hands_its_image_id_to_the_apply(monkeypatch):
+    _install_docker(
+        monkeypatch,
+        out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"},
+        image_id=_IMAGE_ID,
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+    assert result.success is True, result.error
+    assert result.output["image_id"] == _IMAGE_ID
+    assert result.metrics["image_id"] == _IMAGE_ID
+
+
+@pytest.mark.asyncio
+async def test_apply_step_runs_only_the_image_its_plan_ran(monkeypatch):
+    """A copy whose digest differs from the plan's still runs when it is the same image."""
+    pinned = f"ghcr.io/hegemony-sh/opentofu-runner@sha256:{'b' * 64}"
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"}, image_id=_IMAGE_ID)
+    services = _Services(_plan_output(image_digest=pinned, image_id=_IMAGE_ID))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.success is True, result.error
+    assert result.metrics["image_id"] == _IMAGE_ID
+    assert any(call[1] == "create" for call in state["calls"])
+
+
+@pytest.mark.asyncio
+async def test_apply_step_refuses_an_image_other_than_its_plans(monkeypatch):
+    pinned = f"ghcr.io/hegemony-sh/opentofu-runner@sha256:{'b' * 64}"
+    other = "sha256:" + "5" * 64
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"}, image_id=other)
+    services = _Services(_plan_output(image_digest=pinned, image_id=_IMAGE_ID))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.success is False
+    assert _IMAGE_ID in (result.error or "") and other in (result.error or "")
+    # Nothing ran: the saved plan was never applied.
+    assert not any(call[1] == "create" for call in state["calls"])
+
+
+@pytest.mark.asyncio
+async def test_apply_step_of_a_plan_without_an_image_id_does_not_check(monkeypatch):
+    """A plan from an older tf.plan recorded no ID: its apply runs as before."""
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"}, image_id="")
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _Services(_plan_output())))
+    assert result.success is True, result.error
+    assert any(call[1] == "create" for call in state["calls"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recorded", ["", "sha256:short", None, 42])
+async def test_apply_step_refuses_a_plan_that_could_not_record_its_image_id(monkeypatch, recorded):
+    """A recorded but empty or malformed ID would turn the image check off."""
+    state = _install_docker(monkeypatch, out={"outputs.json": b"{}"}, image_id=_IMAGE_ID)
+    services = _Services(_plan_output(image_id=recorded))
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, services))
+    assert result.success is False
+    assert "could not record its image's ID" in (result.error or "")
+    assert not any(call[1] == "create" for call in state["calls"])
+
+
+@pytest.mark.asyncio
+async def test_plan_step_records_no_image_id_it_could_not_read(monkeypatch):
+    """The daemon's own ID never stands in: it differs between an image and its copy.
+
+    Such a plan's apply is refused (see
+    test_apply_step_refuses_a_plan_that_could_not_record_its_image_id).
+    """
+
+    from hegemony_steps_tf import plan as plan_module
+
+    local_id = "sha256:" + "6" * 64
+    _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    real = plan_module.run_container_job
+    asked: list[bool] = []
+
+    async def without_configuration_id(ctx, job):
+        asked.append(job.needs_image_id)
+        outcome = await real(ctx, job)
+        return dataclasses.replace(outcome, image_id="", image_local_id=local_id)
+
+    monkeypatch.setattr(plan_module, "run_container_job", without_configuration_id)
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+    assert result.success is True, result.error
+    assert asked == [True]
+    assert result.output["image_id"] == ""
+    assert (result.metrics["image_id"], result.metrics["image_local_id"]) == ("", local_id)
+
+
+def test_a_named_opentofu_series_runs_its_own_tag_of_the_default_image():
+    tofu = DEFAULT_IMAGES["opentofu"]
+    assert default_image("opentofu") == tofu
+    assert default_image("opentofu", "1.13") == f"{tofu}-tofu1.13"
+    # The default series by name too: it stays when the default moves.
+    assert default_image("opentofu", "1.12") == f"{tofu}-tofu1.12"
+    assert default_image("terraform", "1.13") == DEFAULT_IMAGES["terraform"]
+    assert step_image({"opentofu_version": "1.13"}) == f"{tofu}-tofu1.13"
+    assert step_image({"opentofu_version": "1.13", "image": " mine:1 "}) == "mine:1"
+    assert step_image({}) == tofu
+
+    handler = TfPlanHandler()
+    base = {"state": "ephemeral"}
+    assert handler.validate_config({**base, "opentofu_version": "1.13"}) == []
+    assert handler.validate_config({**base, "opentofu_version": "1.13", "image": "mine:1"}) == [
+        "set 'image' or 'opentofu_version', not both: the image decides the version"
+    ]
+    assert handler.validate_config({**base, "opentofu_version": "1.13", "engine": "terraform"}) == [
+        "'opentofu_version' needs the opentofu engine"
+    ]
+    # A series the image is not published for never reaches a pull.
+    unknown = handler.validate_config({**base, "opentofu_version": "1.11"})
+    assert len(unknown) == 1 and "opentofu_version" in unknown[0]
+
+
+@pytest.mark.asyncio
+async def test_a_plan_pulls_the_image_of_the_series_it_names(monkeypatch):
+    state = _install_docker(monkeypatch, out={"plan-exitcode": b"0", "plan.txt": b"No changes.\n"})
+    result = await TfPlanHandler().execute(
+        _ctx({"state": "ephemeral", "opentofu_version": "1.13"}, _Services())
+    )
+
+    assert result.success is True, result.error
+    image = f"{DEFAULT_IMAGES['opentofu']}-tofu1.13"
+    create = next(call for call in state["calls"] if call[1] == "create")
+    assert image in create
+    # tf.apply runs the image the plan names.
+    assert result.output["image"] == image
+
+
+def _versioned(raw: bytes | None) -> Any:
+    collected = {TOOL_VERSION_FILE: raw} if raw is not None else {}
+    return dataclasses.replace(_job_result(0), collected=collected)
+
+
+@pytest.mark.parametrize(
+    ("raw", "version"),
+    [
+        (b'{"terraform_version": "1.12.6", "platform": "linux_amd64"}', "1.12.6"),
+        (b'{"terraform_version": "v1.13.0-rc1"}\n', "1.13.0-rc1"),
+        (b'{"terraform_version": "1.16.4+ent"}', "1.16.4+ent"),
+        # Never a guess: no file, no JSON, another shape, or not a version.
+        (None, ""),
+        (b"", ""),
+        (b"OpenTofu v1.12.6\n", ""),
+        (b'["1.12.6"]', ""),
+        (b'{"terraform_version": 1.12}', ""),
+        (b'{"terraform_version": "1.12.6; rm -rf /"}', ""),
+        (b'{"version": "1.12.6"}', ""),
+    ],
+)
+def test_the_tool_version_is_what_the_tool_reported_or_empty(raw, version):
+    assert tool_version(_versioned(raw)) == version
+
+
+def test_both_scripts_record_the_tool_version_first_and_never_fail_on_it():
+    config = TfPlanConfig.model_validate({"engine": "terraform", "state": "ephemeral"})
+    plan = build_plan_script(config, workdir=LOCAL_WORKDIR, has_vars=False, has_secret_vars=False)
+    apply = build_apply_script("opentofu", "/shared/tf/plan", "5m", "d" * 64)
+    for script, tool, first in (
+        (plan, "terraform", "rm -rf"),
+        (apply, "tofu", "if [ ! -f /shared"),
+    ):
+        line = (
+            f"if ! {tool} version -json > {TOOL_VERSION_FILE} 2>/dev/null; "
+            f"then rm -f {TOOL_VERSION_FILE}; fi"
+        )
+        lines = script.splitlines()
+        assert line in lines
+        # Before the step's own work, so a run that fails still names the version.
+        assert lines.index(line) < next(i for i, text in enumerate(lines) if text.startswith(first))
+        _assert_parses(script)
+    bounded = build_apply_script(
+        "opentofu", "/shared/tf/plan", "5m", "d" * 64, deadline=1_900_000_000
+    )
+    assert f"if ! bounded tofu version -json > {TOOL_VERSION_FILE}" in bounded
+
+
+@pytest.mark.asyncio
+async def test_a_plan_reports_the_tool_version_it_ran(monkeypatch):
+    _install_docker(
+        monkeypatch,
+        out={
+            "plan-exitcode": b"2",
+            "plan.txt": b"Plan: 1 to add, 0 to change, 0 to destroy.\n",
+            "tool-version.json": b'{"terraform_version": "1.12.6"}',
+            PLAN_JSON_FILE: _PLAN_JSON,
+        },
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+
+    assert result.success is True, result.error
+    assert result.output["tool_version"] == "1.12.6"
+    assert result.metrics["tool_version"] == "1.12.6"
+    # Whoever approves the plan reads the version on the plan itself.
+    plan = next(item for item in result.evidence if item["name"].startswith("plan_"))
+    assert plan["content_text"].endswith("Made by OpenTofu 1.12.6\n")
+    assert plan["content_json"]["tool_version"] == "1.12.6"
+    # The apply step takes it over for a plan it does not need to apply.
+    handoff = read_plan_handoff(
+        "plan",
+        {**result.output, "working_dir": "/shared/tf/plan", "image_id": "sha256:" + "6" * 64},
+    )
+    assert isinstance(handoff, PlanHandoff) and handoff.tool_version == "1.12.6"
+
+
+@pytest.mark.asyncio
+async def test_a_plan_without_a_reported_version_says_so_with_an_empty_one(monkeypatch):
+    _install_docker(
+        monkeypatch,
+        out={"plan-exitcode": b"2", "plan.txt": b"Plan: 1 to add.\n", PLAN_JSON_FILE: _PLAN_JSON},
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+
+    assert result.success is True, result.error
+    assert result.output["tool_version"] == ""
+    plan = next(item for item in result.evidence if item["name"].startswith("plan_"))
+    assert "Made by" not in plan["content_text"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_plan_still_names_the_version_that_failed(monkeypatch):
+    _install_docker(
+        monkeypatch, out={"tool-version.json": b'{"terraform_version": "1.12.6"}'}, exit_code=1
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+
+    assert result.success is False
+    assert result.metrics["tool_version"] == "1.12.6"
+
+
+def _declared(handler: type[BaseHandler]) -> set[str]:
+    names = [field.name for field in handler.output_fields]
+    assert len(names) == len(set(names))
+    return set(names)
+
+
+@pytest.mark.asyncio
+async def test_a_plan_outputs_only_declared_keys(monkeypatch):
+    # The editor's variable picker lists output_fields; every key a plan
+    # reports must be among them.
+    _install_docker(
+        monkeypatch,
+        out={
+            "plan-exitcode": b"2",
+            "plan.txt": b"Plan: 1 to add, 0 to change, 0 to destroy.\n",
+            PLAN_JSON_FILE: _PLAN_JSON,
+        },
+    )
+    result = await TfPlanHandler().execute(_ctx({"state": "ephemeral"}, _Services()))
+
+    assert result.success is True, result.error
+    # Every key the plan reports is declared, and only the truncation flag is
+    # missing: fewer than 200 resources change.
+    assert set(result.output) == _declared(TfPlanHandler) - {"resource_changes_truncated"}
+
+
+@pytest.mark.asyncio
+async def test_an_apply_outputs_exactly_the_declared_keys(monkeypatch):
+    _install_docker(monkeypatch, out={}, exit_code=0)
+    result = await TfApplyHandler().execute(_ctx({"plan_step": "plan"}, _Services(_plan_output())))
+
+    assert result.success is True, result.error
+    assert set(result.output) == _declared(TfApplyHandler)
+
+
+@pytest.mark.parametrize(
+    ("handler", "handler_id"), [(TfPlanHandler, "tf.plan"), (TfApplyHandler, "tf.apply")]
+)
+def test_the_docs_page_names_every_declared_output_field(handler, handler_id):
+    from hegemony_step_sdk.docs import load_docs_bundle
+
+    text = load_docs_bundle("hegemony_steps_tf")[handler_id]
+    for field in handler.output_fields:
+        assert f"output.{field.name}`" in text, field.name
+        assert field.description and field.type, field.name

@@ -17,8 +17,22 @@
 # release tag vX.Y.Z as ghcr.io/hegemony-sh/ansible-runner:X.Y.Z and :X.Y. The
 # step's default names X.Y (DEFAULT_IMAGE in
 # plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py), currently
-# ghcr.io/hegemony-sh/ansible-runner:0.42. To customise it, build and push it
-# under your own tag and set the step's Execution image:
+# ghcr.io/hegemony-sh/ansible-runner:0.56. That tag names a plugin release, not
+# the ansible-core inside: the image's sh.hegemony.ansible-core.version label
+# names it, and so does every run (the step's ansible_version output). A patch
+# release of the plugins stays on ansible-core 2.19; another series needs a
+# minor release, so commit that change as feat
+# (scripts/verify_release_version.py refuses the release otherwise).
+#
+# The workflow also publishes the image for every ansible-core series in
+# variants.json, as X.Y.Z-core<series> and X.Y-core<series> (0.51-core2.21, say):
+# the same Dockerfile built with that entry's build arguments. The step's
+# "ansible-core version" names one of them. The ARG default below is the
+# default series' entry (tests/test_release_versions.py checks it), so a plain
+# build is the default image.
+#
+# To customise the image, build and push it under your own tag and set the
+# step's Execution image:
 #
 #   docker build --no-cache -t registry.example.com/ansible-runner:custom images/ansible-runner
 #   docker push registry.example.com/ansible-runner:custom
@@ -27,7 +41,8 @@
 # proposes the new digest when the tag moves (.github/renovate.json).
 FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df
 
-ARG ANSIBLE_CORE_VERSION=2.19.13
+ARG ANSIBLE_CORE_VERSION=2.19.15
+LABEL sh.hegemony.ansible-core.version="${ANSIBLE_CORE_VERSION}"
 
 # The base image carries Debian's fixes only once it is rebuilt, so upgrade its
 # packages first: a fix Debian has already published (libpcre2-8-0

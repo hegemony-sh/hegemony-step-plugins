@@ -52,6 +52,7 @@ evidence record named `http_<device name>` capturing the full URL, the
 method, the response status and latency, and the error text when the check
 failed.
 
+`steps.NODE_ID.output.targets` maps each target's name to its result.
 Later steps read each target's result from
 `steps.NODE_ID.output.targets['<device name>']`: `ok`, `error` (empty when
 it passed) and `latency_ms`, plus the facts its evidence records (the `url`,

@@ -135,11 +135,54 @@ with `== false`, not `not`. Very large results are trimmed to fit (diffs
 first, then long messages, then task records); the play recap and the counts
 are always complete, and `results_trimmed` names what was left out.
 
+The output keys:
+
+- `steps.NODE_ID.output.exit_code`: the exit code of ansible-playbook.
+- `steps.NODE_ID.output.ansible_version`: the version of ansible-core that
+  ran, such as `2.19.13`, as `ansible-playbook --version` reported it before
+  the play (empty when it reported none). The step's metrics carry it too.
+- `steps.NODE_ID.output.check_mode`: whether the playbook ran in check mode.
+- `steps.NODE_ID.output.changed`: whether any host changed (null when unknown).
+- `steps.NODE_ID.output.hosts`: the per-host task counts from the play recap.
+- `steps.NODE_ID.output.changed_hosts`, `steps.NODE_ID.output.failed_hosts`
+  and `steps.NODE_ID.output.unreachable_hosts`: the hosts in each state.
+- `steps.NODE_ID.output.stats`: the values the play published with `set_stats`.
+- `steps.NODE_ID.output.results_trimmed`: what was left out of very large
+  results, present only when something was.
+- `steps.NODE_ID.output.changed_hosts_truncated`,
+  `steps.NODE_ID.output.failed_hosts_truncated` and
+  `steps.NODE_ID.output.unreachable_hosts_truncated`: true when that host
+  list was cut to fit; present only then.
+- `steps.NODE_ID.output.hosts_truncated` and
+  `steps.NODE_ID.output.stats_truncated`: true when `hosts` or `stats` was
+  left out to fit; present only then.
+
 ## Execution Image
 
-The default image, `ghcr.io/hegemony-sh/ansible-runner:0.42`, bundles
-ansible-core, ansible-pylibssh, ncclient, and the network collections the
-platform maps device platforms onto. It is built from `images/ansible-runner/`
+The default image, `ghcr.io/hegemony-sh/ansible-runner:0.56`, bundles
+ansible-core 2.19, ansible-pylibssh, ncclient, and the network collections the
+platform maps device platforms onto. Its tag names a release of the plugins,
+not the ansible-core inside: every run reports the exact version as
+`steps.NODE_ID.output.ansible_version`, and the image carries it in its
+`sh.hegemony.ansible-core.version` label. A patch release of the plugins may
+bring a newer 2.19 patch release, never another series: that comes only with
+a minor release of the plugins, and its changelog names it.
+
+To choose the series yourself, set **ansible-core version**: `default` (the
+series above), `2.19` or `2.21`. Each named series is the same image built
+with that ansible-core, published as
+`ghcr.io/hegemony-sh/ansible-runner:0.56-core2.21` and so on. A step that names
+a series stays on it when a later release of the plugins moves the default,
+and still gets that series' patch releases; a series is withdrawn only with a
+minor release, and a step that names a withdrawn one fails its validation
+rather than run another version. Collections follow ansible-core: check that
+the ones your playbook uses support the series you pick. For any other
+ansible-core version, set Execution image to an image that has it; an image
+of your own replaces ansible-core version, so set only one of the two. (A
+flow saved with an earlier release's default image is not such an image: with
+a series named, the step runs this release's image for that series.)
+
+The image is built from `images/ansible-runner/`
 in the hegemony-step-plugins repository and published on ghcr.io with every
 release, tagged with the release version and its minor version; the step
 names the minor version of the wheel you run. The sandbox's Docker daemon

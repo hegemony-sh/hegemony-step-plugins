@@ -83,12 +83,52 @@ capabilities, and neither the engine nor the editor reads it. A step's `kind`
 tag changes nothing about how the step runs.
 
 Handlers reach every platform facility — device transports, secret/template
-resolution, the internal API, notifications — through `ctx.services`
+resolution, notifications, their own run — through `ctx.services`
 (`HandlerServices`); plugin code never imports Hegemony internals.
 
-A device transport that checks SSH host keys sets
+Plugins never build internal-API requests themselves. Internal paths are not
+part of the plugin contract: the platform may change them, and a worker
+outside the platform's network (an edge worker) will refuse most of them.
+Use the named methods of `ctx.services` (`fetch_run_artifacts`, `fetch_run`,
+…) and, for a notification destination and a run event, the functions of
+`hegemony_step_sdk.run_access`: `fetch_notification_destination(ctx, id)`
+and `emit_run_event(ctx, message, kind=..., attrs=...)`. They reach only the
+step's own run and its organization, and they also work on hosts from before
+the named methods. They raise `PlatformRequestError` when the platform does
+not answer. A test in this repository fails when a plugin calls
+`open_api_client` or names an `/internal/` path.
+
+A handler that drives the platform instead of a device (starting child runs,
+sending notifications, writing secrets, syncing inventory) declares
+`central_only = True`. Such a step always runs on a worker inside the
+platform's network, never on one in a remote zone.
+
+**Device transports are internal.** The stable plugin contract is handlers
+and `HandlerServices`. The device-transport interface
+(`hegemony_step_sdk.transports`) is not part of it. It is for the transports
+in this repository only (netmiko, scrapli and asyncssh), it has no stability
+promise, and it may change in any release. A device transport from another
+party is not supported. This covers the `hegemony.device_transports`
+entry-point group, `TransportRegistry`, `DeviceConnectionSpec`,
+`HostKeyVerifier`, `HostKeyRejectedError`, `SshAlgorithmRecorder`,
+`ConnectionCancellationRegistry`, `TransportOutputSink` and the `supports_*`
+class flags. The reason: a transport is handed resolved passwords and keys
+and enforces the SSH host-key and algorithm rules, so it is platform code.
+The paragraphs below on host keys and SSH algorithms describe this interface
+for people who work on the built-in transports.
+
+A handler is not affected. `ctx.services.connect(...)` and the `Transport`
+session it returns are part of the stable contract. So are
+`ctx.services.resolve_device_credentials(...)`, the `DeviceCredentials` it
+returns, and the `JumpHostSpec` in its `jump_host` field; these change by
+additions only.
+
+Every device transport must support SSH host-key checking: it sets
 `supports_host_key_verifier = True` and takes a `host_key_verifier`
-(`HostKeyVerifier`) at construction. Before it dials a hop it asks
+(`HostKeyVerifier`) at construction. The Hegemony worker refuses to connect
+with a transport that does not set it, before it resolves any credential, and
+the step fails with a message that names the transport. (Older workers only
+logged a warning and connected without the check.) Before it dials a hop it asks
 `trusted_keys(host, port)` and connects accepting only those keys: None means
 no check, an empty tuple means first contact (fetch the key without logging
 in, then `learn` it). A host that presents another key is reported with
@@ -109,8 +149,9 @@ Legacy SSH algorithms are off by default; a step turns them on with the
 `allow_legacy_ssh` setting (`SshSecurityConfig`). A transport that honours it
 also has a static `ssh_algorithm_lists(allow_legacy=False)`, the exact
 algorithms its connections offer by kind (`kex`, `host_key`, `cipher`, `mac`),
-built with `hegemony_step_sdk.ssh.asyncssh_algorithm_lists` or
-`paramiko_algorithm_lists`. Comparing the two calls shows what the opt-in
+built from the SDK's policy (`hegemony_step_sdk.ssh.algorithm_policy`); the
+built-in transports apply it through their internal `hegemony-transport-support`
+package, which is not part of this SDK. Comparing the two calls shows what the opt-in
 adds. `legacy_algorithms(agreed, secure, with_legacy)` names the algorithms a
 connection agreed on that only the opt-in allowed. The field's JSON schema carries
 `"x_help": "legacy-ssh-algorithms"`, the help topic a host links the
@@ -166,6 +207,30 @@ service, and `add_trusted_cas(context, pem)` adds the certificates to an
 `ssl` context. A `ca_bundle` a step sets still replaces both (it pins those
 CAs).
 
+## Versioning
+
+The SDK has its own version, separate from the version of the plugin wheels
+released with it. It changes only when the SDK changes:
+
+- **Major**: something was removed or changed incompatibly. The major
+  version is always `SDK_ABI_VERSION`, and the platform refuses plugins built
+  for another ABI.
+- **Minor**: something was added (a name, an optional parameter, an optional
+  field). Within one major the contract only grows.
+- **Patch**: a fix that does not change the public surface.
+
+So a step-handler or probe wheel requires the SDK minor it was built and
+tested with, up to the next major:
+
+```toml
+dependencies = ["hegemony-step-sdk>=1.0,<2"]
+```
+
+A host built against an older SDK minor may lack a newer service; the SDK's
+default for such a service raises `NotImplementedError`, so a handler that
+must also run on older hosts handles that error. Device transports are
+first-party only and pin the SDK exactly.
+
 ## API reference
 
 Import public handler contracts from `hegemony_step_sdk`. The SDK exposes
@@ -197,7 +262,8 @@ Methods declared `async` must be awaited, for example
 Some methods return resources synchronously: `connect(...)` returns a
 `Transport`; `open_state_backend(...)` returns an async context manager
 to use with `async with`. `open_api_client(...)` returns an `httpx.AsyncClient` which
-also needs to be closed, normally with `async with`.
+also needs to be closed, normally with `async with`; it is for the host and
+`run_access`, not for handler code.
 `validate_secret_ref`, `contains_template`, `container_runtime` and
 `is_check_registered` are synchronous. See the service reference for each
 method's exact arguments and result.

@@ -51,7 +51,7 @@ A commit written by an AI coding agent is signed off by the person who directs
 the agent and submits the work, as its author; the agent is credited in a
 `Co-authored-by:` trailer and never signs off in its own name. See the
 platform's
-[CONTRIBUTING.md](https://github.com/hegemony-sh/hegemony/blob/develop/CONTRIBUTING.md#licensing-and-dco).
+[CONTRIBUTING.md](https://github.com/hegemony-sh/hegemony/blob/main/CONTRIBUTING.md#licensing-and-dco).
 
 ## Local setup and checks
 
@@ -185,8 +185,9 @@ wheels and asserts one page per registered handler.
 A merge to `main` is a release. The `Release` workflow calls the shared
 [`plugin-release.yml`](https://github.com/hegemony-sh/hegemony-github-workflows)
 workflow, which runs [semantic-release](https://semantic-release.gitbook.io/):
-it reads the Conventional Commits since the last tag, derives the next version
-from them, bumps every package and SDK pin (`scripts/set_version.py`),
+it reads the Conventional Commits since the last tag, derives the next
+version from them, sets it on every package except the SDK and rewrites
+every SDK pin from the SDK's own version (`scripts/set_version.py`),
 refreshes `uv.lock`, builds the wheels and sdists, smoke-installs the wheels,
 prepends `CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`, tags
 `vX.Y.Z` and publishes the wheels, the sdists and `SHA256SUMS` as the GitHub
@@ -194,14 +195,18 @@ Release. Once that Release is published, the `pypi` job of `release.yml`
 uploads the same wheels and sdists to PyPI with trusted publishing and PEP 740
 attestations. That job is in this repository's workflow, not the shared one,
 because trusted publishing does not work inside a reusable workflow; it runs
-in the `pypi` environment, which waits for a required reviewer. If it fails (a
-package without a matching trusted publisher, say), fix the cause and re-run
-the failed job; it downloads the files from the published Release, so a re-run
-works at any time, and files PyPI already holds are skipped. Publishing the Release also starts the
-`Images` workflow, which publishes the steps' runner images (`ansible-runner`,
-`opentofu-runner`) as `X.Y.Z` and `X.Y` from the tag; the release commit
-carries the steps' defaults moved to `X.Y`. There is no manual step any more:
-do not bump versions or push `v*` tags by hand.
+in the `pypi` environment, which waits for a required reviewer. The SDK's
+wheel and sdist carry the SDK's own version; when it has not changed, PyPI
+already holds them and the upload skips them. If the job fails (a package
+without a matching trusted publisher, say), fix the cause and re-run the
+failed job; it downloads the files from the published Release, so a re-run
+works at any time, and files PyPI already holds are skipped. Publishing the
+Release also starts the `Images` workflow, which publishes the steps' runner
+images (`ansible-runner`, `opentofu-runner`, `git-runner`) as `X.Y.Z` and
+`X.Y` from the tag; the release commit carries the steps' defaults moved to
+`X.Y`. There is no manual step any more: do not bump the release version or
+push `v*` tags by hand. The one version you do set by hand is the SDK's (next
+section).
 
 | Commits since the last tag | Release |
 |---|---|
@@ -209,6 +214,35 @@ do not bump versions or push `v*` tags by hand.
 | `feat` | minor |
 | breaking change (any type with `!`, such as `feat!:` or `refactor!:`, or a `BREAKING CHANGE:` footer) | **minor, while the major is 0** |
 | `chore`, `docs`, `ci`, `test`, `refactor`, `build`, `style` | none |
+
+A change of the series (the `X.Y`) of a tool the steps run by default is a
+`feat`, whatever else the commit does: ansible-core
+(`images/ansible-runner/Dockerfile`), OpenTofu
+(`images/opentofu-runner/Dockerfile`) and Terraform (`DEFAULT_IMAGES` in
+`plugins/steps_tf/src/hegemony_steps_tf/common.py`). Flows on the default
+image get the new tool with the upgrade, so it must be a minor release with
+its own changelog line, such as `feat(tf): build the runner image on
+OpenTofu 1.13`. `scripts/verify_release_version.py` refuses a patch release
+whose tools differ in series from the previous release of that minor; if a
+release fails on it, push a `feat` commit that names the change. A newer
+patch release of the same series (1.12.6 to 1.12.7) may ship as a `fix`. The
+files that state a series (the steps' docs, READMEs and Image field help) are
+checked against the one that sets it, by the same script and by
+`tests/test_release_versions.py`.
+
+The series a step can choose (**ansible-core version**, **OpenTofu version**)
+are the entries of `images/<name>/variants.json`: the Images workflow builds
+the image's Dockerfile once per entry, with the entry's build arguments, and
+tags it `X.Y.Z-<tag><series>` and `X.Y-<tag><series>`; the default series
+also gets the plain tags. To offer another series, add its entry, a matrix
+entry for it in `.github/workflows/images.yml`, the series in the step's
+`Literal` (`AnsibleCoreVersion`, `OpenTofuVersion`) and in the step's docs;
+the same script and test check that these agree, and that the Dockerfile's
+`ARG` defaults are the default series' entry. An OpenTofu series needs its
+own `GO_MODULE_RAISES`: build it on a pull request and raise what the scan
+flags. Adding a series is a `feat`. Dropping one breaks the flows that name
+it, so it needs a minor release too (the script refuses a patch release that
+drops one): mark that commit as breaking.
 
 The 0.x rule is the `"breaking": true` entry in `.releaserc.json`'s
 `releaseRules`; once the packages reach 1.0, change its `release` to
@@ -238,6 +272,52 @@ dist/*.tar.gz dist/SHA256SUMS` after rebuilding the wheels and sdists at that
 tag, with `SHA256SUMS` covering `*.whl *.tar.gz`). The `pypi` job does not run
 for such a tag, so that release reaches PyPI only if its files are uploaded
 separately.
+
+### The SDK's own version
+
+`hegemony-step-sdk` does not take the release version. Its version changes
+only when the SDK changes, so a new SDK version always means a new contract
+or an SDK fix, and a plugin-only release keeps it. Every release still
+attaches the SDK wheel; an unchanged SDK builds to the same bytes, so the
+same version is always the same wheel.
+
+Set it in the pull request that changes anything in `packages/step_sdk`:
+
+```bash
+uv run python scripts/sdk_version.py bump minor   # or major, or patch
+uv lock
+```
+
+This sets the version in the SDK's `pyproject.toml` and `_version.py`, every
+wheel's SDK requirement, and the SDK's recorded public surface,
+`packages/step_sdk/api-surface.json` (rewrite only that file with
+`scripts/sdk_version.py write`). Which bump:
+
+| Change in `packages/step_sdk` since the last release tag | SDK version |
+|---|---|
+| none | unchanged (a bump without a change fails) |
+| code, docs or dependencies, but not the public surface | at least patch |
+| the surface gains a name, an optional parameter or an optional field | at least minor |
+| the internal device-transport interface changes (the names `hegemony_step_sdk.transports` lists as internal) | at least minor |
+| the surface loses or changes something | major, and `SDK_ABI_VERSION` moves with it |
+
+The device-transport interface needs no major because only the built-in
+transports use it and they pin the SDK exactly; `DeviceCredentials` and
+`JumpHostSpec` are part of the handler contract and follow the
+additions-only rule. The SDK's major is always `SDK_ABI_VERSION`, and the platform refuses
+plugins built for another ABI, so avoid a major: keep an old name working
+and add a new one instead. CI runs `scripts/sdk_version.py check`, which
+compares the tree with the newest release tag and fails when the version
+does not match the change; the release runs it again. The surface record
+holds names, call shapes and fields, not types or constants' values, so a
+change the record cannot show (a constant's value, a narrower type, new
+behaviour) is the author's and reviewer's call: the check accepts a larger
+bump than it requires. Only one bump per release: a second pull request
+before the next release keeps the version the first one set unless it needs
+a larger bump.
+
+Commit an SDK change with a type that releases (`feat(sdk):`, `fix(sdk):`),
+so the new SDK version is published.
 
 The shared workflow is pinned by commit in `.github/workflows/release.yml`;
 a change merged to it reaches this repository through a pull request that

@@ -10,11 +10,15 @@ When the host serves an :class:`~hegemony_step_sdk.ImageCache`, a step whose
 platform registry, under its organization's namespace, and later runs pull
 that copy instead of going back to the image's own registry. The copy is
 named after the upstream reference — ``<namespace>/<host>/<repository>`` —
-and tagged twice: with the upstream tag, for people and for the offline
-fallback, and with ``sha256_<upstream digest>``, the key a later run looks up
-after asking upstream which digest the tag points at today. A copy is a
+and tagged twice: with the upstream tag, for people, and with
+``sha256_<upstream digest>``, the key a later run looks up after asking
+upstream which digest the tag points at today. A copy is usually a
 single-platform image with a digest of its own, so the upstream digest can
-only be found by that tag, never by ``@digest``.
+only be found by that tag, never by ``@digest``. Any step of the
+organization can push over either tag, so neither vouches for the copy: a
+copy is used only once its configuration digest is shown to be the one the
+upstream digest names (or its digest is the upstream digest itself), and
+never in place of an upstream that cannot be asked.
 
 This module holds the pure parts: reference parsing and copy naming, the
 registry HTTP calls (one ``HEAD`` per manifest, with the anonymous, Basic and
@@ -176,6 +180,17 @@ class AcquiredImage:
     # none): the content this step's own pull brought, which the container
     # then runs by.
     digest: str = ""
+    # The image ID a cache check verified, when the pull reported no digest:
+    # the container then runs by this ID, so a retag of the copy's tag after
+    # the check cannot change what runs. "" otherwise.
+    image_id: str = ""
+    # What a cache check read of the copy at the reference it runs by: the
+    # daemon's ID, the configuration digest and the platform. The step reuses
+    # them instead of asking the daemon and the registry a second time. ""
+    # when no check read them.
+    checked_local_id: str = ""
+    checked_config_id: str = ""
+    checked_platform: str = ""
 
 
 def plan_cache(image: str, cache: ImageCache) -> CachePlan | None:
@@ -291,6 +306,92 @@ class RegistryClient:
         except httpx.HTTPError as exc:
             raise RegistryUnavailable(f"{self._base_url}: {exc}"[:200]) from exc
 
+    async def config_digest(self, repo: str, digest: str, platform: str) -> str | None:
+        """The config digest of ``repo@digest`` for ``platform`` (``os/arch[/variant]``).
+
+        This is what ``docker image inspect --format {{.Id}}`` reports for the
+        image, whichever registry or manifest format serves it, so a copy can
+        be checked against the image its digest names. ``digest`` may name an
+        index (a multi-platform image): its entry for ``platform`` is read.
+        Every manifest is checked against the digest it was asked by. None when
+        the registry has no such manifest or the index has no entry for
+        ``platform``. Raises :class:`RegistryUnavailable` when the registry
+        cannot be used, or answers with content that does not match its digest,
+        and :class:`RegistryDenied` when it refuses the login.
+        """
+        image = await self.platform_image(repo, digest, platform)
+        return image[1] if image else None
+
+    async def platform_image(self, repo: str, digest: str, platform: str) -> tuple[str, str] | None:
+        """``repo@digest``'s image for ``platform``: its manifest digest and its config digest.
+
+        The manifest digest is ``digest`` itself for a single-platform image,
+        and the index entry for ``platform`` when ``digest`` names an index; a
+        reference pinned to it names exactly the image whose configuration was
+        read, whatever entry a client would pick from the index. Every
+        manifest is checked against the digest it was asked by. None, and the
+        errors raised, as for :meth:`config_digest`.
+        """
+        headers: dict[str, str] = {"Accept": MANIFEST_ACCEPT}
+        try:
+            async with httpx.AsyncClient(
+                timeout=_HTTP_TIMEOUT, trust_env=self._trust_env, transport=self._transport
+            ) as client:
+                manifest = await self._manifest(client, repo, digest, headers)
+                if manifest is None:
+                    return None
+                if isinstance(manifest.get("manifests"), list):
+                    entry = _platform_entry(manifest["manifests"], platform)
+                    if entry is None:
+                        return None
+                    digest = entry
+                    manifest = await self._manifest(client, repo, digest, headers)
+                    if manifest is None:
+                        return None
+                config = manifest.get("config")
+                found = config.get("digest") if isinstance(config, dict) else None
+                if isinstance(found, str) and _DIGEST.match(found):
+                    return digest, found
+                return None
+        except httpx.HTTPError as exc:
+            raise RegistryUnavailable(f"{self._base_url}: {exc}"[:200]) from exc
+
+    async def _manifest(
+        self, client: httpx.AsyncClient, repo: str, digest: str, headers: dict[str, str]
+    ) -> dict | None:
+        """``repo@digest``'s manifest, its content checked against ``digest``; None when absent.
+
+        Answering a Bearer challenge adds the token to ``headers``, so the next
+        request of the same lookup reuses it.
+        """
+        url = f"{self._base_url}/v2/{repo}/manifests/{digest}"
+        response = await client.get(url, headers=headers)
+        if response.status_code == 401 and "Authorization" not in headers:
+            authorization = await self._authorize(
+                client, response.headers.get("www-authenticate", ""), repo
+            )
+            if authorization is None:
+                raise RegistryDenied(f"{self._base_url} refused the login for {repo}")
+            headers["Authorization"] = authorization
+            response = await client.get(url, headers=headers)
+        if response.status_code == 404:
+            return None
+        if response.status_code in (401, 403):
+            raise RegistryDenied(f"{self._base_url} refused access to {repo}")
+        if response.status_code != 200:
+            raise RegistryUnavailable(
+                f"{self._base_url} answered HTTP {response.status_code} for {repo}"
+            )
+        if "sha256:" + hashlib.sha256(response.content).hexdigest() != digest:
+            raise RegistryUnavailable(
+                f"{self._base_url} served content for {repo}@{digest} that does not match it"
+            )
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise RegistryUnavailable(f"{self._base_url} served an unreadable manifest") from exc
+        return body if isinstance(body, dict) else None
+
     async def _authorize(self, client: httpx.AsyncClient, challenge: str, repo: str) -> str | None:
         """The ``Authorization`` value that answers ``challenge``, or None."""
         scheme, _, params_text = challenge.strip().partition(" ")
@@ -325,6 +426,57 @@ class RegistryClient:
             return None
         raw = f"{self._login.username}:{self._login.password}".encode()
         return "Basic " + base64.b64encode(raw).decode("ascii")
+
+
+# The variant an architecture means when none is named (containerd's platform
+# normalisation).
+_DEFAULT_VARIANTS = {"amd64": "v1", "arm64": "v8", "arm": "v7"}
+
+
+def _platform_entry(entries: list, platform: str) -> str | None:
+    """The digest of the index entry for ``platform`` (``os/arch[/variant]``), or None.
+
+    Attestations and other entries without a real platform never match. A
+    missing variant means the architecture's default, as containerd reads it
+    (``v8`` for arm64, ``v7`` for arm): an arm64 image's configuration often
+    names no variant while its index entry says ``v8``. Otherwise an entry
+    without a variant matches a platform with one only when no entry names
+    that variant. An index with more than one entry for the platform answers
+    None: the daemon could run another entry than the one checked.
+
+    32-bit ARM without a variant matches nothing: ``docker version`` reports
+    no variant for an ARM sandbox, and v6 and v7 images differ, so assuming
+    v7 could accept a v7 copy where a pull on a v6 daemon picks v6. A check
+    that cannot tell is no verdict, and the copy is refused.
+    """
+    os_name, _, rest = platform.partition("/")
+    arch, _, variant = rest.partition("/")
+    if arch == "arm" and not variant:
+        return None
+    default = _DEFAULT_VARIANTS.get(arch, "")
+    wanted = variant or default
+    exact: list[str] = []
+    loose: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("digest"), str):
+            continue
+        spec = entry.get("platform")
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("os") != os_name or spec.get("architecture") != arch:
+            continue
+        if not _DIGEST.match(entry["digest"]):
+            continue
+        if (spec.get("variant") or default) == wanted:
+            exact.append(entry["digest"])
+        elif not spec.get("variant"):
+            loose.append(entry["digest"])
+    # More than one entry for the platform (amd64/v1 and plain amd64 are one
+    # platform to containerd): which one the daemon runs is not known, so the
+    # entry checked might not be the one that runs. No verdict.
+    if exact:
+        return exact[0] if len(exact) == 1 else None
+    return loose[0] if len(loose) == 1 else None
 
 
 __all__ = [

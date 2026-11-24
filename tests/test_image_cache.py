@@ -309,13 +309,29 @@ from types import SimpleNamespace  # noqa: E402
 from typing import Any, cast  # noqa: E402
 from unittest.mock import AsyncMock  # noqa: E402
 
-from hegemony_step_sdk import ContainerRuntime, HandlerContext, HandlerServices  # noqa: E402
+from hegemony_step_sdk import (  # noqa: E402
+    ContainerRuntime,
+    HandlerContext,
+    HandlerResult,
+    HandlerServices,
+)
 from hegemony_steps_container.pull_progress import EnginePullError, PullOutcome  # noqa: E402
 from hegemony_steps_container.run import RunContainerHandler  # noqa: E402
 from hegemony_steps_container.runner import ContainerJob, run_container_job  # noqa: E402
 
-UPSTREAM_DIGEST = "sha256:" + "11" * 32
-KEY_TAG = "sha256_" + "11" * 32
+# Upstream alpine:3.20, a single-platform image; a copy is that image when its
+# image ID (configuration digest) is UPSTREAM_CONFIG.
+UPSTREAM_CONFIG = "sha256:" + "42" * 32
+UPSTREAM_MANIFEST = json.dumps(
+    {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"digest": UPSTREAM_CONFIG},
+        "layers": [],
+    }
+).encode()
+UPSTREAM_DIGEST = "sha256:" + hashlib.sha256(UPSTREAM_MANIFEST).hexdigest()
+KEY_TAG = cache_key_tag(UPSTREAM_DIGEST)
 PINNED = f"alpine@{UPSTREAM_DIGEST}"
 OWN_REPO = "orgs/acme/docker.io/library/alpine"
 GLOBAL_REPO = "global/docker.io/library/alpine"
@@ -414,11 +430,17 @@ def _install(
     push_returncode: int = 0,
     push_results: list[int] | None = None,
     pull_digests: dict[str, str] | None = None,
+    image_id: str = "",
+    copy_identity: str | dict[str, str] = "",
+    image_store: str = "classic",
 ):
     """Script the registries, the Engine API pull and the docker CLI.
 
     ``pull_digests`` maps a pulled reference to the digest its pull reports
-    (none by default, which leaves the digest to RepoDigests).
+    (none by default, which leaves the digest to RepoDigests). ``image_id`` is
+    the image ID the ID-and-platform inspect reports (as linux/amd64; nothing by
+    default), ``copy_identity`` what that inspect prints instead, for every
+    reference or, as a map, for the references it names.
 
     The Engine API pull succeeds for every image but those in ``pull_failures``,
     which raise and whose CLI fallback also fails, so the handler reports the
@@ -426,6 +448,9 @@ def _install(
     ``push_returncode``, or ``push_results`` one by one when given.
     """
     registries = _Registries()
+    registries.manifests[("https://registry-1.docker.io", "library/alpine", UPSTREAM_DIGEST)] = (
+        httpx.Response(200, content=UPSTREAM_MANIFEST)
+    )
     monkeypatch.setattr("hegemony_steps_container.run._registry_transport", registries.transport)
 
     pulled: list[str] = []
@@ -452,10 +477,36 @@ def _install(
                 return SimpleNamespace(returncode=1, stdout="", stderr="manifest unknown")
             pulled.append(argv[2])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[:2] == ["docker", "info"]:
+            if image_store == "broken":
+                return SimpleNamespace(returncode=1, stdout="", stderr="daemon busy")
+            if image_store == "starting":
+                # A daemon that answers before it knows its storage driver.
+                return SimpleNamespace(returncode=0, stdout="|null\n", stderr="")
+            if image_store == "vfs":
+                # A classic driver that prints no status list.
+                return SimpleNamespace(returncode=0, stdout="vfs|null\n", stderr="")
+            status = (
+                [["driver-type", "io.containerd.snapshotter.v1"]]
+                if image_store == "containerd"
+                else [["Backing Filesystem", "extfs"]]
+            )
+            driver = "overlayfs" if image_store == "containerd" else "overlay2"
+            return SimpleNamespace(
+                returncode=0, stdout=f"{driver}|{json.dumps(status)}\n", stderr=""
+            )
         if argv[:2] == ["docker", "push"]:
             code = remaining_push_results.pop(0) if remaining_push_results else push_returncode
             return SimpleNamespace(returncode=code, stdout="", stderr="denied: push")
         if argv[:3] == ["docker", "image", "inspect"]:
+            if any("{{.Os}}" in arg for arg in argv):
+                if isinstance(copy_identity, dict) and argv[-1] in copy_identity:
+                    identity = copy_identity[argv[-1]]
+                elif isinstance(copy_identity, str) and copy_identity:
+                    identity = copy_identity
+                else:
+                    identity = f"{image_id} linux/amd64" if image_id else ""
+                return SimpleNamespace(returncode=0, stdout=f"{identity}\n", stderr="")
             if "RepoDigests" in " ".join(argv):
                 name = argv[-1].split("@")[0].rsplit(":", 1)[0]
                 return SimpleNamespace(
@@ -523,6 +574,8 @@ async def test_without_a_platform_registry_the_pull_is_as_before(monkeypatch) ->
                 "image": "alpine:3.20",
                 "served": "alpine:3.20",
                 "digest": digest,
+                "image_id": "",
+                "image_local_id": "",
             },
         )
     ]
@@ -626,7 +679,11 @@ async def test_a_miss_pulls_upstream_and_saves_a_copy_under_both_tags(monkeypatc
 
 
 async def test_a_hit_in_the_own_namespace_runs_the_copy(monkeypatch) -> None:
-    registries, captured = _install(monkeypatch)
+    registries, captured = _install(
+        monkeypatch,
+        pull_digests={f"{OWN_COPY}:{KEY_TAG}": "sha256:" + "cc" * 32},
+        copy_identity=f"{UPSTREAM_CONFIG} linux/amd64",
+    )
     registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
         UPSTREAM_DIGEST
     )
@@ -661,7 +718,9 @@ async def test_a_hit_runs_by_the_digest_its_own_pull_reported(monkeypatch) -> No
     """The daemon is not asked afterwards: another pull of the tag could have moved it."""
     pulled_digest = "sha256:" + "dd" * 32
     registries, captured = _install(
-        monkeypatch, pull_digests={f"{OWN_COPY}:{KEY_TAG}": pulled_digest}
+        monkeypatch,
+        pull_digests={f"{OWN_COPY}:{KEY_TAG}": pulled_digest},
+        copy_identity=f"{UPSTREAM_CONFIG} linux/amd64",
     )
     registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
         UPSTREAM_DIGEST
@@ -675,14 +734,14 @@ async def test_a_hit_runs_by_the_digest_its_own_pull_reported(monkeypatch) -> No
     assert result.success is True
     assert f"{OWN_COPY}@{pulled_digest}" in _create_argv(captured)
     inspects = [cmd for cmd, _env in captured["run"] if cmd[:3] == ["docker", "image", "inspect"]]
-    assert not any("RepoDigests" in " ".join(cmd) for cmd in inspects)
+    assert not any("{{json .RepoDigests}}" in cmd for cmd in inspects)
     assert result.metrics["image_digest"] == f"{OWN_COPY}@{pulled_digest}"
 
 
 async def test_a_copy_in_the_global_namespace_serves_when_the_own_one_is_missing(
     monkeypatch,
 ) -> None:
-    registries, captured = _install(monkeypatch)
+    registries, captured = _install(monkeypatch, copy_identity=f"{UPSTREAM_CONFIG} linux/amd64")
     registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
         UPSTREAM_DIGEST
     )
@@ -698,8 +757,9 @@ async def test_a_copy_in_the_global_namespace_serves_when_the_own_one_is_missing
     assert result.metrics["image_source"] == "cache"
 
 
-async def test_upstream_unreachable_falls_back_to_the_last_copy_by_tag(monkeypatch) -> None:
-    registries, captured = _install(monkeypatch)
+async def test_upstream_unreachable_never_runs_a_copy_by_tag(monkeypatch) -> None:
+    """The copy under the tag could be anything a step pushed there: nothing checks it."""
+    registries, captured = _install(monkeypatch, copy_identity=f"{UPSTREAM_CONFIG} linux/amd64")
     registries.unreachable.add("https://registry-1.docker.io")
     registries.manifests[("http://registry.hegemony.internal", OWN_REPO, "3.20")] = (
         "sha256:" + "44" * 32
@@ -708,11 +768,13 @@ async def test_upstream_unreachable_falls_back_to_the_last_copy_by_tag(monkeypat
 
     result = await RunContainerHandler().execute(_handler_ctx(events))
     assert result.success is True
-    assert captured["pulled"] == [f"{OWN_COPY}:3.20"]
+    assert captured["pulled"] == ["alpine:3.20"]
+    assert not any("registry.hegemony.internal" in url for _m, url in registries.requests)
     assert _docker(captured, "push") == []
-    stale = next(attrs for _m, attrs in events if attrs.get("milestone") == "image_cache_stale")
-    assert "connection refused" in stale["reason"]
-    assert result.metrics["image_source"] == "cache"
+    [(message, attrs)] = [(m, a) for m, a in events if a.get("milestone") == "image_cache_skip"]
+    assert "cannot be checked" in message and "connection refused" in attrs["reason"]
+    assert "image_cache_stale" not in _milestones(events)
+    assert result.metrics["image_source"] == "upstream"
 
 
 async def test_upstream_unreachable_without_a_copy_pulls_upstream_without_saving(
@@ -911,7 +973,11 @@ async def test_no_time_left_skips_saving_the_copy(monkeypatch) -> None:
 
 
 async def test_a_job_served_from_the_cache_records_the_copy_digest(monkeypatch) -> None:
-    registries, captured = _install(monkeypatch)
+    registries, captured = _install(
+        monkeypatch,
+        pull_digests={f"{OWN_COPY}:{KEY_TAG}": "sha256:" + "cc" * 32},
+        copy_identity=f"{UPSTREAM_CONFIG} linux/amd64",
+    )
     registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
         UPSTREAM_DIGEST
     )
@@ -932,6 +998,72 @@ async def test_a_job_served_from_the_cache_records_the_copy_digest(monkeypatch) 
     assert outcome.image_digest in _create_argv(captured)
 
 
+IMAGE_ID = UPSTREAM_CONFIG
+
+
+def _cache_hit(registries) -> None:
+    registries.manifests[("https://registry-1.docker.io", "library/alpine", "3.20")] = (
+        UPSTREAM_DIGEST
+    )
+    registries.manifests[("http://registry.hegemony.internal", OWN_REPO, KEY_TAG)] = (
+        "sha256:" + "22" * 32
+    )
+
+
+async def test_a_job_records_the_image_id_it_ran(monkeypatch) -> None:
+    registries, captured = _install(monkeypatch, image_id=IMAGE_ID)
+    _cache_hit(registries)
+    events: list = []
+    job = ContainerJob(config={"image": "alpine:3.20", "command": ["true"]}, handler_id="tool.run")
+    outcome = await run_container_job(_handler_ctx(events), job)
+    assert not hasattr(outcome, "success"), getattr(outcome, "error", None)
+    assert outcome.image_id == IMAGE_ID
+    assert outcome.image_local_id == IMAGE_ID  # the classic store: the same ID
+    # The pull reported no digest, so the container runs by the ID that was read.
+    assert IMAGE_ID in _create_argv(captured)
+    assert _digest_events(events)[0][1]["image_id"] == IMAGE_ID
+
+
+async def test_a_copy_with_the_expected_image_id_runs(monkeypatch) -> None:
+    registries, captured = _install(monkeypatch, image_id=IMAGE_ID)
+    _cache_hit(registries)
+    events: list = []
+    job = ContainerJob(
+        config={"image": "alpine:3.20", "command": ["true"]},
+        handler_id="tool.run",
+        expected_image_id=IMAGE_ID,
+    )
+    outcome = await run_container_job(_handler_ctx(events), job)
+    assert not hasattr(outcome, "success"), getattr(outcome, "error", None)
+    assert outcome.image_source == "cache"
+    assert _docker(captured, "create")
+
+
+@pytest.mark.parametrize("reported", ["sha256:" + "66" * 32, ""])
+async def test_a_copy_with_another_image_id_is_refused_before_it_runs(
+    monkeypatch, reported: str
+) -> None:
+    """A copy in the platform registry that is not the expected image never runs.
+
+    Its key tag names the upstream digest, but a tag can be pushed over; the
+    image ID cannot be faked. An ID the daemon does not report is refused too.
+    """
+    registries, captured = _install(monkeypatch, image_id=reported)
+    _cache_hit(registries)
+    events: list = []
+    job = ContainerJob(
+        config={"image": "alpine:3.20", "command": ["true"]},
+        handler_id="tool.run",
+        expected_image_id=IMAGE_ID,
+    )
+    outcome = await run_container_job(_handler_ctx(events), job)
+    assert isinstance(outcome, HandlerResult) and outcome.success is False
+    assert IMAGE_ID in (outcome.error or "")
+    assert (reported or "could not be read") in (outcome.error or "")
+    assert _docker(captured, "create") == []
+    assert "image_id_mismatch" in _milestones(events)
+
+
 async def test_tool_configs_pass_the_option_through(monkeypatch) -> None:
     from hegemony_steps_container.runner import container_config_from
 
@@ -940,3 +1072,615 @@ async def test_tool_configs_pass_the_option_through(monkeypatch) -> None:
     )
     assert job_config["cache_image"] is False
     assert "cache_image" not in container_config_from({}, image="ghcr.io/x/y:1", command=["true"])
+
+
+# ── A cache hit checks its copy against the image's registry ─────────────────
+
+from hegemony_steps_container.image_cache import _platform_entry  # noqa: E402
+
+CONFIG_AMD64 = "sha256:" + "a1" * 32
+CONFIG_ARM64 = "sha256:" + "a2" * 32
+HUB = "https://registry-1.docker.io"
+PLATFORM_REGISTRY = "http://registry.hegemony.internal"
+
+
+def _blob(document: dict[str, Any]) -> tuple[str, bytes]:
+    body = json.dumps(document).encode()
+    return "sha256:" + hashlib.sha256(body).hexdigest(), body
+
+
+def _upstream_index(registries: _Registries) -> str:
+    """Script an upstream index with amd64 and arm64 images; return its digest."""
+    manifests = {}
+    entries = []
+    for arch, config in (("amd64", CONFIG_AMD64), ("arm64", CONFIG_ARM64)):
+        digest, body = _blob(
+            {
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {"digest": config},
+                "layers": [],
+            }
+        )
+        manifests[digest] = body
+        entries.append({"digest": digest, "platform": {"os": "linux", "architecture": arch}})
+    entries.append(
+        {
+            "digest": "sha256:" + "a3" * 32,
+            "platform": {"os": "unknown", "architecture": "unknown"},
+            "annotations": {"vnd.docker.reference.type": "attestation-manifest"},
+        }
+    )
+    index_digest, index_body = _blob(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": entries,
+        }
+    )
+    manifests[index_digest] = index_body
+    for digest, body in manifests.items():
+        registries.manifests[(HUB, "library/alpine", digest)] = httpx.Response(200, content=body)
+    registries.manifests[(HUB, "library/alpine", "3.20")] = index_digest
+    registries.manifests[(PLATFORM_REGISTRY, OWN_REPO, cache_key_tag(index_digest))] = (
+        "sha256:" + "22" * 32
+    )
+    return index_digest
+
+
+async def test_a_copy_that_is_the_upstream_image_runs(monkeypatch) -> None:
+    registries, captured = _install(monkeypatch, copy_identity=f"{CONFIG_AMD64} linux/amd64")
+    index = _upstream_index(registries)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    assert result.metrics["image_source"] == "cache"
+    assert captured["pulled"] == [f"{OWN_COPY}:{cache_key_tag(index)}"]
+    assert "image_cache_verified" in _milestones(events)
+    # The index, then the amd64 manifest, were read from upstream by digest.
+    gets = [url for method, url in registries.requests if method == "GET"]
+    assert any(url.endswith(f"/manifests/{index}") for url in gets)
+
+
+async def test_a_copy_pushed_over_by_another_image_is_not_run(monkeypatch) -> None:
+    """The key tag names the upstream digest, but a tag can be pushed over."""
+    registries, captured = _install(
+        monkeypatch, copy_identity=f"{'sha256:' + 'ee' * 32} linux/amd64"
+    )
+    index = _upstream_index(registries)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    assert "image_cache_mismatch" in _milestones(events)
+    # Upstream is pulled by the digest, and a true copy is saved over the bad one.
+    assert captured["pulled"] == [f"{OWN_COPY}:{cache_key_tag(index)}", f"alpine@{index}"]
+    assert ["docker", "push", f"{OWN_COPY}:{cache_key_tag(index)}"] in _docker(captured, "push")
+    assert result.metrics["image_source"] == "upstream"
+    assert f"{OWN_COPY}:{cache_key_tag(index)}" not in _create_argv(captured)
+
+
+async def test_the_check_inspects_the_digest_the_pull_brought_not_the_tag(monkeypatch) -> None:
+    """Another step can retag the copy between this pull and the check.
+
+    The container runs by the digest this pull reported, so that is what is
+    checked: a genuine image under the tag must not vouch for it.
+    """
+    pulled_digest = "sha256:" + "dd" * 32
+    registries, captured = _install(monkeypatch)
+    key = cache_key_tag(_upstream_index(registries))
+    copy_tag = f"{OWN_COPY}:{key}"
+    pinned = f"{OWN_COPY}@{pulled_digest}"
+    registries, captured = _install(
+        monkeypatch,
+        pull_digests={copy_tag: pulled_digest},
+        copy_identity={
+            copy_tag: f"{CONFIG_AMD64} linux/amd64",
+            pinned: f"{'sha256:' + 'ee' * 32} linux/amd64",
+        },
+    )
+    _upstream_index(registries)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    assert "image_cache_mismatch" in _milestones(events)
+    inspected = [cmd[-1] for cmd, _env in captured["run"] if any("{{.Os}}" in a for a in cmd)]
+    # The cache check inspected the pulled digest, never the tag.
+    assert inspected[0] == pinned and copy_tag not in inspected
+    assert pinned not in _create_argv(captured)
+
+
+async def test_a_copy_pulled_without_a_digest_runs_by_the_checked_image_id(monkeypatch) -> None:
+    registries, captured = _install(monkeypatch)
+    key = cache_key_tag(_upstream_index(registries))
+    copy_tag = f"{OWN_COPY}:{key}"
+    registries, captured = _install(
+        monkeypatch,
+        image_id=CONFIG_AMD64,
+        copy_identity={copy_tag: f"{CONFIG_AMD64} linux/amd64"},
+    )
+    _upstream_index(registries)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    assert "image_cache_verified" in _milestones(events)
+    create = _create_argv(captured)
+    assert CONFIG_AMD64 in create and copy_tag not in create
+    # No digest is looked up by the tag after the check.
+    assert not any("{{json .RepoDigests}}" in cmd for cmd, _env in captured["run"])
+
+
+async def test_a_copy_that_cannot_be_checked_is_not_run(monkeypatch) -> None:
+    """A digest-pinned image whose registry is down at the check: the copy is no stand-in."""
+    registries, captured = _install(monkeypatch, copy_identity=f"{CONFIG_AMD64} linux/amd64")
+    index = _upstream_index(registries)
+    registries.unreachable.add(HUB)
+    events: list = []
+
+    result = await RunContainerHandler().execute(
+        _handler_ctx(events, config={"image": f"alpine@{index}", "command": ["true"]})
+    )
+    assert result.success is True, result.error
+    assert result.metrics["image_source"] == "upstream"
+    [message] = [m for m, a in events if a.get("milestone") == "image_cache_unverified"]
+    assert "Not running it" in message
+    assert captured["pulled"] == [f"{OWN_COPY}:{cache_key_tag(index)}", f"alpine@{index}"]
+    assert f"{OWN_COPY}:{cache_key_tag(index)}" not in _create_argv(captured)
+
+
+async def test_a_copy_of_a_platform_upstream_does_not_serve_is_not_run(monkeypatch) -> None:
+    """A copy can be made to fail the check (a platform upstream has no image for).
+
+    That must not get it run unchecked: it is refused like any copy that is
+    not shown to be the image.
+    """
+    registries, captured = _install(
+        monkeypatch, copy_identity=f"{'sha256:' + 'ee' * 32} linux/s390x"
+    )
+    index = _upstream_index(registries)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    [attrs] = [a for _m, a in events if a.get("milestone") == "image_cache_unverified"]
+    assert "linux/s390x" in attrs["reason"]
+    assert result.metrics["image_source"] == "upstream"
+    assert captured["pulled"][-1] == f"alpine@{index}"
+    assert f"{OWN_COPY}:{cache_key_tag(index)}" not in _create_argv(captured)
+
+
+async def test_a_copy_pulled_by_the_upstream_digest_itself_runs_without_asking_upstream(
+    monkeypatch,
+) -> None:
+    """The same digest is the same content: no check against upstream is needed."""
+    registries, captured = _install(
+        monkeypatch, pull_digests={f"{OWN_COPY}:{KEY_TAG}": UPSTREAM_DIGEST}
+    )
+    registries.unreachable.add(HUB)
+    registries.manifests[(PLATFORM_REGISTRY, OWN_REPO, KEY_TAG)] = UPSTREAM_DIGEST
+    events: list = []
+
+    result = await RunContainerHandler().execute(
+        _handler_ctx(events, config={"image": PINNED, "command": ["true"]})
+    )
+    assert result.success is True, result.error
+    assert result.metrics["image_source"] == "cache"
+    assert "image_cache_verified" in _milestones(events)
+    assert not any(url.startswith(HUB) for _m, url in registries.requests)
+    assert f"{OWN_COPY}@{UPSTREAM_DIGEST}" in _create_argv(captured)
+
+
+async def test_an_upstream_manifest_that_does_not_match_its_digest_is_not_trusted() -> None:
+    digest = "sha256:" + "b4" * 32
+    body = json.dumps({"config": {"digest": CONFIG_AMD64}}).encode()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    client = _client(handler)
+    with pytest.raises(RegistryUnavailable, match="does not match"):
+        await client.config_digest("x/tool", digest, "linux/amd64")
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected"),
+    [
+        ("linux/amd64", "sha256:" + "01" * 32),
+        ("linux/arm64/v8", "sha256:" + "03" * 32),
+        ("linux/arm/v7", "sha256:" + "02" * 32),
+        ("linux/arm/v6", None),
+        ("windows/amd64", None),
+    ],
+)
+def test_the_index_entry_is_picked_by_platform(platform: str, expected: str | None) -> None:
+    entries = [
+        {"digest": "sha256:" + "01" * 32, "platform": {"os": "linux", "architecture": "amd64"}},
+        {
+            "digest": "sha256:" + "02" * 32,
+            "platform": {"os": "linux", "architecture": "arm", "variant": "v7"},
+        },
+        {"digest": "sha256:" + "03" * 32, "platform": {"os": "linux", "architecture": "arm64"}},
+        {"digest": "sha256:" + "04" * 32, "platform": {"os": "unknown", "architecture": "unknown"}},
+    ]
+    assert _platform_entry(entries, platform) == expected
+
+
+# ── The containerd image store: the image ID is read from the registry ───────
+#
+# Docker 29's default store reports a pulled image's ID as the digest of the
+# manifest or index it was pulled by, not of its configuration. Checked by hand
+# against a Docker 29 daemon on both stores: alpine:3.20's index and its copy in
+# a registry resolve to the same configuration digest, which the classic store
+# reports as the ID.
+
+
+def _copy_manifest(registries: _Registries, config: str) -> str:
+    """Script a single-platform copy in the platform registry; return its digest."""
+    digest, body = _blob(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"digest": config},
+            "layers": [],
+        }
+    )
+    registries.manifests[(PLATFORM_REGISTRY, OWN_REPO, digest)] = httpx.Response(200, content=body)
+    return digest
+
+
+@pytest.mark.parametrize(
+    ("copy_config", "milestone", "source"),
+    [
+        (CONFIG_AMD64, "image_cache_verified", "cache"),
+        ("sha256:" + "ee" * 32, "image_cache_mismatch", "upstream"),
+    ],
+)
+async def test_on_the_containerd_store_a_copy_is_checked_by_its_registry_config(
+    monkeypatch, copy_config: str, milestone: str, source: str
+) -> None:
+    registries, _ = _install(monkeypatch)
+    key = cache_key_tag(_upstream_index(registries))
+    copy_tag = f"{OWN_COPY}:{key}"
+    copy_digest = _copy_manifest(registries, copy_config)
+    pinned = f"{OWN_COPY}@{copy_digest}"
+    # The containerd store's ID is the digest the copy was pulled by.
+    registries, captured = _install(
+        monkeypatch,
+        image_store="containerd",
+        pull_digests={copy_tag: copy_digest},
+        copy_identity={pinned: f"{copy_digest} linux/amd64"},
+    )
+    _upstream_index(registries)
+    _copy_manifest(registries, copy_config)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    assert milestone in _milestones(events)
+    assert result.metrics["image_source"] == source
+    if source == "cache":
+        # The recorded ID is the configuration digest, as on the classic store.
+        assert result.metrics["image_id"] == CONFIG_AMD64
+
+
+async def test_on_the_containerd_store_the_daemon_id_never_stands_in_for_the_image_id(
+    monkeypatch,
+) -> None:
+    """The daemon's ID differs between an image and its copy there: it is not compared.
+
+    A job expecting an ID whose registry will not give the configuration digest
+    is refused, even when the expected value equals the daemon's ID; the error
+    says the ID could not be read, not that the image is another one.
+    """
+    local_id = "sha256:" + "5a" * 32
+    _, captured = _install(
+        monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64"
+    )
+    events: list = []
+    job = ContainerJob(
+        config={"image": "tools/runner:dev", "command": ["true"], "cache_image": False},
+        handler_id="tool.run",
+        expected_image_id=local_id,
+    )
+    outcome = await run_container_job(_handler_ctx(events, services=_CacheServices(None)), job)
+    assert isinstance(outcome, HandlerResult) and outcome.success is False
+    assert "could not be read" in (outcome.error or "") and local_id in (outcome.error or "")
+    assert outcome.metrics["image_local_id"] == local_id
+    assert _docker(captured, "create") == []
+
+
+async def test_on_the_containerd_store_a_plain_job_asks_no_registry_for_its_image_id(
+    monkeypatch,
+) -> None:
+    """Manifest requests can count against pull limits: only jobs that compare images pay."""
+    local_id = "sha256:" + "5c" * 32
+    registries, _ = _install(
+        monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64"
+    )
+    job = ContainerJob(
+        config={"image": "ghcr.io/x/tool:1", "command": ["true"], "cache_image": False},
+        handler_id="tool.run",
+    )
+    outcome = await run_container_job(_handler_ctx([], services=_CacheServices(None)), job)
+    assert not hasattr(outcome, "success"), getattr(outcome, "error", None)
+    assert (outcome.image_id, outcome.image_local_id) == ("", local_id)
+    assert registries.requests == []
+
+    asking = ContainerJob(
+        config={"image": "ghcr.io/x/tool:1", "command": ["true"], "cache_image": False},
+        handler_id="tool.run",
+        needs_image_id=True,
+    )
+    await run_container_job(_handler_ctx([], services=_CacheServices(None)), asking)
+    assert any("ghcr.io/v2/x/tool/manifests/" in url for _m, url in registries.requests)
+
+
+async def test_on_the_containerd_store_an_unreadable_registry_config_is_no_id(
+    monkeypatch,
+) -> None:
+    """A digest-pinned image whose registry cannot say: no ID, so a check refuses it."""
+    digest = "sha256:" + "5b" * 32
+    registries, _ = _install(
+        monkeypatch, image_store="containerd", copy_identity=f"{digest} linux/amd64"
+    )
+    registries.unreachable.add("https://ghcr.io")
+    identity = await RunContainerHandler()._image_identity(
+        reference=f"ghcr.io/x/tool@{digest}",
+        repository="ghcr.io/x/tool:1",
+        cache=CACHE,
+        docker_bin="docker",
+        docker_env={"DOCKER_HOST": "tcp://dind:2375"},
+        deadline=time.monotonic() + 60,
+        resolve=True,
+    )
+    assert (identity.local_id, identity.image_id) == (digest, "")
+
+
+@pytest.mark.parametrize(
+    ("answer", "store"),
+    [
+        ("containerd", "containerd"),
+        ("classic", "classic"),
+        # A classic driver without a status list is still a real answer.
+        ("vfs", "classic"),
+        # No driver named, or no answer: never read as the classic store.
+        ("starting", "unknown"),
+        ("broken", "unknown"),
+    ],
+)
+async def test_the_image_store_is_read_from_a_real_answer_only(
+    monkeypatch, answer: str, store: str
+) -> None:
+    _, captured = _install(monkeypatch, image_store=answer)
+    handler = RunContainerHandler()
+    env = {"DOCKER_HOST": "tcp://dind:2375"}
+    assert await handler._image_store(docker_bin="docker", docker_env=env, timeout=60) == store
+    # Nothing is remembered: a daemon recreated with another store is asked again.
+    await handler._image_store(docker_bin="docker", docker_env=env, timeout=60)
+    assert len(_docker(captured, "info")) == 2
+
+
+async def test_the_image_store_question_keeps_to_the_steps_deadline(monkeypatch) -> None:
+    """A slow `docker info` must not carry a step past its timeout."""
+    _, captured = _install(
+        monkeypatch, image_store="containerd", copy_identity="sha256:" + "5d" * 32 + " linux/amd64"
+    )
+    handler = RunContainerHandler()
+    await handler._image_identity(
+        reference="tools/runner:dev",
+        repository="tools/runner:dev",
+        cache=None,
+        docker_bin="docker",
+        docker_env={"DOCKER_HOST": "tcp://dind:2375"},
+        deadline=time.monotonic() + 3,
+        resolve=True,
+    )
+    [info_timeout] = [t for cmd, t in captured["timeouts"] if cmd[:2] == ["docker", "info"]]
+    assert info_timeout is not None and info_timeout <= 3
+    # Out of time, the daemon is not asked at all.
+    env = {"DOCKER_HOST": "tcp://other:2375"}
+    assert await handler._image_store(docker_bin="docker", docker_env=env, timeout=0) == "unknown"
+    assert len(_docker(captured, "info")) == 1
+
+
+async def test_a_pulled_image_whose_registry_cannot_say_has_no_id_on_containerd(
+    monkeypatch,
+) -> None:
+    """Its daemon ID is a manifest digest there: never offered as the configuration digest."""
+    local_id = "sha256:" + "5e" * 32
+    registries, _ = _install(
+        monkeypatch, image_store="containerd", copy_identity=f"{local_id} linux/amd64"
+    )
+    registries.unreachable.add("https://ghcr.io")
+    identity = await RunContainerHandler()._image_identity(
+        reference="ghcr.io/x/tool:1",
+        repository="ghcr.io/x/tool:1",
+        cache=None,
+        docker_bin="docker",
+        docker_env={"DOCKER_HOST": "tcp://dind:2375"},
+        deadline=time.monotonic() + 60,
+        resolve=True,
+    )
+    assert (identity.local_id, identity.image_id) == (local_id, "")
+
+
+async def test_an_unknown_store_reads_a_pinned_image_from_its_registry(monkeypatch) -> None:
+    """`docker info` failed: the daemon's ID may be either kind, so the registry decides."""
+    registries, _ = _install(monkeypatch)
+    copy_digest = _copy_manifest(registries, CONFIG_AMD64)
+    pinned = f"{OWN_COPY}@{copy_digest}"
+    registries, captured = _install(
+        monkeypatch, image_store="broken", copy_identity=f"{copy_digest} linux/amd64"
+    )
+    _copy_manifest(registries, CONFIG_AMD64)
+    handler = RunContainerHandler()
+    env = {"DOCKER_HOST": "tcp://dind:2375"}
+    pinned_identity = await handler._image_identity(
+        reference=pinned,
+        repository=OWN_COPY,
+        cache=CACHE,
+        docker_bin="docker",
+        docker_env=env,
+        deadline=time.monotonic() + 60,
+        resolve=True,
+    )
+    assert pinned_identity.image_id == CONFIG_AMD64
+    tag_identity = await handler._image_identity(
+        reference=f"{OWN_COPY}:x",
+        repository=f"{OWN_COPY}:x",
+        cache=CACHE,
+        docker_bin="docker",
+        docker_env=env,
+        deadline=time.monotonic() + 60,
+        resolve=True,
+    )
+    assert (tag_identity.local_id, tag_identity.image_id) == (copy_digest, "")
+    assert len(_docker(captured, "info")) == 2
+
+
+@pytest.mark.parametrize(
+    ("platform", "entry_platform"),
+    [
+        # The configuration names no variant; the index says v8.
+        ("linux/arm64", {"os": "linux", "architecture": "arm64", "variant": "v8"}),
+        # And the other way round.
+        ("linux/arm64/v8", {"os": "linux", "architecture": "arm64"}),
+    ],
+)
+def test_a_missing_variant_means_the_architectures_default(
+    platform: str, entry_platform: dict[str, str]
+) -> None:
+    digest = "sha256:" + "0a" * 32
+    entries = [
+        {"digest": "sha256:" + "0b" * 32, "platform": {"os": "linux", "architecture": "amd64"}},
+        {"digest": digest, "platform": entry_platform},
+    ]
+    assert _platform_entry(entries, platform) == digest
+
+
+def test_32_bit_arm_without_a_variant_matches_nothing() -> None:
+    """A v6 sandbox reports plain linux/arm: assuming v7 could accept the wrong image."""
+    v6, v7 = "sha256:" + "06" * 32, "sha256:" + "07" * 32
+    entries = [
+        {"digest": v6, "platform": {"os": "linux", "architecture": "arm", "variant": "v6"}},
+        {"digest": v7, "platform": {"os": "linux", "architecture": "arm", "variant": "v7"}},
+    ]
+    assert _platform_entry(entries, "linux/arm") is None
+    assert _platform_entry(entries, "linux/arm/v6") == v6
+    assert _platform_entry(entries, "linux/arm/v7") == v7
+
+
+@pytest.mark.parametrize(
+    "duplicate",
+    [
+        {"os": "linux", "architecture": "amd64", "variant": "v1"},
+        {"os": "linux", "architecture": "amd64"},
+    ],
+)
+def test_an_index_with_two_entries_for_the_platform_matches_nothing(duplicate) -> None:
+    """amd64/v1 and plain amd64 are one platform to containerd: which runs is unknown."""
+    entries = [
+        {"digest": "sha256:" + "0d" * 32, "platform": duplicate},
+        {"digest": "sha256:" + "0e" * 32, "platform": {"os": "linux", "architecture": "amd64"}},
+    ]
+    assert _platform_entry(entries, "linux/amd64") is None
+
+
+def test_a_missing_variant_does_not_match_another_one() -> None:
+    entries = [
+        {
+            "digest": "sha256:" + "0c" * 32,
+            "platform": {"os": "linux", "architecture": "arm", "variant": "v6"},
+        }
+    ]
+    assert _platform_entry(entries, "linux/arm") is None
+
+
+async def test_a_job_whose_image_cannot_be_pulled_never_runs(monkeypatch) -> None:
+    """An image only the sandbox holds (built there, never pushed) fails at the pull.
+
+    The identity fallback to the daemon's ID never lets a step run an image the
+    registry did not serve: a container step always pulls first.
+    """
+    _, captured = _install(
+        monkeypatch,
+        image_store="containerd",
+        pull_failures=frozenset({"local/tool:dev"}),
+        copy_identity="sha256:" + "5a" * 32 + " linux/amd64",
+    )
+    job = ContainerJob(
+        config={"image": "local/tool:dev", "command": ["true"], "cache_image": False},
+        handler_id="tool.run",
+        expected_image_id="sha256:" + "5a" * 32,
+    )
+    outcome = await run_container_job(_handler_ctx([], services=_CacheServices(None)), job)
+    assert isinstance(outcome, HandlerResult) and outcome.success is False
+    assert "pull" in (outcome.error or "").lower()
+    assert _docker(captured, "create") == []
+
+
+async def test_a_verified_cache_hit_reads_the_copy_once(monkeypatch) -> None:
+    """The step reuses what the cache check read: no second inspect or registry lookup."""
+    registries, _ = _install(monkeypatch)
+    key = cache_key_tag(_upstream_index(registries))
+    copy_tag = f"{OWN_COPY}:{key}"
+    copy_digest = _copy_manifest(registries, CONFIG_AMD64)
+    pinned = f"{OWN_COPY}@{copy_digest}"
+    registries, captured = _install(
+        monkeypatch,
+        image_store="containerd",
+        pull_digests={copy_tag: copy_digest},
+        copy_identity={pinned: f"{copy_digest} linux/amd64"},
+    )
+    _upstream_index(registries)
+    _copy_manifest(registries, CONFIG_AMD64)
+    events: list = []
+
+    result = await RunContainerHandler().execute(_handler_ctx(events))
+    assert result.success is True, result.error
+    assert "image_cache_verified" in _milestones(events)
+    inspects = [cmd for cmd, _env in captured["run"] if any("{{.Os}}" in a for a in cmd)]
+    assert len(inspects) == 1
+    copy_gets = [
+        url
+        for m, url in registries.requests
+        if m == "GET" and url.startswith(PLATFORM_REGISTRY) and copy_digest in url
+    ]
+    assert len(copy_gets) == 1
+    assert result.metrics["image_id"] == CONFIG_AMD64
+    assert result.metrics["image_local_id"] == copy_digest
+
+
+async def test_the_cache_check_keeps_half_its_budget_for_the_upstream_lookup(monkeypatch) -> None:
+    """Reading the copy may not use up the time the verdict's lookup needs."""
+    registries, _ = _install(monkeypatch, copy_identity=f"{CONFIG_AMD64} linux/amd64")
+    index = _upstream_index(registries)
+    handler = RunContainerHandler()
+    seen: dict[str, float] = {}
+    real = handler._image_identity
+
+    async def spy(**kwargs: Any):
+        seen["budget"] = kwargs["deadline"] - time.monotonic()
+        return await real(**kwargs)
+
+    monkeypatch.setattr(handler, "_image_identity", spy)
+    started = time.monotonic()
+    matches, _identity = await handler._copy_matches_upstream(
+        upstream=_client(registries.transport(HUB).handler, base_url=HUB),
+        repo="library/alpine",
+        upstream_digest=index,
+        copy=f"{OWN_COPY}:{cache_key_tag(index)}",
+        pinned=f"{OWN_COPY}:{cache_key_tag(index)}",
+        cache=CACHE,
+        image="alpine:3.20",
+        docker_bin="docker",
+        docker_env={"DOCKER_HOST": "tcp://dind:2375"},
+        deadline=started + 600,
+        emit=AsyncMock(),
+    )
+    assert matches is True
+    # The whole budget is 30 s here: the copy's read gets at most half.
+    assert 0 < seen["budget"] <= 15.01

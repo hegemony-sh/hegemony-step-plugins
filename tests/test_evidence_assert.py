@@ -469,32 +469,28 @@ class TestFindCommandArtifact:
 
 
 class _RunApi:
-    """Host services whose API serves one run's artifacts and counts the fetches."""
+    """Host services that serve one run's artifacts and count the fetches."""
 
     def __init__(self, artifacts: list[dict], status_code: int = 200) -> None:
         self.artifacts = artifacts
         self.status_code = status_code
         self.fetches = 0
 
-    def open_api_client(self, timeout: float = 30) -> _RunApi:
-        return self
-
-    async def __aenter__(self) -> _RunApi:
-        return self
-
-    async def __aexit__(self, *exc: object) -> bool:
-        return False
-
-    async def get(self, url: str) -> _RunApi:
+    async def fetch_run_artifacts(self, run_id: str) -> list[dict]:
+        """The host's named method: raises on a failed fetch, as the platform does."""
         self.fetches += 1
-        return self
-
-    def json(self) -> dict:
-        return {"artifacts": self.artifacts}
+        if self.status_code != 200:
+            raise RuntimeError(f"HTTP {self.status_code}")
+        return self.artifacts
 
 
 async def _run_assert(
-    api: _RunApi, command: str, expected: str, devices: list[dict], operator: str = "contains"
+    api: _RunApi,
+    command: str,
+    expected: str,
+    devices: list[dict],
+    operator: str = "contains",
+    **extra: object,
 ):
     from typing import cast
 
@@ -511,6 +507,7 @@ async def _run_assert(
             "command": command,
             "operator": operator,
             "expected": expected,
+            **extra,
         },
         target_roles=["core"],
         target_devices_by_role={"core": devices},
@@ -663,3 +660,105 @@ async def test_assert_fails_every_device_when_the_run_fetch_fails() -> None:
     assert result.success is False
     assert (result.error or "").count("could not fetch artifact content") == 3
     assert api.fetches == 1
+
+
+async def test_the_declared_output_fields_are_the_keys_the_step_outputs() -> None:
+    # The editor's variable picker lists output_fields; they must match.
+    command, output = next(iter(_OUTPUTS.items()))
+    result = await _assert_command(_collected("collect", _OUTPUTS), command, output)
+    assert result.success is True, result.error
+    assert set(result.output) == {field.name for field in AssertHandler.output_fields}
+
+
+def test_the_docs_page_names_every_declared_output_field() -> None:
+    from hegemony_step_sdk.docs import load_docs_bundle
+
+    page = load_docs_bundle("hegemony_steps_evidence")["evidence.assert"]
+    output = page.split("## Output", 1)[1].split("\n## ", 1)[0]
+    for field in AssertHandler.output_fields:
+        assert f"`{field.name}`" in output, field.name
+        assert field.description and field.type, field.name
+
+
+_SHOW_FLASH = """Directory of flash:/
+
+    3  -rwx    13013140   Mar 1 1993 02:09:13 +00:00  c3750-ipservicesk9-mz.122-55.SE12.bin
+    7  -rwx        5709  Nov 16 2026 14:51:25 +00:00  private-config.text
+
+15998976 bytes total (2954240 bytes free)
+"""
+
+
+class TestExtract:
+    def test_the_first_group_is_compared_as_a_number(self) -> None:
+        passed, _, detail = _handler()._assert_content(
+            _SHOW_FLASH, "2900000", "ge", "output", "", 1, r"([0-9]+) bytes free"
+        )
+        assert passed is True
+        assert detail["extracted"] == "2954240"
+        passed, msg, _ = _handler()._assert_content(
+            _SHOW_FLASH, "13013140", "ge", "output", "", 1, r"([0-9]+) bytes free"
+        )
+        assert passed is False
+        assert "13013140" in msg
+
+    def test_without_a_group_the_whole_match_is_compared(self) -> None:
+        passed, _, detail = _handler()._assert_content(
+            "Version 17.09.04a, RELEASE", "17.09.04a", "eq", "output", "", 1, r"17\.[0-9.]+a?"
+        )
+        assert passed is True
+        assert detail["extracted"] == "17.09.04a"
+
+    @pytest.mark.parametrize("operator", ["ne", "not_contains", "not_matches"])
+    def test_content_it_does_not_match_fails_even_a_negative_operator(self, operator) -> None:
+        passed, msg, _ = _handler()._assert_content(
+            "nothing here", "x", operator, "output", "", 1, r"([0-9]+) bytes free"
+        )
+        assert passed is False
+        assert msg == "extract '([0-9]+) bytes free' matched nothing"
+
+    def test_an_invalid_regex_fails(self) -> None:
+        passed, msg, _ = _handler()._assert_content("x", "x", "eq", "output", "", 1, "(")
+        assert passed is False
+        assert msg.startswith("Invalid extract regex")
+
+    def test_each_selected_line_is_extracted(self) -> None:
+        text = "Gi1/0/1 errors 0\nGi1/0/2 errors 3\nGi1/0/3 errors 1\n"
+        passed, msg, detail = _handler()._assert_content(
+            text, "1", "le", "lines", "errors", 1, r"errors ([0-9]+)"
+        )
+        assert passed is False
+        assert detail["lines_passed"] == 2
+        assert "first: 'Gi1/0/2 errors 3'" in msg
+
+    def test_a_selected_line_it_does_not_match_fails_and_says_why(self) -> None:
+        passed, msg, _ = _handler()._assert_content(
+            "Gi1/0/1 errors 0\nGi1/0/2 errors n/a\n",
+            "1",
+            "le",
+            "lines",
+            "errors",
+            1,
+            r"errors ([0-9]+)",
+        )
+        assert passed is False
+        assert msg.endswith("extract 'errors ([0-9]+)' matched nothing in it")
+
+    def test_an_empty_extract_compares_the_whole_content(self) -> None:
+        passed, _, detail = _handler()._assert_content("42", "42", "eq", "output", "", 1, "")
+        assert passed is True
+        assert "extract" not in detail
+
+
+async def test_assert_extracts_the_free_space_from_show_flash() -> None:
+    artifacts = _collected("collect", {"show flash": _SHOW_FLASH})
+    fits = await _run_assert(
+        _RunApi(artifacts), "show flash", "1065536", [_R1], "ge", extract=r"([0-9]+) bytes free"
+    )
+    assert fits.success is True, fits.error
+    assert fits.evidence[0]["content_json"]["extracted"] == "2954240"
+    too_big = await _run_assert(
+        _RunApi(artifacts), "show flash", "13078676", [_R1], "ge", extract=r"([0-9]+) bytes free"
+    )
+    assert too_big.success is False
+    assert too_big.output["failed"] == too_big.output["checked"]

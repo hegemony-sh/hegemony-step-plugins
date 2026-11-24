@@ -63,6 +63,80 @@ transport, a configuration block that holds a `banner`, `macro name` or
 `crypto pki certificate chain` line takes about two seconds a line: free
 text gets no prompt back, so each line waits for the device to go quiet.
 
+## Commands That Ask Questions
+
+Some commands stop at a question before the device prompt returns, such as
+the file name and `[confirm]` of a `delete`. The step waits for the prompt,
+so such a command runs into the command timeout, and the error then
+suggests listing the question. List the questions a command may ask, and
+what to answer, under `prompts`:
+
+```yaml
+commands:
+  - delete flash:old-image.bin
+prompts:
+  - command: '^delete '               # regular expression on the command text
+    expect: 'Delete filename \[.*\]\?'  # regular expression on the last line
+    answer: ''                        # empty: Enter alone
+  - command: '^delete '
+    expect: '\[confirm\]'
+```
+
+Each entry applies to the commands its `command` pattern finds (an empty
+`command` applies it to every command), and is matched against the last line
+the device printed. It answers once per command; set `repeat: true` to answer
+it every time it is asked, such as the per-file confirmations of a
+`delete /recursive`, up to 50 answers. Only listed questions are answered: a
+question nobody listed, or a question asked again after its one answer, fails
+the command with the line the device is waiting at. The command timeout
+applies to each wait, from the command or an answer to the next question or
+the prompt. An answer can hold a `{{ secret(...) }}` reference; it is masked
+like other secret values.
+
+In the step form, Answers to questions has one row per entry: the command
+pattern, the question, the answer and "Every time" (`repeat`). Prompts apply
+to commands run at the exec prompt, not to configuration lines, and need the
+netmiko or scrapli transport; with another transport the step fails rather
+than skip them.
+
+## Commands That End the Session
+
+A `reload` (or an `install ... activate` that reloads) ends the SSH session
+while the command runs, which normally fails it. Turn on **Allow disconnect
+after the last command** (`allow_disconnect_after_last_command`, under the
+advanced settings) to count that as success:
+
+```yaml
+commands:
+  - reload
+prompts:
+  - command: '^reload'
+    expect: '\[confirm\]'
+allow_disconnect_after_last_command: true
+```
+
+Only the last command that is not blank may end the session; blank lines
+after it are skipped once it closed. A session that closes during an
+earlier command still fails, and the commands after it are skipped. The
+command must have an entry under `prompts` whose `command` pattern matches
+it, as a `reload` needs for its `[confirm]` anyway: only then does the step
+read the command's whole output itself, so it can see a device error
+printed just before the session closed. A command that asks nothing can
+still use the setting with an entry that matches it; its question never
+comes, so the entry is never used. Without such an entry the closed session
+fails the command.
+
+The setting accepts only a session the device closed. A command that fails
+with a device error, also one the device printed just before it closed the
+session, or that times out while the session stays open (the device
+stopped answering without closing it, or waits at a question nobody
+listed), still fails, as does a session closed because the run was
+cancelled. A device that closes the session cleanly shows it at once. The setting does not
+check that the device really reloads: follow the step with
+`probe.wait_unreachable` and then `probe.wait_reachable`. It needs the
+netmiko or scrapli transport; with another transport the step fails rather
+than ignore it.
+
 ## SSH Compatibility
 
 Allow legacy SSH algorithms defaults to off. Enable `allow_legacy_ssh` only
@@ -79,7 +153,11 @@ covers that hop only and needs a Hegemony version that reads it.
 ## Output
 
 Later steps can read `steps.NODE_ID.output.stdout` — the combined output of all
-commands across all devices, capped at 4096 characters. Full outputs are
+commands across all devices, capped at 4096 characters — and
+`steps.NODE_ID.output.disconnected`, the devices that closed the session
+during the last command while Allow disconnect after the last command was
+on (empty otherwise). The evidence of that command says so, with
+`disconnected` set and the output the device sent before it closed. Full outputs are
 preserved in the `cli_output` evidence artifacts described above, which also
 record the device, the command(s), the exit code, and any error text. A
 device that throws an error contributes an "Error" artifact with the message

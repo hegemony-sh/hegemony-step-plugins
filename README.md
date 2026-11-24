@@ -36,10 +36,13 @@ entry-point group and the platform discovers them at startup.
   `.github/plugin-pins.json` names a release tag and commit, and its
   `pyproject.toml` accepts only the matching version range of each wheel.
   A release of the platform is built against exactly that tag.
-- **The wheels share one version.** Every package here carries the SDK's
-  version, and that version is the release tag `vX.Y.Z`. The wheels are
-  versioned in lockstep with one another, not with the platform's own version
-  number. The pins and the release workflow are described in
+- **Two version numbers.** Every plugin, probe and transport wheel carries
+  the release version, the release tag `vX.Y.Z`. The SDK,
+  `hegemony-step-sdk`, has its own version, which changes only when the SDK
+  changes; its major version is the SDK's ABI version. Step-handler and
+  probe wheels accept a range of SDK versions (`>=X.Y,<X+1`), transport
+  wheels one exact SDK version. Neither number follows the platform's own
+  version. The pins and the release workflow are described in
   [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
 - **Plugins never import platform code.** A handler reaches every platform
   facility (device transports, secret and template resolution, the internal
@@ -62,7 +65,7 @@ entry-point group and the platform discovers them at startup.
   | Wheel | Namespace | Handlers |
   | --- | --- | --- |
   | `plugins/steps_general` | `general.` | noop (hidden), sleep |
-  | `plugins/steps_probe` | `probe.` | connectivity, http, dns, tls, wait_reachable |
+  | `plugins/steps_probe` | `probe.` | connectivity, http, dns, tls, snmp (read only), wait_reachable, wait_unreachable |
   | `plugins/steps_netcli` | `netcli.` | execute, collect_evidence, file_download |
   | `plugins/steps_evidence` | `evidence.` | assert, compare |
   | `plugins/steps_container` | `container.` | run |
@@ -74,6 +77,8 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_http` | `http.` | request |
   | `plugins/steps_secret` | `secret.` | write — store, swap or delete a secret in the organization's secret store |
   | `plugins/steps_inventory` | `inventory.` | sync — sync an inventory provider of the run's organization now |
+  | `plugins/steps_git` | `git.` | commit — commit an earlier step's evidence (configuration backups) to a Git repository over HTTPS, only when it changed (built on `container.run`'s runner) |
+  | `plugins/steps_netconf` | `netconf.` | get, edit_config, commit, cancel_commit, rpc — NETCONF (RFC 6241): read, change as one transaction (candidate, diff, validate, dry run, confirmed commit), settle a pending commit, any other operation |
   | `plugins/steps_netbox` | `netbox.` | request, ipam.allocate/release, render_config — NetBox objects, IP address management and config rendering (needs `hegemony-steps-http`) |
 
 Device transports (`transports/`: netmiko, scrapli, asyncssh) and the network
@@ -82,7 +87,7 @@ rest. Every wheel ships in the platform's images. The platform has no runtime
 switch that hides an installed step, so a deployment that must not offer one
 builds its api and worker images without the wheel (`uv pip uninstall` in a
 derived image; see the platform's
-[production hardening guide](https://github.com/hegemony-sh/hegemony/blob/develop/docs/deployment/production-hardening.md#step-handlers-in-the-images)).
+[production hardening guide](https://github.com/hegemony-sh/hegemony/blob/main/docs/deployment/production-hardening.md#step-handlers-in-the-images)).
 Hardened deployments may do that with `hegemony-steps-container` to disable
 container execution entirely.
 
@@ -90,6 +95,12 @@ The wheels that reach outside the worker are limited in different ways:
 
 - `hegemony-steps-shell`: only devices whose access config holds SSH
   credentials, checked against the organization's trusted host keys.
+- `hegemony-steps-netconf`: the same as shell steps, on the NETCONF port
+  (830 by default), and the flow's egress policy. On a device with a
+  candidate datastore, configuration changes go through it with a confirmed
+  commit by default. A device without one (`netconf.edit_config` Target
+  `auto`) gets the change on running at once: no dry run and no confirmed
+  commit.
 - `hegemony-steps-http` and `hegemony-steps-netbox` (which needs
   `hegemony-steps-http`): the flow's egress policy. A flow without one can
   reach any address the worker can, except loopback, link-local (cloud
@@ -106,8 +117,9 @@ use the SDK on its own; the platform's images already carry the rest. Name the
 release your Hegemony version pins (see [Compatibility](#compatibility)); the
 newest is on the
 [Releases page](https://github.com/hegemony-sh/hegemony-step-plugins/releases).
-Every other package pins `hegemony-step-sdk` to its own exact version, so the
-packages you install must all come from the same release.
+The SDK has its own version: the plugins accept any `hegemony-step-sdk` of the
+same major (`>=1.0,<2`), and the built-in transports pin it exactly. Install
+packages of the same release together.
 
 ### From PyPI
 
@@ -135,30 +147,30 @@ Each release also attaches the same wheels and sdists to its
 `vX.Y.Z`, with a `SHA256SUMS` file listing every one of them. Installing from
 local files, name the SDK wheel of the same release in the same command,
 together with any wheel that the wheels you install depend on
-(`hegemony-steps-netbox` needs `hegemony-steps-http`; `hegemony-steps-ansible`
-and `hegemony-steps-tf` need `hegemony-steps-container`), so the installer
-does not look for them on an index:
+(`hegemony-steps-netbox` needs `hegemony-steps-http`; `hegemony-steps-ansible`,
+`hegemony-steps-tf` and `hegemony-steps-git` need `hegemony-steps-container`),
+so the installer does not look for them on an index. The SDK wheel has its own
+version, so take each wheel's file name from the release's `SHA256SUMS`:
 
 ```bash
 version=X.Y.Z   # a release tag without the leading v
 base="https://github.com/hegemony-sh/hegemony-step-plugins/releases/download/v${version}"
+mkdir wheels && cd wheels
 curl -fsSLO "${base}/SHA256SUMS"
 for wheel in hegemony_step_sdk hegemony_steps_http hegemony_steps_netbox; do
-  curl -fsSLO "${base}/${wheel}-${version}-py3-none-any.whl"
+  file=$(awk -v w="${wheel}-" 'index($2, w) == 1 {print $2}' SHA256SUMS)
+  curl -fsSLO "${base}/${file}"
 done
 sha256sum -c --ignore-missing SHA256SUMS
 (
-  for wheel in ./hegemony_*-"${version}"-py3-none-any.whl; do
+  for wheel in ./hegemony_*.whl; do
     gh attestation verify "$wheel" \
       --repo hegemony-sh/hegemony-step-plugins \
       --signer-workflow hegemony-sh/hegemony-github-workflows/.github/workflows/plugin-release.yml \
       || exit 1
   done
 ) &&
-uv pip install \
-  ./hegemony_step_sdk-"${version}"-py3-none-any.whl \
-  ./hegemony_steps_http-"${version}"-py3-none-any.whl \
-  ./hegemony_steps_netbox-"${version}"-py3-none-any.whl
+uv pip install ./hegemony_*.whl
 ```
 
 `pip install` takes the same wheel files. The file names use underscores
@@ -175,9 +187,12 @@ and the provenance, start with the release that added the PyPI upload.
 
 ### Runner images
 
-The runner images (`ghcr.io/hegemony-sh/ansible-runner` and
-`ghcr.io/hegemony-sh/opentofu-runner`) are signed by the Images workflow
-from the release tag, and carry the same kind of provenance. Both checks
+The runner images (`ghcr.io/hegemony-sh/ansible-runner`,
+`ghcr.io/hegemony-sh/opentofu-runner` and `ghcr.io/hegemony-sh/git-runner`)
+are signed by the Images workflow from the release tag, and carry the same
+kind of provenance. The Ansible and OpenTofu images are also published per
+tool series (`ansible-runner:X.Y.Z-core2.21`, `opentofu-runner:X.Y.Z-tofu1.13`),
+which the steps' version settings name; those tags verify the same way. Both checks
 below accept only that workflow run at a release tag:
 
 ```bash
@@ -201,6 +216,14 @@ release. Install the release your platform pins; the newest one is on the
 | 1.0.0 | 0.33.0 |
 
 Hegemony versions before 1.0.0 were not released publicly.
+
+Up to v0.55.0 the SDK carried the release version. From the release that
+gave it its own version on, the SDK version is in the name of the release's
+`hegemony_step_sdk-*.whl`. A plugin wheel from a newer release installs
+with any SDK its requirement accepts, so it can also install on an older
+platform whose SDK is in that range. It runs there only if that platform
+provides the services its handlers call, or the handlers fall back when a
+service is missing (an older host raises `NotImplementedError` for it).
 
 ## Develop a handler
 

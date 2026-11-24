@@ -70,7 +70,10 @@
           "plugins/steps_tf/README.md",
           "plugins/steps_tf/src/hegemony_steps_tf/common.py",
           "plugins/steps_tf/src/hegemony_steps_tf/plan.py",
-          "plugins/steps_tf/src/hegemony_steps_tf/docs/tf.plan.md"
+          "plugins/steps_tf/src/hegemony_steps_tf/docs/tf.plan.md",
+          "plugins/steps_git/README.md",
+          "plugins/steps_git/src/hegemony_steps_git/commit.py",
+          "plugins/steps_git/src/hegemony_steps_git/docs/git.commit.md"
         ],
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }

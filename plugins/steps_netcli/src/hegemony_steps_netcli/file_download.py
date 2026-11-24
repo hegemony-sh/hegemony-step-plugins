@@ -5,8 +5,10 @@
 
 """FileDownloadHandler: each target downloads a file-repository file by itself.
 
-The step asks the host for a short-lived download link to the file
-(``services.open_file_download``) and has the target fetch it over HTTP(S)
+The file is named by a file reference (``file``: repository name and path,
+picked in the editor or taken from a run input) or, in older flows, by its
+id (``file_ids``). The step asks the host for a short-lived download link to
+the file (``services.open_file_download``) and has the target fetch it over HTTP(S)
 through the device transport's ``http_transfer``: a ``copy <url> <fs>`` on a
 network device, a ``curl`` on a server. The link is asked for anew for each
 target right before its transfer and ended right after it.
@@ -24,12 +26,16 @@ from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
     MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
+    FileDownload,
+    FileRef,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StepKind,
     for_each_target_device,
     max_parallel_from_config,
+    parse_file_ref,
 )
 from hegemony_step_sdk.ssh import SshSecurityConfig, configure_ssh_security
 
@@ -55,17 +61,33 @@ class FileDownloadConfig(SshSecurityConfig):
 
     model_config = ConfigDict(extra="allow")
 
+    # A file reference ({"repository": ..., "path": ...}), a list of one, or
+    # a template such as "{{ inputs.firmware }}". Listed in
+    # native_config_keys, so a run input arrives as the reference itself.
+    file: dict[str, Any] | list[Any] | str | None = Field(
+        default=None,
+        title="File",
+        description=(
+            "The file each target downloads. Pick a file from a file repository, or "
+            "reference a run-form field such as {{ inputs.firmware }}."
+        ),
+        json_schema_extra={"x_widget": "repository-file-ref", "x_col_span": 2},
+    )
     # Named file_ids on purpose: the platform refuses to delete a stored file
-    # that a flow lists under this key.
+    # that a flow lists under this key. Kept for flows saved before ``file``.
     file_ids: list[str] = Field(
         default_factory=list,
-        title="File Repository File",
-        description="The file each target downloads. Browse the file repositories and pick one.",
+        title="File by id (legacy)",
+        description=(
+            "The file each target downloads, by its id, as older flows store it. "
+            "Leave empty when File is set."
+        ),
         json_schema_extra={
             "x_widget": "repository-file-select",
             "x_multiple": False,
             "x_file_type_filter": "file",
             "x_col_span": 2,
+            "x_advanced": True,
         },
     )
     dest_fs: str = Field(
@@ -153,6 +175,72 @@ _NO_DOWNLOAD_LINKS = (
     "This Hegemony version cannot issue download links for file "
     "repository files; upgrade the platform to use this step"
 )
+_NO_REPOSITORY_PATHS = (
+    "This Hegemony version cannot open files by repository and path; "
+    "upgrade the platform or use a file id"
+)
+
+
+def _is_unset(value: Any) -> bool:
+    """Whether a file setting is empty (absent, blank text, an empty list or dict)."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        # An empty list or object rendered as text (an older platform passes
+        # the setting on as text) is as empty as the value itself.
+        return value.strip() in ("", "[]", "{}")
+    if isinstance(value, (list, tuple, dict)):
+        return not value
+    return False
+
+
+def _file_details(download: FileDownload) -> dict[str, Any]:
+    """What the step reports about the downloaded file (never the link)."""
+    return {
+        "file_id": download.file_id,
+        "filename": download.filename,
+        "size_bytes": download.size_bytes,
+        "sha256": download.sha256,
+        "md5": download.md5,
+        # getattr: a host older than these fields builds an older FileDownload.
+        "repository": getattr(download, "repository", ""),
+        "repository_id": getattr(download, "repository_id", ""),
+        "path": getattr(download, "path", ""),
+        "folder": getattr(download, "folder", ""),
+        "content_type": getattr(download, "content_type", None),
+        "sha512": getattr(download, "sha512", None),
+        "metadata": dict(getattr(download, "metadata", None) or {}),
+    }
+
+
+def _file_ref_of(file_info: dict[str, Any] | None) -> dict[str, str] | None:
+    """The reference a later step can take for the file the host named, or None."""
+    if not file_info or not file_info.get("repository") or not file_info.get("path"):
+        return None
+    return {"repository": file_info["repository"], "path": file_info["path"]}
+
+
+def _file_output(file_info: dict[str, Any], ref: FileRef | None) -> dict[str, Any]:
+    """The step output's file keys, ``file`` being a reference a later step can take.
+
+    The host's answer wins; without one (no target got a link) the configured
+    reference fills in. What neither knows (a host older than these fields,
+    given a file id) is None.
+    """
+    repository = file_info.get("repository") or (ref.repository if ref else "")
+    path = file_info.get("path") or (ref.path if ref else "")
+    known = bool(file_info.get("repository"))
+    return {
+        "repository": repository or None,
+        "repository_id": file_info.get("repository_id") or None,
+        "path": path or None,
+        # "" is the repository root, so it is kept when the host named the file.
+        "folder": file_info.get("folder", "") if known else None,
+        "content_type": file_info.get("content_type"),
+        "sha512": file_info.get("sha512"),
+        "metadata": file_info.get("metadata") or {},
+        "file": {"repository": repository, "path": path} if repository and path else None,
+    }
 
 
 def _without_link(text: str, url: str) -> str:
@@ -164,6 +252,31 @@ def _without_link(text: str, url: str) -> str:
     if not url:
         return text
     return text.replace(url, _LINK_PLACEHOLDER)
+
+
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("filename", "Name of the stored file", "string"),
+    OutputField("file_id", "Id of the stored file", "string"),
+    OutputField("dest_fs", "File system the file went to on each device", "string"),
+    OutputField("dest_filename", "File name on each device", "string"),
+    OutputField("size_bytes", "Size of the stored file in bytes", "int"),
+    OutputField("sha256", "SHA-256 of the stored file", "string"),
+    OutputField("md5", "MD5 of the stored file (null if not stored)", "string"),
+    OutputField("sha512", "SHA-512 of the stored file (null if not stored)", "string"),
+    OutputField("content_type", "Content type of the stored file", "string"),
+    OutputField("metadata", "Metadata stored with the file", "object"),
+    OutputField("transferred_count", "Devices that completed the download", "int"),
+    OutputField("repository", "Name of the file repository", "string"),
+    OutputField("repository_id", "Id of the file repository", "string"),
+    OutputField("path", "Path of the file in the repository (folder and name)", "string"),
+    OutputField("folder", "Folder of the file (empty for the repository root)", "string"),
+    OutputField(
+        "file",
+        "File reference to the same file, for another download step's File",
+        "object",
+    ),
+)
 
 
 class FileDownloadHandler(BaseHandler):
@@ -179,6 +292,9 @@ class FileDownloadHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=True, ips=False)
     config_model = FileDownloadConfig
+    output_fields = _OUTPUT_FIELDS
+    # "{{ inputs.firmware }}" reaches the handler as the file reference itself.
+    native_config_keys = frozenset({"file"})
     # A software image over a slow link takes a while, and every target has
     # its own Transfer timeout within the step's.
     default_timeout_seconds = 7200
@@ -193,11 +309,25 @@ class FileDownloadHandler(BaseHandler):
                 summary="Missing target device",
             )
 
+        raw_file = ctx.config.get("file")
         raw_ids = ctx.config.get("file_ids") or []
         if isinstance(raw_ids, str):
             raw_ids = [raw_ids]
         file_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
-        if len(file_ids) != 1:
+        ref: FileRef | None = None
+        file_id = ""
+        if not _is_unset(raw_file):
+            if file_ids:
+                return HandlerResult(
+                    success=False,
+                    error="Set either File or File by id (legacy), not both",
+                    summary="Conflicting file settings",
+                )
+            try:
+                ref = parse_file_ref(raw_file)
+            except ValueError as exc:
+                return HandlerResult(success=False, error=str(exc), summary="Invalid file")
+        elif len(file_ids) != 1:
             return HandlerResult(
                 success=False,
                 error=(
@@ -207,7 +337,11 @@ class FileDownloadHandler(BaseHandler):
                 ),
                 summary="Missing file",
             )
-        file_id = file_ids[0]
+        else:
+            file_id = file_ids[0]
+        named_file: dict[str, Any] = (
+            {"repository": ref.repository, "path": ref.path} if ref else {"file_id": file_id}
+        )
 
         services = ctx.require_services()
         open_file_download = getattr(services, "open_file_download", None)
@@ -267,7 +401,7 @@ class FileDownloadHandler(BaseHandler):
                         "content_json": {
                             "device_id": device_id,
                             "device_name": device_name,
-                            "file_id": file_id,
+                            **named_file,
                             "error": message,
                             "success": False,
                             **details,
@@ -285,16 +419,20 @@ class FileDownloadHandler(BaseHandler):
                 # A link of its own for each target, asked for right before its
                 # transfer: a slow target earlier in the list cannot use up the
                 # time a later one has to start.
-                async with open_file_download(file_id, ttl_seconds=link_ttl) as download:
+                if ref is None:
+                    link = open_file_download(file_id, ttl_seconds=link_ttl)
+                else:
+                    try:
+                        link = open_file_download(
+                            repository=ref.repository, path=ref.path, ttl_seconds=link_ttl
+                        )
+                    except TypeError:
+                        # A host older than repository and path refuses them.
+                        return _fail(_NO_REPOSITORY_PATHS)
+                async with link as download:
                     link_opened = True
                     url = download.url
-                    outcome.file = {
-                        "file_id": download.file_id,
-                        "filename": download.filename,
-                        "size_bytes": download.size_bytes,
-                        "sha256": download.sha256,
-                        "md5": download.md5,
-                    }
+                    outcome.file = _file_details(download)
                     if not url:
                         return _fail(
                             "the platform has no address targets can reach it at; an "
@@ -356,6 +494,7 @@ class FileDownloadHandler(BaseHandler):
                         "device_id": device_id,
                         "device_name": device_name,
                         **(outcome.file or {}),
+                        "file": _file_ref_of(outcome.file) or (ref.as_dict() if ref else None),
                         "dest_fs": dest_fs,
                         "dest_filename": dest_filename,
                         "success": transferred,
@@ -376,6 +515,19 @@ class FileDownloadHandler(BaseHandler):
 
         errors = [error for outcome in outcomes for error in outcome.errors]
         all_success = all(outcome.success for outcome in outcomes)
+        # Each target opens its own link, so a path is looked up once per
+        # target. Should the path name another file part way through (the
+        # file was moved or replaced), the targets hold different files: the
+        # step fails rather than report one file for all of them.
+        got_ids = sorted(
+            {str(o.file["file_id"]) for o in outcomes if o.file and o.file.get("file_id")}
+        )
+        if len(got_ids) > 1:
+            all_success = False
+            errors.append(
+                f"the devices did not all get the same file: {', '.join(got_ids)}; "
+                "the file at that path changed during the step"
+            )
         transferred_count = sum(1 for outcome in outcomes if outcome.transferred)
         file_info = next((outcome.file for outcome in outcomes if outcome.file), None) or {}
         filename = str(file_info.get("filename") or "")
@@ -397,7 +549,7 @@ class FileDownloadHandler(BaseHandler):
             },
             evidence=[item for outcome in outcomes for item in outcome.evidence],
             output={
-                "file_id": file_id,
+                "file_id": file_id or file_info.get("file_id") or None,
                 "filename": filename,
                 "dest_fs": dest_fs,
                 "dest_filename": dest_name,
@@ -405,5 +557,6 @@ class FileDownloadHandler(BaseHandler):
                 "sha256": file_info.get("sha256"),
                 "md5": file_info.get("md5"),
                 "transferred_count": transferred_count,
+                **_file_output(file_info, ref),
             },
         )

@@ -17,9 +17,10 @@ extra caps ``paramiko<4``, which would drag the whole install onto an old
 paramiko; asyncssh is already the platform's SSH library).
 
 Command execution (single, batch, config sets, timing mode) is implemented on
-scrapli's core network drivers; file staging (``scp_put``/``http_transfer``)
-is netmiko-only for now and raises :class:`NotImplementedError` — select the
-netmiko transport for staging steps.
+scrapli's core network drivers, and HTTP staging (``http_transfer``: the
+device's ``copy <url> <fs>``) on its raw channel. SCP staging (``scp_put``) is
+netmiko-only for now and raises :class:`NotImplementedError` — select the
+netmiko transport for it.
 """
 
 import asyncio
@@ -27,6 +28,7 @@ import contextlib
 import logging
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -39,13 +41,23 @@ from hegemony_step_sdk import (
     SshAlgorithms,
     TransportOutputSink,
 )
+from hegemony_step_sdk.cli_prompts import (
+    CliPrompt,
+    CliPromptError,
+    PromptDialogue,
+    last_line,
+    prompts_for,
+    waiting_at,
+)
 from hegemony_step_sdk.ssh import (
-    asyncssh_algorithm_lists,
-    asyncssh_algorithms,
-    asyncssh_security_options,
     hop_allows_legacy,
     is_weak_ssh_public_key,
     validate_ssh_public_key,
+)
+from hegemony_transport_support.ssh import (
+    asyncssh_algorithm_lists,
+    asyncssh_algorithms,
+    asyncssh_security_options,
 )
 
 try:
@@ -231,6 +243,8 @@ class ScrapliResult:
     exit_code: int
     error: str | None = None
     latency_ms: float = 0.0
+    #: The device closed the session while this command ran (a reload).
+    disconnected: bool = False
 
 
 # Map inventory platform strings to scrapli core platform names.
@@ -242,15 +256,70 @@ PLATFORM_TO_SCRAPLI = {
     "junos": "juniper_junos",
 }
 
-#: timeout_transport for timing-mode connections: each channel read returns (or
+#: Poll window of a timing-mode or copy read: each channel read returns (or
 #: times out) within this window, which sets the poll cadence for prompt answers,
-#: wait-for-pattern checks, and cancellation checks.
+#: wait-for-pattern checks, and cancellation checks. Applied around the read,
+#: not as scrapli's timeout_transport, which closes the connection when it ends.
 _TIMING_POLL_SECONDS = 2.5
 
 #: In timing mode without wait_for_patterns, the command is considered settled
 #: after this many consecutive empty reads (mirrors send_command_timing's
 #: "read until quiet" semantics).
 _QUIET_READS_DONE = 3
+
+
+#: Output that ends a ``copy <url> <fs>`` dialogue, whether it worked or not.
+#: "nknown command" is a platform without this copy command ("% Unknown
+#: command" on FRR, "unknown command." on Junos): the answer is final.
+_COPY_DONE_MARKERS = (
+    "bytes copied",
+    "%Error",
+    "Error opening",
+    "Invalid",
+    "not found",
+    "timed out",
+    "refused",
+    "Could not",
+    "Incomplete command",
+    "nknown command",
+    "Broken pipe",
+)
+
+#: Output that means the copy failed.
+_COPY_ERROR_MARKERS = (
+    "%Error",
+    "Error opening",
+    "Error reading",
+    "Invalid",
+    "not found",
+    "refused",
+    "Could not",
+    "Broken pipe",
+    "timed out",
+)
+
+
+def _copy_answer(output: str, url: str, dest_fs: str, dest_filename: str) -> str:
+    """The device's own words in a copy dialogue: ``output`` without the inputs it echoes.
+
+    The device repeats the URL and the file name (the command echo,
+    "Destination filename [<name>]?", "Accessing <url>..."), so a name like
+    ``Invalid-image.bin`` must not read as the device's "Invalid".
+
+    The URL holds "://", so it is never part of the device's own words and is
+    removed everywhere. The file name is removed only where it is echoed
+    (``<fs><name>`` and ``[<name>]``): a name like ``bytes`` must not cut
+    "bytes copied" out of the device's answer.
+    """
+    echoes = [f"copy {url} {dest_fs}{dest_filename}", url]
+    if dest_filename:
+        if dest_fs:
+            echoes.append(f"{dest_fs}{dest_filename}")
+        echoes.append(f"[{dest_filename}]")
+    for echoed in echoes:
+        if echoed:
+            output = output.replace(echoed, "")
+    return output
 
 
 #: Lines that open a config block. Only ``end`` closes one: ``exit`` inside a
@@ -290,6 +359,70 @@ _COPY_QUESTION_AT_END = re.compile(r"(?:Destination filename \[[^\]\n]*\]\?|\[co
 
 #: A copy to startup-config asks at most these two questions.
 _MAX_COPY_ANSWERS = 2
+
+
+#: The questions a copy to startup-config asks, answered with Enter as the
+#: built-in dialogue does, after any the step lists itself.
+_STARTUP_COPY_PROMPTS = (
+    CliPrompt(expect=r"Destination filename \[[^\]\n]*\]\?"),
+    CliPrompt(expect=r"\[confirm\]"),
+)
+
+#: Error of a result for a command not run because an earlier one may have left
+#: the device at a question: its text would be taken as the answer.
+_LEFT_WAITING_ERROR = "Skipped: an earlier command may have left the device waiting at a question"
+_CLOSED_ERROR = "Skipped: the device closed the session"
+
+
+class _SessionClosed(Exception):
+    """The device closed the session while a command ran; ``output`` is what it sent first."""
+
+    def __init__(self, output: str) -> None:
+        super().__init__("The device closed the session")
+        self.output = output
+
+
+def _session_open(connection: Any) -> bool:
+    """Whether the SSH session is still open, from scrapli's own state.
+
+    The device closing the session leaves the transport's output stream at
+    EOF; scrapli's ``isalive`` notices only later. Both read state and write
+    nothing to the device. Only a real True or False counts: a check that
+    cannot run proves nothing, and a session that went silent without
+    closing (the network dropped it) still counts as open.
+    """
+    stdout = getattr(getattr(connection, "transport", None), "stdout", None)
+    at_eof = getattr(stdout, "at_eof", None)
+    if callable(at_eof):
+        try:
+            if at_eof() is True:
+                return False
+        except Exception:  # noqa: BLE001 - a check that cannot run proves nothing
+            pass
+    isalive = getattr(connection, "isalive", None)
+    if not callable(isalive):
+        return True
+    try:
+        return isalive() is not False
+    except Exception:  # noqa: BLE001 - a check that cannot run proves nothing
+        return True
+
+
+def _closed_result(command: str, output: str) -> ScrapliResult:
+    """The result of a command during which the device closed the session.
+
+    ``disconnected`` stops the commands after it either way. A device error
+    in what it printed first keeps it a failed command (exit code 1), which
+    the step never accepts as an allowed disconnect; otherwise exit code -1.
+    """
+    cli_error = _detect_cli_error(output) if command.strip() else None
+    return ScrapliResult(
+        command=command,
+        output=output,
+        exit_code=1 if cli_error else -1,
+        error=cli_error or "The device closed the session",
+        disconnected=True,
+    )
 
 
 def _is_startup_copy(command: str) -> bool:
@@ -394,6 +527,25 @@ class ScrapliTransport:
             raise ValueError("allow_legacy must be a boolean")
         self._allow_legacy_ssh = allow_legacy
 
+    #: Feature flag: ``configure_cli_prompts`` answers the questions a step lists.
+    supports_cli_prompts = True
+    _cli_prompts: tuple[CliPrompt, ...] = ()
+    #: Set when a command may have left the device at a question.
+    _left_waiting = False
+
+    def configure_cli_prompts(self, prompts: Sequence[CliPrompt]) -> None:
+        """Set the questions the step's commands may ask, and what to answer."""
+        self._cli_prompts = tuple(prompts)
+
+    #: Feature flag: a result is ``disconnected`` when the device closed the
+    #: session while that exec command ran, such as on a reload.
+    supports_disconnect_reports = True
+    #: Set when scrapli's own read timeout closed the session; cleared for
+    #: each connection opened.
+    _scrapli_closed = False
+    #: Whether the running exec command was written to the device.
+    _command_sent = False
+
     def _legacy(self, *, jump_host: bool) -> bool:
         """Whether a hop may use legacy SSH: the step setting, or that hop's inventory flag."""
         return hop_allows_legacy(
@@ -496,14 +648,10 @@ class ScrapliTransport:
         except Exception:  # noqa: BLE001 - best-effort tail flush
             logger.debug("output sink flush failed", exc_info=True)
 
-    def _get_connection_params(
-        self, *, timeout_transport: float | None = None, connect_timeout: float | None = None
-    ) -> dict[str, Any]:
+    def _get_connection_params(self, *, connect_timeout: float | None = None) -> dict[str, Any]:
         """Get scrapli connection parameters.
 
         Args:
-            timeout_transport: Per-read transport timeout override; timing mode
-                uses a short value so channel polls return promptly.
             connect_timeout: Socket timeout for the device hop. Defaults to the
                 full budget; the bastion path passes what its own hop left.
         """
@@ -525,8 +673,6 @@ class ScrapliTransport:
         if self.secret:
             # Scrapli escalates to privilege-exec itself using auth_secondary.
             params["auth_secondary"] = self.secret
-        if timeout_transport is not None:
-            params["timeout_transport"] = timeout_transport
         return params
 
     async def _hop_keys(
@@ -687,8 +833,10 @@ class ScrapliTransport:
         self._record_algorithms(tunnel, jump.host, jump.port)
         return tunnel
 
-    async def _open_connection(self, *, timeout_transport: float | None = None):
+    async def _open_connection(self):
         """Construct and open a scrapli connection (via the bastion when set)."""
+        # A timeout that closed an earlier connection says nothing about this one.
+        self._scrapli_closed = False
         assert AsyncScrapli is not None  # Validated in __init__
         tunnel = None
         device_timeout = None
@@ -722,9 +870,7 @@ class ScrapliTransport:
                 with contextlib.suppress(Exception):
                     tunnel.close()
             raise
-        params = self._get_connection_params(
-            timeout_transport=timeout_transport, connect_timeout=device_timeout
-        )
+        params = self._get_connection_params(connect_timeout=device_timeout)
         if asyncssh_options:
             params["transport_options"] = {"asyncssh": asyncssh_options}
         connection = AsyncScrapli(**params)
@@ -812,19 +958,131 @@ class ScrapliTransport:
 
     async def _send_exec_command(self, connection, command: str) -> ScrapliResult:
         """Run one command at privilege-exec; a CLI error pattern gives exit code 1."""
+        # Only a session that closes after the command went out can be the
+        # command's doing (a reload); one that closed before it, such as in
+        # acquire_priv, is not.
+        self._command_sent = False
         try:
-            if _is_startup_copy(command):
+            if prompts := prompts_for(command, self._cli_prompts):
+                if _is_startup_copy(command):
+                    # The flow's entries first; the copy's own questions still answered.
+                    prompts = [*prompts, *_STARTUP_COPY_PROMPTS]
+                result = await self._send_with_prompts(connection, command, prompts)
+            elif _is_startup_copy(command):
                 result = await self._send_startup_copy(connection, command)
             else:
+                # send_command drops what it read when it raises, so a device
+                # error printed before the session closed would be lost: a
+                # close here is never reported as the command's disconnect.
+                # A command that may end the session goes through the prompt
+                # path (a prompts entry whose pattern matches it), which keeps
+                # all of its output.
+                self._command_sent = False
                 result = self._result_from_response(command, await connection.send_command(command))
         except Exception as e:
+            # Every close the prompt path can attribute to the device raises
+            # _SessionClosed with the output read so far (not one scrapli's
+            # own timeout caused); any other error, also on a session that
+            # closed meanwhile, stays a failure. Cancelling the run closes
+            # the session too, which is no reload either.
+            closed = self._command_sent and isinstance(e, _SessionClosed)
+            if closed and not self._cancellation_registry.is_cancelled(self.step_run_id):
+                logger.warning(f"{self.host} closed the session during a command")
+                return _closed_result(command, getattr(e, "output", ""))
             logger.error(f"Command on {self.host} failed: {type(e).__name__}")
-            return ScrapliResult(command=command, output="", exit_code=-1, error=str(e))
+            error = str(e)
+            if isinstance(e, (ScrapliTimeout, CliPromptError)):
+                # The device may still be waiting at a question.
+                self._left_waiting = True
+            if isinstance(e, ScrapliTimeout):
+                # The device may be waiting at a question the step did not list.
+                error += "; if the command asks a question, list it under prompts"
+            return ScrapliResult(command=command, output="", exit_code=-1, error=error)
         if result.exit_code == 0:
             logger.info(f"Command on {self.host} completed in {result.latency_ms:.0f}ms")
         else:
             logger.warning(f"Command on {self.host} returned a CLI error")
         return result
+
+    async def _send_with_prompts(
+        self, connection, command: str, prompts: Sequence[CliPrompt]
+    ) -> ScrapliResult:
+        """Run ``command``, answering the questions ``prompts`` list, until the prompt returns.
+
+        The channel is read here rather than by send_command, so the output is
+        kept: a question nobody listed fails the command with the line the
+        device is waiting at. ``command_timeout`` bounds each wait, from the
+        command or an answer to the next question or the prompt. The output
+        keeps neither the command echo nor the trailing prompt.
+        """
+        exec_prompt = connection.privilege_levels[connection.default_desired_privilege_level]
+        prompt = re.compile(exec_prompt.pattern, flags=re.I | re.M)
+        dialogue = PromptDialogue(prompts)
+        started = time.perf_counter()
+        # send_command would return to the exec prompt first (a configuration
+        # block before this command leaves configuration mode open); the raw
+        # write below does not, so do it here.
+        await connection.acquire_priv(connection.default_desired_privilege_level)
+        connection.channel.write(command + "\n")
+        self._command_sent = True
+        output = ""
+        # Where the output after the latest answer starts: the question just
+        # answered is not read as a new one.
+        since_answer = 0
+        deadline = time.monotonic() + self.command_timeout
+        while True:
+            if self._cancellation_registry.is_cancelled(self.step_run_id):
+                raise CliPromptError("The step was cancelled while the command ran")
+            # Each read waits no longer than the command has left, so a question
+            # that comes after the timeout is not answered.
+            remaining = deadline - time.monotonic()
+            chunk = await self._read_channel_chunk(
+                connection, timeout=max(min(_TIMING_POLL_SECONDS, remaining), 0.01)
+            )
+            if chunk is None:
+                # Only the device closing the session is a disconnect: not
+                # scrapli's own timeout, nor a read error on a session that
+                # is still open.
+                if not self._scrapli_closed and not _session_open(connection):
+                    raise _SessionClosed(output)
+                raise CliPromptError(f"The connection closed; {waiting_at(output)}")
+            if chunk:
+                output += chunk
+                recent = output[since_answer:]
+                if prompt.fullmatch(last_line(recent)):
+                    break
+                answer = None if time.monotonic() >= deadline else dialogue.answer_for(recent)
+                if answer is not None:
+                    try:
+                        connection.channel.write(answer + "\n")
+                    except Exception as exc:
+                        # Keep what the device printed, a device error included.
+                        if not self._scrapli_closed and not _session_open(connection):
+                            raise _SessionClosed(output) from exc
+                        raise
+                    since_answer = len(output)
+                    deadline = time.monotonic() + self.command_timeout
+                    continue
+            if time.monotonic() >= deadline:
+                raise CliPromptError(
+                    f"Timed out after {self.command_timeout:g} seconds; {waiting_at(output)} "
+                    "(list that question under prompts if the command should answer it)"
+                )
+        lines = output.rstrip().splitlines()
+        if lines and lines[0].strip() == command.strip():
+            lines.pop(0)
+        if lines and prompt.fullmatch(lines[-1].strip()):
+            lines.pop()
+        text = "\n".join(lines)
+        latency_ms = (time.perf_counter() - started) * 1000
+        cli_error = _detect_cli_error(text)
+        return ScrapliResult(
+            command=command,
+            output=text,
+            exit_code=1 if cli_error else 0,
+            error=cli_error,
+            latency_ms=latency_ms,
+        )
 
     async def _send_startup_copy(self, connection, command: str) -> ScrapliResult:
         """Run a copy to startup-config, answering its questions with Enter.
@@ -932,7 +1190,17 @@ class ScrapliTransport:
                     if any(r.exit_code != 0 for r in step_results):
                         skip_reason = self._skip_reason()
             else:
-                for command in commands:
+                # After a command that may have left the device at a question,
+                # the next one would be taken as the answer: the rest are not sent.
+                self._left_waiting = False
+                for index, command in enumerate(commands):
+                    if self._left_waiting:
+                        results.extend(
+                            _skipped(cmd, _LEFT_WAITING_ERROR)
+                            for cmd in commands[index:]
+                            if cmd.strip()
+                        )
+                        break
                     if not command.strip():
                         continue
                     if self._cancellation_registry.is_cancelled(self.step_run_id):
@@ -943,6 +1211,13 @@ class ScrapliTransport:
                         )
                         break
                     results.append(await self._send_exec_command(connection, command))
+                    if results[-1].disconnected:
+                        results.extend(
+                            _skipped(cmd, _CLOSED_ERROR)
+                            for cmd in commands[index + 1 :]
+                            if cmd.strip()
+                        )
+                        break
 
         except ScrapliAuthenticationFailed as e:
             logger.error(f"Authentication failed to {self.host}: {e}")
@@ -1007,17 +1282,29 @@ class ScrapliTransport:
             )
         )
 
-    async def _read_channel_chunk(self, connection) -> str | None:
-        """One bounded channel read.
+    async def _read_channel_chunk(self, connection, timeout: float | None = None) -> str | None:
+        """One channel read, bounded by ``_TIMING_POLL_SECONDS``.
 
         Returns the decoded text (empty when nothing arrived within the poll
         window), or None on a hard read error (connection dropped, e.g. device
         reboot) so the caller can stop polling instead of spinning.
+
+        The poll is bounded here, not by scrapli's transport timeout: when
+        that runs out scrapli closes the connection, so a device that stays
+        quiet for one poll (IOS while a copy fetches) would lose its session.
+        Cancelling the read leaves unread data in asyncssh's buffer.
         """
         try:
-            chunk = await connection.channel.read()
-        except ScrapliTimeout:
+            chunk = await asyncio.wait_for(
+                connection.channel.read(), _TIMING_POLL_SECONDS if timeout is None else timeout
+            )
+        except TimeoutError:
             return ""
+        except ScrapliTimeout as read_err:
+            # scrapli's own timeout closed the connection: nothing more comes.
+            logger.warning(f"Channel read timed out and scrapli closed it: {read_err}")
+            self._scrapli_closed = True
+            return None
         except Exception as read_err:
             logger.warning(f"Error reading channel: {read_err}")
             return None
@@ -1063,8 +1350,7 @@ class ScrapliTransport:
 
         try:
             logger.info(f"Executing timing command on {self.host}")
-            # Short per-read transport timeout so the loop below polls promptly.
-            connection = await self._open_connection(timeout_transport=_TIMING_POLL_SECONDS)
+            connection = await self._open_connection()
 
             if self.step_run_id:
                 self._cancellation_registry.register(self.step_run_id, connection)
@@ -1198,7 +1484,7 @@ class ScrapliTransport:
         """
         raise NotImplementedError(
             "scp_put is not supported by the scrapli transport; "
-            "use the netmiko transport (device access_config.ssh.transport) for staging steps"
+            "use the netmiko transport (device access_config.ssh.transport) for SCP staging"
         )
 
     async def http_transfer(
@@ -1209,12 +1495,82 @@ class ScrapliTransport:
         dest_filename: str,
         timeout_seconds: int = 3600,
     ) -> dict:
-        """HTTP copy staging is not supported by the scrapli transport.
+        """Have the device pull a file: ``copy <url> <fs><filename>`` at privilege-exec.
 
-        The interactive ``copy <url> <fs>`` dialogue is implemented in the
-        netmiko transport only; staging steps should run over netmiko.
+        The same dialogue as the netmiko transport: the destination-filename
+        question and an overwrite confirmation are each answered once with
+        Enter, then the output is read until the copy reports its end or
+        ``timeout_seconds`` passes. "bytes copied" is the success.
+
+        On Cisco IOS a '?' on the command line opens the help, so a URL with a
+        query string cannot be typed as it is; the platform's download links
+        carry their token in the path.
+
+        Returns:
+            Dict with: transferred, output, elapsed_ms
         """
-        raise NotImplementedError(
-            "http_transfer is not supported by the scrapli transport; "
-            "use the netmiko transport (device access_config.ssh.transport) for staging steps"
-        )
+        connection = None
+        start_time = time.perf_counter()
+        output = ""
+
+        try:
+            logger.info(f"HTTP transfer to {self.host}: {dest_fs}{dest_filename}")
+            # scrapli escalates to privilege-exec on open (auth_secondary).
+            connection = await self._open_connection()
+            if self.step_run_id:
+                self._cancellation_registry.register(self.step_run_id, connection)
+
+            connection.channel.write(f"copy {url} {dest_fs}{dest_filename}\n")
+            dest_filename_handled = False
+            overwrite_handled = False
+
+            while (time.perf_counter() - start_time) < timeout_seconds:
+                if self._cancellation_registry.is_cancelled(self.step_run_id):
+                    logger.info(f"HTTP transfer cancelled for step {self.step_run_id}")
+                    return {
+                        "transferred": False,
+                        "output": output + "\n[CANCELLED]",
+                        "elapsed_ms": (time.perf_counter() - start_time) * 1000,
+                    }
+
+                chunk = await self._read_channel_chunk(connection)
+                if chunk is None:
+                    # The connection is gone: nothing more will arrive.
+                    break
+                output += chunk
+
+                # Complete lines only: a read can end inside an echoed URL, whose
+                # partial text would not be removed and could hold a marker.
+                complete = output[: output.rfind("\n") + 1]
+                answer = _copy_answer(complete, url, dest_fs, dest_filename)
+                if any(marker in answer for marker in _COPY_DONE_MARKERS):
+                    break
+                if "Destination filename" in output and not dest_filename_handled:
+                    connection.channel.write("\n")
+                    dest_filename_handled = True
+                    continue
+                recent_output = output[-500:]
+                if not overwrite_handled and (
+                    "Overwrite?" in recent_output or "[confirm]" in recent_output.lower()
+                ):
+                    connection.channel.write("\n")
+                    overwrite_handled = True
+
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            answer = _copy_answer(output, url, dest_fs, dest_filename)
+            if any(marker in answer for marker in _COPY_ERROR_MARKERS):
+                # Not the output: the device echoes the copy command and its URL.
+                logger.error(f"HTTP transfer to {self.host} failed")
+                return {"transferred": False, "output": output, "elapsed_ms": elapsed_ms}
+            return {
+                "transferred": "bytes copied" in answer.lower(),
+                "output": output,
+                "elapsed_ms": elapsed_ms,
+            }
+        except Exception as e:
+            logger.error(f"HTTP transfer to {self.host} failed: {type(e).__name__}")
+            raise
+        finally:
+            if self.step_run_id and connection:
+                self._cancellation_registry.unregister(self.step_run_id, connection)
+            await _safe_close(connection)

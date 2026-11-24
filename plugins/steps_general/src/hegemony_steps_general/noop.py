@@ -46,6 +46,8 @@ class NoOpHandler(BaseHandler):
     hidden = True
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = NoOpConfig
+    # Puts nothing in its step output.
+    output_fields = ()
     run_timeout_field = "delay_seconds"
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:

@@ -5,8 +5,10 @@
 
 """ShellFileDownloadHandler: each host downloads a file-repository file with curl.
 
-The Linux/Unix counterpart of ``netcli.file_download``. The step asks the
-platform for a short-lived download link (``services.open_file_download``),
+The Linux/Unix counterpart of ``netcli.file_download``. The file is named by
+a file reference (``file``: repository name and path, picked in the editor or
+taken from a run input) or, in older flows, by its id (``file_ids``). The step
+asks the platform for a short-lived download link (``services.open_file_download``),
 has the host fetch it with ``curl`` over the device's shell transport, and
 checks the SHA-256 on the host before the file takes its place. The file never
 passes through the worker. Each host gets a link of its own, issued right
@@ -27,12 +29,16 @@ from hegemony_step_sdk import (
     MAX_CHAIN_OUTPUT_CHARS,
     MAX_PARALLEL_DEVICES_LIMIT,
     BaseHandler,
+    FileDownload,
+    FileRef,
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
     InvalidConfigError,
+    OutputField,
     StepKind,
     for_each_target_device,
+    parse_file_ref,
 )
 from hegemony_step_sdk.ssh import SshSecurityConfig
 
@@ -61,6 +67,72 @@ _NO_DOWNLOAD_LINKS = (
     "This Hegemony version cannot issue download links for file "
     "repository files; upgrade the platform to use this step"
 )
+_NO_REPOSITORY_PATHS = (
+    "This Hegemony version cannot open files by repository and path; "
+    "upgrade the platform or use a file id"
+)
+
+
+def _is_unset(value: Any) -> bool:
+    """Whether a file setting is empty (absent, blank text, an empty list or dict)."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        # An empty list or object rendered as text (an older platform passes
+        # the setting on as text) is as empty as the value itself.
+        return value.strip() in ("", "[]", "{}")
+    if isinstance(value, (list, tuple, dict)):
+        return not value
+    return False
+
+
+def _file_details(download: FileDownload) -> dict[str, Any]:
+    """What the step reports about the downloaded file (never the link)."""
+    return {
+        "file_id": download.file_id,
+        "filename": download.filename,
+        "size_bytes": download.size_bytes,
+        "sha256": download.sha256,
+        "md5": download.md5,
+        # getattr: a host older than these fields builds an older FileDownload.
+        "repository": getattr(download, "repository", ""),
+        "repository_id": getattr(download, "repository_id", ""),
+        "path": getattr(download, "path", ""),
+        "folder": getattr(download, "folder", ""),
+        "content_type": getattr(download, "content_type", None),
+        "sha512": getattr(download, "sha512", None),
+        "metadata": dict(getattr(download, "metadata", None) or {}),
+    }
+
+
+def _file_ref_of(file_info: dict[str, Any] | None) -> dict[str, str] | None:
+    """The reference a later step can take for the file the host named, or None."""
+    if not file_info or not file_info.get("repository") or not file_info.get("path"):
+        return None
+    return {"repository": file_info["repository"], "path": file_info["path"]}
+
+
+def _file_output(file_info: dict[str, Any], ref: FileRef | None) -> dict[str, Any]:
+    """The step output's file keys, ``file`` being a reference a later step can take.
+
+    The host's answer wins; without one (no target got a link) the configured
+    reference fills in. What neither knows (a host older than these fields,
+    given a file id) is None.
+    """
+    repository = file_info.get("repository") or (ref.repository if ref else "")
+    path = file_info.get("path") or (ref.path if ref else "")
+    known = bool(file_info.get("repository"))
+    return {
+        "repository": repository or None,
+        "repository_id": file_info.get("repository_id") or None,
+        "path": path or None,
+        # "" is the repository root, so it is kept when the host named the file.
+        "folder": file_info.get("folder", "") if known else None,
+        "content_type": file_info.get("content_type"),
+        "sha512": file_info.get("sha512"),
+        "metadata": file_info.get("metadata") or {},
+        "file": {"repository": repository, "path": path} if repository and path else None,
+    }
 
 
 class ShellFileDownloadConfig(SshSecurityConfig):
@@ -68,17 +140,33 @@ class ShellFileDownloadConfig(SshSecurityConfig):
 
     model_config = ConfigDict(extra="allow")
 
+    # A file reference ({"repository": ..., "path": ...}), a list of one, or
+    # a template such as "{{ inputs.package }}". Listed in
+    # native_config_keys, so a run input arrives as the reference itself.
+    file: dict[str, Any] | list[Any] | str | None = Field(
+        default=None,
+        title="File",
+        description=(
+            "The file each host downloads. Pick a file from a file repository, or "
+            "reference a run-form field such as {{ inputs.package }}."
+        ),
+        json_schema_extra={"x_widget": "repository-file-ref", "x_col_span": 2},
+    )
     # Named file_ids on purpose: the platform refuses to delete a stored file
-    # that a flow lists under this key.
+    # that a flow lists under this key. Kept for flows saved before ``file``.
     file_ids: list[str] = Field(
         default_factory=list,
-        title="File Repository File",
-        description="The file each host downloads. Browse the file repositories and pick one.",
+        title="File by id (legacy)",
+        description=(
+            "The file each host downloads, by its id, as older flows store it. "
+            "Leave empty when File is set."
+        ),
         json_schema_extra={
             "x_widget": "repository-file-select",
             "x_multiple": False,
             "x_file_type_filter": "file",
             "x_col_span": 2,
+            "x_advanced": True,
         },
     )
     dest_dir: str = Field(
@@ -186,6 +274,33 @@ def _first_line(text: str) -> str:
     return lines[0] if lines else ""
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("filename", "Name of the stored file", "string"),
+    OutputField("file_id", "Id of the stored file", "string"),
+    OutputField("dest_dir", "Directory the file went to on each host", "string"),
+    OutputField("dest_filename", "File name on each host", "string"),
+    OutputField("dest_path", "Full path of the file on each host", "string"),
+    OutputField("size_bytes", "Size of the stored file in bytes", "int"),
+    OutputField("sha256", "SHA-256 of the stored file", "string"),
+    OutputField("md5", "MD5 of the stored file (null if not stored)", "string"),
+    OutputField("sha512", "SHA-512 of the stored file (null if not stored)", "string"),
+    OutputField("content_type", "Content type of the stored file", "string"),
+    OutputField("metadata", "Metadata stored with the file", "object"),
+    OutputField("transferred_count", "Hosts that completed the download", "int"),
+    OutputField("repository", "Name of the file repository", "string"),
+    OutputField("repository_id", "Id of the file repository", "string"),
+    OutputField("path", "Path of the file in the repository (folder and name)", "string"),
+    OutputField("folder", "Folder of the file (empty for the repository root)", "string"),
+    OutputField(
+        "file",
+        "File reference to the same file, for another download step's File",
+        "object",
+    ),
+    OutputField("verified", "Whether every host's copy passed the checksum check", "bool"),
+)
+
+
 class ShellFileDownloadHandler(BaseHandler):
     """Handler that has each Linux/Unix host download one file-repository file."""
 
@@ -199,6 +314,9 @@ class ShellFileDownloadHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=True, ips=False)
     config_model = ShellFileDownloadConfig
+    output_fields = _OUTPUT_FIELDS
+    # "{{ inputs.package }}" reaches the handler as the file reference itself.
+    native_config_keys = frozenset({"file"})
     default_config = {"dest_dir": "/var/tmp", "verify_checksum": True}
     # A large file over a slow link takes a while, and every host has its own
     # Transfer timeout within the step's.
@@ -219,7 +337,20 @@ class ShellFileDownloadHandler(BaseHandler):
             return exc.result()
 
         file_ids = [item.strip() for item in config.file_ids if item.strip()]
-        if len(file_ids) != 1:
+        ref: FileRef | None = None
+        file_id = ""
+        if not _is_unset(config.file):
+            if file_ids:
+                return HandlerResult(
+                    success=False,
+                    error="Set either File or File by id (legacy), not both",
+                    summary="Conflicting file settings",
+                )
+            try:
+                ref = parse_file_ref(config.file)
+            except ValueError as exc:
+                return HandlerResult(success=False, error=str(exc), summary="Invalid file")
+        elif len(file_ids) != 1:
             return HandlerResult(
                 success=False,
                 error=(
@@ -229,7 +360,11 @@ class ShellFileDownloadHandler(BaseHandler):
                 ),
                 summary="Missing file",
             )
-        file_id = file_ids[0]
+        else:
+            file_id = file_ids[0]
+        named_file: dict[str, Any] = (
+            {"repository": ref.repository, "path": ref.path} if ref else {"file_id": file_id}
+        )
 
         services = ctx.require_services()
         open_file_download = getattr(services, "open_file_download", None)
@@ -288,7 +423,7 @@ class ShellFileDownloadHandler(BaseHandler):
                         "content_json": {
                             "device_id": device_id,
                             "device_name": device_name,
-                            "file_id": file_id,
+                            **named_file,
                             "error": message,
                             "success": False,
                             **details,
@@ -323,16 +458,22 @@ class ShellFileDownloadHandler(BaseHandler):
                     logger.debug("staging file cleanup failed", exc_info=True)
 
             try:
-                async with open_file_download(file_id, ttl_seconds=_LINK_TTL_SECONDS) as download:
+                if ref is None:
+                    link = open_file_download(file_id, ttl_seconds=_LINK_TTL_SECONDS)
+                else:
+                    try:
+                        link = open_file_download(
+                            repository=ref.repository,
+                            path=ref.path,
+                            ttl_seconds=_LINK_TTL_SECONDS,
+                        )
+                    except TypeError:
+                        # A host older than repository and path refuses them.
+                        return _fail(_NO_REPOSITORY_PATHS)
+                async with link as download:
                     link_opened = True
                     url = download.url
-                    outcome.file = {
-                        "file_id": download.file_id,
-                        "filename": download.filename,
-                        "size_bytes": download.size_bytes,
-                        "sha256": download.sha256,
-                        "md5": download.md5,
-                    }
+                    outcome.file = _file_details(download)
                     if not url:
                         return _fail(
                             "the platform has no address hosts can reach it at; an "
@@ -455,6 +596,7 @@ class ShellFileDownloadHandler(BaseHandler):
                         "device_id": device_id,
                         "device_name": device_name,
                         **(outcome.file or {}),
+                        "file": _file_ref_of(outcome.file) or (ref.as_dict() if ref else None),
                         "dest_dir": dest_dir,
                         "dest_filename": dest_filename,
                         "dest_path": dest_path,
@@ -473,6 +615,19 @@ class ShellFileDownloadHandler(BaseHandler):
 
         errors = [error for outcome in outcomes for error in outcome.errors]
         all_success = all(outcome.success for outcome in outcomes)
+        # Each target opens its own link, so a path is looked up once per
+        # target. Should the path name another file part way through (the
+        # file was moved or replaced), the targets hold different files: the
+        # step fails rather than report one file for all of them.
+        got_ids = sorted(
+            {str(o.file["file_id"]) for o in outcomes if o.file and o.file.get("file_id")}
+        )
+        if len(got_ids) > 1:
+            all_success = False
+            errors.append(
+                f"the hosts did not all get the same file: {', '.join(got_ids)}; "
+                "the file at that path changed during the step"
+            )
         transferred_count = sum(1 for outcome in outcomes if outcome.transferred)
         file_info = next((outcome.file for outcome in outcomes if outcome.file), None) or {}
         filename = str(file_info.get("filename") or "")
@@ -494,7 +649,7 @@ class ShellFileDownloadHandler(BaseHandler):
             },
             evidence=[item for outcome in outcomes for item in outcome.evidence],
             output={
-                "file_id": file_id,
+                "file_id": file_id or file_info.get("file_id") or None,
                 "filename": filename,
                 "dest_dir": dest_dir,
                 "dest_filename": dest_name,
@@ -504,5 +659,6 @@ class ShellFileDownloadHandler(BaseHandler):
                 "md5": file_info.get("md5"),
                 "verified": config.verify_checksum and all_success,
                 "transferred_count": transferred_count,
+                **_file_output(file_info, ref),
             },
         )

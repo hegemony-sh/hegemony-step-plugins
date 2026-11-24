@@ -14,6 +14,7 @@ callable under the ``hegemony.step_handlers`` entry-point group and registers
 
 from __future__ import annotations
 
+from . import run_access
 from ._version import SDK_ABI_VERSION, __version__
 from .concurrency import (
     MAX_PARALLEL_DEVICES_LIMIT,
@@ -33,10 +34,12 @@ from .contract import (
     HandlerResult,
     HandlerTargeting,
     InvalidConfigError,
+    OutputField,
     command_label,
     resolve_target_devices_for_roles,
 )
 from .enums import StepKind
+from .file_refs import FileRef, parse_file_ref
 from .probes import (
     PROBE_ENTRY_POINT_GROUP,
     BaseProbe,
@@ -44,15 +47,18 @@ from .probes import (
     ProbeResult,
 )
 from .registry import StepHandlerRegistry
+from .run_access import PlatformRequestError
 from .services import (
     BUILD_NETWORK_DEFAULT,
     BUILD_NETWORK_NONE,
+    DEFAULT_NETCONF_PORT,
     CommandResult,
     ContainerRuntime,
     FileDownload,
     HandlerServices,
     ImageBuild,
     ImageCache,
+    NetconfChannel,
     SecretWriteResult,
     ShellResult,
     ShellTransport,
@@ -84,11 +90,13 @@ __all__ = [
     "DEFAULT_DEVICE_PLATFORM",
     "DEFAULT_RUN_TIMEOUT_MARGIN_SECONDS",
     "MAX_CHAIN_OUTPUT_CHARS",
+    "DEFAULT_NETCONF_PORT",
     "MAX_PARALLEL_DEVICES_LIMIT",
     "OUTPUT_EVENT_CHUNK_CHARS",
     "OUTPUT_EVENT_MAX_CHARS",
     "OUTPUT_MILESTONE",
     "OUTPUT_TRUNCATION_NOTICE",
+    "PlatformRequestError",
     "PROBE_ENTRY_POINT_GROUP",
     "SDK_ABI_VERSION",
     "STEP_HANDLER_ENTRY_POINT_GROUP",
@@ -101,13 +109,16 @@ __all__ = [
     "ContainerRuntime",
     "ImageBuild",
     "ImageCache",
+    "NetconfChannel",
     "DeviceConnectionSpec",
     "DeviceCredentials",
     "FileDownload",
+    "FileRef",
     "HandlerContext",
     "HandlerResult",
     "HandlerServices",
     "HandlerTargeting",
+    "OutputField",
     "HostKeyRejectedError",
     "HostKeyVerifier",
     "InvalidConfigError",
@@ -128,5 +139,7 @@ __all__ = [
     "__version__",
     "for_each_target_device",
     "max_parallel_from_config",
+    "parse_file_ref",
     "resolve_target_devices_for_roles",
+    "run_access",
 ]

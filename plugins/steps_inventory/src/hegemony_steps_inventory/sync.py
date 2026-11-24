@@ -28,6 +28,7 @@ from hegemony_step_sdk import (
     HandlerResult,
     HandlerTargeting,
     InvalidConfigError,
+    OutputField,
     StepKind,
 )
 
@@ -237,6 +238,25 @@ def _result(
     )
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("provider", "The provider as the step named it", "string"),
+    OutputField("provider_id", "Id of the provider the platform found", "string"),
+    OutputField("provider_name", "Name of the provider the platform found", "string"),
+    OutputField("provider_type", "Type of the provider the platform found", "string"),
+    OutputField("status", "ok, partial, error, fresh or busy (null when refused)", "string"),
+    OutputField("synced", "Whether this step ran a sync", "bool"),
+    OutputField("history_id", "Sync history entry, when a sync ran", "string"),
+    OutputField("started_at", "When the sync started, when a sync ran", "string"),
+    OutputField("finished_at", "When the sync finished, when a sync ran", "string"),
+    OutputField("duration_ms", "How long the sync took, when a sync ran", "int"),
+    OutputField("counts", "What the sync changed, by kind (null when none ran)", "object"),
+    OutputField("error_message", "Why the sync failed or was partial, or null", "string"),
+    OutputField("last_sync_at", "When the provider's last sync ended", "string"),
+    OutputField("waited_seconds", "How long the step waited for another sync", "float"),
+)
+
+
 class InventorySyncHandler(BaseHandler):
     """Sync one of the run organization's inventory providers now."""
 
@@ -250,8 +270,11 @@ class InventorySyncHandler(BaseHandler):
     category = "Actions"
     targeting = HandlerTargeting(roles=False, ips=False)
     syncs_inventory = True
+    # Drives the organization's inventory providers from the platform.
+    central_only = True
     run_timeout_field = "timeout_seconds"
     config_model = InventorySyncConfig
+    output_fields = _OUTPUT_FIELDS
     default_config = {"max_age_seconds": 0}
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:

@@ -20,6 +20,7 @@ from hegemony_step_sdk import (
     HandlerContext,
     HandlerResult,
     HandlerTargeting,
+    OutputField,
     StepKind,
 )
 
@@ -45,6 +46,16 @@ _PREVIEW_LABELS = 5
 
 #: The two sides of a comparison, as named in messages and diff details.
 _SIDES = ("precheck", "postcheck")
+
+
+#: Kinds of artifact the platform adds to a step about its connection, not
+#: evidence the step captured.
+_PLATFORM_RECORD_KINDS = frozenset({"transport_meta", "egress_report"})
+
+
+def _step_evidence(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The artifacts a step captured, without the platform's own records."""
+    return [a for a in artifacts if a.get("kind") not in _PLATFORM_RECORD_KINDS]
 
 
 def _content(artifact: dict[str, Any]) -> Any:
@@ -162,6 +173,19 @@ class CompareEvidenceConfig(BaseModel):
     )
 
 
+#: What the step puts in its output, for the flow editor's variable picker.
+_OUTPUT_FIELDS = (
+    OutputField("passed", "Whether the comparison passed", "bool"),
+    OutputField("comparison_type", "The comparison mode", "string"),
+    OutputField("compared", "Artifacts found on both sides", "list"),
+    OutputField(
+        "failed", "Artifacts that did not meet the comparison or whose capture failed", "list"
+    ),
+    OutputField("missing_in_postcheck", "Artifacts found only in the precheck", "list"),
+    OutputField("only_in_postcheck", "Artifacts found only in the postcheck", "list"),
+)
+
+
 class CompareEvidenceHandler(BaseHandler):
     """Handler for comparing evidence from two phases (precheck vs postcheck)."""
 
@@ -172,21 +196,16 @@ class CompareEvidenceHandler(BaseHandler):
     category = "Checks"
     targeting = HandlerTargeting(roles=False, ips=False)
     config_model = CompareEvidenceConfig
+    output_fields = _OUTPUT_FIELDS
 
     async def _fetch_run_artifacts(self, ctx: HandlerContext) -> list[dict]:
         """Fetch the run's artifacts from the API; empty when the fetch fails."""
         run_id = ctx.run_id
-        async with ctx.require_services().open_api_client(timeout=30) as client:
-            try:
-                # Use internal endpoint for worker-to-API calls
-                response = await client.get(f"/internal/runs/{run_id}")
-                if response.status_code != 200:
-                    logger.error(f"Failed to fetch run {run_id}: {response.status_code}")
-                    return []
-                return response.json().get("artifacts", [])
-            except Exception as e:
-                logger.error(f"Failed to fetch artifacts of run {run_id}: {e}")
-                return []
+        try:
+            return list(await ctx.require_services().fetch_run_artifacts(run_id))
+        except Exception as e:
+            logger.error(f"Failed to fetch artifacts of run {run_id}: {e}")
+            return []
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         """Compare evidence between steps by fetching artifacts from API."""
@@ -213,6 +232,16 @@ class CompareEvidenceHandler(BaseHandler):
         postcheck_step = postcheck_step_id or ctx.step_id
         precheck_artifacts = [a for a in run_artifacts if a.get("step_id") == precheck_step_id]
         postcheck_artifacts = [a for a in run_artifacts if a.get("step_id") == postcheck_step]
+
+        # The platform adds records of its own to a step: what each SSH hop
+        # agreed on (transport_meta) and what the step reached on the network
+        # (egress_report). They describe the connection, not the device, and
+        # are the same before and after an ordinary change, so "changed" mode
+        # would fail on them however the captured output changed. Only an
+        # explicit artifact_name compares one.
+        if not artifact_name:
+            precheck_artifacts = _step_evidence(precheck_artifacts)
+            postcheck_artifacts = _step_evidence(postcheck_artifacts)
 
         # Restrict to artifacts whose name matches the glob, so volatile outputs
         # (routing/neighbor tables with counters) can be excluded and only the
