@@ -1,3 +1,9 @@
+## [0.57.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.56.0...v0.57.0) (2026-11-24)
+
+### Features
+
+* **evidence:** expose extracted values in evidence.assert output ([a3e2856](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a3e2856d66019c258c38e3587a1c17f56f2a3547))
+
 ## [0.56.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.55.0...v0.56.0) (2026-11-24)
 
 ### ⚠ BREAKING CHANGES
