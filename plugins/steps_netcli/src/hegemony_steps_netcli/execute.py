@@ -28,6 +28,8 @@ from hegemony_step_sdk import (
 from hegemony_step_sdk.cli_prompts import CliPrompt
 from hegemony_step_sdk.ssh import SshSecurityConfig, configure_ssh_security
 
+from .transcript import command_transcript
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 30
@@ -339,10 +341,15 @@ class ExecuteCLIActionHandler(BaseHandler):
                         )
                         if result.output:
                             outcome.output_parts.append(result.output)
-                            # Live view: per-command output into the Logs tab
-                            await ctx.emit_output(
-                                result.output, device=device, command=result.command
-                            )
+                        # Live view: the command line, then its output, into
+                        # the Logs tab. The transports strip the command echo
+                        # and the prompt, so without the line a command that
+                        # prints nothing (delete /force) would leave no trace.
+                        await ctx.emit_output(
+                            command_transcript(result.command, result.output),
+                            device=device,
+                            command=result.command,
+                        )
                         outcome.evidence.append(
                             {
                                 "kind": "cli_output",

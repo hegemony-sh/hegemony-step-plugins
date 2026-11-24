@@ -192,7 +192,41 @@ class TestHandlerWiring:
         assert [e[2]["command"] for e in out] == ["show version", "show inventory"]
         assert all(e[1] == DEVICE_UUID for e in out)
         assert all(e[2]["stream"] == "stdout" for e in out)
-        assert out[0][0] == "output of show version"
+        assert out[0][0] == "$ show version\noutput of show version\n"
+
+    @pytest.mark.asyncio
+    async def test_netcli_execute_logs_a_command_without_output(self):
+        """A command that prints nothing (delete /force) still shows in the log."""
+        from hegemony_steps_netcli.execute import ExecuteCLIActionHandler
+
+        class _Result:
+            command = "delete /force flash:old.bin"
+            output = ""
+            exit_code = 0
+            error = None
+            latency_ms = 1.0
+
+        class _Transport:
+            async def execute_commands(self, commands):
+                return [_Result()]
+
+        class _Services:
+            def connect(self, device, *, platform=None, **kwargs):
+                return _Transport()
+
+        events = []
+        ctx = _ctx(
+            events,
+            config={"commands": ["delete /force flash:old.bin"]},
+            target_roles=["primary"],
+            target_devices_by_role={"primary": [DEVICE]},
+            services=cast(HandlerServices, _Services()),
+        )
+        result = await ExecuteCLIActionHandler().execute(ctx)
+        assert result.success is True
+        out = _output_events(events)
+        assert [e[0] for e in out] == ["$ delete /force flash:old.bin\n"]
+        assert out[0][2]["command"] == "delete /force flash:old.bin"
 
     @pytest.mark.asyncio
     async def test_netcli_execute_config_mode_streams_transcript(self):
@@ -275,7 +309,7 @@ class TestHandlerWiring:
         )
         result = await CollectEvidenceHandler().execute(ctx)
         assert result.success is True
-        assert [e[0] for e in _output_events(events)] == ["Cisco IOS XE"]
+        assert [e[0] for e in _output_events(events)] == ["$ show version\nCisco IOS XE\n"]
 
     @pytest.mark.asyncio
     async def test_shell_execute_emits_stdout_and_stderr(self):
