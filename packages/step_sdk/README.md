@@ -103,7 +103,7 @@ sending notifications, writing secrets, syncing inventory) declares
 `central_only = True`. Such a step always runs on a worker inside the
 platform's network, never on one in a remote zone.
 
-Every device transport must check SSH host keys: it sets
+Every device transport must support SSH host-key checking: it sets
 `supports_host_key_verifier = True` and takes a `host_key_verifier`
 (`HostKeyVerifier`) at construction. The Hegemony worker refuses to connect
 with a transport that does not set it, before it resolves any credential, and
