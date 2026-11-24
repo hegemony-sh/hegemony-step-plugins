@@ -103,9 +103,12 @@ sending notifications, writing secrets, syncing inventory) declares
 `central_only = True`. Such a step always runs on a worker inside the
 platform's network, never on one in a remote zone.
 
-A device transport that checks SSH host keys sets
+Every device transport must check SSH host keys: it sets
 `supports_host_key_verifier = True` and takes a `host_key_verifier`
-(`HostKeyVerifier`) at construction. Before it dials a hop it asks
+(`HostKeyVerifier`) at construction. The Hegemony worker refuses to connect
+with a transport that does not set it, before it resolves any credential, and
+the step fails with a message that names the transport. (Older workers only
+logged a warning and connected without the check.) Before it dials a hop it asks
 `trusted_keys(host, port)` and connects accepting only those keys: None means
 no check, an empty tuple means first contact (fetch the key without logging
 in, then `learn` it). A host that presents another key is reported with

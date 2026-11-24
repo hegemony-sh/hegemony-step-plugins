@@ -143,9 +143,10 @@ class HostKeyRejectedError(ConnectionError):
 class HostKeyVerifier(Protocol):
     """Host-owned SSH host-key trust for the hops of one connection.
 
-    The host builds one per ``connect()`` call and passes it to transport
-    constructors that advertise ``supports_host_key_verifier = True``
-    (feature-detected, like the output sink). Before a transport dials a hop
+    The host builds one per ``connect()`` call and passes it to the transport
+    constructor, which must advertise ``supports_host_key_verifier = True``:
+    the Hegemony worker refuses to connect with a transport that does not,
+    before it resolves any credential. Before a transport dials a hop
     (the jump host first, then the device) it asks :meth:`trusted_keys` and
     connects accepting only those keys, so a host presenting any other key
     fails during the key exchange, before a password or private key is sent.
@@ -287,7 +288,7 @@ class SshAlgorithmRecorder(Protocol):
 
     The host builds one per ``connect()`` call and passes it to transport
     constructors that advertise ``supports_ssh_algorithm_recorder = True``
-    (feature-detected, like the host-key verifier). Once a hop is logged in
+    (feature-detected, like the output sink). Once a hop is logged in
     (the jump host first, then the device) the transport reports what its
     key exchange agreed on, so the step's evidence shows which devices are
     not yet reached with a quantum-safe key exchange.
