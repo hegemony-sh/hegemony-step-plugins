@@ -65,7 +65,10 @@ data, indented one element per line, so `evidence.assert`,
 The step fails without connecting when no targets are selected, when Filter
 is not well-formed XML, and when the platform cannot open NETCONF sessions
 (an older Hegemony). A device fails when the connection, its host key or the
-network policy refuses it, when it sends no hello in time, when it lacks the
+network policy refuses it, when the session is not open within Connect
+Timeout (sec) (the error names the port and the limit; some switches need
+more than the default 15 s for their first sessions), when it sends no hello
+in time, when it lacks the
 datastore or the `:xpath` capability asked for, and when it answers with an
 `rpc-error`, which the step error quotes. One failing device fails the step;
 the others' data is kept.

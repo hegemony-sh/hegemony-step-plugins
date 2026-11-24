@@ -1677,3 +1677,19 @@ async def test_a_final_commit_whose_session_drops_says_it_may_have_happened():
     )
     assert not result.success
     assert "may already have committed" in (result.error or "")
+
+
+async def test_a_slow_session_open_says_which_phase_timed_out():
+    # A host's connect time-out is a bare TimeoutError; the step names it.
+    class SlowToOpen(FakeServices):
+        async def open_netconf(self, device: dict[str, Any], **kwargs: Any) -> Any:
+            raise TimeoutError
+
+    result = await NetconfGetHandler().execute(
+        _ctx(
+            {"connect_timeout_seconds": 15}, SlowToOpen({"r1": FakeNetconfDevice.with_config(BASE)})
+        )
+    )
+    assert not result.success
+    error = result.output["devices"]["r1"]["error"]
+    assert "opening the NETCONF session (port 830) took longer than 15 s" in error

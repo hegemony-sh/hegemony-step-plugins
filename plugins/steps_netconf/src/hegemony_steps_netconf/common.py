@@ -126,6 +126,13 @@ async def netconf_session(
         channel = await open_netconf(device, **kwargs)
     except NotImplementedError:
         raise SessionUnavailable("this platform cannot open NETCONF sessions") from None
+    except TimeoutError as exc:
+        # The host's time-out carries no text of its own; say which phase it was.
+        raise NetconfError(
+            f"opening the NETCONF session (port {config.port}) took longer than "
+            f"{config.connect_timeout_seconds} s; raise Connect Timeout for a device "
+            "that is slow to start NETCONF sessions"
+        ) from exc
     session = NetconfSession(channel, timeout=float(config.rpc_timeout_seconds))
     try:
         try:
