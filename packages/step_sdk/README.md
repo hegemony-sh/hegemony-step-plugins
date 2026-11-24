@@ -207,6 +207,30 @@ service, and `add_trusted_cas(context, pem)` adds the certificates to an
 `ssl` context. A `ca_bundle` a step sets still replaces both (it pins those
 CAs).
 
+## Versioning
+
+The SDK has its own version, separate from the version of the plugin wheels
+released with it. It changes only when the SDK changes:
+
+- **Major**: something was removed or changed incompatibly. The major
+  version is always `SDK_ABI_VERSION`, and the platform refuses plugins built
+  for another ABI.
+- **Minor**: something was added (a name, an optional parameter, an optional
+  field). Within one major the contract only grows.
+- **Patch**: a fix that does not change the public surface.
+
+So a step-handler or probe wheel requires the SDK minor it was built and
+tested with, up to the next major:
+
+```toml
+dependencies = ["hegemony-step-sdk>=1.0,<2"]
+```
+
+A host built against an older SDK minor may lack a newer service; the SDK's
+default for such a service raises `NotImplementedError`, so a handler that
+must also run on older hosts handles that error. Device transports are
+first-party only and pin the SDK exactly.
+
 ## API reference
 
 Import public handler contracts from `hegemony_step_sdk`. The SDK exposes

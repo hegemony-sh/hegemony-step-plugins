@@ -541,7 +541,7 @@ fuzz = [
 
 [[package]]
 name = "hegemony-step-sdk"
-version = "0.55.0"
+version = "1.0.0"
 source = { editable = "packages/step_sdk" }
 dependencies = [
     { name = "pydantic" },
@@ -1336,7 +1336,7 @@ resolution-markers = [
     "python_full_version < '3.11.5'",
 ]
 dependencies = [
-    { name = "pyasn1", marker = "python_full_version < '3.11.5'" },
+    { name = "pyasn1" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/27/57/f2fc981847cd5520b27abcb608ef7cdac477eda529ca59539467ba89939a/pysnmp-7.1.32.tar.gz", hash = "sha256:b256e83513110b9f18011ed897e23652a7314c286910dbca87ba848289449ae3", size = 270434, upload-time = "2026-11-07T12:58:10.928Z" }
 wheels = [
@@ -1351,7 +1351,7 @@ resolution-markers = [
     "python_full_version >= '3.11.5'",
 ]
 dependencies = [
-    { name = "pyasn1", marker = "python_full_version >= '3.11.5'" },
+    { name = "pyasn1" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/bf/87/fd716527e6f0822d978c9b2bd4f4435f2a2320089938b8051c3fd72898c4/pysnmp-7.1.33.tar.gz", hash = "sha256:bce415342dac9021823c7f98325989e03868f239e899776cd31e380900d32ea5", size = 270715, upload-time = "2026-11-16T01:17:02.22Z" }
 wheels = [

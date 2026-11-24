@@ -3,7 +3,11 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Verify a release tag matches every package version, SDK pin, sibling-wheel pin, and image tag.
+"""Verify a release tag matches every package version, sibling-wheel pin, and image tag.
+
+The SDK has its own version (scripts/sdk_version.py): it must agree with its
+ABI version, every wheel must pin it in the form its kind takes, and it must
+be the version the SDK's change since the previous release needs.
 
 Also that a patch release keeps the series (X.Y) of every tool the steps run
 by default: a new one is a change of behaviour for every flow on the default
@@ -21,19 +25,20 @@ import subprocess
 import tomllib
 from collections.abc import Callable
 
+import sdk_version
 from package_paths import (
     BUNDLED_TOOLS,
-    PACKAGE_DIRS,
     PLUGIN_DIRS,
+    RELEASE_DIRS,
     ROOT,
     RUNNER_IMAGES,
-    SDK_VERSION_FILE,
 )
 
 #: A requirement's name, extras and version constraint (markers split off first).
 REQUIREMENT = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*(.*)")
-#: Another wheel of this monorepo, by normalized name: they release in
-#: lockstep, so each must be pinned exactly, whatever its constraint says.
+#: Another wheel of this monorepo, by normalized name, apart from the SDK: they
+#: release in lockstep, so each must be pinned exactly, whatever its
+#: constraint says.
 SIBLING_NAME = re.compile(r"hegemony-(?:steps|probe|transport)-[a-z0-9-]+")
 
 
@@ -244,6 +249,11 @@ def _project_metadata(pyproject) -> dict:
     return tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
 
 
+def _name_and_dependencies(package_dir) -> tuple[str, list[str]]:
+    metadata = _project_metadata(package_dir / "pyproject.toml")
+    return metadata["name"], list(metadata.get("dependencies", []))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -259,28 +269,24 @@ def main() -> None:
 
     failures: list[str] = []
 
-    for package_dir in PACKAGE_DIRS:
+    for package_dir in RELEASE_DIRS:
         metadata = _project_metadata(package_dir / "pyproject.toml")
         if metadata["version"] != version:
             failures.append(
                 f"{metadata['name']} version is {metadata['version']}, expected {version}"
             )
 
-    expected_sdk_dependency = f"hegemony-step-sdk=={version}"
     for plugin_dir in PLUGIN_DIRS:
         metadata = _project_metadata(plugin_dir / "pyproject.toml")
-        if expected_sdk_dependency not in metadata["dependencies"]:
-            failures.append(f"{metadata['name']} must depend on {expected_sdk_dependency}")
-        # Pins on sibling wheels of this monorepo release in lockstep too.
+        # Pins on sibling wheels of this monorepo release in lockstep.
         for dependency in metadata["dependencies"]:
             failure = sibling_pin_failure(metadata["name"], dependency, version)
             if failure:
                 failures.append(failure)
 
-    sdk_version_text = SDK_VERSION_FILE.read_text(encoding="utf-8")
-    match = re.search(r'^__version__ = "([^"]+)"$', sdk_version_text, re.MULTILINE)
-    if match is None or match.group(1) != version:
-        failures.append(f"{SDK_VERSION_FILE} __version__ must be {version}")
+    # The SDK's own version: consistent, pinned right, and the bump its change needs.
+    failures.extend(sdk_version.pin_failures(_name_and_dependencies))
+    failures.extend(sdk_version.check(release=version))
 
     for image in RUNNER_IMAGES:
         for path in image.files:

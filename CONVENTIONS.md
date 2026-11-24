@@ -230,16 +230,35 @@ test check they match.
 ## Plugin kinds and their entry-point groups
 
 Step handlers are one of several plugin kinds this repo ships. All kinds
-build on `hegemony-step-sdk` and live in **this monorepo** — a transport or
-probe wheel is useless without the exact SDK protocol version it implements,
-so they release in lockstep with the SDK (this is why they are *not* split
-into per-domain repos the way inventory/notification/secret plugins are).
+build on `hegemony-step-sdk` and live in **this monorepo**, and every wheel
+except the SDK is released together, under the release version (this is why
+they are *not* split into per-domain repos the way
+inventory/notification/secret plugins are).
 
-| Kind | Entry-point group | Workspace dir | Wheel name |
-|------|-------------------|---------------|------------|
-| Step handlers | `hegemony.step_handlers` | `plugins/steps_*` | `hegemony-steps-<prefix>` |
-| Device transports | `hegemony.device_transports` | `transports/transport_*` | `hegemony-transport-<name>` |
-| Probes | `hegemony.probes` | `probes/probe_*` | `hegemony-probe-<name>` |
+The SDK has **its own version**, which changes only when the SDK changes
+(see [CONTRIBUTING.md](CONTRIBUTING.md#the-sdks-own-version)). Its major
+version is `SDK_ABI_VERSION`, and within a major the contract only grows
+("additions only"), so each kind states the SDK versions it works with:
+
+| Kind | Entry-point group | Workspace dir | Wheel name | Requires the SDK as |
+|------|-------------------|---------------|------------|---------------------|
+| Step handlers | `hegemony.step_handlers` | `plugins/steps_*` | `hegemony-steps-<prefix>` | `>=X.Y,<X+1` |
+| Probes | `hegemony.probes` | `probes/probe_*` | `hegemony-probe-<name>` | `>=X.Y,<X+1` |
+| Device transports | `hegemony.device_transports` | `transports/transport_*` | `hegemony-transport-<name>` | `==X.Y.Z` |
+| Transport support (internal) | none | `packages/transport_support` | `hegemony-transport-support` | `==X.Y.Z` |
+
+`X.Y.Z` is the SDK version in the tree. Step handlers and probes use only
+the additions-only contract, so they accept the SDK they were built and
+tested with (its minor, `X.Y`) and every later SDK of the same major. Device
+transports and `hegemony-transport-support` pin the SDK exactly: the
+device-transport interface is first-party only, with no stability promise,
+so a transport is only ever installed with the SDK it was built with. Pins
+between the other wheels (`hegemony-steps-netbox` on `hegemony-steps-http`,
+the tool handlers on `hegemony-steps-container`, the transports on
+`hegemony-transport-support`) are exact pins on the release version. Nobody
+writes these pins by hand: `scripts/sdk_version.py` and
+`scripts/set_version.py` write them, and `scripts/verify_release_version.py`,
+`tests/test_sdk_version.py` and the wheel smoke test check them.
 
 The group-name constants live in the SDK next to
 `STEP_HANDLER_ENTRY_POINT_GROUP`. The host consumes every kind the same way:
@@ -269,8 +288,9 @@ in the images and are omitted from the demo manifest).
   (`packages/transport_support`, module `hegemony_transport_support`), for
   example `hegemony_transport_support.ssh`, which maps the SDK's SSH policy
   onto Paramiko and AsyncSSH. It is internal, with no stability promise, for
-  the built-in transports only; it releases in lockstep with the SDK and the
-  transports, which pin it exactly (`==<version>`, like the SDK).
+  the built-in transports only; it carries the release version, pins the SDK
+  exactly (`==<SDK version>`), and the transports pin it exactly
+  (`==<release version>`).
   The dependency direction is
   `steps → SDK ← transport-support ← transports`: the SDK never imports it,
   step plugins never import it or any transport, and no transport imports

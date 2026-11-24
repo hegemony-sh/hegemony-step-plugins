@@ -186,14 +186,16 @@ A merge to `main` is a release. The `Release` workflow calls the shared
 [`plugin-release.yml`](https://github.com/hegemony-sh/hegemony-github-workflows)
 workflow, which runs [semantic-release](https://semantic-release.gitbook.io/):
 it reads the Conventional Commits since the last tag, derives the next
-version from them, bumps every package and SDK pin (`scripts/set_version.py`),
+version from them, sets it on every package except the SDK and rewrites
+every SDK pin from the SDK's own version (`scripts/set_version.py`),
 refreshes `uv.lock`, builds and smoke-installs the wheels, prepends
 `CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`, tags `vX.Y.Z` and
 publishes the wheels plus `SHA256SUMS` as the GitHub Release. Publishing that
 Release starts the `Images` workflow, which publishes the steps' runner images
 (`ansible-runner`, `opentofu-runner`, `git-runner`) as `X.Y.Z` and `X.Y` from the tag; the
 release commit carries the steps' defaults moved to `X.Y`. There is no manual
-step any more: do not bump versions or push `v*` tags by hand.
+step any more: do not bump the release version or push `v*` tags by hand.
+The one version you do set by hand is the SDK's (next section).
 
 | Commits since the last tag | Release |
 |---|---|
@@ -256,6 +258,52 @@ from a checkout of the tag, as the shared workflow's
 [README](https://github.com/hegemony-sh/hegemony-github-workflows#recovering-a-tag-without-a-release)
 describes (`gh release create vX.Y.Z --verify-tag ... dist/*.whl
 dist/SHA256SUMS` after rebuilding the wheels at that tag).
+
+### The SDK's own version
+
+`hegemony-step-sdk` does not take the release version. Its version changes
+only when the SDK changes, so a new SDK version always means a new contract
+or an SDK fix, and a plugin-only release keeps it. Every release still
+attaches the SDK wheel; an unchanged SDK builds to the same bytes, so the
+same version is always the same wheel.
+
+Set it in the pull request that changes anything in `packages/step_sdk`:
+
+```bash
+uv run python scripts/sdk_version.py bump minor   # or major, or patch
+uv lock
+```
+
+This sets the version in the SDK's `pyproject.toml` and `_version.py`, every
+wheel's SDK requirement, and the SDK's recorded public surface,
+`packages/step_sdk/api-surface.json` (rewrite only that file with
+`scripts/sdk_version.py write`). Which bump:
+
+| Change in `packages/step_sdk` since the last release tag | SDK version |
+|---|---|
+| none | unchanged (a bump without a change fails) |
+| code, docs or dependencies, but not the public surface | at least patch |
+| the surface gains a name, an optional parameter or an optional field | at least minor |
+| the internal device-transport interface changes (the names `hegemony_step_sdk.transports` lists as internal) | at least minor |
+| the surface loses or changes something | major, and `SDK_ABI_VERSION` moves with it |
+
+The device-transport interface needs no major because only the built-in
+transports use it and they pin the SDK exactly; `DeviceCredentials` and
+`JumpHostSpec` are part of the handler contract and follow the
+additions-only rule. The SDK's major is always `SDK_ABI_VERSION`, and the platform refuses
+plugins built for another ABI, so avoid a major: keep an old name working
+and add a new one instead. CI runs `scripts/sdk_version.py check`, which
+compares the tree with the newest release tag and fails when the version
+does not match the change; the release runs it again. The surface record
+holds names, call shapes and fields, not types or constants' values, so a
+change the record cannot show (a constant's value, a narrower type, new
+behaviour) is the author's and reviewer's call: the check accepts a larger
+bump than it requires. Only one bump per release: a second pull request
+before the next release keeps the version the first one set unless it needs
+a larger bump.
+
+Commit an SDK change with a type that releases (`feat(sdk):`, `fix(sdk):`),
+so the new SDK version is published.
 
 The shared workflow is pinned by commit in `.github/workflows/release.yml`;
 a change merged to it reaches this repository through a pull request that

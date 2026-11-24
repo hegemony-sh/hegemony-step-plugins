@@ -3,7 +3,10 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Sibling wheels release in lockstep: set_version pins them, the verifier insists."""
+"""Sibling wheels release in lockstep: set_version pins them, the verifier insists.
+
+The SDK is the exception: it has its own version (tests/test_sdk_version.py).
+"""
 
 from __future__ import annotations
 
@@ -360,8 +363,9 @@ def test_the_release_commit_carries_every_file_set_version_writes():
         for plugin in releaserc["plugins"]
         if isinstance(plugin, list) and plugin[0] == "@semantic-release/git"
     ]
-    written = [package_dir / "pyproject.toml" for package_dir in paths.PACKAGE_DIRS]
-    written.append(paths.SDK_VERSION_FILE)
+    # Not the SDK's files: its version is set in the pull request that changes
+    # it, and the release leaves it alone.
+    written = [package_dir / "pyproject.toml" for package_dir in paths.RELEASE_DIRS]
     written += [path for image in paths.RUNNER_IMAGES for path in image.files]
     relative = [path.relative_to(paths.ROOT).as_posix() for path in written]
 
@@ -381,6 +385,35 @@ def test_the_images_are_published_when_the_release_is_published():
 
     assert triggers["release"] == {"types": ["published"]}
     assert "push" not in triggers
+
+
+def test_set_version_leaves_the_sdk_version_alone(tmp_path, monkeypatch):
+    """The release stamps its version on every other wheel and the SDK pins on
+    all of them in their kind's form, but never touches the SDK itself."""
+    set_version = _script("set_version")
+    plugin = tmp_path / "plugins" / "steps_x"
+    plugin.mkdir(parents=True)
+    (plugin / "pyproject.toml").write_text(
+        '[project]\nname = "hegemony-steps-x"\nversion = "0.55.0"\n'
+        'dependencies = ["hegemony-step-sdk==0.55.0", "hegemony-steps-http==0.55.0"]\n',
+        encoding="utf-8",
+    )
+    written: list[str] = []
+    monkeypatch.setattr(set_version, "RELEASE_DIRS", (plugin,))
+    monkeypatch.setattr(set_version, "PLUGIN_DIRS", (plugin,))
+    monkeypatch.setattr(set_version, "read_sdk_version", lambda: "1.2.3")
+    monkeypatch.setattr(set_version, "write_pins", written.append)
+    monkeypatch.setattr(set_version, "_set_runner_image_tags", lambda version: None)
+    monkeypatch.setattr(sys, "argv", ["set_version.py", "0.56.0"])
+
+    set_version.main()
+
+    text = (plugin / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.56.0"' in text
+    assert '"hegemony-steps-http==0.56.0"' in text
+    assert written == ["1.2.3"]
+    paths = _script("package_paths")
+    assert paths.SDK_DIR not in paths.RELEASE_DIRS
 
 
 def test_a_breaking_change_of_any_type_releases():
