@@ -98,6 +98,11 @@ class FakeNetconfDevice:
     #: Grant a candidate lock while the candidate has uncommitted changes
     #: (RFC 6241 7.5 says refuse; some servers do not).
     lenient_locks: bool = False
+    #: IOS XE: while a confirmed commit is pending, the datastores stay locked
+    #: for the session that made it, even after it ends; other sessions'
+    #: lock and edit-config get in-use naming that session. A commit with
+    #: the persist id still settles it from any session.
+    pending_holds_locks: bool = False
 
     candidate: list[ET.Element] = field(default_factory=list)
     locks: dict[str, int] = field(default_factory=dict)
@@ -353,14 +358,33 @@ class FakeChannel:
                 return target
         return ""
 
-    def _error(self, tag: str, message: str = "", path: str = "") -> tuple[str, bool]:
+    def _error(
+        self, tag: str, message: str = "", path: str = "", info: str = ""
+    ) -> tuple[str, bool]:
         error_path = f"<error-path>{escape(path)}</error-path>" if path else ""
+        error_info = f"<error-info>{info}</error-info>" if info else ""
         return (
             "<rpc-error><error-type>application</error-type>"
             f"<error-tag>{tag}</error-tag><error-severity>error</error-severity>"
-            f"{error_path}<error-message>{message or tag}</error-message></rpc-error>",
+            f"{error_path}<error-message>{message or tag}</error-message>{error_info}"
+            "</rpc-error>",
             False,
         )
+
+    def _held_for_pending(self) -> tuple[str, bool] | None:
+        """IOS XE's refusal while another session's confirmed commit is pending."""
+        pending = self.device.pending
+        if (
+            self.device.pending_holds_locks
+            and pending is not None
+            and pending.session != self.session_id
+        ):
+            return self._error(
+                "in-use",
+                f"the configuration database is locked by session {pending.session}",
+                info=f"<session-id>{pending.session}</session-id>",
+            )
+        return None
 
     def _datastore(self, node: ET.Element | None) -> str:
         if node is None or not len(node):
@@ -377,6 +401,9 @@ class FakeChannel:
             target = self._datastore(op.find(f"{{{BASE_NS}}}target"))
             owner = device.locks.get(target)
             if name == "lock":
+                held = self._held_for_pending()
+                if held is not None:
+                    return held
                 if owner is not None and owner != self.session_id:
                     return self._error("lock-denied", f"{target} is locked by session {owner}")
                 pending = device.pending
@@ -426,6 +453,9 @@ class FakeChannel:
             if device.fail_edit:
                 return self._error(device.fail_edit, "edit refused")
             target = self._datastore(op.find(f"{{{BASE_NS}}}target"))
+            held = self._held_for_pending()
+            if held is not None:
+                return held
             if self._locked_by_other(target):
                 return self._error("in-use", f"{target} is locked by another session")
             default = op.findtext(f"{{{BASE_NS}}}default-operation") or "merge"

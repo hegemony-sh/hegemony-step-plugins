@@ -47,6 +47,13 @@ Connect Timeout (sec), Request Timeout (sec) and Allow legacy SSH are
 advanced. Max Parallel Devices (default 10) sets how many devices are read
 at the same time.
 
+Every NETCONF step writes to the run's Logs tab as it works, one line per
+device for each event: the session opening (its id, how long it took, and
+the capabilities the steps use), each request with its outcome and time
+(`lock candidate: ok (12 ms)`, or the device's `rpc-error`), and the session
+closing. The lines name operations only; configuration sent or read is
+kept in the output and the evidence, not in the log.
+
 ## Output
 
 The summary reads `netconf get <read>: N/M devices`. Each device adds one
@@ -65,7 +72,10 @@ data, indented one element per line, so `evidence.assert`,
 The step fails without connecting when no targets are selected, when Filter
 is not well-formed XML, and when the platform cannot open NETCONF sessions
 (an older Hegemony). A device fails when the connection, its host key or the
-network policy refuses it, when it sends no hello in time, when it lacks the
+network policy refuses it, when the session is not open within Connect
+Timeout (sec) (the error names the port and the limit; some switches need
+more than the default 15 s for their first sessions), when it sends no hello
+in time, when it lacks the
 datastore or the `:xpath` capability asked for, and when it answers with an
 `rpc-error`, which the step error quotes. One failing device fails the step;
 the others' data is kept.

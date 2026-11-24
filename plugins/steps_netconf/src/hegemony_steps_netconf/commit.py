@@ -44,6 +44,7 @@ from .common import (
     run_per_device,
     unavailable,
 )
+from .transaction import lock_holder
 
 
 class SettleConfig(NetconfConnectionConfig):
@@ -132,7 +133,7 @@ class _SettleHandler(BaseHandler):
         OutputField(
             "devices",
             "Each device's result by name: ok, error, persist_id, skipped (nothing was "
-            "pending) and the outcome",
+            "pending), notes and the outcome",
             "object",
         ),
         OutputField("truncated", "Output texts cut short, as device.key", "list"),
@@ -243,14 +244,30 @@ class NetconfCommitHandler(_SettleHandler):
         # 8.4), and another session may have staged edits since the change
         # step unlocked it. Hold the candidate and confirm only when it is
         # exactly the pending running configuration.
+        locked = True
+        note = ""
         try:
             await session.lock("candidate")
         except RpcFailed as exc:
-            raise NetconfError(
-                f"the candidate cannot be locked ({exc}): another session holds it or has "
-                "changes staged in it, so the commit is not confirmed. Discard those changes "
-                "on the device, or cancel the commit"
-            ) from None
+            holder = lock_holder(exc)
+            committer = str(entry.get("commit_session_id") or "")
+            if not (holder and committer and holder == committer):
+                held = f"session {holder}" if holder else "another session"
+                made = f"session {committer}" if committer else "a session this step cannot name"
+                raise NetconfError(
+                    f"the candidate cannot be locked ({exc}): {held} holds it or has changes "
+                    f"staged in it, and the pending commit was made by {made}, so the commit "
+                    "is not confirmed. Discard those changes on the device, or cancel the commit"
+                ) from None
+            # IOS XE keeps the datastores locked for the session that made a
+            # confirmed commit until the commit is settled. That lock also
+            # keeps every other session from editing the candidate, so the
+            # comparison below still holds without a lock of this step's own.
+            locked = False
+            note = (
+                f"the device holds the candidate lock for session {holder}, which made the "
+                "pending commit; compared and confirmed without the lock"
+            )
         try:
             # Compared in canonical form: a device may format the two
             # datastores differently even when they hold the same configuration.
@@ -272,18 +289,23 @@ class NetconfCommitHandler(_SettleHandler):
                     "configuration before running the step again"
                 ) from None
             result: dict[str, Any] = {"confirmed": True, "saved": ""}
+            if note:
+                result["notes"] = [note]
             if config.save_config or entry.get("save_requested"):
                 # Still holding the candidate: no other session can commit (and
                 # so put an unconfirmed change in running) before the save copies
-                # running to startup.
+                # running to startup. Without the lock (see above) the device
+                # may release its own when the commit is confirmed, so this
+                # guarantee is weaker there.
                 try:
                     result["saved"] = await session.save_config()
                 except Exception as exc:  # noqa: BLE001 - the commit is confirmed either way
                     result["save_error"] = str(exc) or type(exc).__name__
             return result
         finally:
-            with contextlib.suppress(Exception):
-                await session.unlock("candidate")
+            if locked:
+                with contextlib.suppress(Exception):
+                    await session.unlock("candidate")
 
 
 class NetconfCancelCommitHandler(_SettleHandler):

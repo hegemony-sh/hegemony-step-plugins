@@ -29,7 +29,17 @@ of each prefix it uses, as in an identityref or an instance identifier).
 Without the schema a value's type is unknown, so `i:foo` and `j:foo` count
 as different even when `i` and `j` name one namespace: the step refuses
 rather than confirm a change it cannot rule out. Edits another session staged since the
-change step stop it. When the device does not answer the confirmation in
+change step stop it.
+
+Some devices (IOS XE) keep the candidate locked for the session that made a
+confirmed commit until the commit is settled, so no other session can lock
+it. The change step records that session's id (`commit_session_id`). When
+the lock refusal names the same session (in its `error-info` or its message,
+such as "locked by session 54"), the step compares candidate and running
+without a lock of its own and confirms, and says so in `notes`; the
+device's lock keeps other sessions from editing the candidate meanwhile. A
+lock held by any other session still stops the step, and the error names
+both sessions. When the device does not answer the confirmation in
 time, the step fails and says the commit may already be confirmed. When the
 device refuses the persist id and a save was asked, the error also says to
 save running to startup in case an earlier attempt confirmed it.
@@ -57,8 +67,8 @@ out; after that the device has already restored the previous configuration.
 The summary reads `netconf commit: N/M devices`.
 
 - `steps.NODE_ID.output.devices`: each device's result by name: `ok`,
-  `error`, `persist_id`, `skipped`, `confirmed`, `saved` and
-  `save_requested`.
+  `error`, `persist_id`, `skipped`, `confirmed`, `saved`,
+  `save_requested` and `notes`.
 - `steps.NODE_ID.output.truncated`: always empty for this step.
 
 ## When It Fails
@@ -68,7 +78,8 @@ A device the change step left unchanged (or committed at once) has nothing
 pending and is skipped, with `skipped` true. A device fails when the change
 step has no result for it or failed on it, when several target devices
 share its name without ids that tell their results apart, when another
-session holds the candidate or has staged other changes in it, when it
+session (other than the one that made the pending commit) holds the
+candidate, when another session has staged other changes in it, when it
 lacks `:confirmed-commit:1.1`, when it cannot be reached, when saving fails
 after the confirmation (`confirmed` stays true, with `save_error`), and when
 it refuses the persist id: the commit was confirmed or cancelled already, or

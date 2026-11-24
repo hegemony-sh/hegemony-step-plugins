@@ -515,7 +515,8 @@ async def test_confirming_refuses_while_another_session_holds_the_candidate():
     await other.lock("candidate")
     result = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
     assert not result.success
-    assert "another session holds it" in (result.error or "")
+    assert "session 2 holds it" in (result.error or "")
+    assert "made by session 1" in (result.error or "")
     assert device.pending is not None
     await other.close()
 
@@ -1677,3 +1678,161 @@ async def test_a_final_commit_whose_session_drops_says_it_may_have_happened():
     )
     assert not result.success
     assert "may already have committed" in (result.error or "")
+
+
+async def test_a_slow_session_open_says_which_phase_timed_out():
+    # A host's connect time-out is a bare TimeoutError; the step names it.
+    class SlowToOpen(FakeServices):
+        async def open_netconf(self, device: dict[str, Any], **kwargs: Any) -> Any:
+            raise TimeoutError
+
+    result = await NetconfGetHandler().execute(
+        _ctx(
+            {"connect_timeout_seconds": 15}, SlowToOpen({"r1": FakeNetconfDevice.with_config(BASE)})
+        )
+    )
+    assert not result.success
+    error = result.output["devices"]["r1"]["error"]
+    assert "opening the NETCONF session (port 830) took longer than 15 s" in error
+
+
+# --- IOS XE: the committing session keeps the datastores locked -------------
+
+
+async def test_the_change_step_records_the_session_that_made_the_pending_commit():
+    device = FakeNetconfDevice.with_config(BASE)
+    result, _ = await _pending_change(device)
+    entry = result.output["devices"]["r1"]
+    assert device.pending is not None
+    assert entry["commit_session_id"] == str(device.pending.session)
+
+
+async def test_confirming_past_the_committing_sessions_own_lock():
+    # IOS XE refuses every other session's lock while a confirmed commit is
+    # pending ("locked by session N", N the session that made it).
+    device = FakeNetconfDevice.with_config(BASE, pending_holds_locks=True)
+    result, services = await _pending_change(device)
+    committer = result.output["devices"]["r1"]["commit_session_id"]
+
+    confirmed = await NetconfCommitHandler().execute(
+        _ctx({"change_step": "change", "save_config": True}, services)
+    )
+    assert confirmed.success, confirmed.error
+    entry = confirmed.output["devices"]["r1"]
+    assert entry["confirmed"] is True
+    assert any(f"session {committer}" in note for note in entry["notes"])
+    assert device.pending is None and device.saved == 1
+    device.expire()
+    assert _running_hostname(device) == "r2"
+
+
+async def test_a_lock_held_by_another_session_than_the_committer_still_stops_the_confirm():
+    device = FakeNetconfDevice.with_config(BASE, pending_holds_locks=True)
+    result, services = await _pending_change(device)
+    output = result.output
+    output["devices"]["r1"]["commit_session_id"] = "999"
+    services.step_outputs = {"change": {"success": True, "output": output}}
+
+    confirmed = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
+    assert not confirmed.success
+    holder = str(device.pending.session) if device.pending else ""
+    assert f"session {holder} holds it" in (confirmed.error or "")
+    assert "made by session 999" in (confirmed.error or "")
+    assert device.pending is not None  # not confirmed
+
+
+async def test_without_a_recorded_session_the_held_lock_stops_the_confirm():
+    # Output from a release before commit_session_id: refuse, as before.
+    device = FakeNetconfDevice.with_config(BASE, pending_holds_locks=True)
+    result, services = await _pending_change(device)
+    output = result.output
+    del output["devices"]["r1"]["commit_session_id"]
+    services.step_outputs = {"change": {"success": True, "output": output}}
+
+    confirmed = await NetconfCommitHandler().execute(_ctx({"change_step": "change"}, services))
+    assert not confirmed.success
+    assert "a session this step cannot name" in (confirmed.error or "")
+    assert device.pending is not None
+
+
+async def test_a_retry_that_cannot_lock_the_candidate_keeps_the_persist_id():
+    # IOS XE: an earlier attempt's pending commit keeps the candidate locked
+    # for its session, so the retry cannot check it; the id stays settleable.
+    device = FakeNetconfDevice.with_config(BASE, pending_holds_locks=True)
+    first, _ = await _pending_change(device)
+    persist_id = first.output["devices"]["r1"]["persist_id"]
+
+    config = {"config": _hostname("r2"), "commit_mode": "later"}
+    retry = await NetconfEditConfigHandler().execute(
+        _ctx(config, FakeServices({"r1": device}), attempt=2)
+    )
+    assert not retry.success
+    entry = retry.output["devices"]["r1"]
+    assert entry["commit_uncertain"] is True and entry["persist_id"] == persist_id
+    assert entry["commit_session_id"] == ""
+    assert "earlier attempt" in (retry.error or "")
+
+    services = FakeServices({"r1": device})
+    services.step_outputs = {"change": {"success": False, "output": retry.output}}
+    cancelled = await NetconfCancelCommitHandler().execute(
+        _ctx({"change_step": "change"}, services)
+    )
+    assert cancelled.success, cancelled.error
+    assert device.pending is None and _running_hostname(device) == "r1"
+
+
+def test_lock_holder_reads_error_info_and_the_ios_xe_message():
+    from hegemony_steps_netconf.client import RpcError
+    from hegemony_steps_netconf.transaction import lock_holder
+
+    info = RpcFailed("lock candidate", [RpcError(tag="lock-denied", info="session-id=7")])
+    message = RpcFailed(
+        "lock candidate",
+        [RpcError(tag="in-use", message="the configuration database is locked by session 54")],
+    )
+    none = RpcFailed("lock candidate", [RpcError(tag="lock-denied", message="locked")])
+    assert lock_holder(info) == "7"
+    assert lock_holder(message) == "54"
+    assert lock_holder(none) == ""
+
+
+# --- Live log ------------------------------------------------------------------
+
+
+async def test_each_request_and_its_outcome_reach_the_live_log():
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    async def emit(message: str, device_id: str | None, attrs: dict[str, Any] | None) -> bool:
+        events.append((message, attrs or {}))
+        return True
+
+    device = FakeNetconfDevice.with_config(BASE)
+    ctx = _ctx({"config": _hostname("r2"), "commit_mode": "later"}, FakeServices({"r1": device}))
+    ctx._emit_progress = emit
+    result = await NetconfEditConfigHandler().execute(ctx)
+    assert result.success, result.error
+    lines = "".join(message for message, _ in events)
+    assert "opening a NETCONF session on port 830" in lines
+    assert "NETCONF session 1 open after" in lines and ":candidate" in lines
+    assert "lock running: ok" in lines
+    assert "edit-config candidate: ok" in lines
+    assert "confirmed commit: ok" in lines
+    assert "NETCONF session 1 closed" in lines
+    # Operation names only: the configuration sent is not logged.
+    assert "r2" not in lines
+    assert all(attrs.get("device_name") == "r1" for _, attrs in events)
+
+
+async def test_a_refused_request_reaches_the_live_log_with_its_error():
+    events: list[str] = []
+
+    async def emit(message: str, device_id: str | None, attrs: dict[str, Any] | None) -> bool:
+        events.append(message)
+        return True
+
+    device = FakeNetconfDevice.with_config(BASE, fail_edit="invalid-value")
+    ctx = _ctx({"config": _hostname("r2")}, FakeServices({"r1": device}))
+    ctx._emit_progress = emit
+    result = await NetconfEditConfigHandler().execute(ctx)
+    assert not result.success
+    assert any("edit-config candidate failed: invalid-value" in line for line in events)
