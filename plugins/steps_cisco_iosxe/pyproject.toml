@@ -5,16 +5,16 @@
 
 [project]
 name = "hegemony-steps-cisco-iosxe"
-version = "0.53.1"
+version = "0.54.0"
 description = "Cisco IOS XE step handlers (atomic config replace over NETCONF) for Hegemony"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.53.1",
+    "hegemony-step-sdk==0.54.0",
     # Built on the netconf wheel's client, sessions and transaction.
-    "hegemony-steps-netconf==0.53.1",
+    "hegemony-steps-netconf==0.54.0",
 ]
 
 [project.entry-points."hegemony.step_handlers"]
