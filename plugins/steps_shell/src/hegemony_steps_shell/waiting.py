@@ -187,19 +187,18 @@ OUTPUT_FIELDS = (
 def condition_met(compiled: re.Pattern[str], text: str, *, until: str, scope: str) -> bool:
     """Whether ``text`` meets the condition: the pattern found (or not found) in it.
 
-    Only the first ``MAX_REGEX_INPUT_CHARS`` are searched. A match there
-    counts; output longer than that never meets "does not match", since the
-    pattern may be in the part not searched.
+    Output longer than ``MAX_REGEX_INPUT_CHARS`` never meets it, in either
+    mode: the pattern is not run on more text than that, and a cut-off
+    prefix proves nothing (the pattern may be past the cut, or ``$`` may
+    match at it).
     """
-    cut = len(text) > MAX_REGEX_INPUT_CHARS
-    text = text[:MAX_REGEX_INPUT_CHARS]
+    if len(text) > MAX_REGEX_INPUT_CHARS:
+        return False
     if scope == "lines":
         found = any(compiled.search(line) for line in text.splitlines())
     else:
         found = compiled.search(text) is not None
-    if until == "matches":
-        return found
-    return not found and not cut
+    return found if until == "matches" else not found
 
 
 class WaitAborted(Exception):

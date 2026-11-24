@@ -605,13 +605,22 @@ async def test_a_one_second_wait_still_polls_once(clock):
     assert result.output["devices"]["sw1"]["attempts"] == 1
 
 
-def test_output_too_long_to_search_never_meets_does_not_match():
+def test_output_too_long_to_search_never_meets_the_condition():
     from hegemony_steps_netcli.waiting import MAX_REGEX_INPUT_CHARS, condition_met
 
     compiled = re.compile("FAILED")
     long_text = "x" * MAX_REGEX_INPUT_CHARS + "FAILED"
     assert condition_met(compiled, long_text, until="not_matches", scope="output") is False
     assert condition_met(compiled, "x" * 10, until="not_matches", scope="output") is True
-    # A match within the searched part still counts.
+    # A cut-off prefix proves nothing for "matches" either: no match at the cut.
     found_early = "FAILED" + "x" * MAX_REGEX_INPUT_CHARS
-    assert condition_met(compiled, found_early, until="matches", scope="lines") is True
+    assert condition_met(compiled, found_early, until="matches", scope="lines") is False
+    anchored = re.compile("x$")
+    assert (
+        condition_met(
+            anchored, "x" * (MAX_REGEX_INPUT_CHARS + 1) + "\n!", until="matches", scope="output"
+        )
+        is False
+    )
+    exact = "y" * (MAX_REGEX_INPUT_CHARS - 6) + "FAILED"
+    assert condition_met(compiled, exact, until="matches", scope="output") is True

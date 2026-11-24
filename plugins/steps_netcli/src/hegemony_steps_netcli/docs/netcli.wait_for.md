@@ -22,8 +22,8 @@ Until says whether the step waits for the output to match it or to stop
 matching it. Match Scope "Whole output" searches the whole output at once,
 so a pattern can span lines; "Any line" searches each line on its own, so
 `^` and `$` mark the start and end of a line. Start the pattern with `(?i)`
-to ignore case. Only the first million characters of
-the output are searched, so longer output never meets "does not match".
+to ignore case. Output longer than a million characters
+is not searched and never meets the condition, in either mode.
 
 The step polls every Poll Interval (sec), 10 by default. Stable For (polls)
 asks for that many polls in a row that meet the condition, so a value that
