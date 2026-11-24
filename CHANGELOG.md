@@ -1,3 +1,10 @@
+## [0.54.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.54.0...v0.54.1) (2026-11-24)
+
+### Bug Fixes
+
+* **netcli:** leave skipped commands out of the live log ([1be556f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/1be556f71a060a686efb1ce165a160f9094aadc5))
+* **netcli:** log each command in the live view, even with no output ([fb02a53](https://github.com/hegemony-sh/hegemony-step-plugins/commit/fb02a53c1fc76739acd0b39368c11a8484648aa0))
+
 ## [0.54.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.53.1...v0.54.0) (2026-11-24)
 
 ### Features
