@@ -1,3 +1,27 @@
+## [0.54.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.53.1...v0.54.0) (2026-11-24)
+
+### Features
+
+* **netconf:** add the netconf steps: get, edit_config, commit, cancel_commit, rpc ([427f799](https://github.com/hegemony-sh/hegemony-step-plugins/commit/427f799e067db819a94cdc6a8865976f3a3afc07))
+* **sdk:** add open_netconf and the NetconfChannel protocol ([ef35907](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ef35907e48bae44819562330e136889204638a7e))
+
+### Bug Fixes
+
+* **netconf:** check for a pending commit only on a retry, and add to it ([8364c62](https://github.com/hegemony-sh/hegemony-step-plugins/commit/8364c62a09c7d8f0df1e8db2443b46cdb2f826c0))
+* **netconf:** compare what values mean, decode inherited namespaces, keep ids on any lost reply ([20927bc](https://github.com/hegemony-sh/hegemony-step-plugins/commit/20927bcdcf2863c231353538e2957374da193cf3))
+* **netconf:** fail closed on prefixed values, unclear refusals and channel errors ([58aeb71](https://github.com/hegemony-sh/hegemony-step-plugins/commit/58aeb718d53229d23feca69b2aa08e6f8c05311d))
+* **netconf:** keep a pending commit findable on retry, and confirm only what is pending ([6de829a](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6de829af9b1375287d05cf5cb123652f89c2e226))
+* **netconf:** keep inherited namespaces, save under the lock, match devices by id ([580f44f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/580f44f082cb6f264a53e7e7138d67e0fb9c4d92))
+* **netconf:** read non-ASCII prefixes on the enclosing reply tags ([d34dfdb](https://github.com/hegemony-sh/hegemony-step-plugins/commit/d34dfdbc84eb139807ba8445cf773d83a93aa2c4))
+* **netconf:** read only real namespace declarations, keep mixed whitespace ([bc0290f](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bc0290ff3b3f328d0fddd4ee27480ccf954bcbd6))
+* **netconf:** read only the reply's own <data> child ([ce921df](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ce921df865c09cd325e172431677eff2138fd9c0))
+* **netconf:** recover a pending commit before locking running ([ef4858d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/ef4858d1354900e1078d600c35f38228910e7deb))
+* **netconf:** recover and save on retries, fail closed on more value shapes ([557f196](https://github.com/hegemony-sh/hegemony-step-plugins/commit/557f196596b7c87cea352516352452734729abe3))
+* **netconf:** say why the device closed the session when the host knows ([718aea8](https://github.com/hegemony-sh/hegemony-step-plugins/commit/718aea848ca7dadc1fa88c9561a5803c3f74d11f))
+* **netconf:** skip quoted '>' in tags, keep same-line whitespace ([a5d42fd](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a5d42fdd118169aeae58cdbfc0614651557eefac))
+* **netconf:** stop using a session after a timeout, and reassemble replies in place ([bda013e](https://github.com/hegemony-sh/hegemony-step-plugins/commit/bda013ed293250669c483ff61e31b6740a0209c5))
+* **netconf:** word the partial-diff note for any partial read, not only a filter ([55cd6bb](https://github.com/hegemony-sh/hegemony-step-plugins/commit/55cd6bb657b46510a6e374ef548856eb97502290))
+
 ## [0.53.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.53.0...v0.53.1) (2026-11-23)
 
 ### Bug Fixes
