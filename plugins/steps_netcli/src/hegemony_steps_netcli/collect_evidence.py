@@ -26,6 +26,8 @@ from hegemony_step_sdk import (
 )
 from hegemony_step_sdk.ssh import SshSecurityConfig, configure_ssh_security
 
+from .transcript import command_transcript, was_skipped
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_COMMAND_TIMEOUT_SECONDS = 30
@@ -217,9 +219,14 @@ class CollectEvidenceHandler(BaseHandler):
                 results = await ssh.execute_commands(commands)
                 for result in results:
                     outcome.texts[result.command] = result.output or ""
-                    if result.output:
-                        # Live view: per-command output into the Logs tab
-                        await ctx.emit_output(result.output, device=device, command=result.command)
+                    # Live view: the command line, then its output, into the
+                    # Logs tab; a command the transport skipped never ran.
+                    if not was_skipped(result):
+                        await ctx.emit_output(
+                            command_transcript(result.command, result.output),
+                            device=device,
+                            command=result.command,
+                        )
                     outcome.evidence.append(
                         {
                             "kind": "cli_output",
