@@ -22,8 +22,13 @@ from hegemony_step_sdk import BaseHandler, StepHandlerRegistry
 
 from .execute import ShellExecuteHandler
 from .file_download import ShellFileDownloadHandler
+from .wait_for import ShellWaitForHandler
 
-ALL_HANDLERS: tuple[type[BaseHandler], ...] = (ShellExecuteHandler, ShellFileDownloadHandler)
+ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
+    ShellExecuteHandler,
+    ShellFileDownloadHandler,
+    ShellWaitForHandler,
+)
 
 
 def register(registry: StepHandlerRegistry) -> None:

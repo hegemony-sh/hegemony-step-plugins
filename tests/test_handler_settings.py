@@ -127,6 +127,7 @@ EXPECTED_RUN_TIMEOUT_FIELDS = {
     "netcli.wait_for": "max_wait_seconds",
     "probe.wait_reachable": "max_wait_seconds",
     "probe.wait_unreachable": "max_wait_seconds",
+    "shell.wait_for": "max_wait_seconds",
     "tf.apply": "timeout_seconds",
     "tf.plan": "timeout_seconds",
 }
