@@ -3,19 +3,20 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Set the unified release version across all workspace packages."""
+"""Set the release version on every package except the SDK, and every SDK pin.
+
+The SDK keeps its own version, which a pull request sets by hand
+(scripts/sdk_version.py); each wheel's SDK requirement follows that version,
+in the form its kind takes (CONVENTIONS.md, "Plugin kinds").
+"""
 
 from __future__ import annotations
 
 import argparse
 import re
 
-from package_paths import (
-    PACKAGE_DIRS,
-    PLUGIN_DIRS,
-    RUNNER_IMAGES,
-    SDK_VERSION_FILE,
-)
+from package_paths import PLUGIN_DIRS, RELEASE_DIRS, RUNNER_IMAGES
+from sdk_version import read_sdk_version, write_pins
 
 SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:[a-zA-Z0-9.+-]+)?$")
 
@@ -38,20 +39,9 @@ def _set_project_version(pyproject, version: str) -> None:
     pyproject.write_text(text, encoding="utf-8")
 
 
-def _set_plugin_sdk_pin(pyproject, version: str) -> None:
-    text = pyproject.read_text(encoding="utf-8")
-    text = _replace(
-        r"hegemony-step-sdk(?:==|>=)[^\",<\]]*(?:,<\d+\.\d+(?:\.\d+)?)?",
-        f"hegemony-step-sdk=={version}",
-        text,
-        path=str(pyproject),
-    )
-    pyproject.write_text(text, encoding="utf-8")
-
-
-#: A dependency on another wheel of this monorepo (a tool handler built on
-#: hegemony-steps-container, say), in a quoted dependency string. They release
-#: in lockstep, so every such constraint (``==``, ``>=``, a range) becomes an
+#: A dependency on another wheel of this monorepo other than the SDK (a tool
+#: handler built on hegemony-steps-container, say), in a quoted dependency
+#: string. They release in lockstep, so every such constraint (``==``, ``>=``, a range) becomes an
 #: exact pin on the version; an environment marker after it is kept, and a
 #: pyproject without one is left alone. The constraint is required, so a bare
 #: name (``name = "hegemony-steps-tf"``) and a ``[tool.uv.sources]`` key never
@@ -106,20 +96,11 @@ def main() -> None:
     if not SEMVER.fullmatch(version):
         raise SystemExit(f"Invalid semver release version: {args.version}")
 
-    for package_dir in PACKAGE_DIRS:
+    for package_dir in RELEASE_DIRS:
         _set_project_version(package_dir / "pyproject.toml", version)
     for plugin_dir in PLUGIN_DIRS:
-        _set_plugin_sdk_pin(plugin_dir / "pyproject.toml", version)
         _set_sibling_pins(plugin_dir / "pyproject.toml", version)
-
-    text = SDK_VERSION_FILE.read_text(encoding="utf-8")
-    text = _replace(
-        r'^__version__ = "[^"]+"$',
-        f'__version__ = "{version}"',
-        text,
-        path=str(SDK_VERSION_FILE),
-    )
-    SDK_VERSION_FILE.write_text(text, encoding="utf-8")
+    write_pins(read_sdk_version())
 
     _set_runner_image_tags(version)
 

@@ -7,6 +7,9 @@
 
 Pins the public API plugin authors rely on; the host keeps a mirror parity
 test so the duck-typed platform registry and this SDK stay in lock-step.
+The whole public surface is also recorded in packages/step_sdk/api-surface.json,
+and scripts/sdk_version.py makes a change to it bump the SDK's own version
+(tests/test_sdk_version.py).
 """
 
 import asyncio
@@ -62,6 +65,8 @@ def test_entry_point_group_and_abi():
     assert sdk.STEP_HANDLER_ENTRY_POINT_GROUP == "hegemony.step_handlers"
     assert sdk.PROBE_ENTRY_POINT_GROUP == "hegemony.probes"
     assert sdk.SDK_ABI_VERSION == 1
+    # The SDK's major version is its ABI version: an incompatible change moves both.
+    assert sdk.__version__.split(".")[0] == str(sdk.SDK_ABI_VERSION)
 
 
 def test_handler_services_declares_run_probe():

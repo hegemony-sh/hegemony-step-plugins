@@ -35,9 +35,34 @@ PACKAGE_DIRS = (
     ROOT / "transports" / "transport_asyncssh",
 )
 
-# Everything except the SDK (index 0) pins hegemony-step-sdk and is version-locked to it.
+# Two version streams (CONTRIBUTING.md, "The SDK's own version"):
+#
+# - The SDK (index 0) has its own version, set by hand in the pull request that
+#   changes it (scripts/sdk_version.py); semantic-release never touches it.
+# - Every other package carries the release version, the tag vX.Y.Z.
+SDK_DIR = PACKAGE_DIRS[0]
+SDK_PYPROJECT = SDK_DIR / "pyproject.toml"
+SDK_VERSION_FILE = SDK_DIR / "src" / "hegemony_step_sdk" / "_version.py"
+#: The SDK's public surface as scripts/sdk_version.py records it; the diff of
+#: this file is how a reviewer sees a contract change.
+SDK_SURFACE_FILE = SDK_DIR / "api-surface.json"
+
+# Everything except the SDK depends on hegemony-step-sdk and carries the
+# release version.
 PLUGIN_DIRS = PACKAGE_DIRS[1:]
-SDK_VERSION_FILE = ROOT / "packages" / "step_sdk" / "src" / "hegemony_step_sdk" / "_version.py"
+RELEASE_DIRS = PLUGIN_DIRS
+
+#: Wheels that pin the SDK exactly (``==<SDK version>``): the device transports,
+#: whose interface has no stability promise, and the internal code they share.
+SDK_EXACT_PIN_DIRS = tuple(
+    path
+    for path in PLUGIN_DIRS
+    if path.parent.name == "transports" or path.name == "transport_support"
+)
+#: Wheels that accept the SDK's current minor and every later release of its
+#: major (``>=X.Y,<X+1``): step handlers and probes, which use only the
+#: additions-only contract.
+SDK_RANGE_PIN_DIRS = tuple(path for path in PLUGIN_DIRS if path not in SDK_EXACT_PIN_DIRS)
 
 # The steps' default execution images. The Images workflow publishes each from
 # images/<name> for every release tag vX.Y.Z as X.Y.Z and X.Y; the steps name

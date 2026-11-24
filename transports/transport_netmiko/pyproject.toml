@@ -12,7 +12,7 @@ license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==0.55.0",
+    "hegemony-step-sdk==1.0.0",
     "hegemony-transport-support==0.55.0",
     "netmiko>=4.3.0",
     "paramiko>=5.1.0",
