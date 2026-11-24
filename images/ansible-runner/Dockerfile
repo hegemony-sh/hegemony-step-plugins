@@ -17,7 +17,7 @@
 # release tag vX.Y.Z as ghcr.io/hegemony-sh/ansible-runner:X.Y.Z and :X.Y. The
 # step's default names X.Y (DEFAULT_IMAGE in
 # plugins/steps_ansible/src/hegemony_steps_ansible/playbook.py), currently
-# ghcr.io/hegemony-sh/ansible-runner:0.54. That tag names a plugin release, not
+# ghcr.io/hegemony-sh/ansible-runner:0.55. That tag names a plugin release, not
 # the ansible-core inside: the image's sh.hegemony.ansible-core.version label
 # names it, and so does every run (the step's ansible_version output). A patch
 # release of the plugins stays on ansible-core 2.19; another series needs a

@@ -1,3 +1,13 @@
+## [0.55.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.54.1...v0.55.0) (2026-11-24)
+
+### Features
+
+* **netconf:** confirm past the committing session's lock; live log ([66e11e4](https://github.com/hegemony-sh/hegemony-step-plugins/commit/66e11e4d68475ef1853bc603085f9aab97c7580a))
+
+### Bug Fixes
+
+* **netconf:** say which phase timed out when a session is slow to open ([2dd6e02](https://github.com/hegemony-sh/hegemony-step-plugins/commit/2dd6e024ef4573ca6e4c999dc39801494ecf0c7b))
+
 ## [0.54.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.54.0...v0.54.1) (2026-11-24)
 
 ### Bug Fixes
