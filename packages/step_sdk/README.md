@@ -103,6 +103,26 @@ sending notifications, writing secrets, syncing inventory) declares
 `central_only = True`. Such a step always runs on a worker inside the
 platform's network, never on one in a remote zone.
 
+**Device transports are internal.** The stable plugin contract is handlers
+and `HandlerServices`. The device-transport interface
+(`hegemony_step_sdk.transports`) is not part of it. It is for the transports
+in this repository only (netmiko, scrapli and asyncssh), it has no stability
+promise, and it may change in any release. A device transport from another
+party is not supported. This covers the `hegemony.device_transports`
+entry-point group, `TransportRegistry`, `DeviceConnectionSpec`,
+`HostKeyVerifier`, `HostKeyRejectedError`, `SshAlgorithmRecorder`,
+`ConnectionCancellationRegistry`, `TransportOutputSink` and the `supports_*`
+class flags. The reason: a transport is handed resolved passwords and keys
+and enforces the SSH host-key and algorithm rules, so it is platform code.
+The paragraphs below on host keys and SSH algorithms describe this interface
+for people who work on the built-in transports.
+
+A handler is not affected. `ctx.services.connect(...)` and the `Transport`
+session it returns are part of the stable contract. So are
+`ctx.services.resolve_device_credentials(...)`, the `DeviceCredentials` it
+returns, and the `JumpHostSpec` in its `jump_host` field; these change by
+additions only.
+
 Every device transport must support SSH host-key checking: it sets
 `supports_host_key_verifier = True` and takes a `host_key_verifier`
 (`HostKeyVerifier`) at construction. The Hegemony worker refuses to connect
