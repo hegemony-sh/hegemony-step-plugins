@@ -77,7 +77,9 @@ Commit:
   step still applies the change and diffs it, reports the device as pending
   when the diff is empty, and otherwise adds the change to that commit with
   another follow-up confirmed commit, so confirming or cancelling settles
-  both. Any other answer, or none, keeps the id as `commit_uncertain`.
+  both. Any other answer, or none, keeps the id as `commit_uncertain`, and
+  so does a candidate the retry cannot lock (IOS XE keeps it locked for the
+  session that made a pending commit).
 - **Commit directly**: a plain commit.
 
 On running (a device without a candidate, or Datastore running) the change
@@ -109,7 +111,8 @@ that changed adds `cli_output` evidence: `<device>:netconf diff`,
   commit waits for `netconf.commit`), `persist_id`, `validated`, `saved`
   (`copy-config` or `save-config` when saved), `save_error`,
   `save_requested` (saved by `netconf.commit`), `commit_uncertain`,
-  `device_id`, `diff` and `notes`. When saving fails after the commit, the device fails with
+  `commit_session_id` (the NETCONF session that made a pending commit;
+  `netconf.commit` uses it), `device_id`, `diff` and `notes`. When saving fails after the commit, the device fails with
   `committed` true and `save_error` set: the change stands, unsaved.
 - `steps.NODE_ID.output.truncated`: diffs cut short in the output (16 KiB a
   device, 64 KiB the step); the evidence keeps them whole.

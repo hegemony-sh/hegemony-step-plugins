@@ -59,7 +59,8 @@ CHANGE_OUTPUT_FIELDS = (
         "Each device's result by name: ok, error, datastore, changed, committed, pending, "
         "persist_id, validated, saved, save_error, save_requested (saved when confirmed), "
         "commit_uncertain (a confirmed commit got no reply; it may be pending under "
-        "persist_id), device_id, diff and notes",
+        "persist_id), commit_session_id (the NETCONF session that made a pending "
+        "commit), device_id, diff and notes",
         "object",
     ),
     OutputField("truncated", "Output texts cut short, as device.key", "list"),
@@ -216,6 +217,7 @@ def change_output(result: ChangeResult) -> dict[str, Any]:
         "committed": result.committed,
         "pending": result.pending,
         "persist_id": result.persist_id,
+        "commit_session_id": result.session_id,
         "validated": result.validated,
         "saved": result.saved,
         "save_error": result.save_error,
@@ -236,6 +238,7 @@ def uncertain_output(exc: CommitUncertain, *, save_requested: bool = False) -> d
         "commit_uncertain": True,
         "pending": False,
         "persist_id": exc.persist_id,
+        "commit_session_id": exc.session_id,
     }
     if save_requested:
         output["save_requested"] = True

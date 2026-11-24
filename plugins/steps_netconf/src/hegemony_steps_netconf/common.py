@@ -26,7 +26,19 @@ from hegemony_step_sdk import (
     for_each_target_device,
 )
 
-from .client import NetconfError, NetconfSession, RpcFailed
+from .client import (
+    CAP_BASE_11,
+    CAP_CANDIDATE,
+    CAP_CONFIRMED_10,
+    CAP_CONFIRMED_11,
+    CAP_ROLLBACK_ON_ERROR,
+    CAP_STARTUP,
+    CAP_VALIDATE_10,
+    CAP_VALIDATE_11,
+    NetconfError,
+    NetconfSession,
+    RpcFailed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,28 +134,63 @@ async def netconf_session(
     }
     if config.allow_legacy_ssh:
         kwargs["allow_legacy_ssh"] = True
+
+    async def log(line: str) -> None:
+        # The Logs tab's live view, as netcli steps give: one line per
+        # request and its outcome, never the configuration sent or read.
+        await ctx.emit_output(line + "\n", device=device, command="netconf")
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await log(f"opening a NETCONF session on port {config.port}")
     try:
         channel = await open_netconf(device, **kwargs)
     except NotImplementedError:
         raise SessionUnavailable("this platform cannot open NETCONF sessions") from None
     except TimeoutError as exc:
+        await log(f"no NETCONF session within {config.connect_timeout_seconds} s")
         # The host's time-out carries no text of its own; say which phase it was.
         raise NetconfError(
             f"opening the NETCONF session (port {config.port}) took longer than "
             f"{config.connect_timeout_seconds} s; raise Connect Timeout for a device "
             "that is slow to start NETCONF sessions"
         ) from exc
-    session = NetconfSession(channel, timeout=float(config.rpc_timeout_seconds))
+    except Exception as exc:
+        await log(f"opening the NETCONF session failed: {exc or type(exc).__name__}")
+        raise
+    session = NetconfSession(channel, timeout=float(config.rpc_timeout_seconds), log=log)
     try:
         try:
             await asyncio.wait_for(session.hello(), timeout=config.connect_timeout_seconds)
         except TimeoutError:
+            await log(f"no NETCONF hello within {config.connect_timeout_seconds} s")
             raise NetconfError(
                 f"no NETCONF hello within {config.connect_timeout_seconds} s"
             ) from None
+        await log(
+            f"NETCONF session {session.session_id or '?'} open after "
+            f"{loop.time() - started:.1f} s ({_capability_summary(session)})"
+        )
         yield session
     finally:
         await session.close()
+        await log(f"NETCONF session {session.session_id or '?'} closed")
+
+
+def _capability_summary(session: NetconfSession) -> str:
+    """The capabilities that decide what the steps can do, by short name."""
+    names = [
+        (CAP_BASE_11, "base:1.1"),
+        (CAP_CANDIDATE, ":candidate"),
+        (CAP_CONFIRMED_11, ":confirmed-commit:1.1"),
+        (CAP_CONFIRMED_10, ":confirmed-commit:1.0"),
+        (CAP_VALIDATE_11, ":validate:1.1"),
+        (CAP_VALIDATE_10, ":validate:1.0"),
+        (CAP_STARTUP, ":startup"),
+        (CAP_ROLLBACK_ON_ERROR, ":rollback-on-error"),
+    ]
+    found = [short for uri, short in names if session.supports(uri)]
+    return ", ".join(found) or "base:1.0 only"
 
 
 def persist_id_for(ctx: HandlerContext, device: dict[str, Any]) -> str:

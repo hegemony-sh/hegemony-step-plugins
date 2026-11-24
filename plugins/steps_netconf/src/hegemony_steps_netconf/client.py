@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import html
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 from xml.dom import minidom
@@ -461,9 +462,18 @@ def filter_xml(filter_type: str, value: str, namespaces: dict[str, str] | None =
 class NetconfSession:
     """One NETCONF session on a host-opened byte channel."""
 
-    def __init__(self, channel: Any, *, timeout: float = 60.0) -> None:
+    def __init__(
+        self,
+        channel: Any,
+        *,
+        timeout: float = 60.0,
+        log: Callable[[str], Awaitable[object]] | None = None,
+    ) -> None:
         self._channel = channel
         self.timeout = timeout
+        #: Receives one line per request and its outcome (operation names
+        #: and rpc-errors, never request or reply data), for the live log.
+        self._log = log
         self.capabilities: frozenset[str] = frozenset()
         self.session_id = ""
         self._chunked = False
@@ -587,7 +597,28 @@ class NetconfSession:
         self._chunked = self.supports(CAP_BASE_11)
         self._negotiated = True
 
+    async def note(self, line: str) -> None:
+        """Send one line to the live log (best effort: it never fails the step)."""
+        if self._log is None:
+            return
+        with contextlib.suppress(Exception):
+            await self._log(line)
+
     async def rpc(self, body: str, *, operation: str = "", timeout: float | None = None) -> Reply:
+        """Send ``<rpc>body</rpc>``, return its reply, and log the outcome."""
+        name = operation or _operation_name(body)
+        started = asyncio.get_running_loop().time()
+        try:
+            reply = await self._rpc(body, name, timeout)
+        except BaseException as exc:
+            await self.note(f"{name}: {exc or type(exc).__name__}")
+            raise
+        elapsed = asyncio.get_running_loop().time() - started
+        warned = f", {len(reply.warnings)} warning(s)" if reply.warnings else ""
+        await self.note(f"{name}: ok ({elapsed * 1000:.0f} ms{warned})")
+        return reply
+
+    async def _rpc(self, body: str, name: str, timeout: float | None) -> Reply:
         """Send ``<rpc>body</rpc>`` and return its reply.
 
         Raises:
@@ -598,7 +629,6 @@ class NetconfSession:
             NetconfError: a closed session, broken framing, or a reply that
                 is not one.
         """
-        name = operation or _operation_name(body)
         if self._broken:
             raise NetconfError(f"{name}: the NETCONF session is unusable ({self._broken})")
         self._message_id += 1

@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import difflib
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -73,6 +74,11 @@ class ChangeResult:
     committed: bool = False
     pending: bool = False
     persist_id: str = ""
+    #: The NETCONF session id of the session that made the pending commit
+    #: ("" when unknown). IOS XE keeps the datastores locked for that session
+    #: while the commit is pending; netconf.commit uses it to tell that lock
+    #: from another session's.
+    session_id: str = ""
     validated: bool = False
     saved: str = ""
     #: Why saving to startup failed after the change was made ("" if it did not).
@@ -95,11 +101,28 @@ class CommitUncertain(NetconfError):
 
     ``persist_id`` lets a netconf.commit or netconf.cancel_commit step settle
     it anyway (the device refuses the id when nothing is pending).
+    ``session_id`` is the session that sent the commit, when this step sent it.
     """
 
-    def __init__(self, message: str, persist_id: str) -> None:
+    def __init__(self, message: str, persist_id: str, session_id: str = "") -> None:
         super().__init__(message)
         self.persist_id = persist_id
+        self.session_id = session_id
+
+
+def lock_holder(exc: RpcFailed) -> str:
+    """The session id a lock refusal names as the holder ("" when it names none).
+
+    RFC 6241 puts it in error-info (``session-id``); IOS XE also says it in
+    the message ("locked by session 54").
+    """
+    for error in exc.errors:
+        match = re.search(r"\bsession-id=(\d+)", error.info) or re.search(
+            r"\bsession(?:[- ]id)?\s+(\d+)\b", error.message, re.IGNORECASE
+        )
+        if match:
+            return match.group(1)
+    return ""
 
 
 def unified_diff(before: str, after: str, *, before_name: str, after_name: str) -> str:
@@ -174,7 +197,18 @@ async def change_candidate(
             # A device refuses to lock running while a confirmed commit is
             # pending (RFC 6241 7.5), so the check comes first, under the
             # candidate lock; running is locked only when nothing is pending.
-            await session.lock("candidate")
+            try:
+                await session.lock("candidate")
+            except RpcFailed as exc:
+                # Another session holds the candidate, or (IOS XE) the device
+                # keeps it locked for the session that made an earlier
+                # attempt's pending commit: that commit may be pending, so the
+                # id is kept for a settle step.
+                raise CommitUncertain(
+                    f"{exc}; a commit from an earlier attempt may be pending under persist id "
+                    f"{persist_id}: confirm or cancel it, or let it roll back",
+                    persist_id,
+                ) from exc
             locked.append("candidate")
             await session.discard_changes()
             earlier_pending = await _still_pending(session, options, result, persist_id)
@@ -359,8 +393,10 @@ async def _commit(
                 f"{result.persist_id}: confirm or cancel it, or let it roll back after "
                 f"{timeout} s",
                 result.persist_id,
+                session.session_id,
             ) from None
         result.pending = True
+        result.session_id = session.session_id
         if follow_up:
             result.notes.append(
                 "an earlier attempt of this step left a commit pending under the same persist "
