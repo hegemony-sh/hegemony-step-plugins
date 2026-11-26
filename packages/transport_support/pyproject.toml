@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-transport-support"
-version = "0.57.0"
+version = "0.57.1"
 description = "Internal code shared by Hegemony's built-in device transports (no stability promise)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

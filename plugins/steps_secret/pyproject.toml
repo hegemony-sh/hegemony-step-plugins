@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-steps-secret"
-version = "0.57.0"
+version = "0.57.1"
 description = "Secret-store step handlers for Hegemony (write, swap and delete a secret)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
