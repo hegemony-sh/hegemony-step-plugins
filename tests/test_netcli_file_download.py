@@ -36,6 +36,8 @@ NO_LOCATION = {
     "content_type": None,
     "sha512": None,
     "metadata": {},
+    "tags": {},
+    "attributes": {},
     "file": None,
 }
 
@@ -125,6 +127,8 @@ class FakeServices:
                     "content_type": "application/octet-stream",
                     "sha512": "ef" * 64,
                     "metadata": {"version": "17.09.05"},
+                    "tags": {"stage": "golden"},
+                    "attributes": {"version": "17.09.05"},
                 }
             )
         self.events.append(f"open:{number}")
@@ -596,6 +600,8 @@ async def test_a_file_named_by_repository_and_path_is_downloaded_and_reported(fi
         "content_type": "application/octet-stream",
         "sha512": "ef" * 64,
         "metadata": {"version": "17.09.05"},
+        "tags": {"stage": "golden"},
+        "attributes": {"version": "17.09.05"},
         # A later step takes it as its own file: {{ steps.stage.output.file }}.
         "file": REF,
     }
@@ -749,3 +755,25 @@ def test_the_docs_page_names_every_declared_output_field():
     for field in FileDownloadHandler.output_fields:
         assert f"output.{field.name}`" in text, field.name
         assert field.description and field.type, field.name
+
+
+def test_a_host_before_tags_reports_its_metadata_as_the_attributes():
+    """A host older than SDK 1.1 sends no tags or attributes; its metadata is
+    the attributes, so the output still carries them under both names."""
+    from types import SimpleNamespace
+    from typing import cast
+
+    from hegemony_steps_netcli.file_download import _file_details
+
+    older = SimpleNamespace(
+        file_id=FILE_ID,
+        filename=FILENAME,
+        size_bytes=1,
+        sha256="ab" * 32,
+        md5=None,
+        metadata={"version": "17.06.01"},
+    )
+    details = _file_details(cast(Any, older))
+    assert details["tags"] == {}
+    assert details["attributes"] == {"version": "17.06.01"}
+    assert details["metadata"] == {"version": "17.06.01"}
