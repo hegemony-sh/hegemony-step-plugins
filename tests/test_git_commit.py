@@ -157,7 +157,11 @@ def test_a_written_out_scheme_other_than_https_is_refused_even_in_a_template():
     ("extra", "message"),
     [
         ({"repository_url": "http://git.example.com/x.git"}, "must be an https:// URL"),
-        ({"repository_url": "{{ not rendered }}"}, "must be an https:// URL"),
+        ({"repository_url": "{{ not rendered }}"}, "still contains a template"),
+        (
+            {"repository_url": "https://git.example.com/{{ vars.REPO }}"},
+            "still contains a template",
+        ),
         ({"branch": "{{ not rendered }}"}, "not a valid branch"),
     ],
 )

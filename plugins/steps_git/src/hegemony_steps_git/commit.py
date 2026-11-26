@@ -126,7 +126,11 @@ def url_error(value: str, *, allow_templates: bool = False) -> str | None:
     text = value.strip()
     if not text:
         return "'repository_url' is required"
-    if allow_templates and _is_templated(text):
+    if _is_templated(text):
+        if not allow_templates:
+            # Rendered by now: template markers left anywhere in it (the path
+            # included) mean it was not rendered, and git could not clone it.
+            return "'repository_url' still contains a template; it was not rendered"
         literal = _LITERAL_SCHEME_RE.match(text)
         if literal and literal.group(1).lower() != "https":
             return "'repository_url' must be an https:// URL"
