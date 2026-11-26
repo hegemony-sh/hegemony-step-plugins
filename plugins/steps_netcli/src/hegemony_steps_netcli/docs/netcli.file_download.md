@@ -46,7 +46,7 @@ question mark asks for help). Targets are chosen with the role-based target pick
 For each target, the step asks the platform for a download link, connects to
 the target and has it fetch the link:
 
-- With the netmiko transport (network devices), it runs
+- With the netmiko or scrapli transport (network devices), it runs
   `copy <link> <destination><filename>` and answers the questions the device
   asks before it starts (the destination file name, a confirmation to
   overwrite). This is the Cisco IOS and IOS XE form of the command. A platform
@@ -55,8 +55,6 @@ the target and has it fetch the link:
   that it does not know the command, otherwise when Transfer timeout ends.
 - With the asyncssh transport (servers), it runs `curl` on the server, which
   must have it installed.
-- The scrapli transport cannot do this; the step fails such a device and says
-  to use the netmiko transport.
 
 The link looks like `<platform address>/dl/<token>/<filename>`. It has no
 query string and is not a redirect, because the HTTP clients of network
