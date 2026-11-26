@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-steps-ansible"
-version = "0.57.2"
+version = "0.58.0"
 description = "Ansible playbook step handler for Hegemony (inventory generated from Hegemony's inventory)"
 readme = "README.md"
 license = "AGPL-3.0-or-later AND MIT"
@@ -15,7 +15,7 @@ dependencies = [
     "hegemony-step-sdk>=1.0,<2",
     # Built on container.run's runner: a deployment without container
     # execution cannot install this wheel either.
-    "hegemony-steps-container==0.57.2",
+    "hegemony-steps-container==0.58.0",
 ]
 
 [project.entry-points."hegemony.step_handlers"]
