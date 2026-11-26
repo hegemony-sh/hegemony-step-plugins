@@ -899,6 +899,11 @@ class ScrapliTransport:
                     raise
                 raise refusal from exc
         except BaseException:
+            # scrapli keeps the SSH session it logged in on even when opening
+            # the shell channel then fails; close it, or each retry of a held
+            # session's login would leave one behind.
+            with contextlib.suppress(Exception):
+                connection.transport.close()
             if tunnel is not None:
                 with contextlib.suppress(Exception):
                     tunnel.close()
@@ -1167,14 +1172,13 @@ class ScrapliTransport:
             return []
 
         results: list[ScrapliResult] = []
-        connection = None
+        held = self._held
+        connection = held
+        self._left_waiting = False
 
         try:
-            connection = await self._open_connection()
-
-            # Register connection for cancellation support
-            if self.step_run_id:
-                self._cancellation_registry.register(self.step_run_id, connection)
+            if held is None:
+                connection = await self._login()
 
             if self._is_config_command_set(commands):
                 # Config blocks and exec commands run in the order written.
@@ -1265,12 +1269,64 @@ class ScrapliTransport:
                 for command in commands
             ]
         finally:
-            # Unregister from cancellation registry before disconnect
-            if self.step_run_id and connection:
-                self._cancellation_registry.unregister(self.step_run_id, connection)
-            await _safe_close(connection)
+            if held is None:
+                await self._logout(connection)
+            elif self._left_waiting or self._scrapli_closed or not _session_open(held):
+                # The device closed the held session, or may wait at a
+                # question the next command would answer: the next caller
+                # sees session_open False and opens a new one.
+                await self._drop_held()
 
         return results
+
+    async def _login(self):
+        """Open a connection and register it for cancellation; the connection."""
+        connection = await self._open_connection()
+        # Register connection for cancellation support
+        if self.step_run_id:
+            self._cancellation_registry.register(self.step_run_id, connection)
+        return connection
+
+    async def _logout(self, connection) -> None:
+        """Unregister ``connection`` from cancellation, then close it."""
+        if self.step_run_id and connection:
+            self._cancellation_registry.unregister(self.step_run_id, connection)
+        await _safe_close(connection)
+
+    async def _drop_held(self) -> None:
+        """Close the held session, if any, and forget it."""
+        held, self._held = self._held, None
+        if held is not None:
+            await self._logout(held)
+
+    #: Feature flag: ``open_session`` keeps one login for later
+    #: ``execute_commands`` calls, as ``wait_for`` steps poll on.
+    supports_held_session = True
+    #: The connection ``open_session`` holds; None while none is held.
+    _held: Any = None
+
+    async def open_session(self) -> None:
+        """Log in now and keep the session for later ``execute_commands`` calls.
+
+        Those calls then run on it instead of logging in each time. A session
+        already held is closed first. Raises the login's error when it fails
+        (refused, timed out, authentication, host key).
+        """
+        await self._drop_held()
+        self._held = await self._login()
+
+    @property
+    def session_open(self) -> bool:
+        """Whether a held session exists and the device has not closed it.
+
+        Read from the SSH library's state only; nothing is sent. A session
+        that went silent without closing still counts as open.
+        """
+        return self._held is not None and not self._scrapli_closed and _session_open(self._held)
+
+    async def close_session(self) -> None:
+        """Close the held session, if any (idempotent)."""
+        await self._drop_held()
 
     async def execute_command(self, command: str) -> ScrapliResult:
         """

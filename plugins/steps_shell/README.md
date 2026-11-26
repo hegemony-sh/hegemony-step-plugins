@@ -18,7 +18,9 @@ run-form field (`file: "{{ inputs.package }}"`); the step's output carries a
 reference to it (`{{ steps.<id>.output.file }}`, looked up again by path;
 `output.file_id` names the exact file; on an older platform a download named
 by id has no `output.file`, so pass `output.file_id` through `file_ids`) for
-later steps. The transport (SSH today, WinRM planned) is resolved
+later steps; `shell.wait_for` — run one command again and again, on one
+connection per host, until its output matches (or stops matching) a regular
+expression, for the time after a reboot or an install. The transport (SSH today, WinRM planned) is resolved
 from `device.access_config` via the platform's `open_shell` service; per
 CONVENTIONS.md, neither transport nor interpreter ever appears in handler ids.
 

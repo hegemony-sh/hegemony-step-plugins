@@ -206,16 +206,31 @@ async def _close_connection(connection) -> None:
     """
     if not connection:
         return
-    with contextlib.suppress(Exception):
-        connection.close()
-    with contextlib.suppress(Exception):
-        await connection.wait_closed()
     tunnel = getattr(connection, _JUMP_TUNNEL_ATTR, None)
-    if tunnel is not None:
+    try:
         with contextlib.suppress(Exception):
-            tunnel.close()
+            connection.close()
         with contextlib.suppress(Exception):
-            await tunnel.wait_closed()
+            await connection.wait_closed()
+    finally:
+        # Also when the wait above is cancelled: asyncssh does not close a
+        # connection given as tunnel=, so the bastion would stay open.
+        if tunnel is not None:
+            with contextlib.suppress(Exception):
+                tunnel.close()
+            with contextlib.suppress(Exception):
+                await tunnel.wait_closed()
+
+
+def _connection_open(connection: Any) -> bool:
+    """Whether asyncssh still counts ``connection`` open; a check that cannot run proves nothing."""
+    is_closed = getattr(connection, "is_closed", None)
+    if not callable(is_closed):
+        return True
+    try:
+        return is_closed() is not True
+    except Exception:  # noqa: BLE001 - a check that cannot run proves nothing
+        return True
 
 
 def _next_prompt(
@@ -640,13 +655,11 @@ class AsyncSSHTransport:
             return []
 
         results: list[ExecResult] = []
-        connection = None
+        held = self._held
+        connection = held
         try:
-            connection = await self._connect()
-
-            # Register connection for cancellation support
-            if self.step_run_id:
-                self._cancellation_registry.register(self.step_run_id, connection)
+            if held is None:
+                connection = await self._login()
 
             config_session = _is_config_session(commands)
             skip_reason: str | None = None
@@ -734,11 +747,64 @@ class AsyncSSHTransport:
                 for command in commands
             ]
         finally:
-            if self.step_run_id and connection:
-                self._cancellation_registry.unregister(self.step_run_id, connection)
-            await _close_connection(connection)
+            if held is None:
+                await self._logout(connection)
+            elif not _connection_open(held):
+                # The device closed the held connection: the next caller
+                # sees session_open False and opens a new one.
+                await self._drop_held()
 
         return results
+
+    async def _login(self):
+        """Connect and register the connection for cancellation; the connection."""
+        connection = await self._connect()
+        # Register connection for cancellation support
+        if self.step_run_id:
+            self._cancellation_registry.register(self.step_run_id, connection)
+        return connection
+
+    async def _logout(self, connection) -> None:
+        """Unregister ``connection`` from cancellation, then close it."""
+        if self.step_run_id and connection:
+            self._cancellation_registry.unregister(self.step_run_id, connection)
+        await _close_connection(connection)
+
+    async def _drop_held(self) -> None:
+        """Close the held connection, if any, and forget it."""
+        held, self._held = self._held, None
+        if held is not None:
+            await self._logout(held)
+
+    #: Feature flag: ``open_session`` keeps one login for later
+    #: ``execute_commands`` calls, as ``wait_for`` steps poll on.
+    supports_held_session = True
+    #: The connection ``open_session`` holds; None while none is held.
+    _held: Any = None
+
+    async def open_session(self) -> None:
+        """Log in now and keep the connection for later ``execute_commands`` calls.
+
+        Those calls then open their exec channels on it instead of logging in
+        each time. A connection already held is closed first. Raises the
+        login's error when it fails (refused, timed out, authentication, host
+        key).
+        """
+        await self._drop_held()
+        self._held = await self._login()
+
+    @property
+    def session_open(self) -> bool:
+        """Whether a held connection exists and has not closed.
+
+        Read from asyncssh's state only; nothing is sent. A connection that
+        went silent without closing still counts as open.
+        """
+        return self._held is not None and _connection_open(self._held)
+
+    async def close_session(self) -> None:
+        """Close the held connection, if any (idempotent)."""
+        await self._drop_held()
 
     async def execute_command(self, command: str) -> ExecResult:
         """
