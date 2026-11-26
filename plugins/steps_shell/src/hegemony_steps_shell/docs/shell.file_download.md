@@ -121,9 +121,12 @@ Later steps can read:
   `steps.NODE_ID.output.folder`: the file repository's name, the file's path in
   it (folder and file name) and its folder (empty for the repository root).
   `steps.NODE_ID.output.repository_id` is the repository's id.
-- `steps.NODE_ID.output.content_type`, `steps.NODE_ID.output.sha512` and
-  `steps.NODE_ID.output.metadata`: the stored file's content type, SHA-512
-  (null for a file stored without one) and the metadata stored with it.
+- `steps.NODE_ID.output.content_type` and `steps.NODE_ID.output.sha512`: the
+  stored file's content type and SHA-512 (null for a file stored without one).
+- `steps.NODE_ID.output.tags` and `steps.NODE_ID.output.attributes`: the
+  file's `key=value` tags and its attributes, as the file repository holds
+  them (for example `{{ steps.NODE_ID.output.tags.stage }}`).
+  `steps.NODE_ID.output.metadata` is the attributes under their older name.
 - `steps.NODE_ID.output.file`: a file reference to the same file
   (`{"repository": ..., "path": ...}`). Another download step takes it as
   its **File**: `{{ steps.NODE_ID.output.file }}`. The next step looks the

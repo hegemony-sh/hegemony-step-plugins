@@ -210,6 +210,12 @@ def _file_details(download: FileDownload) -> dict[str, Any]:
         "content_type": getattr(download, "content_type", None),
         "sha512": getattr(download, "sha512", None),
         "metadata": dict(getattr(download, "metadata", None) or {}),
+        # SDK 1.1. A host older than them leaves them empty; its metadata is
+        # the attributes then.
+        "tags": dict(getattr(download, "tags", None) or {}),
+        "attributes": dict(
+            getattr(download, "attributes", None) or getattr(download, "metadata", None) or {}
+        ),
     }
 
 
@@ -239,6 +245,8 @@ def _file_output(file_info: dict[str, Any], ref: FileRef | None) -> dict[str, An
         "content_type": file_info.get("content_type"),
         "sha512": file_info.get("sha512"),
         "metadata": file_info.get("metadata") or {},
+        "tags": file_info.get("tags") or {},
+        "attributes": file_info.get("attributes") or {},
         "file": {"repository": repository, "path": path} if repository and path else None,
     }
 
@@ -265,7 +273,9 @@ _OUTPUT_FIELDS = (
     OutputField("md5", "MD5 of the stored file (null if not stored)", "string"),
     OutputField("sha512", "SHA-512 of the stored file (null if not stored)", "string"),
     OutputField("content_type", "Content type of the stored file", "string"),
-    OutputField("metadata", "Metadata stored with the file", "object"),
+    OutputField("metadata", "Attributes of the file (the older name of attributes)", "object"),
+    OutputField("tags", "Key=value tags of the file", "object"),
+    OutputField("attributes", "Attributes of the file", "object"),
     OutputField("transferred_count", "Devices that completed the download", "int"),
     OutputField("repository", "Name of the file repository", "string"),
     OutputField("repository_id", "Id of the file repository", "string"),
