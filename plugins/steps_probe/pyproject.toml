@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-steps-probe"
-version = "0.57.1"
+version = "0.57.2"
 description = "Probe step handlers (reachability, DNS, HTTP, TLS, read-only SNMP) for Hegemony"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

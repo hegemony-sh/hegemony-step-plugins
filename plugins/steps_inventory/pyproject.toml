@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-steps-inventory"
-version = "0.57.1"
+version = "0.57.2"
 description = "Inventory step handlers for Hegemony (sync an inventory provider from a flow)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

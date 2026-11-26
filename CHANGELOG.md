@@ -1,3 +1,9 @@
+## [0.57.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.57.1...v0.57.2) (2026-11-26)
+
+### Bug Fixes
+
+* **transport-scrapli:** keep the transport read timeout at least the command timeout ([708ac77](https://github.com/hegemony-sh/hegemony-step-plugins/commit/708ac77ea577bf93f1c0c0996bb8271455f8718c))
+
 ## [0.57.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.57.0...v0.57.1) (2026-11-26)
 
 ### Bug Fixes
