@@ -17,7 +17,11 @@ nothing new adds no commit.
 ## Using It
 
 Repository URL is the repository's `https://` clone URL, without a login.
-Branch (default `main`) is where the step commits. A branch that does not
+It may be a template such as `{{ vars.CONFIG_BACKUP_REPO_URL }}`: saving the
+flow accepts it, and the step checks the rendered URL before it runs (a
+scheme other than `https` written out in the template is refused on save).
+The branch may be a template too. Branch (default `main`) is where the step
+commits. A branch that does not
 exist fails the step unless Create the branch is on; it then starts empty,
 holding only this step's files, which is what the first backup into an
 empty repository needs.
