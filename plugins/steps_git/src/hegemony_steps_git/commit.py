@@ -102,6 +102,12 @@ _UNSAFE_CHAR_RE = re.compile(r"[^A-Za-z0-9._-]+")
 #: A branch name git accepts, kept to a safe subset (git check-ref-format).
 _BRANCH_RE = re.compile(r"^(?!/)(?!.*//)(?!.*\.\.)(?!.*@\{)[A-Za-z0-9._/-]+(?<![/.])$")
 _TEMPLATE_RE = re.compile(r"\{\{|\{%")
+#: A scheme written out before any template, as in ``http://{{ host }}/x.git``.
+_LITERAL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*)://")
+
+
+def _is_templated(value: str) -> bool:
+    return bool(_TEMPLATE_RE.search(value))
 
 
 def _is_secret_ref(value: str) -> bool:
@@ -109,11 +115,26 @@ def _is_secret_ref(value: str) -> bool:
     return is_bare_secret_ref(text) or bool(_TEMPLATE_RE.search(text))
 
 
-def url_error(value: str) -> str | None:
-    """Why ``value`` cannot be the repository URL, or None."""
+def url_error(value: str, *, allow_templates: bool = False) -> str | None:
+    """Why ``value`` cannot be the repository URL, or None.
+
+    With ``allow_templates`` (saving a flow), a URL that is still a template,
+    such as ``{{ vars.REPO_URL }}``, is accepted unless a scheme other than
+    https is written out in it: the step checks the rendered URL in full
+    before it runs.
+    """
     text = value.strip()
     if not text:
         return "'repository_url' is required"
+    if _is_templated(text):
+        if not allow_templates:
+            # Rendered by now: template markers left anywhere in it (the path
+            # included) mean it was not rendered, and git could not clone it.
+            return "'repository_url' still contains a template; it was not rendered"
+        literal = _LITERAL_SCHEME_RE.match(text)
+        if literal and literal.group(1).lower() != "https":
+            return "'repository_url' must be an https:// URL"
+        return None
     try:
         parts = urlsplit(text)
     except ValueError:
@@ -134,9 +155,15 @@ def url_error(value: str) -> str | None:
     return None
 
 
-def branch_error(value: str) -> str | None:
-    """Why ``value`` cannot be the branch, or None."""
+def branch_error(value: str, *, allow_templates: bool = False) -> str | None:
+    """Why ``value`` cannot be the branch, or None.
+
+    With ``allow_templates`` (saving a flow), a templated branch is checked
+    once rendered, when the step runs.
+    """
     text = value.strip()
+    if allow_templates and _is_templated(text):
+        return None
     if text.startswith("refs/"):
         return "'branch' is a branch name such as main, not a ref"
     if (
@@ -321,13 +348,18 @@ class GitCommitConfig(ContainerExecutionConfig):
         return value
 
 
-def config_errors(config: GitCommitConfig) -> list[str]:
-    """Checks across fields that the model's own validators cannot make."""
+def config_errors(config: GitCommitConfig, *, allow_templates: bool = False) -> list[str]:
+    """Checks across fields that the model's own validators cannot make.
+
+    ``allow_templates`` is for saving a flow, when the repository URL and
+    branch may still be templates; the step runs these checks again on the
+    rendered values before it commits anything.
+    """
     errors = [
         error
         for error in (
-            url_error(config.repository_url),
-            branch_error(config.branch),
+            url_error(config.repository_url, allow_templates=allow_templates),
+            branch_error(config.branch, allow_templates=allow_templates),
             path_template_error(config.path_template),
         )
         if error
@@ -799,13 +831,18 @@ class GitCommitHandler(BaseHandler):
         errors = super().validate_config(config)
         if errors:
             return errors
-        return config_errors(GitCommitConfig.model_validate(config))
+        return config_errors(GitCommitConfig.model_validate(config), allow_templates=True)
 
     async def execute(self, ctx: HandlerContext) -> HandlerResult:
         try:
             config = self.parse_config(ctx.config, GitCommitConfig)
         except InvalidConfigError as exc:
             return exc.result()
+        # The settings are rendered by now: check them in full, templates no
+        # longer excused (a rendered value that still looks like one is refused).
+        rendered_errors = config_errors(config, allow_templates=False)
+        if rendered_errors:
+            return _refuse("; ".join(rendered_errors))
         services = ctx.require_services()
         source = config.source_step.strip()
         artifacts = await services.fetch_run_artifacts(ctx.run_id)

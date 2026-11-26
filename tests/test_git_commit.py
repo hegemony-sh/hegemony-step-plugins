@@ -133,6 +133,48 @@ def test_invalid_settings_are_refused(extra, message):
     assert any(message in error for error in errors), errors
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"repository_url": "{{ vars.CONFIG_BACKUP_REPO_URL }}"},
+        {"repository_url": "https://{{ vars.GIT_HOST }}/configs.git"},
+        {"branch": "{{ vars.BACKUP_BRANCH }}"},
+    ],
+)
+def test_templated_settings_pass_when_a_flow_is_saved(extra):
+    """The worker renders templates before the step runs, where they are checked in full."""
+    assert GitCommitHandler().validate_config(_valid(**extra)) == []
+
+
+def test_a_written_out_scheme_other_than_https_is_refused_even_in_a_template():
+    errors = GitCommitHandler().validate_config(
+        _valid(repository_url="http://{{ vars.GIT_HOST }}/configs.git")
+    )
+    assert any("must be an https:// URL" in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ({"repository_url": "http://git.example.com/x.git"}, "must be an https:// URL"),
+        ({"repository_url": "{{ not rendered }}"}, "still contains a template"),
+        (
+            {"repository_url": "https://git.example.com/{{ vars.REPO }}"},
+            "still contains a template",
+        ),
+        ({"branch": "{{ not rendered }}"}, "not a valid branch"),
+    ],
+)
+async def test_the_step_checks_the_rendered_settings_in_full(jobs, extra, message):
+    """A value that still reads as a template when the step runs is refused, not excused."""
+    recorded, _ = jobs
+    services = _Services([_artifact("r1", "show run", "hostname r1\n")])
+    result = await GitCommitHandler().execute(_ctx(_valid(**extra), services))
+    assert not result.success
+    assert message in (result.error or "")
+    assert recorded == []
+
+
 def test_the_login_reaches_the_handler_as_written():
     assert GitCommitHandler.raw_config_keys == frozenset({"username", "password"})
     assert GitCommitHandler.container_backed is True
