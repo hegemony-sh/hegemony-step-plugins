@@ -325,7 +325,7 @@ async def test_a_reload_drops_the_session_and_the_step_reconnects(clock):
     assert device["reconnects"] == 1
     assert transport.login_calls == 4
     log = _log(events)
-    assert "session lost (the device closed the session); reconnecting in 10 s" in log
+    assert "session lost (The device closed the session); reconnecting in 10 s" in log
     assert "not reachable ([Errno 111] Connection refused); trying again in 10 s" in log
 
 
@@ -362,7 +362,8 @@ async def test_an_unreachable_device_times_out_with_the_reason(clock):
     assert result.success is False
     error = result.output["devices"]["sw1"]["error"]
     assert "condition not met within 20 s (2 attempts)" in error
-    assert "not reachable: [Errno 111] Connection refused" in error
+    # The exception's text stays in the live log; the error names its type.
+    assert "not reachable: Refused" in error
 
 
 @pytest.mark.parametrize(
@@ -593,7 +594,7 @@ async def test_a_per_call_transport_that_cannot_log_in_stops_at_once(clock):
     assert result.success is False
     device = result.output["devices"]["sw1"]
     assert device["attempts"] == 1
-    assert device["error"] == "cannot log in: Authentication failed: bad password"
+    assert device["error"] == "cannot log in: the device refused the login"
 
 
 async def test_a_one_second_wait_still_polls_once(clock):
@@ -625,3 +626,81 @@ def test_output_too_long_to_search_never_meets_the_condition():
     )
     exact = "y" * (MAX_REGEX_INPUT_CHARS - 6) + "FAILED"
     assert condition_met(compiled, exact, until="matches", scope="output") is True
+
+
+async def test_a_reconnect_counts_every_new_login_after_a_loss(clock):
+    """Session A drops, B drops on its first command, C matches: two reconnects."""
+    transport = FakeCliTransport([INSTALLING, "DROP", "DROP", COMMITTED])
+
+    result, _ = await _run_cli(transport)
+
+    assert result.success is True
+    assert transport.login_calls == 3
+    assert result.output["devices"]["sw1"]["reconnects"] == 2
+
+
+async def test_a_channel_refusal_reason_reaches_the_live_log_only(clock):
+    refused = CliResult("", "", -1, f"Channel open failed: {SECRET}")
+    transport = FakeCliTransport([refused])
+
+    result, events = await _run_cli(transport, max_wait_seconds=10)
+
+    assert result.success is False
+    error = result.output["devices"]["sw1"]["error"]
+    assert "session lost: the command did not complete" in error
+    assert SECRET not in (result.error or "") and SECRET not in result.summary
+    assert SECRET in _log(events)
+
+
+async def test_a_match_that_ends_after_max_wait_does_not_count(clock):
+    class Slow(FakeCliTransport):
+        async def execute_commands(self, commands):
+            clock.now += 15  # the command outlasts the 10 s Max Wait
+            return await super().execute_commands(commands)
+
+    transport = Slow([COMMITTED])
+
+    result, events = await _run_cli(transport, max_wait_seconds=10)
+
+    assert result.success is False
+    assert result.output["devices"]["sw1"]["matched"] is False
+    assert "ended after Max Wait" in _log(events)
+
+
+async def test_devices_that_share_a_name_keep_their_own_entries(clock):
+    devices = [
+        {"id": "d1", "name": "sw1", "mgmt_host": "192.0.2.1"},
+        {"id": "d2", "name": "sw1", "mgmt_host": "192.0.2.2"},
+    ]
+
+    class ById(CliServices):
+        def connect(self, device, **kwargs):
+            self.connect_calls.append(kwargs)
+            return self.transports[device["id"]]
+
+    transports = {"d1": FakeCliTransport([COMMITTED]), "d2": FakeCliTransport([INSTALLING])}
+    ctx = _ctx(_cli_config(max_wait_seconds=10), ById(transports), [], devices)
+
+    result = await WaitForCliHandler().execute(ctx)
+
+    out = result.output["devices"]
+    assert set(out) == {"sw1 (d1)", "sw1 (d2)"}
+    assert out["sw1 (d1)"]["matched"] is True and out["sw1 (d2)"]["matched"] is False
+    assert (result.error or "").startswith("sw1 (d2): ")
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"command": "   "}, "command must not be blank"),
+        ({"pattern": "a{99999999999}"}, "not a valid regular expression"),
+    ],
+)
+async def test_a_blank_command_or_an_oversized_repeat_is_refused(clock, config, message):
+    services = CliServices({"sw1": FakeCliTransport([COMMITTED])})
+
+    result = await WaitForCliHandler().execute(_ctx(_cli_config(**config), services, []))
+
+    assert result.success is False
+    assert message in (result.error or "")
+    assert services.connect_calls == []

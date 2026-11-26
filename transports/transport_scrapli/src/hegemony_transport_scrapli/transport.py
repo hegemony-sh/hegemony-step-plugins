@@ -899,6 +899,11 @@ class ScrapliTransport:
                     raise
                 raise refusal from exc
         except BaseException:
+            # scrapli keeps the SSH session it logged in on even when opening
+            # the shell channel then fails; close it, or each retry of a held
+            # session's login would leave one behind.
+            with contextlib.suppress(Exception):
+                connection.transport.close()
             if tunnel is not None:
                 with contextlib.suppress(Exception):
                     tunnel.close()

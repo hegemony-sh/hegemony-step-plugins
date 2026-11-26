@@ -78,6 +78,7 @@ The step fails without connecting when no targets are selected, when
 Command or Pattern is empty, and when Pattern is not a valid regular
 expression. A device fails when its output does not meet the condition
 within Max Wait (sec), and at once when the login is refused for good (see
-above) or the device has no management address. The error names the
+above) or the device has no management address. A poll that ends after Max Wait (sec) does not count,
+even when its output meets the condition. The error names the
 device, the number of attempts and what the last poll saw. One failing
 device fails the step; the others' results are kept.

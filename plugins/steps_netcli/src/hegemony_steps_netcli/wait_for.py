@@ -17,7 +17,7 @@ import asyncio
 import logging
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from hegemony_step_sdk import (
     BaseHandler,
@@ -54,6 +54,13 @@ class _CommandField(BaseModel):
         json_schema_extra={"x_placeholder": "show install summary", "x_col_span": 2},
     )
 
+    @field_validator("command")
+    @classmethod
+    def _command_is_not_blank(cls, command: str) -> str:
+        if not command.strip():
+            raise ValueError("command must not be blank")
+        return command
+
 
 class WaitForCliConfig(SshSecurityConfig, waiting.WaitForFields, _CommandField):
     """Config for ``netcli.wait_for``."""
@@ -78,6 +85,7 @@ class _CliSession:
         # A transport without held sessions logs in for every command; the
         # step still works, one login per poll.
         self._held = getattr(transport, "supports_held_session", False) is True
+        self.holds_session = self._held
 
     async def connect(self) -> None:
         if self._held:
@@ -110,19 +118,23 @@ class _CliSession:
         # -1: the transport could not finish the command. Either the device
         # closed the session (disconnected, or session_open is now False) or
         # it did not answer in time; a new login settles both.
-        error = result.error or "the command did not complete"
+        # The transport's error can hold text the device sent (a refused
+        # channel's reason): only the live log, which the host redacts, gets it.
+        detail = result.error or None
         if not self._held:
             # This transport logs in for every command, and reports a failed
             # login only by its error text.
-            if error.startswith("Authentication failed"):
-                raise waiting.WaitAborted(error)
-            if error.startswith(_LOGIN_FAILURES):
-                return waiting.Poll(lost=True, error=error, had_session=False)
+            if (detail or "").startswith("Authentication failed"):
+                raise waiting.WaitAborted("the device refused the login")
+            if (detail or "").startswith(_LOGIN_FAILURES):
+                return waiting.Poll(
+                    lost=True, error="the login failed", detail=detail, had_session=False
+                )
         if getattr(result, "disconnected", False) is True or (
             self._held and getattr(self._transport, "session_open", True) is False
         ):
-            error = "the device closed the session"
-        return waiting.Poll(lost=True, error=error)
+            return waiting.Poll(lost=True, error="the device closed the session", detail=detail)
+        return waiting.Poll(lost=True, error="the command did not complete", detail=detail)
 
     async def close(self) -> None:
         if self._held:

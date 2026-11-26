@@ -19,6 +19,7 @@ import os
 import re
 import socket
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
@@ -477,6 +478,35 @@ def _safe_disconnect(connection) -> None:
         if bastion is not None:
             with contextlib.suppress(Exception):
                 bastion.close()
+
+
+class _LoginHandoff:
+    """Hands a login that runs in a thread to its caller, or marks it abandoned.
+
+    The caller may be cancelled while the thread still logs in. Exactly one
+    side then closes the connection: the thread, when the caller gave up
+    first, or the caller, when the login finished first.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._delivered: Any = None
+
+    def deliver(self, connection: Any) -> bool:
+        """Offer the connection; False when the caller has already given up."""
+        with self._lock:
+            if self._abandoned:
+                return False
+            self._delivered = connection
+            return True
+
+    def abandon(self) -> Any:
+        """Give up; the connection already delivered, which the caller must close."""
+        with self._lock:
+            self._abandoned = True
+            delivered, self._delivered = self._delivered, None
+            return delivered
 
 
 @dataclass
@@ -1150,13 +1180,16 @@ class SSHTransport:
 
     def _get_connection_params(self, *, connect_timeout: float | None = None) -> dict[str, Any]:
         """Get Netmiko connection parameters."""
+        timeout = self.connect_timeout if connect_timeout is None else connect_timeout
         params = {
             "device_type": self.device_type,
             "host": self.host,
             "port": self.port,
             "username": self.username,
             "password": self.password,
-            "timeout": self.connect_timeout if connect_timeout is None else connect_timeout,
+            "timeout": timeout,
+            # The TCP connect itself; netmiko's own default is 10 s.
+            "conn_timeout": timeout,
             "global_delay_factor": 1,
             "fast_cli": True,
         }
@@ -1613,21 +1646,24 @@ class SSHTransport:
         (refused, timed out, authentication, host key).
         """
         await self.close_session()
-        login = asyncio.ensure_future(self._run_in_thread(self._login))
-        try:
-            self._held = await asyncio.shield(login)
-        except asyncio.CancelledError:
-            # The login thread runs on; close what it opens, or the session
-            # and its cancellation-registry entry would be left behind.
-            login.add_done_callback(self._logout_late)
-            raise
+        handoff = _LoginHandoff()
 
-    def _logout_late(self, login: asyncio.Future) -> None:
-        """Close the connection of a login whose caller was cancelled meanwhile."""
-        if login.cancelled() or login.exception() is not None:
-            return
-        connection = login.result()
-        asyncio.get_running_loop().run_in_executor(None, self._logout, connection)
+        def login() -> Any:
+            connection = self._login()
+            if not handoff.deliver(connection):
+                # The caller was cancelled while this ran; nobody holds it.
+                self._logout(connection)
+            return connection
+
+        try:
+            self._held = await self._run_in_thread(login)
+        except asyncio.CancelledError:
+            # The login thread runs on. Whichever side comes second closes
+            # its connection, also when the event loop is shutting down.
+            orphan = handoff.abandon()
+            if orphan is not None:
+                self._logout(orphan)
+            raise
 
     @property
     def session_open(self) -> bool:

@@ -39,8 +39,10 @@ from hegemony_step_sdk import (
     OutputField,
 )
 
-#: ReDoS guardrail, as in ``evidence.assert``: the pattern never runs against
-#: more than this much text, so a catastrophic pattern cannot stall the worker.
+#: Input cap, as in ``evidence.assert``: the pattern never runs against more
+#: than this much text. It bounds the input, not the search time: a pattern
+#: with nested repeats can still take long (a follow-up bounds that for every
+#: step that takes a pattern).
 MAX_REGEX_INPUT_CHARS = 1_000_000
 
 #: The longest login and command a poll may take. A poll that starts just
@@ -166,7 +168,8 @@ class WaitForFields(BaseModel):
     def _pattern_compiles(self) -> Self:
         try:
             re.compile(self.pattern)
-        except re.error as exc:
+        except (re.error, OverflowError) as exc:
+            # A repeat count too large for the engine raises OverflowError.
             raise ValueError(f"pattern is not a valid regular expression: {exc}") from exc
         return self
 
@@ -222,6 +225,19 @@ def is_permanent(exc: BaseException) -> bool:
     return any("Authentication" in name or name == "PermissionDenied" for name in names)
 
 
+def safe_reason(exc: BaseException) -> str:
+    """Why a login failed, for the step's error and output.
+
+    Only the platform's own errors keep their message there. An SSH
+    library's error may carry text the device sent (a disconnect reason), and
+    only the live log, which the host redacts, may hold that: elsewhere it is
+    named by its type.
+    """
+    if isinstance(exc, (HostKeyRejectedError, PermissionError, ValueError, WaitAborted)):
+        return str(exc) or type(exc).__name__
+    return type(exc).__name__
+
+
 @dataclass
 class Poll:
     """One run of the command on a device."""
@@ -244,6 +260,10 @@ class Poll:
 
 class DeviceSession(Protocol):
     """How a step plugin reaches one device; see the module docstring."""
+
+    #: True when ``connect`` logs in and keeps the session; False when the
+    #: transport logs in for every ``run`` and ``connect`` does nothing.
+    holds_session: bool
 
     async def connect(self) -> None:
         """Log in and keep the session. Raise when the login fails."""
@@ -351,10 +371,11 @@ async def wait_on_device(
                 except Exception as exc:  # noqa: BLE001 - the error is reported, not lost
                     detail = str(exc) or type(exc).__name__
                     if is_permanent(exc):
-                        wait.error = f"cannot log in: {detail}"
+                        wait.error = f"cannot log in: {safe_reason(exc)}"
                         given_up = True
+                        await emit(f"[attempt {wait.attempts}] cannot log in ({detail})")
                         break
-                    wait.error = f"not reachable: {detail}"
+                    wait.error = f"not reachable: {safe_reason(exc)}"
                     wait.streak = 0
                     await emit(
                         f"[attempt {wait.attempts}, {_seconds(elapsed)} elapsed] not reachable "
@@ -363,6 +384,10 @@ async def wait_on_device(
                     await _pause(poll_started, config.poll_interval_seconds, deadline)
                     continue
                 connected = True
+                if session.holds_session and wait._session_lost:
+                    # A new login after the session was lost.
+                    wait.reconnects += 1
+                    wait._session_lost = False
             try:
                 poll = await session.run()
             except WaitAborted as exc:
@@ -371,7 +396,16 @@ async def wait_on_device(
                 wait.error = f"cannot log in: {exc}"
                 given_up = True
                 break
-            elapsed = monotonic() - started
+            finished = monotonic()
+            elapsed = finished - started
+            if (
+                not session.holds_session
+                and wait._session_lost
+                and (not poll.lost or poll.had_session)
+            ):
+                # This run logged in again after the session was lost.
+                wait.reconnects += 1
+                wait._session_lost = False
             if poll.lost:
                 connected = False
                 await session.close()
@@ -385,14 +419,15 @@ async def wait_on_device(
                 )
                 await _pause(poll_started, config.poll_interval_seconds, deadline)
                 continue
-            if wait._session_lost:
-                wait.reconnects += 1
-                wait._session_lost = False
             wait.last_output = poll.output
             if not poll.ok:
                 wait.streak = 0
                 wait.error = f"command failed: {poll.error}" if poll.error else "command failed"
                 status = wait.error + (f" ({poll.detail})" if poll.detail else "")
+            elif finished > deadline:
+                # A poll that ends after Max Wait is too late to count.
+                wait.streak = 0
+                status = "ended after Max Wait"
             elif condition_met(compiled, poll.output, until=config.until, scope=config.match_scope):
                 wait.streak += 1
                 wait.error = None
@@ -453,18 +488,21 @@ def step_result(
     truncated: list[str] = []
     evidence: list[dict[str, Any]] = []
     errors: list[str] = []
+    names = [wait.name for wait in waits]
     for device, wait in zip(devices, waits, strict=True):
         device_id = device.get("id", device.get("mgmt_host"))
+        # Two targets may share a name; each keeps its own entry.
+        key = f"{wait.name} ({device_id})" if names.count(wait.name) > 1 else wait.name
         entry, cut = wait.output()
-        entries[wait.name] = entry
+        entries[key] = entry
         if cut:
-            truncated.append(wait.name)
+            truncated.append(key)
         if not wait.matched:
-            errors.append(f"{wait.name}: {wait.error}")
+            errors.append(f"{key}: {wait.error}")
         evidence.append(
             {
                 "kind": "cli_output",
-                "name": f"{label} ({wait.name})" if len(devices) > 1 else label,
+                "name": f"{label} ({key})" if len(devices) > 1 else label,
                 "device_id": device_id,
                 "content_text": wait.last_output,
                 "content_json": {

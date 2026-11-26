@@ -176,3 +176,47 @@ async def test_netmiko_closes_a_login_whose_caller_was_cancelled(monkeypatch):
 
     assert closed == [connection]
     assert transport.session_open is False
+
+
+def test_netmiko_bounds_the_tcp_connect_by_connect_timeout():
+    spec = DeviceConnectionSpec(
+        host=HOST, port=22, username=USERNAME, password=PASSWORD, connect_timeout=7.0
+    )
+    params = SSHTransport(spec, host_key_verifier=checks_off())._get_connection_params()
+
+    assert params["timeout"] == 7.0
+    assert params["conn_timeout"] == 7.0
+
+
+async def test_scrapli_closes_a_session_whose_shell_channel_failed(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    import hegemony_transport_scrapli.transport as scrapli_module
+
+    connection = MagicMock()
+    connection.open = AsyncMock(side_effect=OSError("channel refused"))
+    monkeypatch.setattr(scrapli_module, "AsyncScrapli", MagicMock(return_value=connection))
+    transport = ScrapliTransport(_spec(22), host_key_verifier=checks_off())
+
+    with pytest.raises(OSError):
+        await transport.open_session()
+
+    connection.transport.close.assert_called_once()
+    assert transport.session_open is False
+
+
+async def test_asyncssh_closes_the_bastion_even_when_closing_is_cancelled():
+    from unittest.mock import AsyncMock, MagicMock
+
+    from hegemony_transport_asyncssh.transport import _JUMP_TUNNEL_ATTR, _close_connection
+
+    connection = MagicMock()
+    connection.wait_closed = AsyncMock(side_effect=asyncio.CancelledError)
+    tunnel = MagicMock()
+    tunnel.wait_closed = AsyncMock()
+    setattr(connection, _JUMP_TUNNEL_ATTR, tunnel)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _close_connection(connection)
+
+    tunnel.close.assert_called_once()

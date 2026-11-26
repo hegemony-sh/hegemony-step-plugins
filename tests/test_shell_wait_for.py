@@ -263,3 +263,27 @@ async def test_shell_failure_output_stays_out_of_the_error_and_summary(clock):
     assert "command failed: exit 1" in (result.error or "")
     # The live log, which the host redacts, keeps the detail.
     assert f"(auth failed for token {SECRET})" in _log(events)
+
+
+async def test_shell_refuses_a_blank_command(clock):
+    services = ShellServices([(0, "active\n", "")])
+
+    result = await ShellWaitForHandler().execute(_ctx(_shell_config(command="  "), services, []))
+
+    assert result.success is False
+    assert "command must not be blank" in (result.error or "")
+    assert services.opened == []
+
+
+async def test_shell_lost_connection_text_stays_in_the_live_log(clock):
+    services = ShellServices([ConnectionResetError(f"reset by {SECRET}")])
+    events: list = []
+
+    result = await ShellWaitForHandler().execute(
+        _ctx(_shell_config(max_wait_seconds=10), services, events)
+    )
+
+    error = result.output["devices"]["sw1"]["error"]
+    assert "the connection was lost (ConnectionResetError)" in error
+    assert SECRET not in (result.error or "") and SECRET not in result.summary
+    assert SECRET in _log(events)

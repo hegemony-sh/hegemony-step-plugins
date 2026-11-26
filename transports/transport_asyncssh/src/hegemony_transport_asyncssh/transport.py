@@ -206,16 +206,20 @@ async def _close_connection(connection) -> None:
     """
     if not connection:
         return
-    with contextlib.suppress(Exception):
-        connection.close()
-    with contextlib.suppress(Exception):
-        await connection.wait_closed()
     tunnel = getattr(connection, _JUMP_TUNNEL_ATTR, None)
-    if tunnel is not None:
+    try:
         with contextlib.suppress(Exception):
-            tunnel.close()
+            connection.close()
         with contextlib.suppress(Exception):
-            await tunnel.wait_closed()
+            await connection.wait_closed()
+    finally:
+        # Also when the wait above is cancelled: asyncssh does not close a
+        # connection given as tunnel=, so the bastion would stay open.
+        if tunnel is not None:
+            with contextlib.suppress(Exception):
+                tunnel.close()
+            with contextlib.suppress(Exception):
+                await tunnel.wait_closed()
 
 
 def _connection_open(connection: Any) -> bool:

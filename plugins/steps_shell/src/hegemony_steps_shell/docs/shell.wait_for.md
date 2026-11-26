@@ -76,6 +76,7 @@ Command or Pattern is empty, when Pattern is not a valid regular expression,
 and when a `{{ }}` value in Command is not quoted as described above. A host
 fails when its output does not meet the condition within Max Wait (sec),
 and at once when the login is refused for good or the host has no
-management address. The error names the host, the number of attempts and
+management address. A poll that ends after Max Wait (sec) does not count,
+even when its output meets the condition. The error names the host, the number of attempts and
 what the last poll saw. One failing host fails the step; the others'
 results are kept.

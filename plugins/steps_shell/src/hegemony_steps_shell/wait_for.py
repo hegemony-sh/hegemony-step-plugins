@@ -17,7 +17,7 @@ import asyncio
 import logging
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from hegemony_step_sdk import (
     BaseHandler,
@@ -54,6 +54,14 @@ class _CommandFields(BaseModel):
         ),
         json_schema_extra={"x_placeholder": "systemctl is-active nginx", "x_col_span": 2},
     )
+
+    @field_validator("command")
+    @classmethod
+    def _command_is_not_blank(cls, command: str) -> str:
+        if not command.strip():
+            raise ValueError("command must not be blank")
+        return command
+
     shell: Literal["default", "sh", "bash", "pwsh"] = Field(
         default="default",
         title="Interpreter",
@@ -77,6 +85,8 @@ class ShellWaitForConfig(SshSecurityConfig, waiting.WaitForFields, _CommandField
 
 class _ShellSession:
     """One host's shell connection, as :class:`waiting.DeviceSession`."""
+
+    holds_session = True
 
     def __init__(
         self,
@@ -122,7 +132,13 @@ class _ShellSession:
         except Exception as exc:  # noqa: BLE001 - a lost connection; the loop reconnects
             # The shell transport raises when the connection drops or the
             # command runs out of time; either way a new connection follows.
-            return waiting.Poll(lost=True, error=str(exc) or type(exc).__name__)
+            # The exception's text may come from the host: only the live log,
+            # which the host redacts, gets it.
+            return waiting.Poll(
+                lost=True,
+                error=f"the connection was lost ({type(exc).__name__})",
+                detail=str(exc) or None,
+            )
         # Live view, as shell.execute writes it, unless the transport already
         # streamed the output. The host redacts every platform-resolved secret
         # from these events.
