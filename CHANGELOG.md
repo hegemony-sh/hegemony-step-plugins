@@ -1,3 +1,9 @@
+## [0.59.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.58.0...v0.59.0) (2026-11-26)
+
+### Features
+
+* **sdk:** give steps a file's tags and attributes ([dc4bfb2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/dc4bfb289ecbfd4fbcb8817812ad747d824dd189))
+
 ## [0.58.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.57.2...v0.58.0) (2026-11-26)
 
 ### Features

@@ -26,7 +26,7 @@ argument or an environment variable.
 The step runs on the platform's Docker-in-Docker sandbox through
 `container.run`'s runner (this wheel depends on `hegemony-steps-container`),
 under the flow's egress policy. Its default image is
-`ghcr.io/hegemony-sh/git-runner:0.58`, built and published from
+`ghcr.io/hegemony-sh/git-runner:0.59`, built and published from
 `images/git-runner/` in this repository.
 
 Namespace prefix (= entry-point name): `git.` — see the repo-level
