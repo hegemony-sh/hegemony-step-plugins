@@ -191,11 +191,11 @@ def test_netmiko_bounds_the_tcp_connect_by_connect_timeout():
 async def test_scrapli_closes_a_session_whose_shell_channel_failed(monkeypatch):
     from unittest.mock import AsyncMock, MagicMock
 
-    import hegemony_transport_scrapli.transport as scrapli_module
-
     connection = MagicMock()
     connection.open = AsyncMock(side_effect=OSError("channel refused"))
-    monkeypatch.setattr(scrapli_module, "AsyncScrapli", MagicMock(return_value=connection))
+    monkeypatch.setattr(
+        "hegemony_transport_scrapli.transport.AsyncScrapli", MagicMock(return_value=connection)
+    )
     transport = ScrapliTransport(_spec(22), host_key_verifier=checks_off())
 
     with pytest.raises(OSError):
