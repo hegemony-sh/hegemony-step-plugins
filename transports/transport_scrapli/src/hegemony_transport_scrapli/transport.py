@@ -262,6 +262,10 @@ PLATFORM_TO_SCRAPLI = {
 #: not as scrapli's timeout_transport, which closes the connection when it ends.
 _TIMING_POLL_SECONDS = 2.5
 
+#: scrapli's own default timeout_transport. The transport timeout is never set
+#: below it, so a short command timeout does not shorten the login reads.
+_SCRAPLI_DEFAULT_TRANSPORT_TIMEOUT = 30.0
+
 #: In timing mode without wait_for_patterns, the command is considered settled
 #: after this many consecutive empty reads (mirrors send_command_timing's
 #: "read until quiet" semantics).
@@ -669,6 +673,14 @@ class ScrapliTransport:
                 self.connect_timeout if connect_timeout is None else connect_timeout
             ),
             "timeout_ops": self.command_timeout,
+            # scrapli bounds each single transport read by timeout_transport
+            # (30 s by default) and closes the session when it ends, so a
+            # command that prints nothing for longer (IOS XE "install add"
+            # while it expands the image) would fail long before its command
+            # timeout. The command timeout bounds the whole operation instead.
+            # The polled reads (timing mode, copy, prompts) stay bounded by
+            # their own shorter wait around the read.
+            "timeout_transport": max(self.command_timeout, _SCRAPLI_DEFAULT_TRANSPORT_TIMEOUT),
         }
         if self.secret:
             # Scrapli escalates to privilege-exec itself using auth_secondary.
@@ -1380,7 +1392,7 @@ class ScrapliTransport:
         wait_for_pattern appears, or read_timeout — answering known prompts
         along the way. Same semantics as the netmiko transport's timing mode;
         ``delay_factor`` is accepted for surface parity but the poll cadence is
-        fixed by the timing connection's transport timeout.
+        fixed by ``_TIMING_POLL_SECONDS``.
 
         Args:
             command: CLI command to execute

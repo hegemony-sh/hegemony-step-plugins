@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 # this much text, so a catastrophic pattern cannot stall the worker.
 _MAX_REGEX_INPUT_CHARS = 1_000_000
 
+#: The most of an extracted value kept in the evidence and the step output.
+_MAX_EXTRACTED_CHARS = 500
+
 #: The ordering operators and the symbols their messages show.
 _ORDERING_SYMBOLS = {"gt": ">", "lt": "<", "ge": ">=", "le": "<="}
 
@@ -207,6 +210,11 @@ _OUTPUT_FIELDS = (
     OutputField(
         "failed", "Names of the artifacts that did not pass or could not be fetched", "list"
     ),
+    OutputField(
+        "extracted",
+        "Values Extract read in whole-output scope, by artifact name (only where it matched)",
+        "object",
+    ),
 )
 
 
@@ -328,6 +336,9 @@ class AssertHandler(BaseHandler):
         # Artifact names by outcome, for later steps' templates and conditions.
         checked: list[str] = []
         failed: list[str] = []
+        # What Extract read, by artifact name: whole-output scope only, and
+        # only where it matched, so a missing key means nothing was read.
+        extracted: dict[str, str] = {}
 
         # One fetch of the run's artifacts serves every lookup.
         artifacts = await self._fetch_run_artifacts(ctx) if artifact_step_id else None
@@ -367,6 +378,9 @@ class AssertHandler(BaseHandler):
                 passed, comparison_msg = False, f"capture failed: {error}"
                 scope_detail = {"capture_error": error}
             checked.append(name)
+            value = scope_detail.get("extracted")
+            if isinstance(value, str):
+                extracted[name] = value
             if not passed:
                 failed_messages.append(f"{name}: {comparison_msg}")
                 failed.append(name)
@@ -387,7 +401,12 @@ class AssertHandler(BaseHandler):
                 }
             )
 
-        output = {"passed": not failed_messages, "checked": checked, "failed": failed}
+        output = {
+            "passed": not failed_messages,
+            "checked": checked,
+            "failed": failed,
+            "extracted": extracted,
+        }
         if not failed_messages:
             return HandlerResult(
                 success=True,
@@ -527,7 +546,8 @@ class AssertHandler(BaseHandler):
                 value = _extracted(extractor, actual[:_MAX_REGEX_INPUT_CHARS])
                 if value is None:
                     return False, f"extract '{extract}' matched nothing", detail_out
-                detail_out["extracted"] = value[:500]
+                # Also the step's ``extracted`` output, so the same cap.
+                detail_out["extracted"] = value[:_MAX_EXTRACTED_CHARS]
                 actual = value
             passed, msg = self._compare_values(actual, expected, operator)
             return passed, msg, detail_out

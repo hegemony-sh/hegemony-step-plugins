@@ -1,3 +1,22 @@
+## [0.57.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.57.1...v0.57.2) (2026-11-26)
+
+### Bug Fixes
+
+* **transport-scrapli:** keep the transport read timeout at least the command timeout ([708ac77](https://github.com/hegemony-sh/hegemony-step-plugins/commit/708ac77ea577bf93f1c0c0996bb8271455f8718c))
+
+## [0.57.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.57.0...v0.57.1) (2026-11-26)
+
+### Bug Fixes
+
+* **git:** accept a templated repository URL or branch when a flow is saved ([f484a59](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f484a59a46ce7bfec110eb92f8b58e01c017a662))
+* **git:** refuse an unrendered repository URL before the step runs ([6f6d683](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6f6d6833720859785460b89476976a3feeb82e2f))
+
+## [0.57.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.56.0...v0.57.0) (2026-11-24)
+
+### Features
+
+* **evidence:** expose extracted values in evidence.assert output ([a3e2856](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a3e2856d66019c258c38e3587a1c17f56f2a3547))
+
 ## [0.56.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.55.0...v0.56.0) (2026-11-24)
 
 ### ⚠ BREAKING CHANGES

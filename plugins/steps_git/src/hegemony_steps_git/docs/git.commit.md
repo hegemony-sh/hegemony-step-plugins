@@ -17,7 +17,11 @@ nothing new adds no commit.
 ## Using It
 
 Repository URL is the repository's `https://` clone URL, without a login.
-Branch (default `main`) is where the step commits. A branch that does not
+It may be a template such as `{{ vars.CONFIG_BACKUP_REPO_URL }}`: saving the
+flow accepts it, and the step checks the rendered URL before it runs (a
+scheme other than `https` written out in the template is refused on save).
+The branch may be a template too. Branch (default `main`) is where the step
+commits. A branch that does not
 exist fails the step unless Create the branch is on; it then starts empty,
 holding only this step's files, which is what the first backup into an
 empty repository needs.
@@ -61,7 +65,7 @@ CAs as well as the public ones.
 The step runs git in a container on the platform's sandbox, like
 `container.run`, so the flow's network policy must allow it to reach the
 Git server on port 443. Execution image (advanced) defaults to
-`ghcr.io/hegemony-sh/git-runner:0.56`; change it only to pull that image
+`ghcr.io/hegemony-sh/git-runner:0.57`; change it only to pull that image
 from a mirror. Timeout, memory and CPU limits, environment variables and
 egress rules work as in `container.run`.
 

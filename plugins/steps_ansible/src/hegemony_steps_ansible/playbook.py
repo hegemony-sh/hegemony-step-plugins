@@ -79,7 +79,7 @@ from .results import (
 #: network collections. Built from images/ansible-runner in this repository; the
 #: Images workflow publishes it for every release as X.Y.Z and X.Y, and the tag
 #: here names this release's minor version (scripts/set_version.py moves it).
-DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.56"
+DEFAULT_IMAGE = "ghcr.io/hegemony-sh/ansible-runner:0.57"
 #: The ansible-core series that image is also published for, as
 #: ``<DEFAULT_IMAGE>-core<series>`` (images/ansible-runner/variants.json;
 #: tests/test_release_versions.py keeps the two equal). "default" is the plain

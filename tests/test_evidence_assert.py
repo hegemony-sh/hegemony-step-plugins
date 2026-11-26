@@ -587,6 +587,7 @@ async def test_assert_fails_on_an_unreachable_device(operator: str, expected: st
         "passed": False,
         "checked": [f"r1:{command}", f"r2:{command}"],
         "failed": [f"r2:{command}"],
+        "extracted": {},
     }
 
 
@@ -762,3 +763,110 @@ async def test_assert_extracts_the_free_space_from_show_flash() -> None:
     )
     assert too_big.success is False
     assert too_big.output["failed"] == too_big.output["checked"]
+
+
+class TestExtractedOutput:
+    """The step's ``extracted`` output: what Extract read, by artifact name."""
+
+    async def test_whole_output_with_a_group_outputs_the_group(self) -> None:
+        artifacts = _collected("collect", {"show flash": _SHOW_FLASH})
+        result = await _run_assert(
+            _RunApi(artifacts), "show flash", "0", [_R1], "ge", extract=r"([0-9]+) bytes free"
+        )
+        assert result.success is True, result.error
+        assert result.output["extracted"] == {"r1:show flash": "2954240"}
+
+    async def test_whole_output_without_a_group_outputs_the_whole_match(self) -> None:
+        artifacts = _collected("collect", {"show version": "Cisco IOS XE, Version 17.09.04a"})
+        result = await _run_assert(
+            _RunApi(artifacts), "show version", "17.09.04a", [_R1], "eq", extract=r"17\.[0-9.]+a?"
+        )
+        assert result.success is True, result.error
+        assert result.output["extracted"] == {"r1:show version": "17.09.04a"}
+
+    async def test_a_value_that_fails_the_comparison_is_still_output(self) -> None:
+        artifacts = _collected("collect", {"show flash": _SHOW_FLASH})
+        result = await _run_assert(
+            _RunApi(artifacts),
+            "show flash",
+            "99999999",
+            [_R1],
+            "ge",
+            extract=r"([0-9]+) bytes free",
+        )
+        assert result.success is False
+        assert result.output["extracted"] == {"r1:show flash": "2954240"}
+
+    async def test_each_line_scope_outputs_nothing(self) -> None:
+        artifacts = _collected("collect", {"show int": "Gi1 errors 0\nGi2 errors 1\n"})
+        result = await _run_assert(
+            _RunApi(artifacts),
+            "show int",
+            "1",
+            [_R1],
+            "le",
+            match_scope="lines",
+            line_filter="errors",
+            extract=r"errors ([0-9]+)",
+        )
+        assert result.success is True, result.error
+        assert result.output["extracted"] == {}
+
+    async def test_no_match_leaves_the_artifact_out(self) -> None:
+        artifacts = _collected("collect", {"show flash": "nothing here"})
+        result = await _run_assert(
+            _RunApi(artifacts), "show flash", "0", [_R1], "ge", extract=r"([0-9]+) bytes free"
+        )
+        assert result.success is False
+        assert result.output["extracted"] == {}
+
+    async def test_several_artifacts_and_a_long_value_is_truncated(self) -> None:
+        long_value = "x" * 600
+        outputs = {"r1": "Version 17.9", "r2": f"Version {long_value}", "r3": "no version"}
+        artifacts = [
+            artifact
+            for device in _DEVICES
+            for artifact in _collected(
+                "collect", {"show version": outputs[device["name"]]}, device=device
+            )
+        ]
+        result = await _run_assert(
+            _RunApi(artifacts),
+            "show version",
+            "",
+            _DEVICES,
+            "contains",
+            extract=r"Version (\S+)",
+        )
+        assert result.output["checked"] == [
+            "r1:show version",
+            "r2:show version",
+            "r3:show version",
+        ]
+        assert result.output["failed"] == ["r3:show version"]
+        assert result.output["extracted"] == {
+            "r1:show version": "17.9",
+            "r2:show version": long_value[:500],
+        }
+
+    async def test_an_empty_extract_outputs_an_empty_map(self) -> None:
+        artifacts = _collected("collect", {"show flash": _SHOW_FLASH})
+        result = await _run_assert(_RunApi(artifacts), "show flash", "bytes free", [_R1])
+        assert result.success is True, result.error
+        assert result.output == {
+            "passed": True,
+            "checked": ["r1:show flash"],
+            "failed": [],
+            "extracted": {},
+        }
+
+    async def test_a_failed_capture_outputs_nothing(self) -> None:
+        artifacts = [
+            _failed_capture(artifact, "timed out")
+            for artifact in _collected("collect", {"show flash": _SHOW_FLASH})
+        ]
+        result = await _run_assert(
+            _RunApi(artifacts), "show flash", "0", [_R1], "ge", extract=r"([0-9]+) bytes free"
+        )
+        assert result.success is False
+        assert result.output["extracted"] == {}

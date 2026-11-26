@@ -576,9 +576,71 @@ async def test_timing_mode_stops_when_scrapli_closed_the_connection_on_its_timeo
     assert connection.channel.read.await_count == 2
 
 
-async def test_scrapli_connections_keep_their_default_transport_timeout():
-    """A short timeout_transport would make scrapli close a session that goes quiet."""
-    assert "timeout_transport" not in _make_transport()._get_connection_params()
+def _transport_with_command_timeout(command_timeout: float) -> ScrapliTransport:
+    spec = DeviceConnectionSpec(
+        host="10.0.0.1", username="admin", password="pw", command_timeout=command_timeout
+    )
+    return ScrapliTransport(spec, host_key_verifier=checks_off())
+
+
+@pytest.mark.parametrize("command_timeout", [3600.0, 120.0, 30.0])
+def test_transport_timeout_is_no_shorter_than_the_command_timeout(command_timeout):
+    """scrapli closes a session whose single read waits past timeout_transport.
+
+    A command silent for longer than that (IOS XE "install add") must not fail
+    before its command timeout.
+    """
+    params = _transport_with_command_timeout(command_timeout)._get_connection_params()
+    assert params["timeout_transport"] >= command_timeout
+    assert params["timeout_transport"] >= params["timeout_ops"]
+
+
+def test_short_command_timeout_keeps_scraplis_default_transport_timeout():
+    """A short command timeout does not shorten the reads scrapli makes at login."""
+    params = _transport_with_command_timeout(5.0)._get_connection_params()
+    assert params["timeout_transport"] == 30.0
+
+
+class _SilentStdout:
+    """An asyncssh reader that stays silent for ``delay`` seconds, then answers."""
+
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+
+    def at_eof(self) -> bool:
+        return False
+
+    async def read(self, _n: int) -> bytes:
+        await asyncio.sleep(self.delay)
+        return b"[OK]"
+
+
+def _scrapli_from(params: dict, stdout: _SilentStdout):
+    from scrapli import AsyncScrapli
+
+    connection = AsyncScrapli(**params)
+    connection.transport.stdout = stdout
+    connection.transport.close = MagicMock()
+    return connection
+
+
+async def test_silent_read_longer_than_scraplis_default_succeeds():
+    """A read silent past scrapli's default (scaled down) but within the command timeout."""
+    transport = _transport_with_command_timeout(1.0)
+    with patch.object(
+        hegemony_transport_scrapli.transport, "_SCRAPLI_DEFAULT_TRANSPORT_TIMEOUT", 0.05
+    ):
+        params = transport._get_connection_params()
+    connection = _scrapli_from(params, _SilentStdout(0.2))
+
+    assert await connection.transport.read() == b"[OK]"
+    connection.transport.close.assert_not_called()
+
+    # Control: with scrapli's (scaled-down) default the same read is cut off.
+    params["timeout_transport"] = 0.05
+    connection = _scrapli_from(params, _SilentStdout(0.2))
+    with pytest.raises(ScrapliTimeout, match="timed out reading from transport"):
+        await connection.transport.read()
 
 
 async def test_timing_mode_stops_on_hard_read_error():

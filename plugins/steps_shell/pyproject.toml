@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-steps-shell"
-version = "0.56.0"
+version = "0.57.2"
 description = "Remote shell execution step handlers for Hegemony (Linux/Unix hosts; WinRM planned)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"

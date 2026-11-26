@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-steps-netcli"
-version = "0.56.0"
+version = "0.57.2"
 description = "Network-device CLI step handlers for Hegemony"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
