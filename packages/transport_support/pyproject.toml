@@ -13,7 +13,7 @@ license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 # No SSH library: callers pass their library module or objects in, like the
 # SDK policy it applies.
-dependencies = ["hegemony-step-sdk==1.1.0"]
+dependencies = ["hegemony-step-sdk==1.1.1"]
 
 classifiers = [
     "Development Status :: 4 - Beta",
