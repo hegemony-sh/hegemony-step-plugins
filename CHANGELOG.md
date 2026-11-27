@@ -1,3 +1,43 @@
+## [0.59.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.58.0...v0.59.0) (2026-11-26)
+
+### Features
+
+* **sdk:** give steps a file's tags and attributes ([dc4bfb2](https://github.com/hegemony-sh/hegemony-step-plugins/commit/dc4bfb289ecbfd4fbcb8817812ad747d824dd189))
+
+## [0.58.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.57.2...v0.58.0) (2026-11-26)
+
+### Features
+
+* **netcli:** add netcli.wait_for ([c1a764c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/c1a764c3d4a78e1f8b5763ca24d9acb4988b9dab))
+* **shell:** add shell.wait_for ([3035528](https://github.com/hegemony-sh/hegemony-step-plugins/commit/303552884bf6516024045f262db842165d9e89b7))
+* **transports:** keep one login across execute_commands calls ([53e2372](https://github.com/hegemony-sh/hegemony-step-plugins/commit/53e237287f09f4563a6aa8271647e8a68be01352))
+
+### Bug Fixes
+
+* **netcli,shell,transports:** address the second review of the wait_for steps ([fae276c](https://github.com/hegemony-sh/hegemony-step-plugins/commit/fae276c974f45277b5de9c260e25607a252cc936))
+* **netcli,shell:** output too long to search never meets the condition ([0a9202d](https://github.com/hegemony-sh/hegemony-step-plugins/commit/0a9202dbf5a6414b4fe58722647cf2ccfc85304e))
+* **netcli,shell:** poll once on a short wait; never pass cut-off output ([dd7decf](https://github.com/hegemony-sh/hegemony-step-plugins/commit/dd7decffe664a1469fc9f16c11c9e6c75b650d63))
+* **netcli,shell:** refuse an omitted pattern; keep device output out of errors ([b151e28](https://github.com/hegemony-sh/hegemony-step-plugins/commit/b151e28ebc3e4d55019dd15c0933a481439f2796))
+
+## [0.57.2](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.57.1...v0.57.2) (2026-11-26)
+
+### Bug Fixes
+
+* **transport-scrapli:** keep the transport read timeout at least the command timeout ([708ac77](https://github.com/hegemony-sh/hegemony-step-plugins/commit/708ac77ea577bf93f1c0c0996bb8271455f8718c))
+
+## [0.57.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.57.0...v0.57.1) (2026-11-26)
+
+### Bug Fixes
+
+* **git:** accept a templated repository URL or branch when a flow is saved ([f484a59](https://github.com/hegemony-sh/hegemony-step-plugins/commit/f484a59a46ce7bfec110eb92f8b58e01c017a662))
+* **git:** refuse an unrendered repository URL before the step runs ([6f6d683](https://github.com/hegemony-sh/hegemony-step-plugins/commit/6f6d6833720859785460b89476976a3feeb82e2f))
+
+## [0.57.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.56.0...v0.57.0) (2026-11-24)
+
+### Features
+
+* **evidence:** expose extracted values in evidence.assert output ([a3e2856](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a3e2856d66019c258c38e3587a1c17f56f2a3547))
+
 ## [0.56.0](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.55.0...v0.56.0) (2026-11-24)
 
 ### ⚠ BREAKING CHANGES

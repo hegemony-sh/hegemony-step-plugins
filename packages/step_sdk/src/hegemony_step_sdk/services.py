@@ -316,6 +316,13 @@ class FileDownload:
     ``sha512`` and ``metadata`` (the stored file's metadata) describe where
     the file lives. A host older than these fields leaves them at their
     defaults: empty text, None and an empty dict.
+
+    ``tags`` (a ``key=value`` map of text) and ``attributes`` (a JSON object)
+    are what the platform stores about the file besides its place; since
+    SDK 1.1. ``metadata`` is the attributes' older name, and a host that
+    knows ``attributes`` sends the same object in both. A host older than
+    these two fields leaves them empty: a handler that needs the attributes
+    falls back to ``metadata`` then.
     """
 
     file_id: str
@@ -336,6 +343,8 @@ class FileDownload:
     content_type: str | None = None
     sha512: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    tags: dict[str, str] = field(default_factory=dict)
+    attributes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

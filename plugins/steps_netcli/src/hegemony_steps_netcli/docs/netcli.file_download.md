@@ -46,7 +46,7 @@ question mark asks for help). Targets are chosen with the role-based target pick
 For each target, the step asks the platform for a download link, connects to
 the target and has it fetch the link:
 
-- With the netmiko transport (network devices), it runs
+- With the netmiko or scrapli transport (network devices), it runs
   `copy <link> <destination><filename>` and answers the questions the device
   asks before it starts (the destination file name, a confirmation to
   overwrite). This is the Cisco IOS and IOS XE form of the command. A platform
@@ -55,8 +55,6 @@ the target and has it fetch the link:
   that it does not know the command, otherwise when Transfer timeout ends.
 - With the asyncssh transport (servers), it runs `curl` on the server, which
   must have it installed.
-- The scrapli transport cannot do this; the step fails such a device and says
-  to use the netmiko transport.
 
 The link looks like `<platform address>/dl/<token>/<filename>`. It has no
 query string and is not a redirect, because the HTTP clients of network
@@ -106,9 +104,12 @@ Later steps can read:
   `steps.NODE_ID.output.folder`: the file repository's name, the file's path in
   it (folder and file name) and its folder (empty for the repository root).
   `steps.NODE_ID.output.repository_id` is the repository's id.
-- `steps.NODE_ID.output.content_type`, `steps.NODE_ID.output.sha512` and
-  `steps.NODE_ID.output.metadata`: the stored file's content type, SHA-512
-  (null for a file stored without one) and the metadata stored with it.
+- `steps.NODE_ID.output.content_type` and `steps.NODE_ID.output.sha512`: the
+  stored file's content type and SHA-512 (null for a file stored without one).
+- `steps.NODE_ID.output.tags` and `steps.NODE_ID.output.attributes`: the
+  file's `key=value` tags and its attributes, as the file repository holds
+  them (for example `{{ steps.NODE_ID.output.tags.stage }}`).
+  `steps.NODE_ID.output.metadata` is the attributes under their older name.
 - `steps.NODE_ID.output.file`: a file reference to the same file
   (`{"repository": ..., "path": ...}`). Another download step takes it as
   its **File**: `{{ steps.NODE_ID.output.file }}`. The next step looks the

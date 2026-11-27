@@ -148,16 +148,26 @@ def build_command(
     raise ValueError(f"unsupported shell interpreter: {shell}")
 
 
-async def _open_shell(services: Any, device: dict[str, Any], allow_legacy_ssh: bool) -> Any:
+async def _open_shell(
+    services: Any,
+    device: dict[str, Any],
+    allow_legacy_ssh: bool,
+    *,
+    connect_timeout: float | None = None,
+) -> Any:
     """Open the host's shell transport; never silently drop a legacy request.
 
     The setting is passed only when it is on, so a platform from before it
     still opens secure connections, and refuses a legacy request plainly.
+    ``connect_timeout`` is passed only when given.
     """
+    options: dict[str, Any] = {}
+    if connect_timeout is not None:
+        options["connect_timeout"] = connect_timeout
     if not allow_legacy_ssh:
-        return await services.open_shell(device)
+        return await services.open_shell(device, **options)
     try:
-        return await services.open_shell(device, allow_legacy_ssh=True)
+        return await services.open_shell(device, allow_legacy_ssh=True, **options)
     except TypeError as exc:
         if "allow_legacy_ssh" not in str(exc):
             raise

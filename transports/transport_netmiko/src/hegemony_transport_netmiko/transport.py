@@ -19,6 +19,7 @@ import os
 import re
 import socket
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
@@ -477,6 +478,35 @@ def _safe_disconnect(connection) -> None:
         if bastion is not None:
             with contextlib.suppress(Exception):
                 bastion.close()
+
+
+class _LoginHandoff:
+    """Hands a login that runs in a thread to its caller, or marks it abandoned.
+
+    The caller may be cancelled while the thread still logs in. Exactly one
+    side then closes the connection: the thread, when the caller gave up
+    first, or the caller, when the login finished first.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._delivered: Any = None
+
+    def deliver(self, connection: Any) -> bool:
+        """Offer the connection; False when the caller has already given up."""
+        with self._lock:
+            if self._abandoned:
+                return False
+            self._delivered = connection
+            return True
+
+    def abandon(self) -> Any:
+        """Give up; the connection already delivered, which the caller must close."""
+        with self._lock:
+            self._abandoned = True
+            delivered, self._delivered = self._delivered, None
+            return delivered
 
 
 @dataclass
@@ -1150,13 +1180,16 @@ class SSHTransport:
 
     def _get_connection_params(self, *, connect_timeout: float | None = None) -> dict[str, Any]:
         """Get Netmiko connection parameters."""
+        timeout = self.connect_timeout if connect_timeout is None else connect_timeout
         params = {
             "device_type": self.device_type,
             "host": self.host,
             "port": self.port,
             "username": self.username,
             "password": self.password,
-            "timeout": self.connect_timeout if connect_timeout is None else connect_timeout,
+            "timeout": timeout,
+            # The TCP connect itself; netmiko's own default is 10 s.
+            "conn_timeout": timeout,
             "global_delay_factor": 1,
             "fast_cli": True,
         }
@@ -1478,23 +1511,13 @@ class SSHTransport:
         appropriate Netmiko methods.
         """
         results: list[SSHResult] = []
-        connection = None
+        held = self._held
+        connection = held
+        self._left_waiting = False
 
         try:
-            # Connect to device
-            logger.info(f"Connecting to {self.host}:{self.port} as {self.username}")
-            connect_start = time.perf_counter()
-            connection = self._connect_device()
-            connect_time = (time.perf_counter() - connect_start) * 1000
-            logger.info(f"Connected to {self.host} in {connect_time:.0f}ms")
-
-            # Register connection for cancellation support
-            if self.step_run_id:
-                self._cancellation_registry.register(self.step_run_id, connection)
-
-            # Enter enable mode if we have a secret
-            if self.secret:
-                connection.enable()
+            if held is None:
+                connection = self._login()
 
             if self._is_config_command_set(commands):
                 # Config blocks and exec commands run in the order written.
@@ -1568,12 +1591,93 @@ class SSHTransport:
                     )
                 )
         finally:
-            # Unregister from cancellation registry before disconnect
-            if self.step_run_id and connection:
-                self._cancellation_registry.unregister(self.step_run_id, connection)
-            _safe_disconnect(connection)
+            if held is None:
+                self._logout(connection)
+            elif self._left_waiting or not _session_open(held):
+                # The device closed the held session, or may wait at a
+                # question the next command would answer: the next caller
+                # sees session_open False and opens a new one.
+                self._drop_held()
 
         return results
+
+    def _login(self):
+        """Connect, register for cancellation and enter enable mode; the connection."""
+        logger.info(f"Connecting to {self.host}:{self.port} as {self.username}")
+        connect_start = time.perf_counter()
+        connection = self._connect_device()
+        connect_time = (time.perf_counter() - connect_start) * 1000
+        logger.info(f"Connected to {self.host} in {connect_time:.0f}ms")
+        # Register connection for cancellation support
+        if self.step_run_id:
+            self._cancellation_registry.register(self.step_run_id, connection)
+        try:
+            # Enter enable mode if we have a secret
+            if self.secret:
+                connection.enable()
+        except BaseException:
+            self._logout(connection)
+            raise
+        return connection
+
+    def _logout(self, connection) -> None:
+        """Unregister ``connection`` from cancellation, then close it."""
+        if self.step_run_id and connection:
+            self._cancellation_registry.unregister(self.step_run_id, connection)
+        _safe_disconnect(connection)
+
+    def _drop_held(self) -> None:
+        """Close the held session, if any, and forget it."""
+        held, self._held = self._held, None
+        if held is not None:
+            self._logout(held)
+
+    #: Feature flag: ``open_session`` keeps one login for later
+    #: ``execute_commands`` calls, as ``wait_for`` steps poll on.
+    supports_held_session = True
+    #: The connection ``open_session`` holds; None while none is held.
+    _held: Any = None
+
+    async def open_session(self) -> None:
+        """Log in now and keep the session for later ``execute_commands`` calls.
+
+        Those calls then run on it instead of logging in each time. A session
+        already held is closed first. Raises the login's error when it fails
+        (refused, timed out, authentication, host key).
+        """
+        await self.close_session()
+        handoff = _LoginHandoff()
+
+        def login() -> Any:
+            connection = self._login()
+            if not handoff.deliver(connection):
+                # The caller was cancelled while this ran; nobody holds it.
+                self._logout(connection)
+            return connection
+
+        try:
+            self._held = await self._run_in_thread(login)
+        except asyncio.CancelledError:
+            # The login thread runs on. Whichever side comes second closes
+            # its connection, also when the event loop is shutting down.
+            orphan = handoff.abandon()
+            if orphan is not None:
+                self._logout(orphan)
+            raise
+
+    @property
+    def session_open(self) -> bool:
+        """Whether a held session exists and the device has not closed it.
+
+        Read from the SSH library's state only; nothing is sent. A session
+        that went silent without closing still counts as open.
+        """
+        return self._held is not None and _session_open(self._held)
+
+    async def close_session(self) -> None:
+        """Close the held session, if any (idempotent)."""
+        if self._held is not None:
+            await self._run_in_thread(self._drop_held)
 
     def _scp_put_sync(
         self,

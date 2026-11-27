@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-transport-support"
-version = "0.56.0"
+version = "0.59.0"
 description = "Internal code shared by Hegemony's built-in device transports (no stability promise)"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -13,7 +13,7 @@ license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 # No SSH library: callers pass their library module or objects in, like the
 # SDK policy it applies.
-dependencies = ["hegemony-step-sdk==1.0.1"]
+dependencies = ["hegemony-step-sdk==1.1.0"]
 
 classifiers = [
     "Development Status :: 4 - Beta",
