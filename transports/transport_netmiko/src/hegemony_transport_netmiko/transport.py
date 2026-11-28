@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Coroutine, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, TypeVar, cast
@@ -522,6 +523,22 @@ class SSHResult:
     disconnected: bool = False
 
 
+@dataclass
+class WatchResult:
+    """What ``watch_output`` read from one device (``hegemony_step_sdk.CliWatchResult``)."""
+
+    setup: list[SSHResult]
+    output: str = ""
+    disconnected: bool = False
+    cancelled: bool = False
+    error: str | None = None
+    elapsed_seconds: float = 0.0
+
+
+#: Pause between two reads of a quiet watched session.
+_WATCH_POLL_SECONDS = 0.25
+
+
 # Map inventory platform strings to Netmiko device_type values.
 PLATFORM_TO_NETMIKO = {
     "ios-xe": "cisco_ios",
@@ -882,6 +899,8 @@ class SSHTransport:
         #: Duck-typed flag handlers read to skip duplicate completed-output
         #: emissions for paths this transport streams live.
         self.streams_timing_output = output_sink is not None
+        #: Likewise for what ``watch_output`` reads.
+        self.streams_watch_output = output_sink is not None
 
         self.username = spec.username or None
         self.password = spec.password
@@ -1678,6 +1697,111 @@ class SSHTransport:
         """Close the held session, if any (idempotent)."""
         if self._held is not None:
             await self._run_in_thread(self._drop_held)
+
+    #: Feature flag: ``watch_output`` follows what the device prints
+    #: (``hegemony_step_sdk.CliWatchTransport``, for ``netcli.watch``).
+    supports_cli_watch = True
+
+    def _watch_sync(
+        self,
+        commands: list[str],
+        duration_seconds: float,
+        keepalive_seconds: float,
+        stop: threading.Event,
+    ) -> WatchResult:
+        """Run the setup commands, then read the channel until the watch is over."""
+        held = self._held
+        connection = held
+        outcome = WatchResult(setup=[])
+        try:
+            if held is None:
+                connection = self._login()
+            self._left_waiting = False
+            for command in commands:
+                if not command.strip():
+                    continue
+                result = self._run_exec_command(connection, command)
+                outcome.setup.append(result)
+                if result.exit_code != 0:
+                    outcome.disconnected = result.disconnected
+                    return outcome
+            # Everything the device sends from here on is the watch's, also a
+            # log message already waiting: nothing is read and thrown away.
+            parts: list[str] = []
+            started = time.monotonic()
+            deadline = started + duration_seconds
+            next_keepalive = started + keepalive_seconds if keepalive_seconds > 0 else None
+            try:
+                while True:
+                    if stop.is_set() or self._cancellation_registry.is_cancelled(self.step_run_id):
+                        outcome.cancelled = True
+                        break
+                    chunk = connection.read_channel()
+                    if chunk:
+                        parts.append(str(chunk))
+                        self._stream_from_thread(chunk)
+                    elif not _session_open(connection):
+                        outcome.disconnected = True
+                        break
+                    now = time.monotonic()
+                    if now >= deadline:
+                        break
+                    if next_keepalive is not None and now >= next_keepalive:
+                        connection.write_channel("\n")
+                        next_keepalive = now + keepalive_seconds
+                    if not chunk:
+                        stop.wait(min(_WATCH_POLL_SECONDS, max(deadline - now, 0.0)))
+            finally:
+                # A read or keepalive that fails part way keeps what came before it.
+                outcome.elapsed_seconds = time.monotonic() - started
+                outcome.output = "".join(parts)
+            self._stream_flush_from_thread()
+        except NetmikoAuthenticationException as e:
+            outcome.error = f"Authentication failed: {e}"
+        except NetmikoTimeoutException as e:
+            outcome.error = f"Connection timeout: {e}"
+        except Exception as e:  # noqa: BLE001 - reported in the result
+            if connection is not None and not _session_open(connection):
+                outcome.disconnected = True
+            else:
+                outcome.error = f"SSH connection failed: {e}"
+        finally:
+            if held is None:
+                self._logout(connection)
+            elif self._left_waiting or not _session_open(held):
+                self._drop_held()
+        return outcome
+
+    async def watch_output(
+        self,
+        commands: list[str],
+        *,
+        duration_seconds: float,
+        keepalive_seconds: float = 0,
+    ) -> WatchResult:
+        """Run ``commands`` at the exec prompt, then read what the device prints.
+
+        See ``hegemony_step_sdk.CliWatchTransport.watch_output``. The reads
+        run in a thread of their own, outside the shared executor; cancelling
+        the call tells that thread to stop at its next read.
+        """
+        stop = threading.Event()
+        loop = asyncio.get_running_loop()
+        self._loop = loop
+        # A watch holds its thread for the whole duration. In the event loop's
+        # shared executor, a few watches would take every thread, and the
+        # commands of the change being watched could not run until they end.
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="netmiko-watch")
+        try:
+            return await loop.run_in_executor(
+                pool,
+                partial(self._watch_sync, commands, duration_seconds, keepalive_seconds, stop),
+            )
+        except asyncio.CancelledError:
+            stop.set()
+            raise
+        finally:
+            pool.shutdown(wait=False)
 
     def _scp_put_sync(
         self,

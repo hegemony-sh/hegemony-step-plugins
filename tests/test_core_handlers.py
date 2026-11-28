@@ -52,7 +52,13 @@ WHEELS = [
     (
         hegemony_steps_netcli,
         "netcli",
-        {"netcli.execute", "netcli.collect_evidence", "netcli.file_download", "netcli.wait_for"},
+        {
+            "netcli.execute",
+            "netcli.collect_evidence",
+            "netcli.file_download",
+            "netcli.wait_for",
+            "netcli.watch",
+        },
     ),
     (hegemony_steps_evidence, "evidence", {"evidence.assert", "evidence.compare"}),
     (hegemony_steps_container, "container", {"container.run", "container.build"}),

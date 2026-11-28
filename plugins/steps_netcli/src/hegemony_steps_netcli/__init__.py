@@ -24,12 +24,14 @@ from .collect_evidence import CollectEvidenceHandler
 from .execute import ExecuteCLIActionHandler
 from .file_download import FileDownloadHandler
 from .wait_for import WaitForCliHandler
+from .watch import WatchCliHandler
 
 ALL_HANDLERS: tuple[type[BaseHandler], ...] = (
     CollectEvidenceHandler,
     ExecuteCLIActionHandler,
     FileDownloadHandler,
     WaitForCliHandler,
+    WatchCliHandler,
 )
 
 

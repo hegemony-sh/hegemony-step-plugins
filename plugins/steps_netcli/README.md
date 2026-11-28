@@ -8,18 +8,24 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 # hegemony-steps-netcli
 
 Network-device CLI paradigm: execute command lines, collect outputs as
-evidence, have a device download a file, and wait until a command's output
-matches a pattern. Vendor-neutral by design — platform
+evidence, have a device download a file, wait until a command's output
+matches a pattern, and follow what a device prints for a while. Vendor-neutral by design — platform
 dialects and transports (netmiko/scrapli, ssh) are resolved beneath the
 handler layer from device access config.
 
 Handlers: `netcli.execute`, `netcli.collect_evidence`, `netcli.file_download`,
-`netcli.wait_for`.
+`netcli.wait_for`, `netcli.watch`.
 
 `netcli.wait_for` runs one command again and again until its output matches
 (or stops matching) a regular expression, for the time after a reload or an
 install. It keeps one login per device for every poll, and logs in again when
 the device drops the session.
+
+`netcli.watch` logs in to every device at once, sends setup commands
+(`terminal monitor` by default) and then reads what the devices print on that
+session for a set time, such as the log messages during a change in a
+parallel branch. Optional fail and expect patterns check the lines. It needs a
+transport that can follow output (netmiko or scrapli, `supports_cli_watch`).
 
 `netcli.file_download` names its file by repository and path in **File**: picked
 in the editor, or from a "Repository file" run-form field

@@ -81,6 +81,58 @@ class Transport(Protocol):
     ) -> dict: ...
 
 
+class CliWatchResult(Protocol):
+    """What :meth:`CliWatchTransport.watch_output` read from one device.
+
+    ``setup`` holds the results of the commands sent before the watch, in
+    order; the transport stops at the first that fails (``exit_code != 0``)
+    and then does not watch. ``output`` is everything the device printed
+    while it was watched. ``disconnected`` is True when the device closed
+    the session before the watch was over, ``cancelled`` when the run was
+    cancelled. ``error`` names a login or read failure; it is None when the
+    watch ran, also when it ended early. ``elapsed_seconds`` is the time
+    spent watching, after the setup commands.
+    """
+
+    setup: Sequence[CommandResult]
+    output: str
+    disconnected: bool
+    cancelled: bool
+    error: str | None
+    elapsed_seconds: float
+
+
+class CliWatchTransport(Protocol):
+    """A :class:`Transport` that can follow what a device prints (``netcli.watch``).
+
+    Optional: a transport advertises it with ``supports_cli_watch = True``,
+    and a handler checks that flag before it calls :meth:`watch_output`.
+    A transport whose ``streams_watch_output`` is True pushes what it reads
+    to the step's live log as it arrives, so the handler does not write it
+    again.
+    """
+
+    supports_cli_watch: bool
+
+    async def watch_output(
+        self,
+        commands: list[str],
+        *,
+        duration_seconds: float,
+        keepalive_seconds: float = 0,
+    ) -> CliWatchResult:
+        """Run ``commands`` at the exec prompt, then read what the device prints.
+
+        Reads for ``duration_seconds`` on the same session, such as the log
+        messages ``terminal monitor`` sends, and stops early when the device
+        closes the session or the run is cancelled. With ``keepalive_seconds``
+        above 0 an empty line is sent that often, so a device whose line
+        exec-timeout counts only what it receives keeps the session; each one
+        makes the device print its prompt. Uses the held session when one is
+        open, and otherwise logs in and out itself.
+        """
+
+
 @dataclass(frozen=True, slots=True)
 class ShellResult:
     """Result of one exec-channel command on a remote host."""
