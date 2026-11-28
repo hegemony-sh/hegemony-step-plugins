@@ -222,7 +222,7 @@ version must change before they pin this release.
 ### Features
 
 * **netcli:** answer the questions a command asks, as the step lists them ([da74718](https://github.com/hegemony-sh/hegemony-step-plugins/commit/da74718c225e7bfcc041aba1b0604fe7963e0660))
-* **netcli:** edit a step's answers in the step form ([e026679](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e0266790727393da107739a4657ed46232ca94d9)), closes [hegemony-sh/hegemony#828](https://github.com/hegemony-sh/hegemony/issues/828)
+* **netcli:** edit a step's answers in the step form ([e026679](https://github.com/hegemony-sh/hegemony-step-plugins/commit/e0266790727393da107739a4657ed46232ca94d9))
 
 ### Bug Fixes
 
@@ -320,7 +320,7 @@ value.
 
 ### Code Refactoring
 
-* **evidence:** drop the compare artifact's legacy match field ([a89b7ff](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a89b7ff0f5ab86c1cb1da0545b7f3392a24752db)), closes [hegemony-sh/hegemony#817](https://github.com/hegemony-sh/hegemony/issues/817)
+* **evidence:** drop the compare artifact's legacy match field ([a89b7ff](https://github.com/hegemony-sh/hegemony-step-plugins/commit/a89b7ff0f5ab86c1cb1da0545b7f3392a24752db))
 
 ## [0.41.1](https://github.com/hegemony-sh/hegemony-step-plugins/compare/v0.41.0...v0.41.1) (2026-11-15)
 
