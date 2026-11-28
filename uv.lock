@@ -714,9 +714,9 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "grpcio", specifier = ">=1.66,<2" },
+    { name = "grpcio", specifier = ">=1.76,<2" },
     { name = "hegemony-step-sdk", editable = "packages/step_sdk" },
-    { name = "protobuf", specifier = ">=5.26,<8" },
+    { name = "protobuf", specifier = ">=6.33.5,<8" },
 ]
 
 [[package]]
