@@ -532,3 +532,28 @@ async def test_a_refused_cancel_leaves_it_to_the_devices_timer(monkeypatch):
     assert "rolled back now" not in (result.error or "")
     assert "the device rolls it back within 120 s" in (result.error or "")
     assert "rolled_back" not in result.output["devices"]["r1"]
+
+
+async def test_an_unknown_pending_state_leaves_it_to_the_devices_timer(monkeypatch):
+    device = FakeDevice("r1")
+    device.reachable_after_commit = False
+    services = FakeServices(device)
+    cancels: list[str] = []
+
+    async def unknown(self: FakeSession) -> bool:
+        raise RuntimeError("cannot tell whether a commit is pending: % Invalid input")
+
+    async def cancel(self: FakeSession) -> None:
+        cancels.append("cancel")
+
+    monkeypatch.setattr(FakeSession, "has_pending_commit", unknown)
+    monkeypatch.setattr(FakeSession, "cancel_pending_commit", cancel)
+
+    result = await NapalmConfigHandler().execute(
+        _ctx({"config": "interface Loopback100", "revert_in_seconds": 120}, services)
+    )
+
+    assert not result.success
+    assert cancels == []
+    assert "the device rolls it back within 120 s" in (result.error or "")
+    assert "rolled_back" not in result.output["devices"]["r1"]

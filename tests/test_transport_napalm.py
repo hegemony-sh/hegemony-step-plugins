@@ -441,6 +441,17 @@ async def test_close_waits_for_a_driver_call_its_caller_gave_up_on():
     assert events == ["commit done", "close"]
 
 
+class _IosCli:
+    """The IOS CLI as NAPALM's driver reaches it: one canned reply."""
+
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+
+    def send_command(self, command: str) -> str:
+        assert command == "show archive config rollback timer"
+        return self.reply
+
+
 async def test_cancelling_a_pending_commit_uses_each_platforms_own_command():
     class EosDriver(_FakeDriver):
         config_session = "napalm_42"
@@ -453,12 +464,11 @@ async def test_cancelling_a_pending_commit_uses_each_platforms_own_command():
             return False
 
     class IosDriver(_FakeDriver):
+        device = _IosCli("No Rollback Confirmed Change pending")
+
         def _commit_handler(self, cmd: str) -> str:
             self.calls.append(("commit_handler", cmd))
             return "r1#"
-
-        def has_pending_commit(self) -> bool:
-            return False
 
     eos, ios = EosDriver(), IosDriver()
     await napalm_transport.NapalmDriverSession(
@@ -506,15 +516,50 @@ async def test_a_refused_cancel_is_reported_not_taken_for_a_rollback():
     # NAPALM returns the device's reply instead of raising on a refused
     # command; the commit still pending afterwards is what tells.
     class RefusingIos(_FakeDriver):
+        device = _IosCli("Timer value: 2 min\nUser: admin")
+
         def _commit_handler(self, cmd: str) -> str:
             return "% Rollback Confirmed Change: not permitted for this user\nr1#"
-
-        def has_pending_commit(self) -> bool:
-            return True
 
     session = napalm_transport.NapalmDriverSession(
         _transport(22, FakeVerifier()), "ios", RefusingIos()
     )
 
     with pytest.raises(RuntimeError, match="did not cancel the pending commit: % Rollback"):
+        await session.cancel_pending_commit()
+
+
+@pytest.mark.parametrize(
+    ("reply", "pending"),
+    [
+        ("No Rollback Confirmed Change pending", False),
+        ("Archive feature not enabled", False),
+        (
+            "Time configured: 10:02:11 UTC\nTimer type: Rollback\nTimer value: 2 min\nUser: admin",
+            True,
+        ),
+    ],
+)
+async def test_ios_pending_state_counts_only_explicit_answers(reply, pending):
+    class Ios(_FakeDriver):
+        device = _IosCli(reply)
+
+    session = napalm_transport.NapalmDriverSession(_transport(22, FakeVerifier()), "ios", Ios())
+    assert await session.has_pending_commit() is pending
+
+
+@pytest.mark.parametrize("reply", ["% Invalid input detected at '^' marker.", "", "garbled"])
+async def test_an_ios_pending_state_it_cannot_read_is_unknown_not_none(reply):
+    # NAPALM's own has_pending_commit() would answer False here.
+    class Ios(_FakeDriver):
+        device = _IosCli(reply)
+
+        def _commit_handler(self, cmd: str) -> str:
+            return "r1#"
+
+    session = napalm_transport.NapalmDriverSession(_transport(22, FakeVerifier()), "ios", Ios())
+    with pytest.raises(RuntimeError, match="cannot tell whether a commit is pending"):
+        await session.has_pending_commit()
+    # A cancel it cannot confirm is not reported as done.
+    with pytest.raises(RuntimeError, match="cannot tell"):
         await session.cancel_pending_commit()

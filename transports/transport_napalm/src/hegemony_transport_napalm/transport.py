@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -199,7 +200,8 @@ class NapalmDriverSession:
         await self._call(lambda driver: driver.commit_config(message=message, revert_in=revert_in))
 
     async def has_pending_commit(self) -> bool:
-        return bool(await self._call(lambda driver: driver.has_pending_commit()))
+        name = self.driver
+        return await self._call(lambda driver: _pending(name, driver))
 
     async def confirm_commit(self) -> None:
         await self._call(lambda driver: driver.confirm_commit())
@@ -230,7 +232,7 @@ class NapalmDriverSession:
             # Both drivers return the device's reply rather than raise on a
             # refused command. Ask the device instead of trusting the reply:
             # a commit still pending means it was not cancelled.
-            if driver.has_pending_commit():
+            if _pending(name, driver):
                 raise RuntimeError(
                     f"the device did not cancel the pending commit: {_reply_text(reply)}"
                 )
@@ -309,6 +311,29 @@ class NapalmTransport(SSHTransport):
                 _quiet_close(orphan)
             raise
         return NapalmDriverSession(self, name, driver)
+
+
+#: What IOS says when no confirmed commit is pending, or cannot be.
+_IOS_NOTHING_PENDING = ("No Rollback Confirmed Change pending", "Archive feature not enabled")
+#: Fields IOS shows for a pending confirmed commit.
+_IOS_PENDING_FIELDS = re.compile(r"^\s*(?:Timer value|Time configured)\b", re.MULTILINE)
+
+
+def _pending(name: str, driver: Any) -> bool:
+    """Whether a confirmed commit waits for confirmation; raises when it cannot tell.
+
+    NAPALM's IOS driver answers False for any output it does not recognise
+    (an error, a changed format), which would read as "nothing pending".
+    Here only IOS's explicit answers count; anything else is unknown.
+    """
+    if name != "ios":
+        return bool(driver.has_pending_commit())
+    output = str(driver.device.send_command("show archive config rollback timer") or "")
+    if any(text in output for text in _IOS_NOTHING_PENDING):
+        return False
+    if _IOS_PENDING_FIELDS.search(output):
+        return True
+    raise RuntimeError(f"cannot tell whether a commit is pending: {_reply_text(output)}")
 
 
 def _reply_text(reply: Any) -> str:
