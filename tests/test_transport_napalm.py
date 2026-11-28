@@ -445,12 +445,20 @@ async def test_cancelling_a_pending_commit_uses_each_platforms_own_command():
     class EosDriver(_FakeDriver):
         config_session = "napalm_42"
 
-        def _run_commands(self, commands: list[str], encoding: str = "json") -> None:
+        def _run_commands(self, commands: list[str], encoding: str = "json") -> list:
             self.calls.append(("run", commands))
+            return [{"output": ""}]
+
+        def has_pending_commit(self) -> bool:
+            return False
 
     class IosDriver(_FakeDriver):
-        def _commit_handler(self, cmd: str) -> None:
+        def _commit_handler(self, cmd: str) -> str:
             self.calls.append(("commit_handler", cmd))
+            return "r1#"
+
+        def has_pending_commit(self) -> bool:
+            return False
 
     eos, ios = EosDriver(), IosDriver()
     await napalm_transport.NapalmDriverSession(
@@ -492,3 +500,21 @@ async def test_a_cancelled_call_reports_the_cancellation_even_if_the_driver_then
         await call
     # The lock is free again: the session can still be closed.
     await session.close()
+
+
+async def test_a_refused_cancel_is_reported_not_taken_for_a_rollback():
+    # NAPALM returns the device's reply instead of raising on a refused
+    # command; the commit still pending afterwards is what tells.
+    class RefusingIos(_FakeDriver):
+        def _commit_handler(self, cmd: str) -> str:
+            return "% Rollback Confirmed Change: not permitted for this user\nr1#"
+
+        def has_pending_commit(self) -> bool:
+            return True
+
+    session = napalm_transport.NapalmDriverSession(
+        _transport(22, FakeVerifier()), "ios", RefusingIos()
+    )
+
+    with pytest.raises(RuntimeError, match="did not cancel the pending commit: % Rollback"):
+        await session.cancel_pending_commit()

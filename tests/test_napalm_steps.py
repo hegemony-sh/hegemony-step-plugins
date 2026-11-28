@@ -512,3 +512,23 @@ async def test_the_timer_firing_after_the_pending_check_changes_nothing_more():
     # No NAPALM rollback(), which would restore the startup copy.
     assert device.rollback_calls == 0
     assert device.running == ["hostname r1", "ntp server 192.0.2.9"]
+
+
+async def test_a_refused_cancel_leaves_it_to_the_devices_timer(monkeypatch):
+    device = FakeDevice("r1")
+    device.reachable_after_commit = False
+    services = FakeServices(device)
+
+    async def refuse(self: FakeSession) -> None:
+        raise RuntimeError("the device did not cancel the pending commit: % not permitted")
+
+    monkeypatch.setattr(FakeSession, "cancel_pending_commit", refuse)
+
+    result = await NapalmConfigHandler().execute(
+        _ctx({"config": "interface Loopback100", "revert_in_seconds": 120}, services)
+    )
+
+    assert not result.success
+    assert "rolled back now" not in (result.error or "")
+    assert "the device rolls it back within 120 s" in (result.error or "")
+    assert "rolled_back" not in result.output["devices"]["r1"]

@@ -219,12 +219,21 @@ class NapalmDriverSession:
                 session = getattr(driver, "config_session", None)
                 if not session:
                     raise RuntimeError("no EOS configuration session waits for confirmation")
-                driver._run_commands([f"configure session {session} abort"], encoding="text")
+                reply = driver._run_commands(
+                    [f"configure session {session} abort"], encoding="text"
+                )
                 driver.config_session = None
             elif name == "ios":
-                driver._commit_handler("configure revert now")
+                reply = driver._commit_handler("configure revert now")
             else:
                 raise NotImplementedError(f"the {name} driver has no confirmed commit to cancel")
+            # Both drivers return the device's reply rather than raise on a
+            # refused command. Ask the device instead of trusting the reply:
+            # a commit still pending means it was not cancelled.
+            if driver.has_pending_commit():
+                raise RuntimeError(
+                    f"the device did not cancel the pending commit: {_reply_text(reply)}"
+                )
 
         await self._call(_cancel)
 
@@ -300,6 +309,16 @@ class NapalmTransport(SSHTransport):
                 _quiet_close(orphan)
             raise
         return NapalmDriverSession(self, name, driver)
+
+
+def _reply_text(reply: Any) -> str:
+    """A device reply for an error message: plain text, short."""
+    if isinstance(reply, list):
+        reply = " ".join(
+            str(item.get("output", item)) if isinstance(item, dict) else str(item) for item in reply
+        )
+    text = " ".join(str(reply or "").split())
+    return (text[:300] + "…") if len(text) > 300 else (text or "no reply")
 
 
 def _quiet_close(driver: Any) -> None:
