@@ -20,7 +20,9 @@ reference to it (`{{ steps.<id>.output.file }}`, looked up again by path;
 by id has no `output.file`, so pass `output.file_id` through `file_ids`) for
 later steps; `shell.wait_for` — run one command again and again, on one
 connection per host, until its output matches (or stops matching) a regular
-expression, for the time after a reboot or an install. The transport (SSH today, WinRM planned) is resolved
+expression, for the time after a reboot or an install. `shell.watch` — follow a long command such as
+`tail -F /var/log/syslog` on every host at once for a set time, and check the
+lines it printed against optional fail and expect patterns. The transport (SSH today, WinRM planned) is resolved
 from `device.access_config` via the platform's `open_shell` service; per
 CONVENTIONS.md, neither transport nor interpreter ever appears in handler ids.
 
