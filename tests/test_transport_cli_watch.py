@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 
 import asyncssh
 import pytest
@@ -174,6 +175,99 @@ async def test_cancelling_the_watch_stops_it(servers, transport_id):
             break
         await asyncio.sleep(0.1)
     assert all(conn.is_closed() for conn in servers.seen.connections)
+
+
+async def test_a_message_logged_right_after_setup_is_kept(servers, transport_id):
+    transport = await _transport(servers, transport_id)
+
+    result = await transport.watch_output(["log-now"], duration_seconds=0.8)
+
+    # It reaches the result: in the setup command's output when the transport
+    # read it with the command, or else in the watch output.
+    assert result.error is None
+    seen = "".join(item.output for item in result.setup) + result.output
+    assert "%SYS-5-QUEUED" in seen
+
+
+class _BreakingConnection:
+    """A netmiko-like session: one message, then the read fails (the connection resets)."""
+
+    remote_conn = None
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def read_channel(self) -> str:
+        self.reads += 1
+        if self.reads == 1:
+            return "%LINK-3-UPDOWN: Interface Gi1, changed state to down\n"
+        raise OSError("connection reset by peer")
+
+    def write_channel(self, data: str) -> None:
+        return None
+
+
+async def test_netmiko_keeps_what_it_read_before_a_read_fails(servers, monkeypatch):
+    transport = await _transport(servers, "netmiko")
+    monkeypatch.setattr(transport, "_login", _BreakingConnection)
+    monkeypatch.setattr(transport, "_logout", lambda connection: None)
+
+    result = await transport.watch_output([], duration_seconds=5.0)
+
+    assert result.error is not None
+    assert "changed state to down" in result.output
+    assert result.elapsed_seconds < 5
+
+
+class _ScrapliChannel:
+    def write(self, data: str) -> None:
+        raise OSError("broken pipe")
+
+
+class _ScrapliConnection:
+    channel = _ScrapliChannel()
+
+
+async def test_scrapli_keeps_what_it_read_before_a_keepalive_fails(servers, monkeypatch):
+    transport = await _transport(servers, "scrapli")
+    chunks = iter(["%LINK-3-UPDOWN: Interface Gi1, changed state to down\n"])
+
+    async def login():
+        return _ScrapliConnection()
+
+    async def logout(connection):
+        return None
+
+    async def read(connection, timeout=None):
+        await asyncio.sleep(0.05)
+        return next(chunks, "")
+
+    monkeypatch.setattr(transport, "_login", login)
+    monkeypatch.setattr(transport, "_logout", logout)
+    monkeypatch.setattr(transport, "_read_channel_chunk", read)
+    monkeypatch.setattr("hegemony_transport_scrapli.transport._session_open", lambda c: True)
+
+    result = await transport.watch_output([], duration_seconds=5.0, keepalive_seconds=0.2)
+
+    assert result.error is not None
+    assert "changed state to down" in result.output
+
+
+async def test_a_netmiko_watch_leaves_the_shared_executor_free(servers):
+    transport = await _transport(servers, "netmiko")
+    loop = asyncio.get_running_loop()
+    shared = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(shared)
+    try:
+        watch = asyncio.create_task(transport.watch_output([], duration_seconds=3.0))
+        await asyncio.sleep(1.0)
+        # A command of the change being watched still gets a thread at once.
+        assert await asyncio.wait_for(loop.run_in_executor(None, lambda: "ran"), 1.0) == "ran"
+        assert not watch.done()
+        result = await watch
+        assert result.error is None
+    finally:
+        shared.shutdown(wait=False)
 
 
 def test_asyncssh_does_not_offer_the_watch():

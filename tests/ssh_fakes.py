@@ -203,6 +203,11 @@ async def _session(process: asyncssh.SSHServerProcess) -> None:
             await process.stdin.readline()
             process.stdout.write("\r\nReload requested\r\n")
             break
+        elif command == "log-now":
+            # The prompt comes back, and a log message right behind it, before
+            # anything else is sent: it waits in the session for the next read.
+            process.stdout.write(PROMPT + "\r\n%SYS-5-QUEUED: logged right after the prompt\r\n")
+            continue
         elif command == "terminal monitor":
             background.append(asyncio.create_task(_log_messages(process)))
         elif command == "reload in 1":

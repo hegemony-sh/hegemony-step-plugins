@@ -178,6 +178,20 @@ async def test_a_line_that_matches_fail_pattern_fails_the_device():
     assert device["error"] == "1 line(s) matched fail_pattern"
 
 
+async def test_patterns_also_read_what_the_setup_commands_printed():
+    watched = _watched(
+        output="",
+        setup=[Result("terminal monitor", "%OSPF-5-ADJCHG: Nbr 10.0.0.2 from FULL to DOWN")],
+    )
+
+    result, _, _ = await _run({"r1": FakeTransport(watched)}, fail_pattern="FULL to DOWN")
+
+    assert result.success is False
+    assert result.output["devices"]["r1"]["fail_matches"] == [
+        "%OSPF-5-ADJCHG: Nbr 10.0.0.2 from FULL to DOWN"
+    ]
+
+
 async def test_expect_pattern_must_match_a_line():
     seen, _, _ = await _run({"r1": FakeTransport(_watched())}, expect_pattern="state to up$")
     missing, _, _ = await _run({"r1": FakeTransport(_watched())}, expect_pattern="BGP.*Up")

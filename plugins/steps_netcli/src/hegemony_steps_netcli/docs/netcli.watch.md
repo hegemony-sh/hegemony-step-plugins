@@ -40,8 +40,10 @@ devices. Connect Timeout (sec) bounds each login (10 s by default). Allow
 legacy SSH works as in `netcli.execute`.
 
 Two optional patterns check the output. Each is a regular expression (Python
-syntax) searched for in each line the device printed during the watch; start
-it with `(?i)` to ignore case.
+syntax) searched for in each line the device printed after the login: the
+setup commands' output, where a log message that arrives while a command
+runs lands, and everything printed during the watch. Start it with `(?i)` to
+ignore case.
 
 - **Fail Pattern**: a device fails when any line matches, such as
   `%LINK-3-UPDOWN` or `%OSPF-5-ADJCHG.*Down`.
@@ -73,7 +75,7 @@ whether Expect Pattern matched.
   (`duration` when Duration was up, `disconnected` when the device closed
   the session first, `cancelled` when the run was cancelled, `failed` when
   the login or a setup command failed), `elapsed_seconds` (the time
-  watched), `lines` (lines printed that are not blank), `fail_matches` (the
+  watched), `lines` (lines checked that are not blank), `fail_matches` (the
   first 20 lines that matched Fail Pattern, each cut at 500 characters),
   `expect_matched` (true or false, or null without Expect Pattern) and
   `error`.

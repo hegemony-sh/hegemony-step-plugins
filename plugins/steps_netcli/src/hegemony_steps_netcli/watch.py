@@ -367,8 +367,11 @@ class WatchCliHandler(BaseHandler):
                 outcome.error = f"the device closed the session after {outcome.elapsed_seconds} s"
             else:
                 outcome.ended = "duration"
+            # A log message that arrived while a setup command ran lands in
+            # that command's output, so the patterns read it there too.
+            setup_output = "\n".join(item.output for item in setup if item.output)
             outcome.lines, outcome.fail_matches, outcome.expect_matched = _check_lines(
-                output, fail, expect
+                setup_output + "\n" + output, fail, expect
             )
             if outcome.error is None and outcome.fail_matches:
                 outcome.error = (

@@ -1381,30 +1381,33 @@ class ScrapliTransport:
             started = time.monotonic()
             deadline = started + duration_seconds
             next_keepalive = started + keepalive_seconds if keepalive_seconds > 0 else None
-            while True:
-                if self._cancellation_registry.is_cancelled(self.step_run_id):
-                    outcome.cancelled = True
-                    break
-                now = time.monotonic()
-                if now >= deadline:
-                    break
-                if next_keepalive is not None and now >= next_keepalive:
-                    connection.channel.write("\n")
-                    next_keepalive = now + keepalive_seconds
-                wait = min(_WATCH_READ_SECONDS, deadline - now)
-                if next_keepalive is not None:
-                    wait = min(wait, max(next_keepalive - now, 0.01))
-                chunk = await self._read_channel_chunk(connection, timeout=wait)
-                if chunk is None or (
-                    not chunk and (self._scrapli_closed or not _session_open(connection))
-                ):
-                    outcome.disconnected = True
-                    break
-                if chunk:
-                    parts.append(chunk)
-                    await self._stream_push(chunk)
-            outcome.elapsed_seconds = time.monotonic() - started
-            outcome.output = "".join(parts)
+            try:
+                while True:
+                    if self._cancellation_registry.is_cancelled(self.step_run_id):
+                        outcome.cancelled = True
+                        break
+                    now = time.monotonic()
+                    if now >= deadline:
+                        break
+                    if next_keepalive is not None and now >= next_keepalive:
+                        connection.channel.write("\n")
+                        next_keepalive = now + keepalive_seconds
+                    wait = min(_WATCH_READ_SECONDS, deadline - now)
+                    if next_keepalive is not None:
+                        wait = min(wait, max(next_keepalive - now, 0.01))
+                    chunk = await self._read_channel_chunk(connection, timeout=wait)
+                    if chunk is None or (
+                        not chunk and (self._scrapli_closed or not _session_open(connection))
+                    ):
+                        outcome.disconnected = True
+                        break
+                    if chunk:
+                        parts.append(chunk)
+                        await self._stream_push(chunk)
+            finally:
+                # A read or keepalive that fails part way keeps what came before it.
+                outcome.elapsed_seconds = time.monotonic() - started
+                outcome.output = "".join(parts)
             await self._stream_flush()
         except ScrapliAuthenticationFailed as e:
             outcome.error = f"Authentication failed: {e}"

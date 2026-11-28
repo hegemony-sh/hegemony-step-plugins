@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Coroutine, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, TypeVar, cast
@@ -1724,34 +1725,36 @@ class SSHTransport:
                 if result.exit_code != 0:
                     outcome.disconnected = result.disconnected
                     return outcome
-            # What the setup commands left unread (an echo, a prompt) is not
-            # part of the watch.
-            connection.read_channel()
+            # Everything the device sends from here on is the watch's, also a
+            # log message already waiting: nothing is read and thrown away.
             parts: list[str] = []
             started = time.monotonic()
             deadline = started + duration_seconds
             next_keepalive = started + keepalive_seconds if keepalive_seconds > 0 else None
-            while True:
-                if stop.is_set() or self._cancellation_registry.is_cancelled(self.step_run_id):
-                    outcome.cancelled = True
-                    break
-                chunk = connection.read_channel()
-                if chunk:
-                    parts.append(str(chunk))
-                    self._stream_from_thread(chunk)
-                elif not _session_open(connection):
-                    outcome.disconnected = True
-                    break
-                now = time.monotonic()
-                if now >= deadline:
-                    break
-                if next_keepalive is not None and now >= next_keepalive:
-                    connection.write_channel("\n")
-                    next_keepalive = now + keepalive_seconds
-                if not chunk:
-                    stop.wait(min(_WATCH_POLL_SECONDS, max(deadline - now, 0.0)))
-            outcome.elapsed_seconds = time.monotonic() - started
-            outcome.output = "".join(parts)
+            try:
+                while True:
+                    if stop.is_set() or self._cancellation_registry.is_cancelled(self.step_run_id):
+                        outcome.cancelled = True
+                        break
+                    chunk = connection.read_channel()
+                    if chunk:
+                        parts.append(str(chunk))
+                        self._stream_from_thread(chunk)
+                    elif not _session_open(connection):
+                        outcome.disconnected = True
+                        break
+                    now = time.monotonic()
+                    if now >= deadline:
+                        break
+                    if next_keepalive is not None and now >= next_keepalive:
+                        connection.write_channel("\n")
+                        next_keepalive = now + keepalive_seconds
+                    if not chunk:
+                        stop.wait(min(_WATCH_POLL_SECONDS, max(deadline - now, 0.0)))
+            finally:
+                # A read or keepalive that fails part way keeps what came before it.
+                outcome.elapsed_seconds = time.monotonic() - started
+                outcome.output = "".join(parts)
             self._stream_flush_from_thread()
         except NetmikoAuthenticationException as e:
             outcome.error = f"Authentication failed: {e}"
@@ -1779,17 +1782,26 @@ class SSHTransport:
         """Run ``commands`` at the exec prompt, then read what the device prints.
 
         See ``hegemony_step_sdk.CliWatchTransport.watch_output``. The reads
-        run in an executor thread; cancelling the call tells that thread to
-        stop at its next read.
+        run in a thread of their own, outside the shared executor; cancelling
+        the call tells that thread to stop at its next read.
         """
         stop = threading.Event()
+        loop = asyncio.get_running_loop()
+        self._loop = loop
+        # A watch holds its thread for the whole duration. In the event loop's
+        # shared executor, a few watches would take every thread, and the
+        # commands of the change being watched could not run until they end.
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="netmiko-watch")
         try:
-            return await self._run_in_thread(
-                partial(self._watch_sync, commands, duration_seconds, keepalive_seconds, stop)
+            return await loop.run_in_executor(
+                pool,
+                partial(self._watch_sync, commands, duration_seconds, keepalive_seconds, stop),
             )
         except asyncio.CancelledError:
             stop.set()
             raise
+        finally:
+            pool.shutdown(wait=False)
 
     def _scp_put_sync(
         self,
