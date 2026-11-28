@@ -467,3 +467,28 @@ async def test_cancelling_a_pending_commit_uses_each_platforms_own_command():
         await napalm_transport.NapalmDriverSession(
             _transport(22, FakeVerifier(), platform="nxos"), "nxos_ssh", _FakeDriver()
         ).cancel_pending_commit()
+
+
+async def test_a_cancelled_call_reports_the_cancellation_even_if_the_driver_then_fails():
+    import asyncio
+    import threading
+
+    release, started = threading.Event(), threading.Event()
+
+    class FailingDriver(_FakeDriver):
+        def commit_config(self, message: str = "", revert_in: int | None = None) -> None:
+            started.set()
+            release.wait(5)
+            raise RuntimeError("CommitError: the device refused the commit")
+
+    session = _session(FailingDriver())
+    call = asyncio.create_task(session.commit_config())
+    await asyncio.to_thread(started.wait, 5)
+    call.cancel()
+    await asyncio.sleep(0.1)
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    # The lock is free again: the session can still be closed.
+    await session.close()

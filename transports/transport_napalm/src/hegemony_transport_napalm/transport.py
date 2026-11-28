@@ -157,9 +157,11 @@ class NapalmDriverSession:
             try:
                 return await asyncio.shield(future)
             except asyncio.CancelledError:
+                # asyncio.wait never raises the call's own error, so the
+                # cancellation is what the caller gets, whatever the call did.
                 while not future.done():
                     with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.shield(future)
+                        await asyncio.wait({future})
                 if not future.cancelled():
                     future.exception()  # retrieved: the cancellation wins
                 raise
