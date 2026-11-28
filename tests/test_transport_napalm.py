@@ -439,3 +439,31 @@ async def test_close_waits_for_a_driver_call_its_caller_gave_up_on():
         await call
     await closing
     assert events == ["commit done", "close"]
+
+
+async def test_cancelling_a_pending_commit_uses_each_platforms_own_command():
+    class EosDriver(_FakeDriver):
+        config_session = "napalm_42"
+
+        def _run_commands(self, commands: list[str], encoding: str = "json") -> None:
+            self.calls.append(("run", commands))
+
+    class IosDriver(_FakeDriver):
+        def _commit_handler(self, cmd: str) -> None:
+            self.calls.append(("commit_handler", cmd))
+
+    eos, ios = EosDriver(), IosDriver()
+    await napalm_transport.NapalmDriverSession(
+        _transport(22, FakeVerifier(), platform="eos"), "eos", eos
+    ).cancel_pending_commit()
+    await napalm_transport.NapalmDriverSession(
+        _transport(22, FakeVerifier()), "ios", ios
+    ).cancel_pending_commit()
+
+    assert eos.calls == [("run", ["configure session napalm_42 abort"])]
+    assert eos.config_session is None
+    assert ios.calls == [("commit_handler", "configure revert now")]
+    with pytest.raises(NotImplementedError, match="no confirmed commit"):
+        await napalm_transport.NapalmDriverSession(
+            _transport(22, FakeVerifier(), platform="nxos"), "nxos_ssh", _FakeDriver()
+        ).cancel_pending_commit()

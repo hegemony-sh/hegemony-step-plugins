@@ -205,6 +205,27 @@ class NapalmDriverSession:
     async def rollback(self) -> None:
         await self._call(lambda driver: driver.rollback())
 
+    async def cancel_pending_commit(self) -> None:
+        # The platforms' own commands for "undo the pending confirmed commit".
+        # Each does nothing when no commit is pending (its timer fired), so a
+        # race with the timer is harmless. NAPALM's rollback() would instead
+        # fall back to restoring the copy saved at commit time.
+        name = self.driver
+
+        def _cancel(driver: Any) -> None:
+            if name == "eos":
+                session = getattr(driver, "config_session", None)
+                if not session:
+                    raise RuntimeError("no EOS configuration session waits for confirmation")
+                driver._run_commands([f"configure session {session} abort"], encoding="text")
+                driver.config_session = None
+            elif name == "ios":
+                driver._commit_handler("configure revert now")
+            else:
+                raise NotImplementedError(f"the {name} driver has no confirmed commit to cancel")
+
+        await self._call(_cancel)
+
     async def close(self) -> None:
         async with self._lock:
             driver, self._driver = self._driver, None

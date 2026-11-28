@@ -40,9 +40,11 @@ Confirm Within (sec) makes the commit a confirmed commit. The device rolls
 the change back by itself after that long unless it is confirmed. The step
 confirms it only after a second, new session to the device succeeds. When
 that session fails and the commit is still waiting for confirmation, the
-step rolls back at once; if that fails too, the device's own timer does.
-When the timer has already fired, the step leaves the device as the timer
-left it. The value is 0 (commit at once) or a multiple of 60 from 60 to
+step cancels it at once with the platform's own command (`configure session`
+abort on EOS, `configure revert now` on IOS); if that fails too, the
+device's own timer does. That command only ever undoes the pending commit,
+so when the timer has already fired, the device stays as the timer left
+it. The value is 0 (commit at once) or a multiple of 60 from 60 to
 86340 (23 hours 59 minutes).
 
 What each platform needs:

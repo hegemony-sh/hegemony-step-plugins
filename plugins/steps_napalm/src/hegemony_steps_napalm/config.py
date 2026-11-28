@@ -244,12 +244,15 @@ class NapalmConfigHandler(BaseHandler):
         outcome: DeviceOutcome,
         revert_in: int,
     ) -> str:
-        """Roll back a confirmed commit only while it is still pending; how it ended.
+        """Cancel a confirmed commit while it is still pending; how it ended.
 
         Once the device's timer has fired it has already put the old
-        configuration back. A rollback then would restore what the driver
-        saved at commit time instead (on EOS, the startup configuration),
-        which can drop unsaved changes made before this step.
+        configuration back. NAPALM's rollback() would then restore what the
+        driver saved at commit time instead (on EOS, the startup
+        configuration), which can drop unsaved changes made before this
+        step, and the timer can fire between any check and that call. So the
+        step only cancels the pending commit, which changes nothing once the
+        timer has fired.
         """
         try:
             pending = await session.has_pending_commit()
@@ -260,10 +263,10 @@ class NapalmConfigHandler(BaseHandler):
             await log_line(ctx, device, "the device already rolled the commit back")
             outcome.output["rolled_back"] = True
             return "the device already rolled it back"
-        await log_line(ctx, device, "no new session after the commit; rolling back")
+        await log_line(ctx, device, "no new session after the commit; cancelling it")
         try:
-            await session.rollback()
+            await session.cancel_pending_commit()
         except Exception:  # noqa: BLE001 - the device's own timer still runs
-            return f"the device rolls it back within {revert_in} s"
+            return f"the device rolls it back within {revert_in} s, if it has not already"
         outcome.output["rolled_back"] = True
         return "rolled back now"

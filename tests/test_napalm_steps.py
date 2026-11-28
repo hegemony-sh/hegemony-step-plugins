@@ -36,7 +36,9 @@ class FakeDevice:
         self.reachable_after_commit = True
         self.timer_fires_before_check = False
         self.rollbacks_by_timer = False
+        self.timer_fires_after_check = False
         self.rollback_calls = 0
+        self.startup = list(self.running)
         self.big_result = 0
         self.commits = 0
         self.facts = {"hostname": name, "os_version": "4.30"}
@@ -98,7 +100,19 @@ class FakeSession:
         self.candidate = None
 
     async def has_pending_commit(self) -> bool:
-        return self.device.pending
+        pending = self.device.pending
+        if pending and self.device.timer_fires_after_check:
+            # The race: the timer fires right after the step sees "pending".
+            self.device.running = list(self.device.before_commit or self.device.running)
+            self.device.pending = False
+        return pending
+
+    async def cancel_pending_commit(self) -> None:
+        # Like "configure session X abort" / "configure revert now": only the
+        # pending commit is undone, and nothing happens when none is pending.
+        if self.device.pending:
+            self.device.running = list(self.device.before_commit or self.device.running)
+            self.device.pending = False
 
     async def confirm_commit(self) -> None:
         assert self.device.pending
@@ -480,3 +494,21 @@ async def test_a_cancel_while_logging_the_open_still_closes_the_session(monkeypa
         await NapalmGetHandler().execute(_ctx({}, services))
 
     assert services.sessions and services.sessions[0].closed
+
+
+async def test_the_timer_firing_after_the_pending_check_changes_nothing_more():
+    # Unsaved running changes predate the step; startup does not have them.
+    device = FakeDevice("r1")
+    device.running.append("ntp server 192.0.2.9")
+    device.timer_fires_after_check = True
+    device.reachable_after_commit = False
+    services = FakeServices(device)
+
+    result = await NapalmConfigHandler().execute(
+        _ctx({"config": "interface Loopback100", "revert_in_seconds": 120}, services)
+    )
+
+    assert not result.success
+    # No NAPALM rollback(), which would restore the startup copy.
+    assert device.rollback_calls == 0
+    assert device.running == ["hostname r1", "ntp server 192.0.2.9"]

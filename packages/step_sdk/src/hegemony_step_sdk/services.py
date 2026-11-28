@@ -211,6 +211,15 @@ class NapalmSession(Protocol):
     async def confirm_commit(self) -> None:
         """Confirm a commit made with ``revert_in``, so it stays."""
 
+    async def cancel_pending_commit(self) -> None:
+        """Undo a commit made with ``revert_in`` now, before its timer does.
+
+        It only ever cancels that pending commit: when none is pending any
+        more (the timer fired), it changes nothing. Unlike :meth:`rollback`,
+        it never falls back to restoring a configuration saved at commit
+        time, which can drop changes made before the commit.
+        """
+
     async def rollback(self) -> None:
         """Return to the configuration before the last commit."""
 
