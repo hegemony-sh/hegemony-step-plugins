@@ -300,8 +300,11 @@ The subshell stops at the first failed step, so nothing is uploaded unless
 every file downloaded, matched `SHA256SUMS` and is listed there.
 
 Check the files with `gh attestation verify` first when the Release has
-attestations. Use a PyPI API token scoped to the affected projects, paste it
-when twine asks for the password, and delete it afterwards. A hand upload
+attestations. A PyPI token scoped to one project can upload only that
+project, and the command above uploads every project in the Release. So
+either create a short-lived account-wide token, paste it when twine asks for
+the password and delete it right after, or keep project tokens and run the
+upload once per project with only that project's files. A hand upload
 carries no PEP 740 attestations.
 
 ### The SDK's own version
