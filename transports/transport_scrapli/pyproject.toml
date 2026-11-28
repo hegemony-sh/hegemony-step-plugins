@@ -12,7 +12,7 @@ license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==1.1.0",
+    "hegemony-step-sdk==1.2.0",
     "hegemony-transport-support==0.59.0",
     # asyncssh extra: already the platform's SSH library. The default "system"
     # transport shells out to a local ssh binary (not in worker images), and the
