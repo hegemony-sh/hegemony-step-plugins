@@ -130,12 +130,12 @@ async def napalm_session(
     except Exception as exc:
         await log_line(ctx, device, f"opening the NAPALM session failed: {type(exc).__name__}")
         raise
-    await log_line(
-        ctx,
-        device,
-        f"NAPALM session open ({session.driver} driver) after {loop.time() - started:.1f} s",
-    )
     try:
+        await log_line(
+            ctx,
+            device,
+            f"NAPALM session open ({session.driver} driver) after {loop.time() - started:.1f} s",
+        )
         yield session
     finally:
         await session.close()

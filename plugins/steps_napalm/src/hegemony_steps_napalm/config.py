@@ -49,9 +49,10 @@ from .common import (
 
 HANDLER_ID = "napalm.config"
 
-#: Confirm Within bounds, in seconds. Cisco IOS takes whole minutes only.
+#: Confirm Within bounds, in seconds. Cisco IOS takes whole minutes only, and
+#: Arista EOS writes the timer as HH:MM:SS, so a full 24 h would wrap to 0.
 MIN_REVERT_SECONDS = 60
-MAX_REVERT_SECONDS = 24 * 3600
+MAX_REVERT_SECONDS = 24 * 3600 - 60
 
 
 class NapalmConfigConfig(NapalmConnectionConfig):
@@ -98,7 +99,8 @@ class NapalmConfigConfig(NapalmConnectionConfig):
         description=(
             "0 commits at once. Otherwise a confirmed commit: the device rolls the change "
             "back by itself after this long unless the step confirms it, which it does once a "
-            "new session shows the device can still be managed. A multiple of 60, at least 60. "
+            "new session shows the device can still be managed. A multiple of 60, from 60 to "
+            "86340 (23 h 59 min). "
             "Arista EOS supports it; Cisco IOS needs the archive feature; Cisco NX-OS does "
             "not support it."
         ),
@@ -226,16 +228,42 @@ class NapalmConfigHandler(BaseHandler):
             async with napalm_session(ctx, device, config) as check:
                 await check.get("facts")
         except Exception as exc:  # noqa: BLE001 - reported, and the change undone
-            await log_line(ctx, device, "no new session after the commit; rolling back")
-            try:
-                await session.rollback()
-                outcome.output["rolled_back"] = True
-                undone = "rolled back now"
-            except Exception:  # noqa: BLE001 - the device's own timer still runs
-                undone = f"the device rolls it back within {revert_in} s"
+            undone = await self._undo_pending(ctx, device, session, outcome, revert_in)
             raise NapalmStepError(
                 f"a new session after the commit failed ({describe_error(exc)}); {undone}"
             ) from exc
         await log_line(ctx, device, "confirm_commit")
         await session.confirm_commit()
         outcome.output["confirmed"] = True
+
+    async def _undo_pending(
+        self,
+        ctx: HandlerContext,
+        device: dict[str, Any],
+        session: NapalmSession,
+        outcome: DeviceOutcome,
+        revert_in: int,
+    ) -> str:
+        """Roll back a confirmed commit only while it is still pending; how it ended.
+
+        Once the device's timer has fired it has already put the old
+        configuration back. A rollback then would restore what the driver
+        saved at commit time instead (on EOS, the startup configuration),
+        which can drop unsaved changes made before this step.
+        """
+        try:
+            pending = await session.has_pending_commit()
+        except Exception:  # noqa: BLE001 - unknown: leave it to the device's timer
+            await log_line(ctx, device, "cannot tell whether the commit is pending")
+            return f"the device rolls it back within {revert_in} s"
+        if not pending:
+            await log_line(ctx, device, "the device already rolled the commit back")
+            outcome.output["rolled_back"] = True
+            return "the device already rolled it back"
+        await log_line(ctx, device, "no new session after the commit; rolling back")
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001 - the device's own timer still runs
+            return f"the device rolls it back within {revert_in} s"
+        outcome.output["rolled_back"] = True
+        return "rolled back now"

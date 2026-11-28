@@ -150,7 +150,19 @@ class NapalmDriverSession:
             driver = self._driver
             if driver is None:
                 raise NapalmSessionClosedError("the NAPALM session is closed")
-            return await self._transport._run_in_thread(lambda: func(driver))
+            # A running executor call cannot be stopped. If the caller is
+            # cancelled, the lock stays held until the call returns, so
+            # close() never tears the driver down under a commit in progress.
+            future = asyncio.ensure_future(self._transport._run_in_thread(lambda: func(driver)))
+            try:
+                return await asyncio.shield(future)
+            except asyncio.CancelledError:
+                while not future.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.shield(future)
+                if not future.cancelled():
+                    future.exception()  # retrieved: the cancellation wins
+                raise
 
     async def get(self, getter: str) -> Any:
         if getter not in NAPALM_GETTERS:

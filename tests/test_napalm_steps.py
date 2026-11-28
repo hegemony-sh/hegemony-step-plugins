@@ -34,6 +34,10 @@ class FakeDevice:
         self.before_commit: list[str] | None = None
         self.pending = False
         self.reachable_after_commit = True
+        self.timer_fires_before_check = False
+        self.rollbacks_by_timer = False
+        self.rollback_calls = 0
+        self.big_result = 0
         self.commits = 0
         self.facts = {"hostname": name, "os_version": "4.30"}
 
@@ -57,6 +61,8 @@ class FakeSession:
             return {"running": "\n".join(self.device.running) + "!" * 20000}
         if getter == "vlans":
             raise NotImplementedError("get_vlans is not implemented for this driver")
+        if getter == "interfaces" and self.device.big_result:
+            return {"description": "x" * self.device.big_result}
         return {getter: True}
 
     async def load_config(self, config: str, *, replace: bool = False) -> None:
@@ -83,6 +89,11 @@ class FakeSession:
         self.device.before_commit = list(self.device.running)
         self.device.running = self.candidate
         self.device.pending = revert_in is not None
+        if self.device.pending and self.device.timer_fires_before_check:
+            # The device's own timer reverts before the step checks.
+            self.device.running = list(self.device.before_commit)
+            self.device.pending = False
+            self.device.rollbacks_by_timer = True
         self.device.commits += 1
         self.candidate = None
 
@@ -94,6 +105,7 @@ class FakeSession:
         self.device.pending = False
 
     async def rollback(self) -> None:
+        self.device.rollback_calls += 1
         if self.device.before_commit is None:
             raise RuntimeError("ReplaceConfigException: rollback file does not exist")
         self.device.running = self.device.before_commit
@@ -112,6 +124,8 @@ class FakeServices:
     async def open_napalm(self, device: dict[str, Any], **kwargs: Any) -> FakeSession:
         self.opened.append((device["name"], kwargs))
         state = self.devices[device["name"]]
+        if state.rollbacks_by_timer:
+            raise TimeoutError("the device does not answer")
         if state.driver == "none":
             raise NotImplementedError("NAPALM steps do not support the device platform 'junos'")
         if state.pending and not state.reachable_after_commit:
@@ -337,7 +351,7 @@ async def test_a_driver_without_confirmed_commit_fails_and_changes_nothing():
     assert device.running == ["hostname r1"]
 
 
-@pytest.mark.parametrize("seconds", [30, 90, 24 * 3600 + 60])
+@pytest.mark.parametrize("seconds", [30, 90, 24 * 3600, 24 * 3600 + 60])
 def test_confirm_within_takes_whole_minutes_in_range(seconds):
     with pytest.raises(ValueError):
         NapalmConfigConfig(config="x", revert_in_seconds=seconds)
@@ -397,3 +411,72 @@ async def test_no_targets_fails_every_step():
         ctx = _ctx({"config": "x"}, FakeServices(), names=())
         result = await handler.execute(ctx)
         assert not result.success and result.error == "No target devices configured"
+
+
+async def test_a_commit_the_device_already_reverted_is_not_rolled_back_again():
+    # On EOS a rollback after the timer fired would replace running with the
+    # startup copy taken at commit time, dropping unsaved changes.
+    device = FakeDevice("r1")
+    device.timer_fires_before_check = True
+    services = FakeServices(device)
+
+    result = await NapalmConfigHandler().execute(
+        _ctx({"config": "interface Loopback100", "revert_in_seconds": 120}, services)
+    )
+
+    assert not result.success
+    assert "the device already rolled it back" in (result.error or "")
+    assert device.rollback_calls == 0
+    assert result.output["devices"]["r1"]["rolled_back"] is True
+    assert device.running == ["hostname r1"]
+
+
+async def test_results_read_before_a_failing_getter_are_kept():
+    services = FakeServices(FakeDevice("r1"))
+
+    result = await NapalmGetHandler().execute(_ctx({"getters": ["facts", "vlans"]}, services))
+
+    assert not result.success
+    entry = result.output["devices"]["r1"]
+    assert entry["data"]["facts"]["os_version"] == "4.30"
+    assert [item["name"] for item in result.evidence] == ["r1:facts"]
+
+
+async def test_getter_data_shares_one_output_budget_across_devices():
+    names = tuple(f"r{n}" for n in range(1, 7))
+    devices = [FakeDevice(name) for name in names]
+    for device in devices:
+        device.big_result = 15000
+    services = FakeServices(*devices)
+
+    result = await NapalmGetHandler().execute(
+        _ctx({"getters": ["interfaces"], "max_parallel_devices": 6}, services, names)
+    )
+
+    assert result.success, result.error
+    kept = [name for name, entry in result.output["devices"].items() if entry["data"]]
+    omitted = [name for name, entry in result.output["devices"].items() if entry["omitted"]]
+    # 64 KiB of output fits four 15000-character results, not six.
+    assert len(kept) == 4 and len(omitted) == 2
+    assert len(result.evidence) == 6
+
+
+async def test_a_cancel_while_logging_the_open_still_closes_the_session(monkeypatch):
+    import asyncio
+
+    from hegemony_steps_napalm import common
+
+    real_log = common.log_line
+
+    async def cancel_on_open(ctx: Any, device: Any, line: str) -> None:
+        if line.startswith("NAPALM session open"):
+            raise asyncio.CancelledError
+        await real_log(ctx, device, line)
+
+    monkeypatch.setattr(common, "log_line", cancel_on_open)
+    services = FakeServices(FakeDevice("r1"))
+
+    with pytest.raises(asyncio.CancelledError):
+        await NapalmGetHandler().execute(_ctx({}, services))
+
+    assert services.sessions and services.sessions[0].closed

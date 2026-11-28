@@ -24,6 +24,7 @@ from hegemony_step_sdk import (
 
 from .common import (
     MAX_OUTPUT_TEXT_CHARS,
+    MAX_OUTPUT_TOTAL_CHARS,
     DeviceOutcome,
     NapalmConnectionConfig,
     SessionUnavailable,
@@ -115,26 +116,29 @@ class NapalmGetHandler(BaseHandler):
         except InvalidConfigError as exc:
             return exc.result()
 
+        # Characters of getter data the whole step may still put in its
+        # output; shared by the devices (one event loop, so no lock needed).
+        budget = [MAX_OUTPUT_TOTAL_CHARS]
+
         async def _work(device: dict[str, Any], outcome: DeviceOutcome) -> None:
-            data: dict[str, Any] = {}
+            kept: dict[str, Any] = {}
+            omitted: list[str] = []
+            outcome.output.update(data=kept, omitted=omitted)
             async with napalm_session(ctx, device, config) as session:
                 outcome.output["driver"] = session.driver
                 for getter in config.getters:
                     await log_line(ctx, device, f"get_{getter}")
-                    data[getter] = await session.get(getter)
-            kept: dict[str, Any] = {}
-            omitted: list[str] = []
-            for getter, value in data.items():
-                text = to_json_text(value)
-                outcome.evidence.append(text_evidence(device, getter, text, command=getter))
-                # Large results (a whole configuration, a big MAC table) stay
-                # in the evidence only, so the run's output stays small.
-                if len(text) <= MAX_OUTPUT_TEXT_CHARS:
-                    kept[getter] = value
-                else:
-                    omitted.append(getter)
-            outcome.output["data"] = kept
-            outcome.output["omitted"] = omitted
+                    value = await session.get(getter)
+                    # Recorded at once, so a later getter's failure keeps it.
+                    text = to_json_text(value)
+                    outcome.evidence.append(text_evidence(device, getter, text, command=getter))
+                    # Large results (a whole configuration, a big MAC table)
+                    # stay in the evidence only, so the run's output stays small.
+                    if len(text) <= min(MAX_OUTPUT_TEXT_CHARS, budget[0]):
+                        kept[getter] = value
+                        budget[0] -= len(text)
+                    else:
+                        omitted.append(getter)
 
         try:
             outcomes = await run_per_device(

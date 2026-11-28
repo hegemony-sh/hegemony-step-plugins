@@ -39,9 +39,11 @@ difference, then the same step without Dry run.
 Confirm Within (sec) makes the commit a confirmed commit. The device rolls
 the change back by itself after that long unless it is confirmed. The step
 confirms it only after a second, new session to the device succeeds. When
-that session fails, the step rolls back at once, or, if even that fails,
-the device's own timer does. The value is 0 (commit at once) or a multiple
-of 60 of at least 60.
+that session fails and the commit is still waiting for confirmation, the
+step rolls back at once; if that fails too, the device's own timer does.
+When the timer has already fired, the step leaves the device as the timer
+left it. The value is 0 (commit at once) or a multiple of 60 from 60 to
+86340 (23 hours 59 minutes).
 
 What each platform needs:
 

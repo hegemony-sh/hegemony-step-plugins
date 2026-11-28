@@ -408,3 +408,34 @@ async def test_a_failure_after_the_login_still_closes_the_connection(monkeypatch
         await transport.open_napalm()
 
     assert logged_out == [connection]
+
+
+async def test_close_waits_for_a_driver_call_its_caller_gave_up_on():
+    import asyncio
+    import threading
+
+    release, started = threading.Event(), threading.Event()
+    events: list[str] = []
+
+    class SlowDriver(_FakeDriver):
+        def commit_config(self, message: str = "", revert_in: int | None = None) -> None:
+            started.set()
+            release.wait(5)
+            events.append("commit done")
+
+        def close(self) -> None:
+            events.append("close")
+
+    session = _session(SlowDriver())
+    call = asyncio.create_task(session.commit_config())
+    await asyncio.to_thread(started.wait, 5)
+    call.cancel()
+    closing = asyncio.create_task(session.close())
+    await asyncio.sleep(0.2)
+    # The commit still runs in its thread: the driver is not closed under it.
+    assert events == []
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    await closing
+    assert events == ["commit done", "close"]
