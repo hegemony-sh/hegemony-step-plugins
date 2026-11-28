@@ -40,7 +40,7 @@ on:
   release:
     types: [published]
   pull_request:
-    branches: [main, develop]
+    branches: [main]
     paths:
       - "images/ansible-runner/**"
       - "images/opentofu-runner/**"
