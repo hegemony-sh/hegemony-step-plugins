@@ -247,6 +247,23 @@ class ScrapliResult:
     disconnected: bool = False
 
 
+@dataclass
+class WatchResult:
+    """What ``watch_output`` read from one device (``hegemony_step_sdk.CliWatchResult``)."""
+
+    setup: list[ScrapliResult]
+    output: str = ""
+    disconnected: bool = False
+    cancelled: bool = False
+    error: str | None = None
+    elapsed_seconds: float = 0.0
+
+
+#: Longest single read of a watched session; the loop checks the clock,
+#: the keepalive and a cancellation between reads.
+_WATCH_READ_SECONDS = 1.0
+
+
 # Map inventory platform strings to scrapli core platform names.
 PLATFORM_TO_SCRAPLI = {
     "ios-xe": "cisco_iosxe",
@@ -617,6 +634,8 @@ class ScrapliTransport:
         #: Duck-typed flag handlers read to skip duplicate completed-output
         #: emissions for paths this transport streams live.
         self.streams_timing_output = output_sink is not None
+        #: Likewise for what ``watch_output`` reads.
+        self.streams_watch_output = output_sink is not None
 
         self.username = spec.username or None
         self.password = spec.password
@@ -1327,6 +1346,78 @@ class ScrapliTransport:
     async def close_session(self) -> None:
         """Close the held session, if any (idempotent)."""
         await self._drop_held()
+
+    #: Feature flag: ``watch_output`` follows what the device prints
+    #: (``hegemony_step_sdk.CliWatchTransport``, for ``netcli.watch``).
+    supports_cli_watch = True
+
+    async def watch_output(
+        self,
+        commands: list[str],
+        *,
+        duration_seconds: float,
+        keepalive_seconds: float = 0,
+    ) -> WatchResult:
+        """Run ``commands`` at the exec prompt, then read what the device prints.
+
+        See ``hegemony_step_sdk.CliWatchTransport.watch_output``.
+        """
+        held = self._held
+        connection = held
+        outcome = WatchResult(setup=[])
+        self._left_waiting = False
+        try:
+            if held is None:
+                connection = await self._login()
+            for command in commands:
+                if not command.strip():
+                    continue
+                result = await self._send_exec_command(connection, command)
+                outcome.setup.append(result)
+                if result.exit_code != 0:
+                    outcome.disconnected = result.disconnected
+                    return outcome
+            parts: list[str] = []
+            started = time.monotonic()
+            deadline = started + duration_seconds
+            next_keepalive = started + keepalive_seconds if keepalive_seconds > 0 else None
+            while True:
+                if self._cancellation_registry.is_cancelled(self.step_run_id):
+                    outcome.cancelled = True
+                    break
+                now = time.monotonic()
+                if now >= deadline:
+                    break
+                if next_keepalive is not None and now >= next_keepalive:
+                    connection.channel.write("\n")
+                    next_keepalive = now + keepalive_seconds
+                wait = min(_WATCH_READ_SECONDS, deadline - now)
+                if next_keepalive is not None:
+                    wait = min(wait, max(next_keepalive - now, 0.01))
+                chunk = await self._read_channel_chunk(connection, timeout=wait)
+                if chunk is None or (
+                    not chunk and (self._scrapli_closed or not _session_open(connection))
+                ):
+                    outcome.disconnected = True
+                    break
+                if chunk:
+                    parts.append(chunk)
+                    await self._stream_push(chunk)
+            outcome.elapsed_seconds = time.monotonic() - started
+            outcome.output = "".join(parts)
+            await self._stream_flush()
+        except ScrapliAuthenticationFailed as e:
+            outcome.error = f"Authentication failed: {e}"
+        except ScrapliTimeout as e:
+            outcome.error = f"Connection timeout: {e}"
+        except Exception as e:  # noqa: BLE001 - reported in the result
+            outcome.error = f"SSH connection failed: {e}"
+        finally:
+            if held is None:
+                await self._logout(connection)
+            elif self._left_waiting or self._scrapli_closed or not _session_open(held):
+                await self._drop_held()
+        return outcome
 
     async def execute_command(self, command: str) -> ScrapliResult:
         """

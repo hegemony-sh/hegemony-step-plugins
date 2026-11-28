@@ -147,8 +147,31 @@ async def _delete_dialogue(process: asyncssh.SSHServerProcess, command: str) -> 
     process.stdout.write("\r\n")
 
 
+#: What the fake device logs to a session after ``terminal monitor``.
+MONITOR_MESSAGES = (
+    "%LINK-3-UPDOWN: Interface GigabitEthernet1, changed state to down",
+    "%LINK-3-UPDOWN: Interface GigabitEthernet1, changed state to up",
+    "%SYS-5-CONFIG_I: Configured from console by admin",
+)
+
+
+async def _log_messages(process: asyncssh.SSHServerProcess) -> None:
+    """Send the monitor messages to the session, a little apart, as a device logs them."""
+    for message in MONITOR_MESSAGES:
+        await asyncio.sleep(0.1)
+        process.stdout.write(f"\r\n{message}\r\n")
+
+
+async def _reload_soon(process: asyncssh.SSHServerProcess) -> None:
+    """Log the reload, then close the session as the device goes down."""
+    await asyncio.sleep(0.3)
+    process.stdout.write("\r\n%SYS-5-RELOAD: Reload requested\r\n")
+    process.exit(0)
+
+
 async def _session(process: asyncssh.SSHServerProcess) -> None:
     """An exec command answers once; a shell is a router-like prompt loop."""
+    background: list[asyncio.Task] = []
     if process.command is not None:
         process.stdout.write(f"ran {process.command}\n")
         process.exit(0)
@@ -180,6 +203,11 @@ async def _session(process: asyncssh.SSHServerProcess) -> None:
             await process.stdin.readline()
             process.stdout.write("\r\nReload requested\r\n")
             break
+        elif command == "terminal monitor":
+            background.append(asyncio.create_task(_log_messages(process)))
+        elif command == "reload in 1":
+            # Confirms at once and goes down a moment later.
+            background.append(asyncio.create_task(_reload_soon(process)))
         elif command == "copy run start":
             process.stdout.write("Destination filename [startup-config]? ")
             await process.stdin.readline()
@@ -187,6 +215,8 @@ async def _session(process: asyncssh.SSHServerProcess) -> None:
         elif command and not command.startswith("terminal"):
             process.stdout.write(f"output of {command}\r\n")
         process.stdout.write(PROMPT)
+    for task in background:
+        task.cancel()
     with contextlib.suppress(Exception):
         process.exit(0)
 
