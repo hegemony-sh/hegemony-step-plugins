@@ -117,9 +117,10 @@ use the SDK on its own; the platform's images already carry the rest. Name the
 release your Hegemony version pins (see [Compatibility](#compatibility)); the
 newest is on the
 [Releases page](https://github.com/hegemony-sh/hegemony-step-plugins/releases).
-The SDK has its own version: the plugins accept any `hegemony-step-sdk` of the
-same major (`>=1.0,<2`), and the built-in transports pin it exactly. Install
-packages of the same release together.
+The SDK has its own version: each plugin declares the range of
+`hegemony-step-sdk` it accepts (one major, from the minor it needs, such as
+`>=1.1,<2`), and the built-in transports pin it exactly. Install packages of
+the same release together.
 
 ### From PyPI
 
@@ -158,7 +159,7 @@ base="https://github.com/hegemony-sh/hegemony-step-plugins/releases/download/v${
 mkdir wheels && cd wheels
 curl -fsSLO "${base}/SHA256SUMS"
 for wheel in hegemony_step_sdk hegemony_steps_http hegemony_steps_netbox; do
-  file=$(awk -v w="${wheel}-" 'index($2, w) == 1 {print $2}' SHA256SUMS)
+  file=$(awk -v w="${wheel}-" 'index($2, w) == 1 && $2 ~ /\.whl$/ {print $2}' SHA256SUMS)
   curl -fsSLO "${base}/${file}"
 done
 sha256sum -c --ignore-missing SHA256SUMS
