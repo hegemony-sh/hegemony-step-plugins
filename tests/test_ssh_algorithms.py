@@ -22,6 +22,7 @@ import pytest
 from hegemony_step_sdk import DeviceConnectionSpec, JumpHostSpec, SshAlgorithms
 from hegemony_step_sdk.ssh import negotiation_failure_detail
 from hegemony_transport_asyncssh.transport import AsyncSSHTransport
+from hegemony_transport_napalm import NapalmTransport
 from hegemony_transport_netmiko import transport as netmiko_transport
 from hegemony_transport_scrapli.transport import ScrapliTransport
 from tests.ssh_fakes import (
@@ -40,6 +41,8 @@ TRANSPORTS: dict[str, tuple[type, str]] = {
     "asyncssh": (AsyncSSHTransport, "linux"),
     "scrapli": (ScrapliTransport, "ios-xe"),
     "netmiko": (netmiko_transport.SSHTransport, "ios-xe"),
+    # The netmiko transport plus NAPALM sessions: its CLI must hold the same line.
+    "napalm": (NapalmTransport, "ios-xe"),
 }
 
 
@@ -387,8 +390,9 @@ async def test_an_old_ios_router_needs_legacy_ssh_and_a_transport_that_implement
 
     [result] = await transport.execute_commands(["show version"])
 
-    if transport_id == "netmiko":
-        # paramiko 5 implements none of these key exchanges or signatures.
+    if transport_id in ("netmiko", "napalm"):
+        # paramiko 5 implements none of these key exchanges or signatures
+        # (the NAPALM transport logs in through the netmiko one).
         assert result.exit_code == -1
         assert "the device offers: diffie-hellman-group1-sha1;" in result.error
         assert "choose another SSH transport for this device" in result.error

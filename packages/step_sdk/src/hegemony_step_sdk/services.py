@@ -136,6 +136,86 @@ class NetconfChannel(Protocol):
         """Close the session and its SSH connection (idempotent)."""
 
 
+#: The NAPALM getters a step may read, by name without the ``get_`` prefix.
+#: Read-only, and none of them returns credentials: ``get_users`` (password
+#: hashes and SSH keys) and ``get_snmp_information`` (community strings) are
+#: left out on purpose, and getters that need arguments (``get_route_to``)
+#: are not offered. A host refuses any other name.
+NAPALM_GETTERS: frozenset[str] = frozenset(
+    {
+        "arp_table",
+        "bgp_config",
+        "bgp_neighbors",
+        "bgp_neighbors_detail",
+        "config",
+        "environment",
+        "facts",
+        "interfaces",
+        "interfaces_counters",
+        "interfaces_ip",
+        "ipv6_neighbors_table",
+        "lldp_neighbors",
+        "lldp_neighbors_detail",
+        "mac_address_table",
+        "network_instances",
+        "ntp_peers",
+        "ntp_servers",
+        "ntp_stats",
+        "optics",
+        "vlans",
+    }
+)
+
+
+class NapalmSession(Protocol):
+    """One NAPALM driver session to a device, returned by :meth:`HandlerServices.open_napalm`.
+
+    NAPALM gives the same data shape and the same configuration workflow
+    (load a candidate, compare, commit or discard, roll back) on every
+    platform it supports. The host opens the session over its hardened SSH
+    connection (egress policy, host-key trust, jump host, credentials), so
+    the step wheel never sees a credential. Every method runs the driver's
+    blocking call off the event loop.
+
+    ``driver`` names the NAPALM driver the host chose from the device's
+    platform (``ios``, ``eos``, ``nxos_ssh``). A driver that cannot do an
+    operation raises ``NotImplementedError`` with the reason.
+    """
+
+    driver: str
+
+    async def get(self, getter: str) -> Any:
+        """The result of one getter in :data:`NAPALM_GETTERS` (``facts`` calls ``get_facts``)."""
+
+    async def load_config(self, config: str, *, replace: bool = False) -> None:
+        """Load ``config`` as the candidate: merged into the running one, or replacing it."""
+
+    async def compare_config(self) -> str:
+        """The difference between the running configuration and the loaded candidate."""
+
+    async def discard_config(self) -> None:
+        """Drop the loaded candidate; the running configuration is unchanged."""
+
+    async def commit_config(self, *, message: str = "", revert_in: int | None = None) -> None:
+        """Make the candidate the running configuration.
+
+        With ``revert_in`` seconds the device rolls the change back by itself
+        unless :meth:`confirm_commit` is called in time.
+        """
+
+    async def has_pending_commit(self) -> bool:
+        """Whether a commit made with ``revert_in`` still waits for its confirmation."""
+
+    async def confirm_commit(self) -> None:
+        """Confirm a commit made with ``revert_in``, so it stays."""
+
+    async def rollback(self) -> None:
+        """Return to the configuration before the last commit."""
+
+    async def close(self) -> None:
+        """Close the session and its SSH connection (idempotent)."""
+
+
 @dataclass(frozen=True, slots=True)
 class ImageCache:
     """The platform registry a step may keep copies of the images it pulls in.
@@ -798,6 +878,31 @@ class HandlerServices(Protocol):
         ``getattr(services, "open_netconf", None)`` and fails with a clear
         message when it is missing. A host that has it but cannot serve
         NETCONF raises ``NotImplementedError``.
+        """
+        raise NotImplementedError
+
+    async def open_napalm(
+        self,
+        device: dict[str, Any],
+        *,
+        connect_timeout: float | None = None,
+        command_timeout: float | None = None,
+        allow_legacy_ssh: bool = False,
+    ) -> NapalmSession:
+        """Open a NAPALM driver session to ``device``.
+
+        The host connects as :meth:`connect` does, with the SSH credentials
+        of ``device.access_config.ssh``, the flow's egress policy, the
+        organization's trusted host keys and the device's jump host, and
+        picks the NAPALM driver from the device's platform. ``allow_legacy_ssh``
+        is the step's opt-in to weak SSH algorithms, as for :meth:`open_shell`.
+        Caller owns the session (``close()`` in a finally).
+
+        Hosts older than this method lack it: a handler checks
+        ``getattr(services, "open_napalm", None)`` and fails with a clear
+        message when it is missing. A host that has it but cannot serve NAPALM
+        (the wheel is not installed, or the device's platform has no driver
+        it supports) raises ``NotImplementedError``.
         """
         raise NotImplementedError
 

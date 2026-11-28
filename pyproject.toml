@@ -50,10 +50,12 @@ members = [
     "plugins/steps_netbox",
     "plugins/steps_git",
     "plugins/steps_netconf",
+    "plugins/steps_napalm",
     "probes/probe_net",
     "transports/transport_netmiko",
     "transports/transport_scrapli",
     "transports/transport_asyncssh",
+    "transports/transport_napalm",
 ]
 
 [tool.uv.sources]
@@ -75,10 +77,12 @@ hegemony-steps-inventory = { workspace = true }
 hegemony-steps-netbox = { workspace = true }
 hegemony-steps-git = { workspace = true }
 hegemony-steps-netconf = { workspace = true }
+hegemony-steps-napalm = { workspace = true }
 hegemony-probe-net = { workspace = true }
 hegemony-transport-netmiko = { workspace = true }
 hegemony-transport-scrapli = { workspace = true }
 hegemony-transport-asyncssh = { workspace = true }
+hegemony-transport-napalm = { workspace = true }
 
 [tool.ruff]
 target-version = "py311"
@@ -110,10 +114,12 @@ known-first-party = [
     "hegemony_steps_netbox",
     "hegemony_steps_git",
     "hegemony_steps_netconf",
+    "hegemony_steps_napalm",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
     "hegemony_transport_scrapli",
     "hegemony_transport_asyncssh",
+    "hegemony_transport_napalm",
 ]
 
 [tool.ruff.format]

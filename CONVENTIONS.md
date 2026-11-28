@@ -45,13 +45,17 @@ platforms, transports, and libraries multiply.
    `arista.eos` as they appear. Vendor first, platform second.
 
 4. **Tool namespaces** — handlers that drive one external tool whose own
-   concepts shape the config schema (a playbook, a plan file): `ansible`,
+   concepts shape the config schema (a playbook, a plan file, a library's
+   getters and candidate workflow): `napalm`, `ansible`,
    `tf` (OpenTofu and Terraform share `.tf` files and plan/apply semantics,
    so the implementation is a config field, not part of the id — rule 3).
    Tool handlers that run the tool in a container build on `container.run`'s
    runner (`hegemony_steps_container.runner`), declare `container_backed`,
    and depend on `hegemony-steps-container`, so omitting container execution
    omits them too (see [Building a tool handler](#building-a-tool-handler)).
+   A tool that is a library the worker runs in process (`napalm`) is
+   reached through a `ctx.services` method instead (`open_napalm`), so the
+   platform keeps the device connection.
 
 5. **Integration namespaces** — handlers that speak one external system's own
    API, whose objects and concepts shape the config schema: `netbox`

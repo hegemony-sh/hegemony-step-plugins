@@ -23,6 +23,7 @@ import pytest
 
 from hegemony_step_sdk import DeviceConnectionSpec, JumpHostSpec
 from hegemony_transport_asyncssh.transport import AsyncSSHTransport
+from hegemony_transport_napalm import NapalmTransport
 from hegemony_transport_netmiko import transport as netmiko_transport
 from hegemony_transport_scrapli.transport import ScrapliTransport
 from tests.ssh_fakes import (
@@ -42,6 +43,8 @@ TRANSPORTS: dict[str, tuple[type, str]] = {
     "asyncssh": (AsyncSSHTransport, "linux"),
     "scrapli": (ScrapliTransport, "ios-xe"),
     "netmiko": (netmiko_transport.SSHTransport, "ios-xe"),
+    # The netmiko transport plus NAPALM sessions: its CLI must hold the same line.
+    "napalm": (NapalmTransport, "ios-xe"),
 }
 
 
