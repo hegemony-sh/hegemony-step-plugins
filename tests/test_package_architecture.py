@@ -10,7 +10,10 @@ steps → hegemony-step-sdk ← hegemony-transport-support ← transports
 The SDK is the contract only, so it imports no transport and not the
 transports' shared code. Step plugins build on the SDK alone, so they import
 no transport and not ``hegemony_transport_support``. No transport imports
-another transport. Imports anywhere in a module count, including ones inside
+another transport, with the exceptions in ``BUILT_ON``: a transport that is a
+layer over another one (NAPALM's SSH drivers run on a netmiko connection, so
+the NAPALM transport extends the netmiko transport's hardened login instead
+of copying it). Imports anywhere in a module count, including ones inside
 functions and ``TYPE_CHECKING`` blocks.
 """
 
@@ -30,6 +33,12 @@ TRANSPORTS = sorted(path for path in (ROOT / "transports").iterdir() if (path / 
 
 SUPPORT_MODULE = "hegemony_transport_support"
 SUPPORT_DIST = "hegemony-transport-support"
+
+#: Transport directory -> the one other transport it builds on (its import
+#: name and distribution). It pins that wheel to the same release version.
+BUILT_ON: dict[str, tuple[str, str]] = {
+    "transport_napalm": ("hegemony_transport_netmiko", "hegemony-transport-netmiko"),
+}
 
 
 def imported_modules(package_dir: Path) -> dict[str, set[str]]:
@@ -84,7 +93,8 @@ def module_name(package_dir: Path) -> str:
 def test_scanner_sees_the_transports_imports():
     """The checks below would pass vacuously if the scanner missed imports."""
     for transport in TRANSPORTS:
-        assert SUPPORT_MODULE in imported_modules(transport), transport.name
+        expected = BUILT_ON.get(transport.name, (SUPPORT_MODULE, SUPPORT_DIST))[0]
+        assert expected in imported_modules(transport), transport.name
     assert "hegemony_step_sdk" in imported_modules(SUPPORT)
     assert PLUGINS and len(TRANSPORTS) >= 3
 
@@ -108,7 +118,25 @@ def test_transport_support_imports_no_transport():
 @pytest.mark.parametrize("transport", TRANSPORTS, ids=lambda path: path.name)
 def test_transports_import_no_other_transport(transport):
     own = module_name(transport)
-    assert transport_imports(transport, allowed=frozenset({own, SUPPORT_MODULE})) == []
+    allowed = {own, SUPPORT_MODULE}
+    base = BUILT_ON.get(transport.name)
+    if base is not None:
+        allowed.add(base[0])
+        # It builds on that wheel, so it installs it.
+        assert base[1] in dependency_names(transport)
+    assert transport_imports(transport, allowed=frozenset(allowed)) == []
     # A transport that uses the shared code declares it, so its wheel installs it.
     if SUPPORT_MODULE in imported_modules(transport):
         assert SUPPORT_DIST in dependency_names(transport)
+
+
+def test_built_on_names_real_transports():
+    names = {path.name for path in TRANSPORTS}
+    modules = {module_name(path) for path in TRANSPORTS}
+    for transport, (base_module, _dist) in BUILT_ON.items():
+        assert transport in names
+        assert base_module in modules
+        # A layer over a layer is not allowed: the base stands alone.
+        assert not any(
+            base_module == module_name(path) and path.name in BUILT_ON for path in TRANSPORTS
+        )

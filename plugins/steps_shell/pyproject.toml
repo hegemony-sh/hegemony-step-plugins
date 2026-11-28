@@ -12,7 +12,7 @@ license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk>=1.1,<2",
+    "hegemony-step-sdk>=1.2,<2",
     # Parses command templates for template_errors; renders nothing.
     "jinja2>=3.1",
 ]

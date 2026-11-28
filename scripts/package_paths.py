@@ -29,10 +29,12 @@ PACKAGE_DIRS = (
     ROOT / "plugins" / "steps_netbox",
     ROOT / "plugins" / "steps_git",
     ROOT / "plugins" / "steps_netconf",
+    ROOT / "plugins" / "steps_napalm",
     ROOT / "probes" / "probe_net",
     ROOT / "transports" / "transport_netmiko",
     ROOT / "transports" / "transport_scrapli",
     ROOT / "transports" / "transport_asyncssh",
+    ROOT / "transports" / "transport_napalm",
 )
 
 # Two version streams (CONTRIBUTING.md, "The SDK's own version"):

@@ -67,6 +67,7 @@ def test_the_wheel_kinds_are_sorted_into_exact_and_range_pins():
         "transport_netmiko",
         "transport_scrapli",
         "transport_asyncssh",
+        "transport_napalm",
     }
     ranged = {path.parent.name for path in paths.SDK_RANGE_PIN_DIRS}
     assert ranged == {"plugins", "probes"}

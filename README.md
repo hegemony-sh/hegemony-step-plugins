@@ -79,9 +79,11 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_inventory` | `inventory.` | sync — sync an inventory provider of the run's organization now |
   | `plugins/steps_git` | `git.` | commit — commit an earlier step's evidence (configuration backups) to a Git repository over HTTPS, only when it changed (built on `container.run`'s runner) |
   | `plugins/steps_netconf` | `netconf.` | get, edit_config, commit, cancel_commit, rpc — NETCONF (RFC 6241): read, change as one transaction (candidate, diff, validate, dry run, confirmed commit), settle a pending commit, any other operation |
+  | `plugins/steps_napalm` | `napalm.` | get, config, rollback — NAPALM on Cisco IOS and IOS XE, Arista EOS and Cisco NX-OS: vendor-neutral getters, merge or replace with diff, dry run and confirmed commit, rollback (needs `hegemony-transport-napalm` on the platform) |
   | `plugins/steps_netbox` | `netbox.` | request, ipam.allocate/release, render_config — NetBox objects, IP address management and config rendering (needs `hegemony-steps-http`) |
 
-Device transports (`transports/`: netmiko, scrapli, asyncssh) and the network
+Device transports (`transports/`: netmiko, scrapli, asyncssh, and napalm,
+which builds on netmiko and adds NAPALM sessions) and the network
 probes (`probes/probe_net`) are wheels of the same kind and release with the
 rest. Every wheel ships in the platform's images. The platform has no runtime
 switch that hides an installed step, so a deployment that must not offer one
@@ -101,6 +103,12 @@ The wheels that reach outside the worker are limited in different ways:
   commit by default. A device without one (`netconf.edit_config` Target
   `auto`) gets the change on running at once: no dry run and no confirmed
   commit.
+- `hegemony-steps-napalm`: the same as netcli steps: the device's SSH
+  credentials, the organization's trusted host keys, the jump host and the
+  flow's egress policy, through the platform's NAPALM transport. Only
+  NAPALM's SSH drivers are used (IOS, EOS over SSH, NX-OS over SSH). A
+  confirmed commit is confirmed only after a new session to the device
+  succeeds.
 - `hegemony-steps-http` and `hegemony-steps-netbox` (which needs
   `hegemony-steps-http`): the flow's egress policy. A flow without one can
   reach any address the worker can, except loopback, link-local (cloud

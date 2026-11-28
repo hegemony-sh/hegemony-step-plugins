@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[project]
+name = "hegemony-steps-napalm"
+version = "0.59.0"
+description = "NAPALM step handlers (get, config with diff and confirmed commit, rollback) for Hegemony"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE-*.txt"]
+requires-python = ">=3.11"
+# The SDK only: the platform opens the NAPALM session (services.open_napalm)
+# with hegemony-transport-napalm, which the platform installs.
+dependencies = [
+    "hegemony-step-sdk>=1.2,<2",
+]
+
+[project.entry-points."hegemony.step_handlers"]
+napalm = "hegemony_steps_napalm:register"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "hegemony_steps_napalm"
+module-root = "src"

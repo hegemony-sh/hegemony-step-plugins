@@ -47,10 +47,12 @@ EXPECTED_MODULES = (
     "hegemony_steps_netbox",
     "hegemony_steps_git",
     "hegemony_steps_netconf",
+    "hegemony_steps_napalm",
     "hegemony_probe_net",
     "hegemony_transport_netmiko",
     "hegemony_transport_scrapli",
     "hegemony_transport_asyncssh",
+    "hegemony_transport_napalm",
 )
 
 # Entry-point names under hegemony.step_handlers (claimed handler-id namespaces).
@@ -71,6 +73,7 @@ EXPECTED_ENTRY_POINTS = {
     "netbox",
     "git",
     "netconf",
+    "napalm",
 }
 
 # Entry-point names under hegemony.probes (probe wheels).
@@ -83,6 +86,7 @@ EXPECTED_TRANSPORT_ENTRY_POINTS = {
     "netmiko",
     "scrapli",
     "asyncssh",
+    "napalm",
 }
 
 
