@@ -23,3 +23,17 @@ path = [
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2025-2026 Rexonix s.r.o."
 SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# openconfig's gNMI protocol files, kept exactly as published (a header
+# added here would change them): see LICENSING.md, "The gNMI protocol files".
+[[annotations]]
+path = "plugins/steps_gnmi/src/hegemony_steps_gnmi/proto/gnmi.proto"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2016 Google Inc."
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "plugins/steps_gnmi/src/hegemony_steps_gnmi/proto/gnmi_ext.proto"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2018 Google Inc."
+SPDX-License-Identifier = "Apache-2.0"

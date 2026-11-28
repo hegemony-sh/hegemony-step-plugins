@@ -22,6 +22,7 @@ import hegemony_steps_evidence
 import hegemony_steps_flow
 import hegemony_steps_general
 import hegemony_steps_git
+import hegemony_steps_gnmi
 import hegemony_steps_http
 import hegemony_steps_inventory
 import hegemony_steps_monitor
@@ -74,6 +75,7 @@ WHEELS = [
             "netconf.rpc",
         },
     ),
+    (hegemony_steps_gnmi, "gnmi", {"gnmi.get", "gnmi.set"}),
     (
         hegemony_steps_netbox,
         "netbox",

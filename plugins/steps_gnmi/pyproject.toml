@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: 2026 Rexonix s.r.o.
+# SPDX-FileContributor: Jakub Trávník <jakub.travnik@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[project]
+name = "hegemony-steps-gnmi"
+version = "0.59.0"
+description = "gNMI step handlers (get, set) for Hegemony"
+readme = "README.md"
+# The wheel's code is AGPL; the gNMI protocol files it ships (proto/) and
+# their compiled descriptors (_descriptors.py) are openconfig's, Apache-2.0.
+license = "AGPL-3.0-or-later AND Apache-2.0"
+license-files = ["LICENSE-*.txt"]
+requires-python = ">=3.11"
+# grpcio and protobuf: at least the platform's own pins (the worker already
+# installs both for Temporal); protobuf 6.33.5 also has the fixes for
+# CVE-2025-4565 and CVE-2026-0994. No generated _pb2 code, so no exact
+# protobuf version is needed (see messages.py).
+dependencies = [
+    "hegemony-step-sdk>=1.1,<2",
+    "grpcio>=1.76,<2",
+    "protobuf>=6.33.5,<8",
+]
+
+[project.entry-points."hegemony.step_handlers"]
+gnmi = "hegemony_steps_gnmi:register"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "hegemony_steps_gnmi"
+module-root = "src"
