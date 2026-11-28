@@ -21,10 +21,9 @@ from typing import Any, cast
 import grpc
 import pytest
 
-import hegemony_steps_gnmi
 from hegemony_step_sdk import DeviceCredentials, HandlerContext, HandlerServices
 from hegemony_step_sdk.docs import load_docs_bundle
-from hegemony_steps_gnmi import _descriptors, client, messages
+from hegemony_steps_gnmi import ALL_HANDLERS, _descriptors, client, messages
 from hegemony_steps_gnmi.get import GnmiGetConfig, GnmiGetHandler
 from hegemony_steps_gnmi.paths import (
     PathError,
@@ -37,7 +36,7 @@ from hegemony_steps_gnmi.set_config import GnmiSetConfig, GnmiSetHandler
 from hegemony_steps_gnmi.values import decode_value, encode_value
 from tests.gnmi_fakes import FakeGnmiDevice, FakeGnmiServer, FakeServices, Pki
 
-PROTO_DIR = Path(hegemony_steps_gnmi.__file__).parent / "proto"
+PROTO_DIR = Path(messages.__file__).parent / "proto"
 
 ETH1 = "interface[name=Ethernet1]"
 
@@ -643,11 +642,11 @@ async def test_a_rendered_value_with_quotes_stays_one_value(device, pki):
 
 
 def test_the_wheel_registers_and_documents_both_handlers():
-    ids = {cls.handler_id for cls in hegemony_steps_gnmi.ALL_HANDLERS}
+    ids = {cls.handler_id for cls in ALL_HANDLERS}
     assert ids == {"gnmi.get", "gnmi.set"}
     bundle = load_docs_bundle("hegemony_steps_gnmi")
     assert set(bundle) == ids
-    for cls in hegemony_steps_gnmi.ALL_HANDLERS:
+    for cls in ALL_HANDLERS:
         for spec in cls.output_fields:
             assert f"steps.NODE_ID.output.{spec.name}" in bundle[cls.handler_id]
         assert set(cls.raw_config_keys) == {

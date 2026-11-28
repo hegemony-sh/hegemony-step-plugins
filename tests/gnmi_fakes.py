@@ -286,6 +286,7 @@ class FakeGnmiServer:
                 return await method(request, metadata)
             except _Abort as exc:
                 await context.abort(exc.code, exc.details)
+                raise AssertionError("context.abort returns only by raising") from exc
 
         return grpc.unary_unary_rpc_method_handler(
             call,
