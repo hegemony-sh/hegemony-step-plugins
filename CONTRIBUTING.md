@@ -283,14 +283,15 @@ whose run is older than 30 days (GitHub no longer re-runs it):
 ```bash
 (
   set -euo pipefail
-  mkdir pypi-upload && cd pypi-upload
+  mkdir pypi-upload
+  cd pypi-upload
   gh release download vX.Y.Z --repo hegemony-sh/hegemony-step-plugins \
     --pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS
   sha256sum --check --strict SHA256SUMS
   shopt -s nullglob
   files=(*.whl *.tar.gz)
   for file in "${files[@]}"; do
-    grep -q "  ${file}\$" SHA256SUMS || { echo "${file} is not in SHA256SUMS" >&2; exit 1; }
+    awk -v f="$file" '$2 == f {found = 1} END {exit !found}' SHA256SUMS || { echo "${file} is not in SHA256SUMS" >&2; exit 1; }
   done
   TWINE_USERNAME=__token__ uvx twine upload --skip-existing "${files[@]}"
 )
