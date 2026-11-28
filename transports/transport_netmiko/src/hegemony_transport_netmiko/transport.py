@@ -1175,8 +1175,42 @@ class SSHTransport:
                     os.unlink(known_hosts_file)
         if bastion is not None:
             setattr(connection, _JUMP_CLIENT_ATTR, bastion)
+        self._secure_secondary_connections(connection, keys, bastion)
         self._record_algorithms(getattr(connection, "remote_conn_pre", None), self.host, self.port)
         return connection
+
+    def _secure_secondary_connections(
+        self, connection: Any, keys: tuple[str, ...] | None, bastion: Any
+    ) -> None:
+        """Give the SSH connections netmiko opens later the login's trust and route.
+
+        netmiko's SCP (``file_transfer``) opens a second SSH connection to the
+        device with ``_build_ssh_client`` and ``_connect_params_dict``. Left as
+        they are, that client has no trusted keys (the private known_hosts
+        file is removed once the login is done) and would reuse the jump
+        host's channel the login already holds. Here it accepts only the keys
+        the login accepted (any key only when checks are off for the host) and
+        reaches the device through a fresh channel of the same bastion. The
+        SSH policy already applies: ``_keep_kexinit`` wrapped the builder.
+        """
+        build = connection._build_ssh_client
+        params = connection._connect_params_dict
+        host, port = self.host, self.port
+        timeout = self.connect_timeout
+
+        def build_trusting_login_keys() -> Any:
+            client = build()
+            _set_host_keys(client, host, port, keys)
+            return client
+
+        def params_through_bastion() -> dict[str, Any]:
+            result = params()
+            if bastion is not None:
+                result["sock"] = self._dial_device(bastion, timeout)
+            return result
+
+        connection._build_ssh_client = build_trusting_login_keys
+        connection._connect_params_dict = params_through_bastion
 
     def _get_connection_params(self, *, connect_timeout: float | None = None) -> dict[str, Any]:
         """Get Netmiko connection parameters."""

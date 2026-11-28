@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import asyncssh
+import paramiko
 import pytest
 
 from hegemony_step_sdk import DeviceConnectionSpec, JumpHostSpec
@@ -342,3 +343,86 @@ async def test_netmiko_refuses_to_wait_for_the_verifier_on_its_own_loop():
 
     with pytest.raises(RuntimeError, match="cannot wait for the verifier"):
         transport._from_loop(verifier.trusted_keys(HOST, 22))
+
+
+# --- netmiko's second SSH connection (SCP) ---------------------------------------------------
+
+
+def _netmiko_for(port: int, verifier: FakeVerifier, *, jump_port: int | None = None) -> Any:
+    transport_class, platform = TRANSPORTS["netmiko"]
+    jump = (
+        JumpHostSpec(host=HOST, port=jump_port, username=JUMP_USERNAME, password=JUMP_PASSWORD)
+        if jump_port is not None
+        else None
+    )
+    spec = DeviceConnectionSpec(
+        host=HOST,
+        port=port,
+        username=USERNAME,
+        password=PASSWORD,
+        platform=platform,
+        connect_timeout=5.0,
+        command_timeout=5.0,
+        jump_host=jump,
+    )
+    return transport_class(spec, host_key_verifier=verifier)
+
+
+async def _scp_connect(transport: Any) -> Any:
+    """Log in, then open netmiko's SCP connection as ``file_transfer`` does."""
+    from netmiko.scp_handler import SCPConn
+
+    connection = await transport._run_in_thread(transport._login)
+    try:
+        scp = await transport._run_in_thread(lambda: SCPConn(connection, socket_timeout=5.0))
+        await transport._run_in_thread(scp.close)
+    finally:
+        await transport._run_in_thread(lambda: transport._logout(connection))
+
+
+async def test_netmiko_scp_connection_trusts_the_keys_the_login_trusted(servers):
+    key = _ed25519()
+    port = await servers.device(key)
+    verifier = FakeVerifier()
+    verifier.trust(HOST, port, key)
+
+    # Before the fix, its known_hosts file was gone and RejectPolicy refused
+    # the device's own, trusted key.
+    await _scp_connect(_netmiko_for(port, verifier))
+
+    assert servers.seen.passwords == [PASSWORD, PASSWORD]
+
+
+async def test_netmiko_scp_connection_refuses_a_key_the_login_did_not_trust(servers, monkeypatch):
+    trusted, other = _ed25519(), _ed25519()
+    port = await servers.device(trusted)
+    verifier = FakeVerifier()
+    verifier.trust(HOST, port, trusted)
+    transport = _netmiko_for(port, verifier)
+    connection = await transport._run_in_thread(transport._login)
+    try:
+        # The device answers the second connection with another key.
+        await servers.restart(port, other)
+        servers.seen.passwords.clear()
+        from netmiko.scp_handler import SCPConn
+
+        with pytest.raises(paramiko.BadHostKeyException):
+            await transport._run_in_thread(lambda: SCPConn(connection, socket_timeout=5.0))
+        assert servers.seen.passwords == []
+    finally:
+        await transport._run_in_thread(lambda: transport._logout(connection))
+
+
+async def test_netmiko_scp_connection_rides_a_fresh_channel_of_the_jump_host(servers):
+    device_key, bastion_key = _ed25519(), _ed25519()
+    port = await servers.device(device_key)
+    jump_port = await servers.bastion(bastion_key)
+    verifier = FakeVerifier()
+    verifier.trust(HOST, jump_port, bastion_key)
+    verifier.trust(HOST, port, device_key)
+
+    await _scp_connect(_netmiko_for(port, verifier, jump_port=jump_port))
+
+    # One forward for the login, one for SCP; both through the bastion.
+    assert servers.seen.forwards == [(HOST, port), (HOST, port)]
+    assert servers.seen.passwords == [JUMP_PASSWORD, PASSWORD, PASSWORD]
