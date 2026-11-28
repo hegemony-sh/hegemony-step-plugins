@@ -79,6 +79,7 @@ entry-point group and the platform discovers them at startup.
   | `plugins/steps_inventory` | `inventory.` | sync — sync an inventory provider of the run's organization now |
   | `plugins/steps_git` | `git.` | commit — commit an earlier step's evidence (configuration backups) to a Git repository over HTTPS, only when it changed (built on `container.run`'s runner) |
   | `plugins/steps_netconf` | `netconf.` | get, edit_config, commit, cancel_commit, rpc — NETCONF (RFC 6241): read, change as one transaction (candidate, diff, validate, dry run, confirmed commit), settle a pending commit, any other operation |
+  | `plugins/steps_gnmi` | `gnmi.` | get, set — gNMI (gRPC Network Management Interface): read paths, change configuration as one transaction (delete, replace, update) with a dry run and the values before and after |
   | `plugins/steps_netbox` | `netbox.` | request, ipam.allocate/release, render_config — NetBox objects, IP address management and config rendering (needs `hegemony-steps-http`) |
 
 Device transports (`transports/`: netmiko, scrapli, asyncssh) and the network
@@ -101,6 +102,12 @@ The wheels that reach outside the worker are limited in different ways:
   commit by default. A device without one (`netconf.edit_config` Target
   `auto`) gets the change on running at once: no dry run and no confirmed
   commit.
+- `hegemony-steps-gnmi`: the flow's egress policy for the device's name and
+  every address it resolves to, and the same address refusals as
+  `hegemony-steps-http`. It dials the device itself over gRPC with TLS,
+  verified against the system store and the organization's trusted CAs
+  (plaintext only on an explicit opt-in), and logs in with the device's SSH
+  username and password. Devices behind a jump host are refused.
 - `hegemony-steps-http` and `hegemony-steps-netbox` (which needs
   `hegemony-steps-http`): the flow's egress policy. A flow without one can
   reach any address the worker can, except loopback, link-local (cloud

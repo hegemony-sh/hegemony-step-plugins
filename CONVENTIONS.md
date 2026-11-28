@@ -36,8 +36,8 @@ platforms, transports, and libraries multiply.
    `general`, `probe`, `evidence`, `container`, `flow`, `http`, `secret`
    (and host-owned `monitor` for the in-tree background-monitor family).
 2. **Device-interaction paradigms** — protocol families whose config schemas
-   differ fundamentally: `netcli`, `shell` and `netconf` today; `gnmi` when
-   it exists. A NETCONF edit-config step is not a CLI step with a different
+   differ fundamentally: `netcli`, `shell`, `netconf` and `gnmi`. A NETCONF
+   edit-config step is not a CLI step with a different
    transport — its config is payload-shaped, so it is a different handler in
    a different namespace.
 3. **Vendor-platform namespaces** — only for workflows whose semantics are

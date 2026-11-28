@@ -63,7 +63,21 @@ inside Ansible. The rendered file the step stages carries the same MIT header,
 and the `hegemony-steps-ansible` wheel declares `AGPL-3.0-or-later AND MIT`.
 
 Keep any other file that runs inside a third-party GPL program in its own
-module under MIT in the same way; everything else stays `AGPL-3.0-or-later`.
+module under MIT in the same way; everything else stays `AGPL-3.0-or-later`,
+apart from the gNMI protocol files below.
+
+## The gNMI protocol files
+
+`plugins/steps_gnmi/src/hegemony_steps_gnmi/proto/gnmi.proto` and
+`gnmi_ext.proto` are openconfig's gNMI protocol definitions (release
+v0.14.1), **Apache-2.0**, copyright Google Inc., kept exactly as published;
+REUSE.toml records their licence, since a header added here would change
+them. `_descriptors.py` beside them holds their compiled form, written by
+`scripts/gen_gnmi_descriptors.py`, and is Apache-2.0 too. Apache-2.0 code may
+be combined into an AGPL-3.0 work. The `hegemony-steps-gnmi` wheel declares
+`AGPL-3.0-or-later AND Apache-2.0` and carries both texts; the rest of the
+wheel is AGPL. Its runtime dependencies, `grpcio` (Apache-2.0) and `protobuf`
+(BSD-3-Clause), are already installed by the platform.
 
 ## Container images and third-party components
 
