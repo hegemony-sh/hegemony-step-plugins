@@ -281,11 +281,23 @@ attestations, and the job refuses files without one), and a failed `pypi` job
 whose run is older than 30 days (GitHub no longer re-runs it):
 
 ```bash
-gh release download vX.Y.Z --repo hegemony-sh/hegemony-step-plugins --dir pypi-upload \
-  --pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS
-cd pypi-upload && sha256sum --check --strict SHA256SUMS && rm SHA256SUMS
-TWINE_USERNAME=__token__ uvx twine upload --skip-existing $(ls *.whl *.tar.gz 2>/dev/null)
+(
+  set -euo pipefail
+  mkdir pypi-upload && cd pypi-upload
+  gh release download vX.Y.Z --repo hegemony-sh/hegemony-step-plugins \
+    --pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS
+  sha256sum --check --strict SHA256SUMS
+  shopt -s nullglob
+  files=(*.whl *.tar.gz)
+  for file in "${files[@]}"; do
+    grep -q "  ${file}\$" SHA256SUMS || { echo "${file} is not in SHA256SUMS" >&2; exit 1; }
+  done
+  TWINE_USERNAME=__token__ uvx twine upload --skip-existing "${files[@]}"
+)
 ```
+
+The subshell stops at the first failed step, so nothing is uploaded unless
+every file downloaded, matched `SHA256SUMS` and is listed there.
 
 Check the files with `gh attestation verify` first when the Release has
 attestations. Use a PyPI API token scoped to the affected projects, paste it
