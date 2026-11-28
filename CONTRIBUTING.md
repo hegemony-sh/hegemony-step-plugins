@@ -188,14 +188,26 @@ workflow, which runs [semantic-release](https://semantic-release.gitbook.io/):
 it reads the Conventional Commits since the last tag, derives the next
 version from them, sets it on every package except the SDK and rewrites
 every SDK pin from the SDK's own version (`scripts/set_version.py`),
-refreshes `uv.lock`, builds and smoke-installs the wheels, prepends
-`CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`, tags `vX.Y.Z` and
-publishes the wheels plus `SHA256SUMS` as the GitHub Release. Publishing that
-Release starts the `Images` workflow, which publishes the steps' runner images
-(`ansible-runner`, `opentofu-runner`, `git-runner`) as `X.Y.Z` and `X.Y` from the tag; the
-release commit carries the steps' defaults moved to `X.Y`. There is no manual
-step any more: do not bump the release version or push `v*` tags by hand.
-The one version you do set by hand is the SDK's (next section).
+refreshes `uv.lock`, builds the wheels and sdists, smoke-installs the wheels,
+prepends `CHANGELOG.md`, commits `chore(release): X.Y.Z [skip ci]`, tags
+`vX.Y.Z` and publishes the wheels, the sdists and `SHA256SUMS` as the GitHub
+Release. Once that Release is published, the `pypi` job of `release.yml`
+uploads the same wheels and sdists to PyPI with trusted publishing and PEP 740
+attestations. That job is in this repository's workflow, not the shared one,
+because trusted publishing does not work inside a reusable workflow; it runs
+in the `pypi` environment, which waits for a required reviewer. The SDK's
+wheel and sdist carry the SDK's own version; when it has not changed, PyPI
+already holds them and the upload skips them. If the job fails (a package
+without a matching trusted publisher, say), fix the cause and re-run the
+failed job; it downloads the files from the published Release, so a re-run
+works for as long as GitHub re-runs the run (30 days), and files PyPI already
+holds are skipped. After that, upload by hand as described below. Publishing the
+Release also starts the `Images` workflow, which publishes the steps' runner
+images (`ansible-runner`, `opentofu-runner`, `git-runner`) as `X.Y.Z` and
+`X.Y` from the tag; the release commit carries the steps' defaults moved to
+`X.Y`. There is no manual step any more: do not bump the release version or
+push `v*` tags by hand. The one version you do set by hand is the SDK's (next
+section).
 
 | Commits since the last tag | Release |
 |---|---|
@@ -257,7 +269,44 @@ next run reads the tag as the last release. Publish that tag's assets by hand
 from a checkout of the tag, as the shared workflow's
 [README](https://github.com/hegemony-sh/hegemony-github-workflows#recovering-a-tag-without-a-release)
 describes (`gh release create vX.Y.Z --verify-tag ... dist/*.whl
-dist/SHA256SUMS` after rebuilding the wheels at that tag).
+dist/*.tar.gz dist/SHA256SUMS` after rebuilding the wheels and sdists at that
+tag, with `SHA256SUMS` covering `*.whl *.tar.gz`). The `pypi` job does not run
+for such a tag, so that release reaches PyPI only if its files are uploaded
+separately.
+
+When the `pypi` job cannot do the upload, a maintainer uploads that Release's
+files to PyPI by hand. This covers a tag recovered by hand (the job does not
+run for it), a Release cut while the repository was private (it has no
+attestations, and the job refuses files without one), and a failed `pypi` job
+whose run is older than 30 days (GitHub no longer re-runs it):
+
+```bash
+(
+  set -euo pipefail
+  mkdir pypi-upload
+  cd pypi-upload
+  gh release download vX.Y.Z --repo hegemony-sh/hegemony-step-plugins \
+    --pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS
+  sha256sum --check --strict SHA256SUMS
+  shopt -s nullglob
+  files=(*.whl *.tar.gz)
+  for file in "${files[@]}"; do
+    awk -v f="$file" '$2 == f {found = 1} END {exit !found}' SHA256SUMS || { echo "${file} is not in SHA256SUMS" >&2; exit 1; }
+  done
+  TWINE_USERNAME=__token__ uvx twine upload --skip-existing "${files[@]}"
+)
+```
+
+The subshell stops at the first failed step, so nothing is uploaded unless
+every file downloaded, matched `SHA256SUMS` and is listed there.
+
+Check the files with `gh attestation verify` first when the Release has
+attestations. A PyPI token scoped to one project can upload only that
+project, and the command above uploads every project in the Release. So
+either create a short-lived account-wide token, paste it when twine asks for
+the password and delete it right after, or keep project tokens and run the
+upload once per project with only that project's files. A hand upload
+carries no PEP 740 attestations.
 
 ### The SDK's own version
 

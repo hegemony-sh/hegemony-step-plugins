@@ -55,7 +55,7 @@ record is logged and never fails the connection.
 Connections use the SDK's secure SSH policy by default. Both the device and
 jump host follow that policy. The netcli steps expose an explicit
 `allow_legacy_ssh` override; see the
-[netcli security reference](../../plugins/steps_netcli/README.md#ssh-security)
+[netcli security reference](https://github.com/hegemony-sh/hegemony-step-plugins/blob/main/plugins/steps_netcli/README.md#ssh-security)
 for algorithms, key sizes, risks and library limitations.
 
 Hosts constructing the transport directly can call

@@ -5,7 +5,7 @@
 
 [project]
 name = "hegemony-step-sdk"
-version = "1.1.0"
+version = "1.1.1"
 description = "Public SDK for Hegemony step-handler plugins"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -16,6 +16,24 @@ requires-python = ">=3.11"
 # plugin wheels can depend on it without pulling the platform. httpx appears in
 # type hints only (TYPE_CHECKING); the host provides the actual client.
 dependencies = ["pydantic>=2.7"]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.urls]
+Homepage = "https://hegemony.sh"
+Documentation = "https://hegemony.sh"
+Source = "https://github.com/hegemony-sh/hegemony-step-plugins"
+Issues = "https://github.com/hegemony-sh/hegemony-step-plugins/issues"
+Changelog = "https://github.com/hegemony-sh/hegemony-step-plugins/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["uv_build>=0.9,<0.12"]

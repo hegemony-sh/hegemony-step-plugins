@@ -36,3 +36,4 @@ extend-ignore-identifiers-re = [
 ba = "ba"        # Base address
 nd = "nd"        # Node
 Hashi = "Hashi"  # HashiCorp vendor name stem
+intoto = "intoto"  # in-toto attestation bundles (*.intoto.jsonl)

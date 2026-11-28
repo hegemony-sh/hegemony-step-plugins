@@ -12,7 +12,7 @@ license = "AGPL-3.0-or-later"
 license-files = ["LICENSE-*.txt"]
 requires-python = ">=3.11"
 dependencies = [
-    "hegemony-step-sdk==1.1.0",
+    "hegemony-step-sdk==1.1.1",
     "hegemony-transport-support==0.59.0",
     # asyncssh extra: already the platform's SSH library. The default "system"
     # transport shells out to a local ssh binary (not in worker images), and the
@@ -22,6 +22,24 @@ dependencies = [
     # asyncssh extra; 2026.2.20 is the last release with the API used here.
     "scrapli[asyncssh]>=2024.7.30,<2026.10",
 ]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.urls]
+Homepage = "https://hegemony.sh"
+Documentation = "https://hegemony.sh"
+Source = "https://github.com/hegemony-sh/hegemony-step-plugins"
+Issues = "https://github.com/hegemony-sh/hegemony-step-plugins/issues"
+Changelog = "https://github.com/hegemony-sh/hegemony-step-plugins/blob/main/CHANGELOG.md"
 
 [project.entry-points."hegemony.device_transports"]
 "scrapli" = "hegemony_transport_scrapli:register"

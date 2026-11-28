@@ -15,6 +15,24 @@ dependencies = [
     "hegemony-step-sdk>=1.1,<2",
 ]
 
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.urls]
+Homepage = "https://hegemony.sh"
+Documentation = "https://hegemony.sh"
+Source = "https://github.com/hegemony-sh/hegemony-step-plugins"
+Issues = "https://github.com/hegemony-sh/hegemony-step-plugins/issues"
+Changelog = "https://github.com/hegemony-sh/hegemony-step-plugins/blob/main/CHANGELOG.md"
+
 [project.entry-points."hegemony.step_handlers"]
 netconf = "hegemony_steps_netconf:register"
 

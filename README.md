@@ -110,21 +110,48 @@ The wheels that reach outside the worker are limited in different ways:
 - `hegemony-steps-inventory`: syncs nothing until an administrator ticks
   "Flows may sync this provider" on a provider.
 
-## Install the wheels
+## Install the packages
 
-The wheels are not on PyPI. Each release publishes them as assets of its
+Install by hand to add a wheel of your own to a derived platform image, or to
+use the SDK on its own; the platform's images already carry the rest. Name the
+release your Hegemony version pins (see [Compatibility](#compatibility)); the
+newest is on the
+[Releases page](https://github.com/hegemony-sh/hegemony-step-plugins/releases).
+The SDK has its own version: each plugin declares the range of
+`hegemony-step-sdk` it accepts (one major, from the minor it needs, such as
+`>=1.1,<2`), and the built-in transports pin it exactly. Install packages of
+the same release together.
+
+### From PyPI
+
+Each release uploads every package to [PyPI](https://pypi.org/) as a wheel
+and an sdist, under the package names (`hegemony-step-sdk`,
+`hegemony-steps-http`, ...):
+
+```bash
+uv pip install hegemony-steps-netbox==X.Y.Z   # or: pip install hegemony-steps-netbox==X.Y.Z
+```
+
+The installer pulls in the dependencies of the same release
+(`hegemony-step-sdk` and, here, `hegemony-steps-http`). The release workflow
+uploads the files with PyPI's trusted publishing, together with PEP 740
+attestations that PyPI shows on each file's page. They are the same files as
+the GitHub Release's, so `gh attestation verify` below works on a file
+downloaded from PyPI as well. The first version of each package on PyPI was
+uploaded by hand from its GitHub Release, as wheels only and without PEP 740
+attestations. Earlier releases are only on their GitHub Release.
+
+### From the GitHub Release
+
+Each release also attaches the same wheels and sdists to its
 [GitHub Release](https://github.com/hegemony-sh/hegemony-step-plugins/releases)
-`vX.Y.Z`, with a `SHA256SUMS` file listing every wheel. Install by hand to add
-a wheel of your own to a derived platform image, or to use the SDK on its
-own; the platform's images already carry the rest.
-
-Every wheel requires `hegemony-step-sdk`, and the SDK is not on an index, so
-name the SDK wheel of the same release in the same command, together with
-any wheel that the wheels you install depend on (`hegemony-steps-netbox`
-needs `hegemony-steps-http`; `hegemony-steps-ansible`, `hegemony-steps-tf`
-and `hegemony-steps-git` need `hegemony-steps-container`). The SDK wheel has
-its own version, so take each wheel's file name from the release's
-`SHA256SUMS`:
+`vX.Y.Z`, with a `SHA256SUMS` file listing every one of them. Installing from
+local files, name the SDK wheel of the same release in the same command,
+together with any wheel that the wheels you install depend on
+(`hegemony-steps-netbox` needs `hegemony-steps-http`; `hegemony-steps-ansible`,
+`hegemony-steps-tf` and `hegemony-steps-git` need `hegemony-steps-container`),
+so the installer does not look for them on an index. The SDK wheel has its own
+version, so take each wheel's file name from the release's `SHA256SUMS`:
 
 ```bash
 version=X.Y.Z   # a release tag without the leading v
@@ -132,7 +159,7 @@ base="https://github.com/hegemony-sh/hegemony-step-plugins/releases/download/v${
 mkdir wheels && cd wheels
 curl -fsSLO "${base}/SHA256SUMS"
 for wheel in hegemony_step_sdk hegemony_steps_http hegemony_steps_netbox; do
-  file=$(awk -v w="${wheel}-" 'index($2, w) == 1 {print $2}' SHA256SUMS)
+  file=$(awk -v w="${wheel}-" 'index($2, w) == 1 && $2 ~ /\.whl$/ {print $2}' SHA256SUMS)
   curl -fsSLO "${base}/${file}"
 done
 sha256sum -c --ignore-missing SHA256SUMS
@@ -147,17 +174,19 @@ sha256sum -c --ignore-missing SHA256SUMS
 uv pip install ./hegemony_*.whl
 ```
 
-Replace `X.Y.Z` with the release your Hegemony version pins (see
-[Compatibility](#compatibility)); the newest is on the Releases page.
-`pip install` takes the same wheel files. The wheel file names use underscores
-(`hegemony_steps_http-X.Y.Z-py3-none-any.whl`), the package names dashes
-(`hegemony-steps-http`). `SHA256SUMS` is published beside the wheels in the
+`pip install` takes the same wheel files. The file names use underscores
+(`hegemony_steps_http-X.Y.Z-py3-none-any.whl`,
+`hegemony_steps_http-X.Y.Z.tar.gz` for the sdist), the package names dashes
+(`hegemony-steps-http`). `SHA256SUMS` is published beside the files in the
 same release, so it detects a damaged download, not a replaced release.
-`gh attestation verify` (the GitHub CLI) checks each wheel's signed
+`gh attestation verify` (the GitHub CLI) checks a wheel's or sdist's signed
 provenance, which proves this repository's release workflow built it; the
 install runs only if every wheel passes. Newer releases also attach that
 provenance as `hegemony-step-plugins-X.Y.Z.intoto.jsonl`; for older ones the
-command fetches it from GitHub.
+command fetches it from GitHub. The sdists, and their lines in `SHA256SUMS`
+and the provenance, start with the release that added the PyPI upload.
+
+### Runner images
 
 The runner images (`ghcr.io/hegemony-sh/ansible-runner`,
 `ghcr.io/hegemony-sh/opentofu-runner` and `ghcr.io/hegemony-sh/git-runner`)
