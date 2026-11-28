@@ -200,7 +200,8 @@ wheel and sdist carry the SDK's own version; when it has not changed, PyPI
 already holds them and the upload skips them. If the job fails (a package
 without a matching trusted publisher, say), fix the cause and re-run the
 failed job; it downloads the files from the published Release, so a re-run
-works at any time, and files PyPI already holds are skipped. Publishing the
+works for as long as GitHub re-runs the run (30 days), and files PyPI already
+holds are skipped. After that, upload by hand as described below. Publishing the
 Release also starts the `Images` workflow, which publishes the steps' runner
 images (`ansible-runner`, `opentofu-runner`, `git-runner`) as `X.Y.Z` and
 `X.Y` from the tag; the release commit carries the steps' defaults moved to
@@ -272,6 +273,24 @@ dist/*.tar.gz dist/SHA256SUMS` after rebuilding the wheels and sdists at that
 tag, with `SHA256SUMS` covering `*.whl *.tar.gz`). The `pypi` job does not run
 for such a tag, so that release reaches PyPI only if its files are uploaded
 separately.
+
+When the `pypi` job cannot do the upload, a maintainer uploads that Release's
+files to PyPI by hand. This covers a tag recovered by hand (the job does not
+run for it), a Release cut while the repository was private (it has no
+attestations, and the job refuses files without one), and a failed `pypi` job
+whose run is older than 30 days (GitHub no longer re-runs it):
+
+```bash
+gh release download vX.Y.Z --repo hegemony-sh/hegemony-step-plugins --dir pypi-upload \
+  --pattern '*.whl' --pattern '*.tar.gz' --pattern SHA256SUMS
+cd pypi-upload && sha256sum --check --strict SHA256SUMS && rm SHA256SUMS
+TWINE_USERNAME=__token__ uvx twine upload --skip-existing $(ls *.whl *.tar.gz 2>/dev/null)
+```
+
+Check the files with `gh attestation verify` first when the Release has
+attestations. Use a PyPI API token scoped to the affected projects, paste it
+when twine asks for the password, and delete it afterwards. A hand upload
+carries no PEP 740 attestations.
 
 ### The SDK's own version
 
