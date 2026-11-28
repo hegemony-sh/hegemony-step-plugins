@@ -45,13 +45,14 @@ of 60 of at least 60.
 
 What each platform needs:
 
-- Cisco IOS and IOS XE: loading a candidate copies it to the device's flash
-  with SCP, so the device needs `ip scp server enable`. Confirm Within
-  needs the `archive` feature. NAPALM turns on `file prompt quiet` during
+- Cisco IOS and IOS XE: loading a candidate writes it to the device's flash
+  through the same session, with the device's TCL shell (`tclsh`), so no SCP
+  server is needed. Confirm Within needs the `archive` feature. NAPALM turns on `file prompt quiet` during
   the session and turns it off again when it closes.
 - Arista EOS: uses configuration sessions; nothing extra is needed.
-- Cisco NX-OS: Confirm Within is not supported, and the device fails with
-  that reason.
+- Cisco NX-OS: Merge only. Replace would copy the file with SCP, outside
+  the secured session, so the device fails with that reason. Confirm Within
+  is not supported either.
 
 Max Parallel Devices defaults to 1, so devices change one after another.
 Connect Timeout (sec), Command Timeout (sec) and Allow legacy SSH are

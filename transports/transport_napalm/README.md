@@ -30,6 +30,15 @@ the device and its jump host, the SSH algorithm policy, the record of the
 algorithms agreed, and cancellation when the run is cancelled. The driver is
 never given the password.
 
+Nothing opens a second SSH connection. netmiko's SCP would, without the
+trusted keys and without the jump host, so IOS candidates go through the
+session's TCL shell and NX-OS replace (SCP only) is refused.
+
+Getter results never carry credentials: `config` is read with NAPALM's
+sanitizing, which masks passwords, keys and community strings, and fields
+such as `authentication_key` (BGP neighbor passwords) are dropped from every
+result.
+
 This is why the wheel depends on `hegemony-transport-netmiko` at the same
 version. It is the one transport allowed to build on another
 (`tests/test_package_architecture.py`, `BUILT_ON`).
@@ -38,9 +47,9 @@ version. It is the one transport allowed to build on another
 
 | Device platform | NAPALM driver | Notes |
 | --- | --- | --- |
-| `ios-xe`, `ios` | `ios` | Loading a candidate copies it to the device with SCP, so the device needs `ip scp server enable`. Commit with automatic rollback needs the `archive` feature. NAPALM turns on `file prompt quiet` for the session and turns it off again when it closes. |
+| `ios-xe`, `ios` | `ios` | Loading a candidate sends it through the session with the device's TCL shell (`tclsh`), not SCP. Commit with automatic rollback needs the `archive` feature. NAPALM turns on `file prompt quiet` for the session and turns it off again when it closes. |
 | `eos` | `eos` (over SSH) | Uses EOS configuration sessions. The eAPI (HTTPS) mode is never used. |
-| `nxos` | `nxos_ssh` | No commit with automatic rollback. |
+| `nxos` | `nxos_ssh` | Merge only: replace copies the file with SCP and is refused. No commit with automatic rollback. |
 
 It logs in with paramiko, as the netmiko transport does, so a device that
 offers only the oldest SSH key exchanges (an old IOS router that needs

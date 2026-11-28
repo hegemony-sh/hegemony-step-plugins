@@ -140,7 +140,9 @@ class NetconfChannel(Protocol):
 #: Read-only, and none of them returns credentials: ``get_users`` (password
 #: hashes and SSH keys) and ``get_snmp_information`` (community strings) are
 #: left out on purpose, and getters that need arguments (``get_route_to``)
-#: are not offered. A host refuses any other name.
+#: are not offered. A host refuses any other name, reads ``config`` with
+#: NAPALM's own sanitizing (passwords, keys and community strings masked) and
+#: drops credential fields such as ``authentication_key`` from every result.
 NAPALM_GETTERS: frozenset[str] = frozenset(
     {
         "arp_table",

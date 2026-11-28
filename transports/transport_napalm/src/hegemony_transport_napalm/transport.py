@@ -33,7 +33,7 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from hegemony_step_sdk import NAPALM_GETTERS
-from hegemony_transport_netmiko.transport import SSHTransport
+from hegemony_transport_netmiko.transport import SSHTransport, _LoginHandoff
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +49,37 @@ PLATFORM_TO_DRIVER: dict[str, tuple[str, str]] = {
 
 #: Options every driver is built with. ``transport`` keeps EOS on SSH (its
 #: default is eAPI over HTTPS, which this transport does not secure) and IOS
-#: off telnet.
+#: off telnet. ``inline_transfer`` makes IOS send a candidate through the
+#: session itself (the device's TCL shell) instead of SCP: netmiko's SCP opens
+#: a second SSH client, which has neither the trusted host keys (their file is
+#: gone once the login is done) nor a way through the jump host.
 _DRIVER_OPTIONS: dict[str, dict[str, Any]] = {
-    "ios": {"transport": "ssh"},
+    "ios": {"transport": "ssh", "inline_transfer": True},
     "eos": {"transport": "ssh"},
     "nxos_ssh": {},
 }
+
+#: Drivers whose replace copies the candidate to the device with SCP, which
+#: this transport cannot secure (see ``_DRIVER_OPTIONS``). Merge stays open.
+_NO_REPLACE = {"nxos_ssh": "Cisco NX-OS copies a replacement configuration with SCP"}
+
+#: Fields that hold credentials in NAPALM getter results (``get_bgp_config``
+#: returns BGP neighbor passwords as ``authentication_key``). They are dropped
+#: from every result, whatever the getter, before it leaves the session.
+_SECRET_FIELDS = frozenset({"authentication_key", "auth_key", "password", "secret"})
+
+
+def _without_secrets(value: Any) -> Any:
+    """``value`` with every credential field dropped, at any depth."""
+    if isinstance(value, dict):
+        return {
+            key: _without_secrets(item)
+            for key, item in value.items()
+            if not (isinstance(key, str) and key.lower() in _SECRET_FIELDS)
+        }
+    if isinstance(value, list):
+        return [_without_secrets(item) for item in value]
+    return value
 
 
 def driver_for(platform: str) -> str:
@@ -80,7 +105,12 @@ def _driver_class(name: str, transport: NapalmTransport) -> type:
         # cancellation registration and enable mode.
         del device_type, netmiko_optional_args
         connection = transport._login()
+        # Recorded first, so a failure below still finds it to close.
         self._netmiko_device = connection
+        # NAPALM's getters call send_command without a read timeout, so
+        # netmiko would wait its own 10 s default; the step's Command Timeout
+        # applies instead.
+        connection.read_timeout_override = transport.command_timeout
         return connection
 
     def _netmiko_close(self: Any) -> None:
@@ -125,10 +155,20 @@ class NapalmDriverSession:
     async def get(self, getter: str) -> Any:
         if getter not in NAPALM_GETTERS:
             raise ValueError(f"{getter!r} is not a NAPALM getter a step may read")
-        method = f"get_{getter}"
-        return await self._call(lambda driver: getattr(driver, method)())
+        if getter == "config":
+            # NAPALM's own sanitizing: passwords, keys and community strings
+            # are masked in the configuration text.
+            result = await self._call(lambda driver: driver.get_config(sanitized=True))
+        else:
+            method = f"get_{getter}"
+            result = await self._call(lambda driver: getattr(driver, method)())
+        return _without_secrets(result)
 
     async def load_config(self, config: str, *, replace: bool = False) -> None:
+        if replace and self.driver in _NO_REPLACE:
+            raise NotImplementedError(
+                f"{_NO_REPLACE[self.driver]}, which this transport cannot secure; use merge instead"
+            )
         if replace:
             await self._call(lambda driver: driver.load_replace_candidate(config=config))
         else:
@@ -199,14 +239,30 @@ class NapalmTransport(SSHTransport):
             timeout=int(max(self.command_timeout, 1)),
             optional_args=dict(_DRIVER_OPTIONS[name]),
         )
+        handoff = _LoginHandoff()
+
+        def _open() -> Any:
+            try:
+                driver.open()
+            except BaseException:
+                # A login that worked before the driver failed (EOS reads the
+                # version first) must not stay open.
+                _quiet_close(driver)
+                raise
+            if not handoff.deliver(driver):
+                # The caller was cancelled while this ran; nobody owns it.
+                _quiet_close(driver)
+            return driver
+
         try:
-            await self._run_in_thread(driver.open)
+            await self._run_in_thread(_open)
         except asyncio.CancelledError:
-            # The open runs on in its thread; close whatever it opened.
-            asyncio.get_running_loop().run_in_executor(None, _quiet_close, driver)
-            raise
-        except BaseException:
-            _quiet_close(driver)
+            # The open runs on in its thread. Whichever side comes second
+            # closes the connection: this one if the open already finished,
+            # otherwise the thread once it does.
+            orphan = handoff.abandon()
+            if orphan is not None:
+                _quiet_close(orphan)
             raise
         return NapalmDriverSession(self, name, driver)
 

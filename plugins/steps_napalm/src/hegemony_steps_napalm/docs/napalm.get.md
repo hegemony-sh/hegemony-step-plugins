@@ -42,7 +42,9 @@ The getters offered are `arp_table`, `bgp_config`, `bgp_neighbors`,
 `lldp_neighbors`, `lldp_neighbors_detail`, `mac_address_table`,
 `network_instances`, `ntp_peers`, `ntp_servers`, `ntp_stats`, `optics` and
 `vlans`. Getters that return credentials (`users`, `snmp_information`) are
-not offered. A driver that has no such getter fails the device with
+not offered. `config` is read with NAPALM's sanitizing, which masks
+passwords, keys and community strings, and credential fields such as a BGP
+neighbor's `authentication_key` are dropped from every result. A driver that has no such getter fails the device with
 "not supported".
 
 Connect Timeout (sec), Command Timeout (sec) and Allow legacy SSH are

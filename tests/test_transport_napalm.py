@@ -154,6 +154,19 @@ def test_eos_and_ios_drivers_are_kept_on_ssh():
         assert driver.transport == "ssh"
 
 
+def test_ios_sends_candidates_through_the_session_not_scp():
+    # netmiko's SCP opens a second SSH client with no trusted keys (their file
+    # is removed after the login) and no way through the jump host.
+    transport = _transport(22, FakeVerifier())
+    driver = napalm_transport._driver_class("ios", transport)(
+        hostname=HOST,
+        username=USERNAME,
+        password="",
+        optional_args=dict(napalm_transport._DRIVER_OPTIONS["ios"]),
+    )
+    assert driver.inline_transfer is True
+
+
 # --- sessions over the hardened login ------------------------------------------------------
 
 
@@ -191,6 +204,9 @@ async def test_first_contact_learns_the_key_then_the_driver_logs_in_through_the_
         driver = session._driver  # type: ignore[attr-defined]
         assert driver.password == ""
         assert registry.live == [driver.device]
+        # NAPALM's getters pass no read timeout; the step's Command Timeout
+        # (5 s here) replaces netmiko's 10 s default.
+        assert driver.device.read_timeout_override == 5.0
     finally:
         await session.close()
     assert registry.live == []
@@ -236,10 +252,60 @@ async def test_the_session_rides_the_jump_host_with_both_hops_checked(servers):
 # --- the session surface -------------------------------------------------------------------
 
 
+async def test_a_cancelled_open_closes_the_login_that_finishes_after_it(monkeypatch):
+    import asyncio
+    import threading
+    import types
+
+    transport = _transport(22, FakeVerifier())
+    release = threading.Event()
+    started = threading.Event()
+    connection = types.SimpleNamespace()
+    logged_out: list[Any] = []
+
+    def slow_login() -> Any:
+        started.set()
+        release.wait(5)
+        return connection
+
+    monkeypatch.setattr(transport, "_login", slow_login)
+    monkeypatch.setattr(transport, "_logout", logged_out.append)
+
+    task = asyncio.create_task(transport.open_napalm())
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Any clean-up started at cancellation has run by now, before the login
+    # finishes: it must not be the only chance to close the connection.
+    await asyncio.sleep(0.3)
+    assert logged_out == []
+    # The login finishes after the caller gave up: the thread closes it.
+    release.set()
+    for _ in range(100):
+        if logged_out:
+            break
+        await asyncio.sleep(0.02)
+    assert logged_out == [connection]
+
+
 class _FakeDriver:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.closed = 0
+
+    def get_config(self, sanitized: bool = False) -> dict[str, Any]:
+        self.calls.append(("get_config", sanitized))
+        return {"running": "snmp-server community <removed>" if sanitized else "secret"}
+
+    def get_bgp_config(self) -> dict[str, Any]:
+        self.calls.append(("get_bgp_config", None))
+        return {
+            "core": {
+                "authentication_key": "group-pw",
+                "neighbors": {"192.0.2.2": {"authentication_key": "peer-pw", "remote_as": 65001}},
+            }
+        }
 
     def get_facts(self) -> dict[str, Any]:
         self.calls.append(("get_facts", None))
@@ -303,3 +369,42 @@ async def test_close_is_idempotent_and_ends_the_session():
     assert driver.closed == 1
     with pytest.raises(NapalmSessionClosedError):
         await session.get("facts")
+
+
+async def test_getters_never_return_credentials():
+    driver = _FakeDriver()
+    session = _session(driver)
+
+    config = await session.get("config")
+    bgp = await session.get("bgp_config")
+
+    assert ("get_config", True) in driver.calls
+    assert config == {"running": "snmp-server community <removed>"}
+    assert bgp == {"core": {"neighbors": {"192.0.2.2": {"remote_as": 65001}}}}
+    assert "pw" not in repr(bgp)
+
+
+async def test_nxos_replace_is_refused_before_anything_is_sent():
+    driver = _FakeDriver()
+    session = napalm_transport.NapalmDriverSession(
+        _transport(22, FakeVerifier(), platform="nxos"), "nxos_ssh", driver
+    )
+
+    with pytest.raises(NotImplementedError, match="SCP"):
+        await session.load_config("hostname n1", replace=True)
+    await session.load_config("hostname n1")
+
+    assert driver.calls == [("merge", "hostname n1")]
+
+
+async def test_a_failure_after_the_login_still_closes_the_connection(monkeypatch):
+    transport = _transport(22, FakeVerifier())
+    connection = object()  # takes no attributes: the step after the login fails
+    logged_out: list[Any] = []
+    monkeypatch.setattr(transport, "_login", lambda: connection)
+    monkeypatch.setattr(transport, "_logout", logged_out.append)
+
+    with pytest.raises(AttributeError):
+        await transport.open_napalm()
+
+    assert logged_out == [connection]
