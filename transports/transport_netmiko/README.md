@@ -39,6 +39,11 @@ Netmiko takes host keys only from a file, so the device hop writes the
 trusted keys to a private temporary `known_hosts` file and removes it once
 the session is open.
 
+SCP uploads (`scp_put`, used by `netcli.file_download`) run over a second
+SSH connection that netmiko opens itself. It is held to the login's terms:
+it accepts only the keys the login accepted, reaches the device through a
+fresh channel of the same jump host, and uses the same SSH algorithm policy.
+
 ## Agreed algorithms
 
 When the host passes an `ssh_algorithm_recorder` (the transport advertises
